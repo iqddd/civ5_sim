@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Civ V · Участки поля боя</title>
+<style>
+:root{color-scheme:dark;font:15px system-ui;background:#111a20;color:#e5ecea}*{box-sizing:border-box}body{margin:0}header{padding:24px 32px;border-bottom:1px solid #324147;display:flex;align-items:center;gap:24px}h1{font-size:22px;margin:0}small{color:#a7b9b7}main{display:grid;grid-template-columns:minmax(400px,1fr) 280px;gap:24px;padding:24px 32px}aside{line-height:1.7}select,button{font:inherit;background:#26383e;color:#fff;border:1px solid #53666d;padding:9px;border-radius:5px}button{cursor:pointer}#map{width:100%;height:calc(100vh - 180px);min-height:480px;background:#18272d;border:1px solid #324147;border-radius:8px}#map polygon{stroke:#243a3a;stroke-width:.65;cursor:pointer}#map polygon:hover{stroke:#fff;stroke-width:2}#map text,#map path,#map line,#map circle{pointer-events:none}#details{margin-top:20px;padding:16px;background:#203137;min-height:150px;border-radius:6px}#legend span{display:inline-block;margin-right:9px}i{display:inline-block;width:12px;height:12px;margin-right:6px;border-radius:2px}label{display:block;margin:12px 0}#info{margin:14px 0;color:#b8cbc8}a{color:#95d8e0}@media(max-width:800px){main{grid-template-columns:1fr;padding:16px}header{flex-wrap:wrap;padding:16px}#map{height:65vh}aside{max-width:none}}
+</style>
+<header><div><h1>Пангея · поля боя</h1><small>Ландшафт Civ V / подготовка тактических сценариев</small></div><select id="select" aria-label="Выбрать карту"></select><button id="download">Сохранить JSON</button></header>
+<main><div><svg id="map" role="img" aria-label="Гексагональная карта"></svg><div id="info"></div></div><aside><b>Слои карты</b><label><input type="checkbox" id="coords"> Координаты</label><label><input type="checkbox" id="spawns"> Возможные стартовые клетки</label><div id="legend"></div><p><b>⌃</b> холмы · <b>▲</b> горы<br><b>♠</b> лес · <b>♣</b> джунгли<br><b>≋</b> болото · <b>◉</b> оазис<br>Голубые линии — реки на рёбрах.</p><div id="details">Нажмите на клетку, чтобы увидеть её свойства.</div><p><small>Границы участка закрыты. Стартовые клетки — кандидаты для двух армий, а не готовая расстановка.</small></p></aside></main>
+<script>
+const maps = /*MAP_DATA*/ [];
+const colors={grass:'#89a66a',plains:'#b9ad70',desert:'#dbc28b',tundra:'#91a496',snow:'#d8e2de',coast:'#4d96a7',ocean:'#315c78'};
+const names={grass:'Луга',plains:'Равнины',desert:'Пустыня',tundra:'Тундра',snow:'Снег',coast:'Побережье',ocean:'Океан',flat:'Ровная',hills:'Холмы',mountain:'Горы',water:'Вода',forest:'Лес',jungle:'Джунгли',marsh:'Болото',oasis:'Оазис',flood_plains:'Пойма',ice:'Лёд',atoll:'Атолл'};
+const $=id=>document.getElementById(id), svg=$('map'), S='http://www.w3.org/2000/svg';
+maps.forEach((m,i)=>{let o=document.createElement('option');o.value=i;o.textContent=i===0?'Исходная карта':`Участок ${i} · ${m.width}×${m.height}`;$('select').append(o)});
+Object.entries(colors).forEach(([k,c])=>{let s=document.createElement('span');s.innerHTML=`<i style="background:${c}"></i>${names[k]}`;$('legend').append(s)});
+function el(tag,attrs,parent=svg){let n=document.createElementNS(S,tag);Object.entries(attrs).forEach(([k,v])=>n.setAttribute(k,v));parent.append(n);return n}
+function center(m,x,y){return [28+Math.sqrt(3)*18*(x+((y+m.row_parity)%2)*.5),28+27*(m.height-1-y)]}
+function corners(cx,cy){return Array.from({length:6},(_,i)=>{let a=(30+i*60)*Math.PI/180;return [cx+18*Math.cos(a),cy+18*Math.sin(a)]})}
+function river(m,x,y,d){let [cx,cy]=center(m,x,y),v=corners(cx,cy);let edges=[[4,5],[5,0],[0,1],[1,2],[2,3],[3,4]], [a,b]=edges[d];el('line',{x1:v[a][0],y1:v[a][1],x2:v[b][0],y2:v[b][1],stroke:'#76e5fa','stroke-width':2.8,'stroke-linecap':'round'})}
+function render(){let m=maps[+$('select').value];svg.replaceChildren();svg.setAttribute('viewBox',`0 0 ${60+Math.sqrt(3)*18*m.width} ${60+27*(m.height-1)}`);
+ m.tiles.forEach((t,i)=>{let x=i%m.width,y=Math.floor(i/m.width),[cx,cy]=center(m,x,y);let p=el('polygon',{points:corners(cx,cy).map(p=>p.join(',')).join(' '),fill:colors[t.terrain]});p.addEventListener('click',()=>{let lines=[`Клетка (${x}, ${y})`,`${names[t.terrain]} · ${names[t.elevation]}`,`Особенность: ${names[t.feature]||t.feature||'нет'}`,`Рёбра рек E / SE / SW: ${t.rivers.join(' / ')}`];let c=m.metadata?.crop;if(c)lines.push(`На исходной карте: (${x+c.x}, ${y+c.y})`);$('details').replaceChildren(...lines.map(s=>{let d=document.createElement('div');d.textContent=s;return d}))});
+ let symbol=t.elevation==='mountain'?'▲':t.elevation==='hills'?'⌃':'';let f={forest:'♠',jungle:'♣',marsh:'≋',oasis:'◉',flood_plains:'≈',ice:'❄',atoll:'○'}[t.feature]||'';
+ if(symbol||f){let txt=el('text',{x:cx,y:cy+4,'text-anchor':'middle','font-size':13,fill:'#183d32'});txt.textContent=symbol+f}
+ if($('coords').checked){let txt=el('text',{x:cx,y:cy+12,'text-anchor':'middle','font-size':6,fill:'#162b29'});txt.textContent=`${x},${y}`}
+ });
+ m.tiles.forEach((t,i)=>t.rivers.forEach((f,e)=>{if(f>=0)river(m,i%m.width,Math.floor(i/m.width),e+1)}));
+ (m.boundary_rivers||[]).forEach(e=>river(m,e.x,e.y,e.direction));
+ if($('spawns').checked)(m.spawn_candidates||[]).forEach((side,i)=>side.forEach(([x,y])=>{let[cx,cy]=center(m,x,y);el('circle',{cx,cy,r:5,fill:i?'#ffac92':'#d0f7ff',stroke:'#10232a','stroke-width':1.2})}));
+ let c=m.metadata?.crop; $('info').textContent=`${m.width} × ${m.height} гексов · seed ${m.metadata?.seed??'—'} · ${c?`вырезка (${c.x}, ${c.y}), закрытые границы`:'исходный мир, замыкание по X'}`;
+ $('details').textContent='Нажмите на клетку, чтобы увидеть её свойства.';
+}
+['select','coords','spawns'].forEach(id=>$(id).addEventListener('change',render));
+$('download').onclick=()=>{let m=maps[+$('select').value],a=document.createElement('a'),url=URL.createObjectURL(new Blob([JSON.stringify(m,null,2)],{type:'application/json'}));a.href=url;a.download=`map-${$('select').value}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
+render();
+</script></html>
