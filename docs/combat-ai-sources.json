@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "commit": "029e5988b7726299d6446ddddaaf3782a9c46d61",
+  "profile": "CP Only 4.22 (v144)",
+  "balance_vp": false,
+  "hash_encoding": "SHA-256 of raw local source bytes",
+  "sources": {
+    "CvGameCoreDLL_Expansion2/CvTacticalAI.cpp": "55c9000f2504f92a8534e6bd9c9756ff4100b58286725114c57020354a6a0749",
+    "CvGameCoreDLL_Expansion2/CvTacticalAI.h": "c83d79e99fd47ca5c7084715d9059fecf926dcb2a88b3175de36e6ff56dd8328",
+    "CvGameCoreDLL_Expansion2/CvDangerPlots.cpp": "d97ed9f8d9116a3017fd4273b3476939ae3dcb598da158d215f2d2479cc76465",
+    "CvGameCoreDLL_Expansion2/CvDangerPlots.h": "76f08068f4d305aaf17c85fbe1e8138deb2c0abff6206fc036d97f72acab25df",
+    "CvGameCoreDLL_Expansion2/CvTacticalAnalysisMap.cpp": "afb32afb4c5d0317b5a5de90d0ec680d7932a4f46a8cca445de82ca58d673509",
+    "CvGameCoreDLL_Expansion2/CvTacticalAnalysisMap.h": "b4320485fd317264d19fef2963a6fdef41549f3b1cf5d1c5586eba77b04620bf",
+    "CvGameCoreDLL_Expansion2/CvUnit.cpp": "460a09cb90ea48724ca07f25cf331a523a2c1e14850df270d86550bae7d944ad",
+    "CvGameCoreDLL_Expansion2/CvUnitCombat.cpp": "a23b5a4edca5086907bbb59b526d37946ab9ab2e84f41f0182844e100b4c5d4d",
+    "CvGameCoreDLL_Expansion2/CvUnitMovement.cpp": "6774bdd4d83fe460373e9f6fc49f2b0a96fa5b422c31959070fe6d0fbb27ae45",
+    "CvGameCoreDLL_Expansion2/CvPlot.cpp": "895966dff8adfffae9b8985f4c6a73c1dfb488bf2d2b59d63fc0fd27adff8e1e",
+    "CvGameCoreDLL_Expansion2/CvTargeting.cpp": "50ee33a185b21487754bdcf838bc1307aa027bec8c81036fc854ca42934151ba",
+    "(1) Community Patch/Database Changes/Difficulty/CoreDifficultyChanges.xml": "b22e48cde05143b9eaef8089d97204cadcfe46b3addce161b08fd49b34a8ffb8",
+    "(1) Community Patch/Database Changes/Defines/CoreDefineChanges.sql": "4d09b6c2c28d52540e5727287bc678dad98c4bc66ae9e93672b80dee37c99483",
+    "(1) Community Patch/Database Changes/NewCustomModOptions.xml": "19c62f11b8810a4f808b9931cd450596571ac73d4f042f48560533ebe7f6f396"
+  },
+  "search_defaults": {
+    "difficulty": "HANDICAP_DEITY",
+    "position_capacity": 6000,
+    "max_completed": 2560,
+    "max_branches": 5,
+    "choices_per_unit": 5,
+    "aggression": "medium",
+    "privileged_cp_queries": true,
+    "fixed_roll": 600
+  }
+}

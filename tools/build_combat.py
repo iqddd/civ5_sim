@@ -154,6 +154,7 @@ def build(cp, game):
     manifest["kernel_sources"] = {
         p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
         for p in sorted((ROOT / "native").glob("*"))
+        if p.is_file()
     }
     fingerprint = hashlib.sha256(
         json.dumps(manifest, sort_keys=True).encode()

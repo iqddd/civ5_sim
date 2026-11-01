@@ -41,6 +41,20 @@ Start-Process artifacts\pangaea-42\viewer.html
 .venv\Scripts\python.exe -m civ5map view artifacts\manual.json --out artifacts\manual-view.html
 ```
 
+## Каркас Combat AI
+
+CP-01 добавляет автономный C++17-модуль и Python-обёртку локального поиска.
+Пока непустой корректный запрос возвращает `not_implemented`; играющий агент
+будет добавлен следующими этапами. [Контракт и карта переноса](docs/combat-ai-contract.md)
+содержат интерфейсы, бюджеты и источники данных.
+
+```powershell
+.venv\Scripts\python.exe tools\build_combat_ai.py
+.venv\Scripts\python.exe -m unittest discover -s tests -p test_combat_ai.py -v
+```
+
+Сборка каркаса не требует установленной игры, исходников CP или боевой DLL.
+
 ## Что перенесено
 
 Оригинальные `Pangaea.lua`, `FractalWorld.lua`, `TerrainGenerator.lua`, `FeatureGenerator.lua`, `MapGenerator.lua`, `MapmakerUtilities.lua` читаются из установленной игры. При наличии Lua-файла дополнения приоритет: BNW → G&K → базовая игра. Выполняются стадии `GeneratePlotTypes`, `GenerateTerrain`, `AddRivers`, `AddLakes`, `AddFeatures` с пересчётом областей.
