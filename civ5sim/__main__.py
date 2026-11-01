@@ -1,4 +1,4 @@
-"""Run command scripts or verify a recorded replay. No implicit episode stopping."""
+"""Run agent matches, execute command scripts or verify a recorded replay."""
 
 import argparse
 import json
@@ -6,11 +6,17 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .engine import Battle, digest, load_scenario
+from .match import load_match_config, run_match
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    match = commands.add_parser("match", help="Run a finite match between two agents")
+    match.add_argument("config", type=Path)
+    match.add_argument(
+        "--out", type=Path, required=True, help="Match artifact directory"
+    )
     run = commands.add_parser("run")
     run.add_argument("scenario", type=Path)
     run.add_argument(
@@ -25,7 +31,28 @@ def main():
     replay.add_argument("--out", type=Path)
     args = parser.parse_args()
     try:
-        if args.command == "run":
+        if args.command == "match":
+            config, agents = load_match_config(args.config)
+            match = run_match(config, agents)
+            match.save(args.out)
+            print(
+                json.dumps(
+                    {
+                        k: match.result[k]
+                        for k in (
+                            "status",
+                            "outcome",
+                            "winner",
+                            "reason",
+                            "commands",
+                            "alive",
+                        )
+                    }
+                )
+            )
+            if match.result["status"] == "error":
+                parser.exit(1, f"Agent error: {match.result['error']}\n")
+        elif args.command == "run":
             scenario = load_scenario(args.scenario)
             actions = json.loads(args.commands.read_text(encoding="utf-8"))
             if not isinstance(actions, list):

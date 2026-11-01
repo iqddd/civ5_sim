@@ -4,6 +4,8 @@
 
 Сборка боя: `.venv\Scripts\python.exe tools\build_combat.py`. Пример: `.venv\Scripts\python.exe -m civ5sim run scenarios\duel.json --commands scenarios\duel_commands.json --out build\duel-final.json --replay build\duel-replay.json`. Поддерживаются оба режима видимости и оба варианта урона; опыт и приобретаемые повышения отсутствуют.
 
+Полный матч двух Python-агентов: `.venv\Scripts\python.exe -m civ5sim match scenarios\match-example.json --out build\match-example`. Организатор расставляет армии на сохранённой карте, останавливает бой при уничтожении армии или по лимиту раундов и сохраняет результат, финальное состояние и реплей. Составы и лимит обязательны в конфигурации. [Настройка матчей и подключение агентов](docs/combat.md#организатор-матча).
+
 Готовый результат: [просмотрщик десяти участков](artifacts/pangaea-42/viewer.html). Открывается обычным браузером, без сервера и интернета. В списке есть исходная карта и каждый участок; доступны координаты, кандидаты стартовых клеток, сведения о клетке и выгрузка JSON.
 
 ## Запуск

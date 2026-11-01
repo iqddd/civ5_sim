@@ -1,0 +1,12 @@
+{
+  "map": "../artifacts/pangaea-42/crop-01.json",
+  "armies": [
+    ["warrior", "archer", "chariot_archer", "spearman", "horseman"],
+    ["warrior", "archer", "chariot_archer", "spearman", "horseman"]
+  ],
+  "max_rounds": 20,
+  "seed": 42,
+  "fog": true,
+  "random_damage": true,
+  "agents": ["random", "random"]
+}
