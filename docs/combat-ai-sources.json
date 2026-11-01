@@ -28,6 +28,8 @@
     "choices_per_unit": 5,
     "aggression": "medium",
     "privileged_cp_queries": true,
-    "fixed_roll": 600
+    "fixed_roll": 600,
+    "risk_budget_base": 0,
+    "risk_budget_per_kill": 1
   }
 }

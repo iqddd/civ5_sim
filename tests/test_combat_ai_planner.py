@@ -1,0 +1,42 @@
+"""Behavioral checks for the CP-04 local planner."""
+import os
+import subprocess
+import unittest
+from pathlib import Path
+
+EXECUTABLE = Path(__file__).resolve().parents[1] / "build" / (
+    "combat_ai_planner_test.exe" if os.name == "nt" else "combat_ai_planner_test"
+)
+
+
+@unittest.skipUnless(EXECUTABLE.exists(), "Build tools/build_combat_ai.py first")
+class LocalPlannerTests(unittest.TestCase):
+    def check_native(self, name):
+        result = subprocess.run(
+            [str(EXECUTABLE), name], capture_output=True, text=True, timeout=60, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_focus_fire_and_finishing(self):
+        self.check_native("attacks")
+
+    def test_swaps_freeing_and_omitted_friendlies(self):
+        self.check_native("swaps_and_freeing")
+
+    def test_risk_budget_and_numeric_penalty(self):
+        self.check_native("risk")
+
+    def test_cover_and_movement_after_attack(self):
+        self.check_native("cover_and_retreat")
+
+    def test_budgets_dedup_and_determinism(self):
+        self.check_native("budgets_and_determinism")
+
+    def test_search_continues_after_contact(self):
+        self.check_native("contact")
+
+    def test_seeded_plans_replay_across_fog_parity_and_wrap(self):
+        self.check_native("random_replay")
+
+    def test_thirteen_selected_with_larger_armies_and_tile_255(self):
+        self.check_native("scale_and_last_tile")

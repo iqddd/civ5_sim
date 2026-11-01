@@ -177,15 +177,25 @@ class Adapter final : public RulesAdapter {
     for (const auto& a : branch(base).rules.actions()) out.push_back({a.kind,a.unit,a.target});
     return out;
   }
-  Damage preview(const Branch& base, Command c) const override {
-    const auto& s = branch(base).rules;
-    Action a{c.kind,c.unit,c.target};
-    int code = s.validate(a);
-    if (!code && a.kind != combat_rules::MELEE && a.kind != combat_rules::RANGED)
-      code = combat_rules::BAD_ACTION;
-    if (code) return {0,0,code,0,0};
-    Result r = s.combat(a.unit, s.occupied[a.target], a.kind == combat_rules::RANGED, false);
-    return {r.damage,r.retaliation,r.code,r.attacker_strength,r.defender_strength};
+  Damage preview(const Branch& base, Command c, bool next_turn = false) const override {
+    const auto& current = branch(base).rules;
+    auto evaluate = [&](const State& s) -> Damage {
+      Action a{c.kind,c.unit,c.target};
+      int code = s.validate(a);
+      if (!code && a.kind != combat_rules::MELEE && a.kind != combat_rules::RANGED)
+        code = combat_rules::BAD_ACTION;
+      if (code) return {0,0,code,0,0};
+      Result r = s.combat(a.unit, s.occupied[a.target], a.kind == combat_rules::RANGED, false);
+      return {r.damage,r.retaliation,r.code,r.attacker_strength,r.defender_strength};
+    };
+    if (!next_turn) return evaluate(current);
+    if (c.unit < 0 || c.unit >= int(current.units.size()))
+      return {0,0,combat_rules::BAD_UNIT,0,0};
+    State projected = current;
+    auto& u = projected.units[c.unit];
+    u.moves = combat_rules::moves[u.type];
+    u.attacked = u.waiting = 0;
+    return evaluate(projected);
   }
   Transition apply(Branch& base, Command c) const override {
     auto& b = const_cast<OwnedBranch&>(branch(base));
@@ -203,6 +213,7 @@ class Adapter final : public RulesAdapter {
     return t;
   }
   int32_t distance(int32_t a, int32_t b) const override { tile(a); tile(b); return geo->distance(a,b); }
+  int32_t defense(int32_t n) const override { tile(n); return geo->defense(n); }
   std::vector<int32_t> neighbors(int32_t n) const override {
     tile(n); std::vector<int32_t> out;
     for (int x : geo->neighbors[n]) if (x >= 0) out.push_back(x);

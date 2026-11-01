@@ -1,14 +1,16 @@
 #include "combat_ai.h"
 #include "model.h"
+#include "planner.h"
 
 #include <array>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 // No game objects, battle handles, global scratch buffers or RNG live here.
 struct CaiContext {
   CaiConfig config;
-  // CP-04 will add the position pool, open heap, dedup and danger caches here.
+  combat_ai::SearchWorkspace workspace;
   explicit CaiContext(const CaiConfig& input) : config(input) {}
 };
 
@@ -20,7 +22,9 @@ bool valid_config(const CaiConfig& c) {
          c.max_branches >= 2 && c.max_branches <= 9 &&
          c.choices_per_unit >= 2 && c.choices_per_unit <= 9 &&
          c.aggression >= CAI_NONE && c.aggression <= CAI_BRAVEHEART &&
-         c.privileged_cp_queries == 1;
+         c.privileged_cp_queries == 1 &&
+         c.risk_budget_base >= 0 && c.risk_budget_base <= 13 &&
+         c.risk_budget_per_kill >= 0 && c.risk_budget_per_kill <= 13;
 }
 bool valid_request(const CaiSearchRequest& r) {
   if (!r.state || r.side < 0 || r.side > 1 || r.expected_turn < 0 ||
@@ -88,8 +92,8 @@ bool valid_request(const CaiSearchRequest& r) {
 }  // namespace
 
 int32_t cai_abi(void) { return CAI_ABI; }
-const char* cai_version(void) { return "civ5sim.combat_ai/0.3.0 CP-03"; }
-CaiConfig cai_default_config(void) { return {6000, 2560, 5, 5, CAI_MEDIUM, 1}; }
+const char* cai_version(void) { return "civ5sim.combat_ai/0.4.0 CP-04"; }
+CaiConfig cai_default_config(void) { return {6000, 2560, 5, 5, CAI_MEDIUM, 1, 0, 1}; }
 CaiContext* cai_new(const CaiConfig* config) {
   if (!config || !valid_config(*config)) return nullptr;
   try { return new CaiContext(*config); } catch (...) { return nullptr; }
@@ -109,8 +113,14 @@ int32_t cai_search(CaiContext* context, const CaiSearchRequest* request,
     } else if (request->selected_count == 0) {
       result->reason = CAI_NO_PLAN;
     } else {
-      result->reason = CAI_NOT_IMPLEMENTED;
+      auto plan = combat_ai::find_assignments(context->workspace, context->config, *request);
+      *result = plan.result;
+      if (capacity < result->assignment_count) return CAI_BUFFER_TOO_SMALL;
+      std::copy(plan.assignments.begin(), plan.assignments.end(), assignments);
     }
+    return CAI_OK;
+  } catch (const std::invalid_argument&) {
+    *result = {CAI_INVALID_REQUEST, 0, {0, 0, 0, 0, 0}};
     return CAI_OK;
   } catch (...) { return CAI_INTERNAL_ERROR; }
 }

@@ -24,8 +24,12 @@ def build():
     source = ROOT / "native/combat_ai/combat_ai.cpp"
     common = [ROOT / "native/combat_ai/model.cpp",
               ROOT / "native/combat_state.cpp", ROOT / "native/geometry.cpp"]
+    planner_sources = [ROOT / "native/combat_ai/planner.cpp",
+                       ROOT / "native/combat_ai/tactical.cpp"]
     test_sources = [ROOT / "tests/native/combat_ai_model_test.cpp",
                     ROOT / "native/combat.cpp", *common]
+    planner_tests = [ROOT / "tests/native/combat_ai_planner_test.cpp", source,
+                     *common, *planner_sources]
     # Compile the C++ adapter declarations as part of every build as well.
     check = out / "combat_ai_header_check.cpp"
     check.write_text(
@@ -57,11 +61,15 @@ def build():
         command = (
             f'@call "{vcvars}" >nul\n'
             f'@cl /nologo /std:c++17 /EHsc /O2 /LD /utf-8 /W4 /I"{include}" /I"{out}" '
-            + " ".join(f'"{p}"' for p in [source, check, *common])
+            + " ".join(f'"{p}"' for p in [source, check, *common, *planner_sources])
             + ' /link /OUT:combat_ai.dll\n@if errorlevel 1 exit /b %errorlevel%\n'
             + f'@cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W4 /I"{include}" /I"{out}" '
             + " ".join(f'"{p}"' for p in test_sources)
             + ' /link /OUT:combat_ai_model_test.exe\n'
+            + '@if errorlevel 1 exit /b %errorlevel%\n'
+            + f'@cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W4 /I"{include}" /I"{out}" '
+            + " ".join(f'"{p}"' for p in planner_tests)
+            + ' /link /OUT:combat_ai_planner_test.exe\n'
         )
         (out / "compile_combat_ai.cmd").write_text(command, encoding="utf-8")
         subprocess.run(["cmd", "/c", "compile_combat_ai.cmd"], cwd=out, check=True)
@@ -82,9 +90,17 @@ def build():
                 str(source),
                 str(check),
                 *(str(p) for p in common),
+                *(str(p) for p in planner_sources),
                 "-o",
                 str(out / "libcombat_ai.so"),
             ],
+            check=True,
+        )
+        subprocess.run(
+            ["c++", "-std=c++17", "-O3", "-Wall", "-Wextra",
+             "-I", str(include), "-I", str(out),
+             *(str(p) for p in planner_tests),
+             "-o", str(out / "combat_ai_planner_test")],
             check=True,
         )
         subprocess.run(
@@ -94,7 +110,7 @@ def build():
              "-o", str(out / "combat_ai_model_test")],
             check=True,
         )
-    print("Built standalone combat AI model/danger (CP-03, ABI 2) and native checks")
+    print("Built standalone combat AI planner (CP-04, ABI 3) and native checks")
 
 
 if __name__ == "__main__":

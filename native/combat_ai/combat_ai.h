@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-/* ABI 2. Structs use native alignment, int32 fields and explicit pointers.
+/* ABI 3. Structs use native alignment, int32 fields and explicit pointers.
    All input arrays are borrowed for one synchronous call; no RNG is accepted.
    A context is owned by its caller and must not be used concurrently. */
 enum CaiStatus { CAI_OK, CAI_BAD_ARGUMENT, CAI_INTERNAL_ERROR, CAI_BUFFER_TOO_SMALL };
@@ -24,13 +24,14 @@ enum CaiAssignmentKind {
   CAI_RESTART, CAI_SWAP, CAI_SWAP_REVERSE, CAI_FINISH_TEMP
 };
 enum CaiMovementRole { CAI_ROLE_NONE, CAI_FIRST_LINE, CAI_SECOND_LINE, CAI_THIRD_LINE };
-enum { CAI_ABI = 2, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
+enum { CAI_ABI = 3, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
 
 typedef struct CaiConfig {
   int32_t position_capacity, max_completed, max_branches, choices_per_unit;
   int32_t aggression;
   /* Required explicit opt-in for the CP-source hidden-position queries of v1. */
   int32_t privileged_cp_queries;
+  int32_t risk_budget_base, risk_budget_per_kill; /* Each 0..13. */
 } CaiConfig;
 
 /* Encoding matches the simulator: terrain/elevation/feature enums, six river bits. */
@@ -84,7 +85,7 @@ CAI_API void cai_free(CaiContext* context); /* NULL is allowed. */
    Invalid API pointers/capacity return CAI_BAD_ARGUMENT. result is overwritten
    on every call when non-NULL. Future plans are copied to caller-owned storage;
    insufficient capacity returns CAI_BUFFER_TOO_SMALL and the required count,
-   without a partial copy. CP-03 still returns an empty plan. */
+   without a partial copy. Budgets apply independently to each call. */
 CAI_API int32_t cai_search(CaiContext*, const CaiSearchRequest*,
                           CaiAssignment* assignments, int32_t capacity,
                           CaiSearchResult* result);

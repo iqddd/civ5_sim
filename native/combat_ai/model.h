@@ -44,10 +44,13 @@ class RulesAdapter {
   // stop a move earlier or change its cost. Adjacent moves use the direct edge.
   virtual std::vector<ReachableTile> reachable(const Branch&, int32_t unit) const = 0;
   virtual std::vector<Command> actions(const Branch&) const = 0;
-  virtual Damage preview(const Branch&, Command) const = 0; // fixed roll 600
+  // next_turn refreshes only the attacker's moves/attack/wait flags on a
+  // private copy, preserving branch visibility, contact history and turn.
+  virtual Damage preview(const Branch&, Command, bool next_turn = false) const = 0; // roll 600
   virtual Transition apply(Branch&, Command) const = 0;     // fixed roll 600
   virtual int32_t distance(int32_t from, int32_t to) const = 0;
   virtual std::vector<int32_t> neighbors(int32_t tile) const = 0;
+  virtual int32_t defense(int32_t tile) const = 0;
   // Geometric sight only; independent of branch visibility.
   virtual bool can_see(const Branch&, int32_t from, int32_t to) const = 0;
   // Geometric targeting from a living ranged unit; ignores movement and target contents.

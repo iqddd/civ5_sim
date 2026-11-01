@@ -1,4 +1,4 @@
-"""CP-03 standalone model, danger and planner contract. Search remains a stub.
+"""CP-04 standalone local tactical planner, branch model and danger estimates.
 
 This module is an internal privileged boundary for the CP-source v1 agent.
 Normal Agent.act observations never acquire a PlanningState implicitly.
@@ -58,6 +58,8 @@ class SearchConfig:
     choices_per_unit: int = 5
     aggression: Aggression = Aggression.MEDIUM
     privileged_cp_queries: bool = True
+    risk_budget_base: int = 0
+    risk_budget_per_kill: int = 1
 
 
 @dataclass(frozen=True)
@@ -340,7 +342,7 @@ def _library():
     ):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = arguments, result
-    if lib.cai_abi() != 2:
+    if lib.cai_abi() != 3:
         raise RuntimeError("Unsupported combat AI ABI; rebuild the planner")
     return lib
 
@@ -357,7 +359,7 @@ class Planner:
     """Owned search context. Independent instances may run concurrently.
 
     Use as a context manager. Calls/close on the same instance must be serialized.
-    In CP-03 valid nonempty requests still return NOT_IMPLEMENTED.
+    Returns a local plan; execution through simulator Actions belongs to CP-05.
     """
 
     def __init__(self, config: SearchConfig | None = None):
@@ -371,6 +373,8 @@ class Planner:
             *(_i32(getattr(config, f.name)) for f in fields(config)[:4]),
             int(config.aggression),
             int(config.privileged_cp_queries),
+            _i32(config.risk_budget_base),
+            _i32(config.risk_budget_per_kill),
         )
         self._handle = self._lib.cai_new(C.byref(packed))
         if not self._handle:
@@ -451,7 +455,7 @@ class Planner:
         assignments = ()
         if (
             status == 3
-        ):  # Future implementation: retry with caller-owned output storage.
+        ):  # Repeat the deterministic search with caller-owned output storage.
             capacity = result.assignment_count
             if not 0 < capacity <= 1_000_000:
                 raise RuntimeError("Invalid native plan size")
