@@ -1,0 +1,170 @@
+{
+  "schema": 1,
+  "kind": "civ5sim.scenario",
+  "map": "../artifacts/pangaea-42/crop-01.json",
+  "fog": true,
+  "random_damage": true,
+  "seed": 42,
+  "units": [
+    {
+      "type": "warrior",
+      "side": 0,
+      "tile": [
+        0,
+        0
+      ]
+    },
+    {
+      "type": "archer",
+      "side": 0,
+      "tile": [
+        1,
+        0
+      ]
+    },
+    {
+      "type": "chariot_archer",
+      "side": 0,
+      "tile": [
+        0,
+        1
+      ]
+    },
+    {
+      "type": "spearman",
+      "side": 0,
+      "tile": [
+        1,
+        2
+      ]
+    },
+    {
+      "type": "horseman",
+      "side": 0,
+      "tile": [
+        2,
+        2
+      ]
+    },
+    {
+      "type": "warrior",
+      "side": 0,
+      "tile": [
+        1,
+        3
+      ]
+    },
+    {
+      "type": "archer",
+      "side": 0,
+      "tile": [
+        0,
+        4
+      ]
+    },
+    {
+      "type": "chariot_archer",
+      "side": 0,
+      "tile": [
+        2,
+        4
+      ]
+    },
+    {
+      "type": "spearman",
+      "side": 0,
+      "tile": [
+        0,
+        5
+      ]
+    },
+    {
+      "type": "horseman",
+      "side": 0,
+      "tile": [
+        1,
+        5
+      ]
+    },
+    {
+      "type": "warrior",
+      "side": 1,
+      "tile": [
+        13,
+        0
+      ]
+    },
+    {
+      "type": "archer",
+      "side": 1,
+      "tile": [
+        14,
+        0
+      ]
+    },
+    {
+      "type": "chariot_archer",
+      "side": 1,
+      "tile": [
+        15,
+        0
+      ]
+    },
+    {
+      "type": "spearman",
+      "side": 1,
+      "tile": [
+        13,
+        1
+      ]
+    },
+    {
+      "type": "horseman",
+      "side": 1,
+      "tile": [
+        14,
+        1
+      ]
+    },
+    {
+      "type": "warrior",
+      "side": 1,
+      "tile": [
+        15,
+        1
+      ]
+    },
+    {
+      "type": "archer",
+      "side": 1,
+      "tile": [
+        13,
+        2
+      ]
+    },
+    {
+      "type": "chariot_archer",
+      "side": 1,
+      "tile": [
+        14,
+        2
+      ]
+    },
+    {
+      "type": "spearman",
+      "side": 1,
+      "tile": [
+        15,
+        2
+      ]
+    },
+    {
+      "type": "horseman",
+      "side": 1,
+      "tile": [
+        13,
+        3
+      ]
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "kind": "civ5sim.scenario",
+  "map": "duel-map.json",
+  "fog": true,
+  "random_damage": true,
+  "seed": 42,
+  "units": [
+    {
+      "type": "warrior",
+      "side": 0,
+      "tile": [
+        2,
+        2
+      ]
+    },
+    {
+      "type": "warrior",
+      "side": 1,
+      "tile": [
+        3,
+        2
+      ]
+    },
+    {
+      "type": "archer",
+      "side": 0,
+      "tile": [
+        2,
+        1
+      ]
+    },
+    {
+      "type": "archer",
+      "side": 1,
+      "tile": [
+        4,
+        2
+      ]
+    }
+  ]
+}

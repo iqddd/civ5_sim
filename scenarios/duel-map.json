@@ -1,0 +1,492 @@
+{
+  "schema": 1,
+  "width": 8,
+  "height": 6,
+  "row_parity": 0,
+  "wrap_x": false,
+  "metadata": {
+    "purpose": "CP Only combat smoke scenario"
+  },
+  "tiles": [
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    },
+    {
+      "terrain": "grass",
+      "elevation": "flat",
+      "feature": null,
+      "rivers": [
+        -1,
+        -1,
+        -1
+      ]
+    }
+  ]
+}

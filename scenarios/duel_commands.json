@@ -1,0 +1,28 @@
+[
+  {
+    "kind": "melee",
+    "unit": 0,
+    "target": 19
+  },
+  {
+    "kind": "ranged",
+    "unit": 2,
+    "target": 19
+  },
+  {
+    "kind": "end_turn"
+  },
+  {
+    "kind": "melee",
+    "unit": 1,
+    "target": 18
+  },
+  {
+    "kind": "ranged",
+    "unit": 3,
+    "target": 18
+  },
+  {
+    "kind": "end_turn"
+  }
+]
