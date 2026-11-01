@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-/* ABI 1. Structs use native alignment, int32 fields and explicit pointers.
+/* ABI 2. Structs use native alignment, int32 fields and explicit pointers.
    All input arrays are borrowed for one synchronous call; no RNG is accepted.
    A context is owned by its caller and must not be used concurrently. */
 enum CaiStatus { CAI_OK, CAI_BAD_ARGUMENT, CAI_INTERNAL_ERROR, CAI_BUFFER_TOO_SMALL };
@@ -24,7 +24,7 @@ enum CaiAssignmentKind {
   CAI_RESTART, CAI_SWAP, CAI_SWAP_REVERSE, CAI_FINISH_TEMP
 };
 enum CaiMovementRole { CAI_ROLE_NONE, CAI_FIRST_LINE, CAI_SECOND_LINE, CAI_THIRD_LINE };
-enum { CAI_ABI = 1, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
+enum { CAI_ABI = 2, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
 
 typedef struct CaiConfig {
   int32_t position_capacity, max_completed, max_branches, choices_per_unit;
@@ -48,9 +48,11 @@ typedef struct CaiBattleState {
   int32_t visibility_count;
   int32_t active_side, turn, fog;
 } CaiBattleState;
+typedef struct CaiContact { int32_t id, last_seen_own_turn; } CaiContact;
 typedef struct CaiContactMemory {
   int32_t turn; /* Last real observation update, <= state.turn. */
-  const int32_t* known_enemies; /* Previously observed stable enemy IDs. */
+  int32_t side; /* Observer, or -1 only for the default empty memory at turn 0. */
+  const CaiContact* known_enemies;
   int32_t known_enemy_count;
 } CaiContactMemory;
 typedef struct CaiSearchRequest {
@@ -82,7 +84,7 @@ CAI_API void cai_free(CaiContext* context); /* NULL is allowed. */
    Invalid API pointers/capacity return CAI_BAD_ARGUMENT. result is overwritten
    on every call when non-NULL. Future plans are copied to caller-owned storage;
    insufficient capacity returns CAI_BUFFER_TOO_SMALL and the required count,
-   without a partial copy. CP-02 still returns an empty plan. */
+   without a partial copy. CP-03 still returns an empty plan. */
 CAI_API int32_t cai_search(CaiContext*, const CaiSearchRequest*,
                           CaiAssignment* assignments, int32_t capacity,
                           CaiSearchResult* result);

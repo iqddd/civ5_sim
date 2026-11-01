@@ -15,9 +15,14 @@ struct Transition {
   std::vector<int32_t> newly_visible;
   CommandResult result;
 };
-// CP-03 remembers observed enemy IDs, not arbitrary never-seen enemies.
+struct Contact { int32_t id, last_seen_own_turn; };
 // Owned counterpart of CaiSearchRequest::contacts, copied for every root.
-struct ContactMemory { int32_t turn = 0; std::vector<int32_t> known_enemies; };
+struct ContactMemory {
+  int32_t turn = 0, side = -1;
+  std::vector<Contact> known_enemies;
+};
+// Counts observer-turn starts, up to a harmless initial offset. No int32 overflow.
+int32_t own_turn(int32_t turn, int32_t active_side, int32_t observer);
 
 class Branch {
  public:
@@ -62,7 +67,11 @@ std::unique_ptr<RulesAdapter> make_rules_adapter(const CaiBattleState&, int32_t 
 class DangerModel {
  public:
   virtual ~DangerModel() = default;
-  // CP-03: defender-dependent incoming damage; branch-local cache, no real RNG.
+  // Next enemy response, including CP probability/fog heuristics. The defender
+  // must be living and ours; tile must be passable and free (or its own tile).
+  // Queries never discover contacts. Cache belongs to the branch, no real RNG.
   virtual int32_t incoming(const Branch&, int32_t defender, int32_t tile) = 0;
 };
+// Adapter must outlive the model. Foreign branches/unsupported adapters throw.
+std::unique_ptr<DangerModel> make_danger_model(const RulesAdapter&);
 }  // namespace combat_ai

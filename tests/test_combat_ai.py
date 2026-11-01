@@ -9,6 +9,7 @@ from civ5sim import _native as N
 from civ5sim.combat_ai import (
     LIBRARY_PATH,
     Aggression,
+    Contact,
     ContactMemory,
     Planner,
     PlanningState,
@@ -46,7 +47,7 @@ class PlannerTests(unittest.TestCase):
 
     def test_unit_zero_tile_255_and_complete_board(self):
         p = self.planner()
-        self.assertIn("CP-02", p.version)
+        self.assertIn("CP-03", p.version)
         result = p.search(request())
         self.assertEqual(result.reason, SearchReason.NOT_IMPLEMENTED)
         self.assertEqual(result.assignments, ())
@@ -93,18 +94,22 @@ class PlannerTests(unittest.TestCase):
 
     def test_contact_memory_crosses_abi_and_rejects_invalid_history(self):
         p = self.planner()
-        for memory in (ContactMemory(0, (1,)), ContactMemory()):
+        for memory in (ContactMemory(0, 0, (Contact(1, 0),)), ContactMemory()):
             self.assertEqual(
                 p.search(request(contacts=memory)).reason, SearchReason.NOT_IMPLEMENTED
             )
         for memory in (
             ContactMemory(-1),
             ContactMemory(1),
-            ContactMemory(0, (0,)),
-            ContactMemory(0, (-1,)),
-            ContactMemory(0, (2,)),
-            ContactMemory(0, (1, 1)),
-            ContactMemory(0, (1,) * 513),
+            ContactMemory(0, 1),
+            ContactMemory(0, -1, (Contact(1, 0),)),
+            ContactMemory(0, 0, (Contact(0, 0),)),
+            ContactMemory(0, 0, (Contact(-1, 0),)),
+            ContactMemory(0, 0, (Contact(2, 0),)),
+            ContactMemory(0, 0, (Contact(1, -1),)),
+            ContactMemory(0, 0, (Contact(1, 1),)),
+            ContactMemory(0, 0, (Contact(1, 0), Contact(1, 0))),
+            ContactMemory(0, 0, (Contact(1, 0),) * 513),
         ):
             with self.subTest(memory=memory):
                 self.assertEqual(
@@ -116,7 +121,7 @@ class PlannerTests(unittest.TestCase):
             p.search(
                 request(
                     state=replace(state(), units=(state().units[0], dead_enemy)),
-                    contacts=ContactMemory(0, (1,)),
+                    contacts=ContactMemory(0, 0, (Contact(1, 0),)),
                 )
             ).reason,
             SearchReason.NOT_IMPLEMENTED,

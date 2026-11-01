@@ -159,7 +159,7 @@ void swaps() {
 }
 
 void combat() {
-  Fixture f; f.units={unit(4),unit(0,1,27,1),unit(0,0,25)}; f.start({0,{1}});
+  Fixture f; f.units={unit(4),unit(0,1,27,1),unit(0,0,25)}; f.start({0,0,{{1,0}}});
   f.step({MELEE,0,27}); const auto& s=f.branch->state();
   CHECK(s.units[1].hp==0 && s.units[0].tile==27 && s.units[0].moves==180);
   CaiUnit dead{}; CHECK(!f.adapter->known_enemy(*f.branch,1,dead));
@@ -231,7 +231,7 @@ void visibility() {
   CHECK(hill.adapter->can_see(*hill.branch,26,28) && hill.adapter->can_shoot(*hill.branch,0,28));
   hill.step({RANGED,0,28});
   CHECK(hill.adapter->can_shoot(*hill.branch,0,28)); // geometry remains usable after spending attack
-  Fixture memory;memory.fog=1;memory.units={unit(),unit(0,1,80)};memory.start({0,{1}});
+  Fixture memory;memory.fog=1;memory.units={unit(),unit(0,1,80)};memory.start({0,0,{{1,0}}});
   CaiUnit out{};CHECK(memory.adapter->known_enemy(*memory.branch,1,out) && out.tile==80);
   bool rejected=false;
   try { memory.adapter->prospective_units(*memory.branch,{80}); }
@@ -284,7 +284,8 @@ void bounds_and_invalid() {
   bool rejected=false;try{f.adapter->root(bad,{});}catch(const std::invalid_argument&){rejected=true;}CHECK(rejected);
   bad=f.input;auto mask=f.visibility;mask[0]=0;bad.visibility=mask.data();
   rejected=false;try{f.adapter->root(bad,{});}catch(const std::invalid_argument&){rejected=true;}CHECK(rejected);
-  for(auto contacts : std::vector<ContactMemory>{{-1,{}},{1,{}},{0,{0}},{0,{1,1}},{0,{-1}}}) {
+  for(auto contacts : std::vector<ContactMemory>{{-1,-1,{}},{1,-1,{}},{0,0,{{0,0}}},
+       {0,0,{{1,0},{1,0}}},{0,0,{{-1,0}}},{0,0,{{1,1}}},{0,1,{}}}) {
     rejected=false;try{f.adapter->root(f.input,contacts);}catch(const std::invalid_argument&){rejected=true;}CHECK(rejected);
   }
   auto another=make_rules_adapter(f.input,0);auto foreign=another->root(f.input,{});
@@ -323,15 +324,231 @@ void random_sequences() {
   }
 }
 
+void corridor(Fixture& f) {
+  for (int i=0;i<int(f.tiles.size());++i) if (i/f.w!=2) f.tiles[i].elevation=3;
+}
+
+// Independent combat oracle: execute a single attack at a prescribed pose via
+// the public ABI, without calling the danger model or its internal helpers.
+Result attack_oracle(const Fixture& f, int defender, int attacker, int from, int target) {
+  auto units=f.units;
+  if (units[defender].tile!=target) units[defender].fortified=0;
+  units[defender].tile=target;
+  if (units[attacker].tile!=from) units[attacker].fortified=0;
+  units[attacker].tile=from;
+  units[attacker].moves=moves[units[attacker].type];
+  units[attacker].attacked=units[attacker].waiting=0;
+  void* real=sim_clone(f.real); CHECK(real);
+  Info info{};sim_info(real,&info);info.side=units[attacker].side;info.fog=info.random=0;
+  int reset=sim_reset(real,units.data(),int(units.size()),&info);
+  if (reset) {sim_free(real);CHECK(!reset);}
+  auto result=sim_step(real,{ranged[units[attacker].type]?RANGED:MELEE,attacker,target});
+  sim_free(real);CHECK(result.code==OK);return result;
+}
+
+std::vector<int> disk(const RulesAdapter& adapter,int origin,int radius) {
+  std::vector<int> out{origin};
+  size_t begin=0,end=1;
+  for(int r=0;r<radius;++r) {
+    for(size_t i=begin;i<end;++i) for(int n:adapter.neighbors(out[i]))
+      if(std::find(out.begin(),out.end(),n)==out.end()) out.push_back(n);
+    begin=end;end=out.size();
+  }
+  return out;
+}
+
+int fog_oracle(const Fixture& f,int target) {
+  int count=0;
+  const auto& s=f.branch->state();
+  for(int id=0;id<s.unit_count;++id) {
+    auto u=s.units[id];
+    if(u.hp<=0 || u.side==f.observer || !s.visibility[u.tile]) continue;
+    for(int hidden:disk(*f.adapter,u.tile,2)) {
+      if(s.visibility[hidden] || s.tiles[hidden].elevation>=2 || s.tiles[hidden].feature==5) continue;
+      auto affected=disk(*f.adapter,hidden,2);
+      if(std::find(affected.begin(),affected.end(),target)!=affected.end()) ++count;
+    }
+  }
+  return count;
+}
+
+void danger_damage() {
+  for(int a=0;a<5;++a) for(int d=0;d<5;++d) for(int hp:{20,100}) {
+    Fixture f;corridor(f);f.units={unit(d,0,26,hp),unit(a,1,ranged[a]?28:27)};
+    f.units[0].fortified=(d!=2 && d!=4);
+    f.tiles[26].elevation=1;f.tiles[26].feature=1;f.start();
+    auto danger=make_danger_model(*f.adapter);
+    auto expected=attack_oracle(f,0,1,f.units[1].tile,26);
+    int contribution=expected.damage;
+    if(expected.retaliation>=f.units[1].hp) contribution/=2;
+    CHECK(danger->incoming(*f.branch,0,26)==contribution);
+    CHECK(danger->incoming(*f.branch,0,24)==0);
+    // A second model uses the same valid branch-owned cache.
+    CHECK(make_danger_model(*f.adapter)->incoming(*f.branch,0,26)==contribution);
+  }
+  Fixture sum;sum.units={unit(0,0,26),unit(1,1,27),unit(1,1,28)};sum.start();
+  auto danger=make_danger_model(*sum.adapter);
+  CHECK(danger->incoming(*sum.branch,0,26)==
+        attack_oracle(sum,0,1,27,26).damage+attack_oracle(sum,0,2,28,26).damage);
+  Fixture move;corridor(move);move.units={unit(0,0,25),unit(0,1,28)};
+  move.units[0].fortified=1;move.start();
+  CHECK(make_danger_model(*move.adapter)->incoming(*move.branch,0,26)==attack_oracle(move,0,1,27,26).damage);
+}
+
+void danger_movement() {
+  for(int a=0;a<5;++a) {
+    Fixture f;corridor(f);f.units={unit(0,0,26),unit(a,1,30)};f.start();
+    auto danger=make_danger_model(*f.adapter);
+    CHECK((danger->incoming(*f.branch,0,26)>0)==(a==2 || a==4));
+  }
+  Fixture archer;corridor(archer);archer.units={unit(0,0,26),unit(1,1,29)};archer.start();
+  CHECK(make_danger_model(*archer.adapter)->incoming(*archer.branch,0,26)==attack_oracle(archer,0,1,28,26).damage);
+  Fixture rough;corridor(rough);rough.tiles[28].feature=1;rough.units=archer.units;rough.start();
+  CHECK(make_danger_model(*rough.adapter)->incoming(*rough.branch,0,26)==0);
+  Fixture river;corridor(river);river.tiles[29].rivers=1<<4;river.tiles[28].rivers=1<<1;
+  river.units=archer.units;river.start();
+  CHECK(make_danger_model(*river.adapter)->incoming(*river.branch,0,26)==0);
+  // The enemy must spend all movement crossing between the same defender's
+  // ZOC cells 28 -> 27; killing that covering unit opens the attack.
+  Fixture zoc;corridor(zoc);zoc.tiles[15].elevation=0;
+  zoc.units={unit(0,0,26),unit(4,1,29),unit(0,0,15)};zoc.start();
+  CHECK(make_danger_model(*zoc.adapter)->incoming(*zoc.branch,0,26)==0);
+  Fixture no_zoc;corridor(no_zoc);no_zoc.tiles[15].elevation=0;no_zoc.units=zoc.units;
+  no_zoc.units[2].hp=0;no_zoc.start();
+  CHECK(make_danger_model(*no_zoc.adapter)->incoming(*no_zoc.branch,0,26)>0);
+  Fixture blocked;corridor(blocked);blocked.units={unit(0,0,26),unit(0,1,28),unit(0,0,27)};blocked.start();
+  CHECK(make_danger_model(*blocked.adapter)->incoming(*blocked.branch,0,26)==0);
+  Fixture los;corridor(los);los.tiles[27].elevation=2;los.units={unit(0,0,26),unit(1,1,28)};los.start();
+  CHECK(make_danger_model(*los.adapter)->incoming(*los.branch,0,26)==0);
+  // Current exhaustion does not suppress next-turn threat, and estimation
+  // must not heal the attacker as END_TURN would.
+  Fixture spent;corridor(spent);spent.units={unit(0,0,26),unit(0,1,27,30)};
+  spent.units[1].moves=0;spent.units[1].waiting=spent.units[1].attacked=1;spent.start();
+  auto expected=attack_oracle(spent,0,1,27,26);
+  CHECK(make_danger_model(*spent.adapter)->incoming(*spent.branch,0,26)==expected.damage/(expected.retaliation>=30?2:1));
+}
+
+void danger_heuristics() {
+  // No visible enemy sources => no fog contribution and no known enemy sight.
+  Fixture hidden;corridor(hidden);hidden.fog=1;
+  hidden.units={unit(0,0,26),unit(1,1,29)};hidden.start({0,0,{{1,0}}});
+  CHECK(!hidden.branch->state().visibility[29]);
+  auto damage=attack_oracle(hidden,0,1,28,26).damage;
+  CHECK(make_danger_model(*hidden.adapter)->incoming(*hidden.branch,0,26)==damage*80/100);
+  // The hidden archer really sees 27, but its privileged position must not
+  // become a known sight source. Hypothetical approach positions must not
+  // become known sight sources either.
+  CHECK(hidden.adapter->can_see(*hidden.branch,29,27));
+  CHECK(make_danger_model(*hidden.adapter)->incoming(*hidden.branch,0,27)==
+        attack_oracle(hidden,0,1,29,27).damage*80/100);
+  Fixture suicide;corridor(suicide);suicide.fog=1;
+  suicide.units={unit(3,0,26),unit(0,1,29,1)};suicide.start({0,0,{{1,0}}});
+  // Move the defender into reach without adding any real or hypothetical
+  // sight source: querying a tile itself does not discover the hidden enemy.
+  auto suicidal=attack_oracle(suicide,0,1,28,27);
+  CHECK(suicidal.retaliation==1);
+  CHECK(make_danger_model(*suicide.adapter)->incoming(*suicide.branch,0,27)==suicidal.damage*80/100/2);
+  for(int parity:{0,1}) for(int wrap:{0,1}) {
+    Fixture fog;fog.w=5;fog.h=6;fog.tiles.resize(30);fog.fog=1;fog.parity=parity;fog.wrap=wrap;
+    for(int i=5;i<10;++i) fog.tiles[i].feature=1;
+    fog.units={unit(0,0,10),unit(0,1,12),unit(1,1,11)};fog.start();
+    auto danger=make_danger_model(*fog.adapter);
+    int expected=fog_oracle(fog,10);
+    CHECK(expected>0);
+    // Melee at 12 cannot finish its one-step approach at the occupied 11.
+    // The archer attacks once, and its damage does not depend on shot origin.
+    CHECK(danger->incoming(*fog.branch,0,10)==expected+attack_oracle(fog,0,2,11,10).damage);
+  }
+}
+
+void danger_cache_and_contacts() {
+  Fixture f;corridor(f);f.units={unit(3,0,26),unit(0,1,27,1)};f.start({},1);
+  auto danger=make_danger_model(*f.adapter);
+  Info before{};sim_info(f.real,&before);
+  int incoming=danger->incoming(*f.branch,0,26);CHECK(incoming>0);
+  auto sibling=f.branch->clone();
+  CHECK(f.adapter->apply(*f.branch,{MELEE,0,27}).accepted);
+  CHECK(f.branch->state().units[1].hp==0);
+  CHECK(danger->incoming(*f.branch,0,27)==0);
+  CHECK(danger->incoming(*f.branch,0,26)==0); // same cached key as before the kill
+  CHECK(danger->incoming(*sibling,0,26)==incoming);
+  Info after{};sim_info(f.real,&after);CHECK(before.rng==after.rng);
+  std::vector<Unit> real(f.units.size());sim_units(f.real,-1,real.data());
+  CHECK(real[1].hp==1 && real[0].tile==26);
+  // A never-seen source and the same source absent produce identical danger.
+  Fixture hidden;corridor(hidden);hidden.fog=1;hidden.units={unit(0,0,26),unit(1,1,29)};hidden.start();
+  auto hidden_danger=make_danger_model(*hidden.adapter);
+  CHECK(hidden_danger->incoming(*hidden.branch,0,27)==0);
+  auto known=hidden.adapter->root(hidden.input,{0,0,{{1,0}}});
+  CHECK(hidden_danger->incoming(*known,0,27)>0);
+  // A default root cannot inherit contacts or cached values from another root.
+  CHECK(hidden_danger->incoming(*hidden.adapter->root(hidden.input,{}),0,27)==0);
+  for(int t:{2,4}) {
+    auto input=hidden.input;input.turn=t;
+    auto aged=hidden.adapter->root(input,{0,0,{{1,0}}});
+    CaiUnit u{};CHECK(hidden.adapter->known_enemy(*aged,1,u)==(t==2));
+    CHECK((hidden_danger->incoming(*aged,0,27)>0)==(t==2));
+  }
+  auto branch=hidden.adapter->root(hidden.input,{0,0,{{1,0}}});
+  CHECK(hidden_danger->incoming(*branch,0,27)>0);
+  for(int i=0;i<4;++i) CHECK(hidden.adapter->apply(*branch,{END_TURN,-1,-1}).accepted);
+  CHECK(hidden_danger->incoming(*branch,0,27)==0);
+  CHECK(branch->contacts().turn==0);
+  auto discovered=hidden.branch->clone();
+  CHECK(hidden_danger->incoming(*discovered,0,27)==0);
+  CHECK(hidden.adapter->apply(*discovered,{MOVE,0,27}).accepted);
+  CHECK(hidden_danger->incoming(*discovered,0,27)>0);
+  CHECK(hidden_danger->incoming(*hidden.branch,0,27)==0);
+  CHECK(discovered->contacts().turn==0 && hidden.branch->contacts().known_enemies.empty());
+  // Perturb a never-seen unit on a candidate attack origin, on the queried
+  // destination itself, and beside the destination (possible support). It
+  // must be indistinguishable from a dead roster slot in every query.
+  Fixture unseen,absent;
+  corridor(unseen);corridor(absent);unseen.fog=absent.fog=1;
+  unseen.units={unit(0,0,24),unit(4,1,29),unit(0,1,27)};
+  absent.units=unseen.units;absent.units[2].hp=0;
+  unseen.start({0,0,{{1,0}}});absent.start({0,0,{{1,0}}});
+  CHECK(!unseen.branch->state().visibility[27]);
+  auto ud=make_danger_model(*unseen.adapter),ad=make_danger_model(*absent.adapter);
+  for(int target:{26,27,28}) {
+    int expected=ad->incoming(*absent.branch,0,target);CHECK(expected>0);
+    CHECK(ud->incoming(*unseen.branch,0,target)==expected);
+  }
+  // Query the exact same key before and after an actual branch move.
+  Fixture move;corridor(move);move.units={unit(4,0,26),unit(0,1,29)};move.start();
+  auto md=make_danger_model(*move.adapter);int fortified=md->incoming(*move.branch,0,27);
+  CHECK(move.adapter->apply(*move.branch,{MOVE,0,27}).accepted);
+  CHECK(md->incoming(*move.branch,0,27)==fortified);
+}
+
+void danger_bounds() {
+  for(int observer:{0,1}) for(int parity:{0,1}) for(int wrap:{0,1}) {
+    Fixture f;f.w=f.h=16;f.tiles.resize(256);f.observer=observer;
+    f.parity=parity;f.wrap=wrap;f.units={unit(0,observer,255),unit(0,1-observer,254)};
+    f.start({},0,observer);auto danger=make_danger_model(*f.adapter);
+    CHECK(danger->incoming(*f.branch,0,255)>0);
+    for(auto query:std::vector<std::pair<int,int>>{{-1,255},{1,255},{0,-1},{0,256},{0,254}}) {
+      bool rejected=false;try{danger->incoming(*f.branch,query.first,query.second);}
+      catch(const std::invalid_argument&){rejected=true;}CHECK(rejected);
+    }
+    auto other=make_rules_adapter(f.input,observer);auto foreign=other->root(f.input,{});
+    bool rejected=false;try{danger->incoming(*foreign,0,255);}
+    catch(const std::invalid_argument&){rejected=true;}CHECK(rejected);
+  }
+  CHECK(own_turn(std::numeric_limits<int32_t>::max(),0,0)==1073741824);
+}
+
 int main(int argc,char** argv) {
   const std::map<std::string,std::function<void()>> cases={
     {"movement",movement},{"terrain_and_zoc",terrain_and_zoc},{"swaps",swaps},
     {"combat",combat},{"turn_and_healing",turn_and_healing},{"contact",contact},
     {"visibility",visibility},{"ownership",ownership},{"bounds_and_invalid",bounds_and_invalid},
-    {"random_sequences",random_sequences}};
+    {"random_sequences",random_sequences},{"danger_damage",danger_damage},
+    {"danger_movement",danger_movement},{"danger_heuristics",danger_heuristics},
+    {"danger_cache_and_contacts",danger_cache_and_contacts},{"danger_bounds",danger_bounds}};
   try {
     if(argc==2) cases.at(argv[1])();
     else for(const auto& entry:cases) entry.second();
-    std::cout<<"CP-02 checks passed\n";return 0;
+    std::cout<<"CP-03 checks passed\n";return 0;
   } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

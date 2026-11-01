@@ -5,7 +5,6 @@ import subprocess
 import unittest
 from pathlib import Path
 
-
 EXECUTABLE = Path(__file__).resolve().parents[1] / "build" / (
     "combat_ai_model_test.exe" if os.name == "nt" else "combat_ai_model_test"
 )
@@ -15,7 +14,7 @@ EXECUTABLE = Path(__file__).resolve().parents[1] / "build" / (
 class BranchModelTests(unittest.TestCase):
     def check_native(self, name):
         result = subprocess.run(
-            [str(EXECUTABLE), name], capture_output=True, text=True, timeout=60
+            [str(EXECUTABLE), name], capture_output=True, text=True, timeout=60, check=False
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -48,6 +47,21 @@ class BranchModelTests(unittest.TestCase):
 
     def test_random_sequences(self):
         self.check_native("random_sequences")
+
+    def test_danger_damage(self):
+        self.check_native("danger_damage")
+
+    def test_danger_movement(self):
+        self.check_native("danger_movement")
+
+    def test_danger_heuristics(self):
+        self.check_native("danger_heuristics")
+
+    def test_danger_cache_and_contacts(self):
+        self.check_native("danger_cache_and_contacts")
+
+    def test_danger_bounds(self):
+        self.check_native("danger_bounds")
 
 
 if __name__ == "__main__":

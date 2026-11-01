@@ -94,7 +94,7 @@ def build():
              "-o", str(out / "combat_ai_model_test")],
             check=True,
         )
-    print("Built standalone combat AI model (CP-02, ABI 1) and native checks")
+    print("Built standalone combat AI model/danger (CP-03, ABI 2) and native checks")
 
 
 if __name__ == "__main__":

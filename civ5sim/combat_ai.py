@@ -1,4 +1,4 @@
-"""CP-02 standalone model and planner contract. Search remains an explicit stub.
+"""CP-03 standalone model, danger and planner contract. Search remains a stub.
 
 This module is an internal privileged boundary for the CP-source v1 agent.
 Normal Agent.act observations never acquire a PlanningState implicitly.
@@ -128,11 +128,62 @@ class PlanningState:
 
 
 @dataclass(frozen=True)
+class Contact:
+    id: int
+    last_seen_own_turn: int
+
+
+def own_turn(turn: int, active_side: int, observer: int) -> int:
+    """Observer-turn ordinal; initial offset depends on the starting side."""
+    integer(turn, "turn", 0, 2**31 - 1)
+    integer(active_side, "active_side", 0, 1)
+    integer(observer, "observer", 0, 1)
+    return (turn + int(active_side == observer)) // 2
+
+
+@dataclass(frozen=True)
 class ContactMemory:
-    """Previously observed enemy IDs; real history belongs to the CP agent."""
+    """Active contacts; update only from real observations in the CP agent.
+
+    A hidden contact expires two observer-turn starts after its last sighting.
+    The default unbound empty memory can initialize either side of a new match.
+    """
 
     turn: int = 0
-    known_enemies: tuple[int, ...] = ()
+    side: int = -1
+    known_enemies: tuple[Contact, ...] = ()
+
+    def updated(self, observation: dict) -> "ContactMemory":
+        """Return detached real history; neither hidden queries nor search update it."""
+        side = integer(observation["side"], "side", 0, 1)
+        turn = integer(observation["turn"], "turn", 0, 2**31 - 1)
+        active = integer(observation["active_side"], "active_side", 0, 1)
+        integer(self.turn, "contact turn", 0, turn)
+        integer(self.side, "contact side", -1, 1)
+        if self.side != side and not (
+            self.side == -1 and self.turn == 0 and not self.known_enemies
+        ):
+            raise ValueError("Contact memory belongs to another side")
+        if len(self.known_enemies) > 512:
+            raise ValueError("Too many contacts")
+        now = own_turn(turn, active, side)
+        previous = own_turn(self.turn, active ^ ((turn - self.turn) & 1), side)
+        remembered = {}
+        seen = set()
+        for c in self.known_enemies:
+            integer(c.id, "contact id", 0, 511)
+            integer(c.last_seen_own_turn, "last seen turn", 0, previous)
+            if c.id in seen:
+                raise ValueError("Duplicate contact")
+            seen.add(c.id)
+            if now - c.last_seen_own_turn <= 1:
+                remembered[c.id] = c
+        for u in observation["units"]:
+            unit_side = integer(u["side"], "unit side", 0, 1)
+            if unit_side != side and u["hp"] > 0:
+                uid = integer(u["id"], "contact id", 0, 511)
+                remembered[uid] = Contact(uid, now)
+        return ContactMemory(turn, side, tuple(remembered[k] for k in sorted(remembered)))
 
 
 @dataclass(frozen=True)
@@ -232,10 +283,14 @@ class _State(C.Structure):
     ]
 
 
+_Contact = _structure("_Contact", [f.name for f in fields(Contact)])
+
+
 class _Contacts(C.Structure):
     _fields_ = [
         ("turn", C.c_int32),
-        ("known_enemies", C.POINTER(C.c_int32)),
+        ("side", C.c_int32),
+        ("known_enemies", C.POINTER(_Contact)),
         ("known_enemy_count", C.c_int32),
     ]
 
@@ -285,7 +340,7 @@ def _library():
     ):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = arguments, result
-    if lib.cai_abi() != 1:
+    if lib.cai_abi() != 2:
         raise RuntimeError("Unsupported combat AI ABI; rebuild the planner")
     return lib
 
@@ -302,7 +357,7 @@ class Planner:
     """Owned search context. Independent instances may run concurrently.
 
     Use as a context manager. Calls/close on the same instance must be serialized.
-    In CP-02 valid nonempty requests still return NOT_IMPLEMENTED.
+    In CP-03 valid nonempty requests still return NOT_IMPLEMENTED.
     """
 
     def __init__(self, config: SearchConfig | None = None):
@@ -362,8 +417,8 @@ class Planner:
         selected = (C.c_int32 * len(request.selected_units))(
             *map(_i32, request.selected_units)
         )
-        known = (C.c_int32 * len(request.contacts.known_enemies))(
-            *map(_i32, request.contacts.known_enemies)
+        known = (_Contact * len(request.contacts.known_enemies))(
+            *(_pack(_Contact, c) for c in request.contacts.known_enemies)
         )
         state = _State(
             _i32(s.width),
@@ -387,7 +442,7 @@ class Planner:
             _i32(request.target),
             selected,
             len(selected),
-            _Contacts(_i32(request.contacts.turn), known, len(known)),
+            _Contacts(_i32(request.contacts.turn), _i32(request.contacts.side), known, len(known)),
         )
         result = _Result()
         status = self._lib.cai_search(

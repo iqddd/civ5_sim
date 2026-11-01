@@ -1,10 +1,16 @@
 #include "model.h"
 #include "../combat_state.h"
 #include <algorithm>
+#include <map>
 #include <stdexcept>
 #include <utility>
 
 namespace combat_ai {
+int32_t own_turn(int32_t turn, int32_t active_side, int32_t observer) {
+  if (turn < 0 || (active_side != 0 && active_side != 1) ||
+      (observer != 0 && observer != 1)) throw std::invalid_argument("invalid turn/side");
+  return int32_t((int64_t(turn) + (active_side == observer)) / 2);
+}
 namespace {
 using combat_rules::State;
 bool bit(int n) { return n == 0 || n == 1; }
@@ -43,11 +49,14 @@ class OwnedBranch final : public Branch {
   mutable std::vector<CaiUnit> units;
   mutable std::vector<int32_t> visibility;
   mutable CaiBattleState snapshot{};
+  mutable std::map<std::pair<int32_t,int32_t>, int32_t> danger_cache;
   OwnedBranch(std::shared_ptr<const Geometry> geometry,
               std::shared_ptr<const std::vector<CaiTile>> map_tiles, int side)
       : rules(std::move(geometry)), observer(side), tiles(std::move(map_tiles)) {}
   std::unique_ptr<Branch> clone() const override {
-    return std::make_unique<OwnedBranch>(*this);
+    auto copy = std::make_unique<OwnedBranch>(*this);
+    copy->danger_cache.clear();
+    return copy;
   }
   const CaiBattleState& state() const override {
     units.clear();
@@ -63,12 +72,22 @@ class OwnedBranch final : public Branch {
   }
   const ContactMemory& contacts() const override { return memory; }
   void observe() {
+    danger_cache.clear();
+    memory.side = observer;
+    int now = own_turn(rules.turn, rules.side, observer);
+    auto& contacts = memory.known_enemies;
+    contacts.erase(std::remove_if(contacts.begin(), contacts.end(), [&](const Contact& c) {
+      return now - c.last_seen_own_turn > 1;
+    }), contacts.end());
     for (int i = 0; i < int(rules.units.size()); ++i) {
       const auto& u = rules.units[i];
-      if (u.hp > 0 && u.side != observer && rules.known(observer, u.tile) &&
-          std::find(memory.known_enemies.begin(), memory.known_enemies.end(), i) == memory.known_enemies.end())
-        memory.known_enemies.push_back(i);
+      if (u.hp <= 0 || u.side == observer || !rules.known(observer, u.tile)) continue;
+      auto found = std::find_if(contacts.begin(), contacts.end(),
+                                [i](const Contact& c) { return c.id == i; });
+      if (found == contacts.end()) contacts.push_back({i, now});
+      else found->last_seen_own_turn = now;
     }
+    std::sort(contacts.begin(), contacts.end(), [](const Contact& a, const Contact& b) { return a.id < b.id; });
   }
 };
 class Adapter final : public RulesAdapter {
@@ -118,10 +137,17 @@ class Adapter final : public RulesAdapter {
     for (int i = 0; i < s.tile_count; ++i)
       require(s.visibility[i] == int(b->rules.known(observer, i)), "visibility mismatch");
     require(contacts.turn >= 0 && contacts.turn <= s.turn, "invalid contact turn");
+    require(contacts.side == observer || (contacts.side == -1 && contacts.turn == 0 &&
+            contacts.known_enemies.empty()), "invalid contact side");
+    int previous_side = s.active_side ^ ((s.turn - contacts.turn) & 1);
+    int observed_turn = own_turn(contacts.turn, previous_side, observer);
     std::vector<bool> seen(s.unit_count, false);
-    for (int id : contacts.known_enemies) {
+    for (const auto& contact : contacts.known_enemies) {
+      int id = contact.id;
       require(id >= 0 && id < s.unit_count && !seen[id] && b->rules.units[id].side != observer,
               "invalid contact");
+      require(contact.last_seen_own_turn >= 0 && contact.last_seen_own_turn <= observed_turn,
+              "invalid last seen turn");
       seen[id] = true;
     }
     b->memory = contacts;
@@ -208,12 +234,115 @@ class Adapter final : public RulesAdapter {
   bool known_enemy(const Branch& base, int32_t id, CaiUnit& out) const override {
     const auto& b = branch(base); unit(b,id);
     const auto& u = b.rules.units[id];
-    if (u.side == observer || u.hp <= 0 || std::find(b.memory.known_enemies.begin(),b.memory.known_enemies.end(),id) == b.memory.known_enemies.end()) return false;
+    if (u.side == observer || u.hp <= 0 ||
+        std::none_of(b.memory.known_enemies.begin(),b.memory.known_enemies.end(),
+                     [id](const Contact& c) { return c.id == id; })) return false;
     out = export_unit(id,u); return true;
+  }
+  int32_t incoming(const Branch& base, int32_t defender, int32_t target) const {
+    const auto& b = branch(base); unit(b,defender); tile(target);
+    require(b.rules.units[defender].hp > 0 && b.rules.units[defender].side == observer,
+            "invalid defender");
+    require(geo->passable(target), "impassable danger tile");
+    auto key = std::make_pair(defender,target);
+    auto cached = b.danger_cache.find(key);
+    if (cached != b.danger_cache.end()) return cached->second;
+
+    // Only admitted contacts may affect prediction. Never-seen units are
+    // removed even from occupancy, support and visibility calculations.
+    State projected = b.rules;
+    std::vector<bool> admitted(projected.units.size(), false);
+    for (const auto& c : b.memory.known_enemies) admitted[c.id] = true;
+    std::vector<int> enemies, visible_enemies;
+    for (int i = 0; i < int(projected.units.size()); ++i) {
+      auto& u = projected.units[i];
+      if (u.side == observer || u.hp <= 0) continue;
+      if (!admitted[i]) { u.hp = 0; continue; }
+      enemies.push_back(i);
+      if (b.rules.known(observer,u.tile)) visible_enemies.push_back(i);
+    }
+    projected.rebuild();
+    require(projected.occupied[target] < 0 || projected.occupied[target] == defender,
+            "occupied danger tile");
+
+    // CP IsKnownVisibleToTeam: only sight sources currently visible to us.
+    // Do this before any assumed relocation, including the defender's.
+    bool known_visible = !b.rules.fog;
+    for (int id : visible_enemies) {
+      const auto& sight = geo->sight[projected.units[id].tile];
+      if (std::binary_search(sight.begin(),sight.end(),target)) known_visible = true;
+    }
+    int total = 0;
+    // AddFogDanger(origin, enemy, 2, false): each hidden passable origin
+    // candidate contributes to a disk of radius two, not the whole map.
+    for (int id : visible_enemies)
+      for (int hidden = 0; hidden < int(geo->tiles.size()); ++hidden)
+        if (geo->passable(hidden) && !b.rules.known(observer,hidden) &&
+            geo->distance(projected.units[id].tile,hidden) <= 2 &&
+            geo->distance(hidden,target) <= 2) ++total;
+
+    if (projected.units[defender].tile != target) {
+      projected.units[defender].tile = target;
+      projected.units[defender].fortified = 0;
+      projected.rebuild();
+    }
+    projected.side = 1 - observer;
+    // Reachability assumes complete knowledge of the admitted physical
+    // position. The probability discount above uses a separate knowledge map.
+    projected.fog = 0;
+    for (int id : enemies) {
+      State response = projected;
+      auto& attacker = response.units[id];
+      attacker.moves = combat_rules::moves[attacker.type];
+      attacker.attacked = attacker.waiting = 0;
+      std::vector<int> remaining, previous;
+      response.paths(id,remaining,previous);
+      int best = 0;
+      int origin = attacker.tile;
+      bool shot = combat_rules::ranged[attacker.type] != 0;
+      for (int from = 0; from < int(remaining.size()); ++from) {
+        if (remaining[from] <= 0 ||
+            (response.occupied[from] >= 0 && from != origin)) continue;
+        if (shot) {
+          const auto& targets = geo->targets[from];
+          if (!std::binary_search(targets.begin(),targets.end(),target)) continue;
+        } else if (geo->distance(from,target) != 1) continue;
+        // A private copy keeps the per-position support/visibility exact and
+        // cannot mutate sibling candidate attacks or the real branch.
+        State attack = response;
+        auto& a = attack.units[id];
+        a.tile = from; a.moves = remaining[from];
+        if (from != origin) a.fortified = 0;
+        attack.rebuild();
+        if (attack.validate({shot ? combat_rules::RANGED : combat_rules::MELEE,id,target}) != combat_rules::OK)
+          continue;
+        auto damage = attack.combat(id,defender,shot,false);
+        int contribution = damage.damage;
+        if (!known_visible) contribution = contribution * 80 / 100;
+        if (damage.retaliation >= a.hp) contribution /= 2;
+        best = std::max(best,contribution);
+      }
+      total += best;
+    }
+    b.danger_cache.emplace(key,total);
+    return total;
+  }
+};
+class Danger final : public DangerModel {
+  const Adapter& adapter;
+ public:
+  explicit Danger(const Adapter& value) : adapter(value) {}
+  int32_t incoming(const Branch& b, int32_t defender, int32_t tile) override {
+    return adapter.incoming(b,defender,tile);
   }
 };
 } // namespace
 std::unique_ptr<RulesAdapter> make_rules_adapter(const CaiBattleState& state, int32_t observer) {
   return std::make_unique<Adapter>(state, observer);
+}
+std::unique_ptr<DangerModel> make_danger_model(const RulesAdapter& adapter) {
+  auto* concrete = dynamic_cast<const Adapter*>(&adapter);
+  require(concrete != nullptr, "unsupported danger adapter");
+  return std::make_unique<Danger>(*concrete);
 }
 } // namespace combat_ai

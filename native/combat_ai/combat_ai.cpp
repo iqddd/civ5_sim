@@ -1,4 +1,5 @@
 #include "combat_ai.h"
+#include "model.h"
 
 #include <array>
 #include <memory>
@@ -34,6 +35,8 @@ bool valid_request(const CaiSearchRequest& r) {
       !s.visibility || s.visibility_count != s.tile_count ||
       r.target < 0 || r.target >= s.tile_count ||
       r.contacts.turn < 0 || r.contacts.turn > s.turn ||
+      (r.contacts.side != r.side && !(r.contacts.side == -1 &&
+       r.contacts.turn == 0 && r.contacts.known_enemy_count == 0)) ||
       r.contacts.known_enemy_count < 0 || r.contacts.known_enemy_count > s.unit_count ||
       (r.contacts.known_enemy_count && !r.contacts.known_enemies)) return false;
   for (int32_t i = 0; i < s.tile_count; ++i) {
@@ -68,9 +71,14 @@ bool valid_request(const CaiSearchRequest& r) {
     selected[id] = true;
   }
   std::array<bool, 512> known{};
+  int previous_side = s.active_side ^ ((s.turn - r.contacts.turn) & 1);
+  int observed_turn = combat_ai::own_turn(r.contacts.turn,previous_side,r.side);
   for (int32_t i = 0; i < r.contacts.known_enemy_count; ++i) {
-    int32_t id = r.contacts.known_enemies[i];
+    const auto& contact = r.contacts.known_enemies[i];
+    int32_t id = contact.id;
     if (id < 0 || id >= s.unit_count || known[id] || s.units[id].side == r.side)
+      return false;
+    if (contact.last_seen_own_turn < 0 || contact.last_seen_own_turn > observed_turn)
       return false;
     // Dead contacts are allowed in historical memory; CP-03 adds no threat.
     known[id] = true;
@@ -80,7 +88,7 @@ bool valid_request(const CaiSearchRequest& r) {
 }  // namespace
 
 int32_t cai_abi(void) { return CAI_ABI; }
-const char* cai_version(void) { return "civ5sim.combat_ai/0.2.0 CP-02"; }
+const char* cai_version(void) { return "civ5sim.combat_ai/0.3.0 CP-03"; }
 CaiConfig cai_default_config(void) { return {6000, 2560, 5, 5, CAI_MEDIUM, 1}; }
 CaiContext* cai_new(const CaiConfig* config) {
   if (!config || !valid_config(*config)) return nullptr;
