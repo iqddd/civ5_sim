@@ -40,3 +40,9 @@ class LocalPlannerTests(unittest.TestCase):
 
     def test_thirteen_selected_with_larger_armies_and_tile_255(self):
         self.check_native("scale_and_last_tile")
+
+    def test_support_healing_and_retreat_use_real_rules(self):
+        self.check_native("support_healing")
+
+    def test_support_approach_detours_occupancy_and_last_tile(self):
+        self.check_native("support_approach")

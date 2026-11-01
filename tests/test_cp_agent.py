@@ -1,4 +1,4 @@
-"""Execution, capability lifetime and real-match regressions for CP-05."""
+"""Checked execution, capability lifetime and real-match regressions."""
 
 import unittest
 from dataclasses import asdict, replace
@@ -18,6 +18,7 @@ from civ5sim.combat_ai import (
     SearchReason,
     SearchResult,
     SearchStats,
+    SupportMode,
 )
 from civ5sim.combat_ai import (
     AssignmentKind as K,
@@ -50,9 +51,12 @@ class ScriptedPlanning:
         self.plans = iter(plans)
         self.calls = []
 
-    def search(self, target, selected, *, contacts):
+    def search(self, target, selected, *, contacts, aggression=None):
         self.calls.append((target, selected, contacts))
-        return next(self.plans)
+        return next(self.plans, plan())
+
+    def support(self, target, selected, *, contacts, mode):
+        return plan()
 
 
 def plan(*assignments, reason=SearchReason.COMPLETED):
@@ -76,6 +80,15 @@ class ExecutorTests(unittest.TestCase):
         a.on_action_result(command, result, b.observe(0))
         return result
 
+    def assert_turn_ends(self, a, b, planning):
+        for _ in range(40):
+            command = self.act(a, b, planning)
+            if command.kind == "end_turn":
+                return
+            self.assertEqual(command.kind, "skip")
+            self.execute(a, b, command)
+        self.fail("Coordinator did not finish the turn")
+
     def test_queued_focus_fire_and_finish_one_command_at_a_time(self):
         with Battle(scenario([unit("archer", 0, 17), unit("archer", 0, 10),
                               unit("warrior", 1, 19)])) as b:
@@ -93,7 +106,7 @@ class ExecutorTests(unittest.TestCase):
             self.assertTrue(a._queue)
             self.assertEqual(self.act(a, b, p), Action("skip", 1))
             self.execute(a, b, Action("skip", 1))
-            self.assertEqual(self.act(a, b, p), Action("end_turn"))
+            self.assert_turn_ends(a, b, p)
             self.assertEqual(len(p.calls), 1)
 
     def test_swap_is_atomic_and_reverse_is_only_checked(self):
@@ -113,7 +126,7 @@ class ExecutorTests(unittest.TestCase):
             self.execute(a, b, Action("skip", 0))
             self.assertEqual(self.act(a, b, p), Action("skip", 1))
             self.execute(a, b, Action("skip", 1))
-            self.assertEqual(self.act(a, b, p), Action("end_turn"))
+            self.assert_turn_ends(a, b, p)
             self.assertEqual(len(p.calls), 1)
 
     def test_damage_mismatch_and_unexpected_survival_replan(self):
@@ -126,7 +139,7 @@ class ExecutorTests(unittest.TestCase):
             command = self.act(a, b, p)
             self.execute(a, b, command)
             self.assertFalse(a._queue)
-            self.assertEqual(self.act(a, b, p), Action("end_turn"))
+            self.assert_turn_ends(a, b, p)
             self.assertEqual(len(p.calls), 2)
             self.assertTrue(any(e.get("reason") == "damage_changed" for e in a.drain_diagnostics()))
 
@@ -155,12 +168,14 @@ class ExecutorTests(unittest.TestCase):
         with Battle(scenario([unit("warrior", 0, 17), unit("warrior", 1, 19)])) as b:
             a = self.agent(b)
             p = ScriptedPlanning(plan(assignment(K.MOVE, 0, 99, 18, 60)))
-            self.assertEqual(self.act(a, b, p), Action("end_turn"))
+            self.assert_turn_ends(a, b, p)
             self.assertEqual(len(p.calls), 1)
             self.assertTrue(any(e.get("reason") == "no_progress" for e in a.drain_diagnostics()))
+            b.step(Action("end_turn"))
+            b.step(Action("end_turn"))
             a.reset({"side": 0, "map": b._map})
             p = ScriptedPlanning(plan(reason=SearchReason.BUDGET_EXHAUSTED))
-            self.assertEqual(self.act(a, b, p), Action("end_turn"))
+            self.assert_turn_ends(a, b, p)
             self.assertTrue(any(e.get("reason") == "budget_exhausted" for e in a.drain_diagnostics()))
 
     def test_nonempty_budget_plan_and_unit_zero_tile_255(self):
@@ -174,13 +189,13 @@ class ExecutorTests(unittest.TestCase):
                                       reason=SearchReason.BUDGET_EXHAUSTED))
             self.assertEqual(self.act(a, b, p), Action("move", 0, 255))
             self.execute(a, b, Action("move", 0, 255))
-            self.assertEqual(self.act(a, b, p), Action("end_turn"))
+            self.assert_turn_ends(a, b, p)
 
     def test_no_contact_and_thirteen_selected_from_larger_army(self):
         with Battle(scenario([unit("warrior", 0, 0), unit("warrior", 1, 39)], fog=True)) as b:
             a = self.agent(b)
             p = ScriptedPlanning()
-            self.assertEqual(self.act(a, b, p), Action("end_turn"))
+            self.assert_turn_ends(a, b, p)
             self.assertEqual(p.calls, [])
         with Battle(scenario([unit("warrior", 0, i) for i in range(15)] +
                              [unit("warrior", 1, 20)])) as b:
@@ -225,7 +240,7 @@ class ExecutorTests(unittest.TestCase):
                 command = self.act(a, b, p)
                 self.assertEqual(command, Action("move", 0, target))
                 self.execute(a, b, command)
-            self.assertEqual(self.act(a, b, p), Action("end_turn"))
+            self.assert_turn_ends(a, b, p)
             self.assertEqual(len(p.calls), 3)
             self.assertTrue(any(e.get("reason") == "search_limit" for e in a.drain_diagnostics()))
 
@@ -292,6 +307,8 @@ class MatchIntegrationTests(unittest.TestCase):
             self.assertEqual(match.result["status"], "error" if fail else "completed")
             with self.assertRaisesRegex(RuntimeError, "expired"):
                 a.saved.search(0, (), contacts=ContactMemory())
+            with self.assertRaisesRegex(RuntimeError, "expired"):
+                a.saved.support(0, (), contacts=ContactMemory(), mode=SupportMode.APPROACH)
             self.verify_replay(match)
 
     def test_final_action_checked_and_callback_error_preserves_prefix(self):

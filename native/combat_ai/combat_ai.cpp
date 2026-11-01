@@ -29,7 +29,8 @@ bool valid_config(const CaiConfig& c) {
 bool valid_request(const CaiSearchRequest& r) {
   if (!r.state || r.side < 0 || r.side > 1 || r.expected_turn < 0 ||
       r.selected_count < 0 || r.selected_count > CAI_MAX_SELECTED ||
-      (r.selected_count && !r.selected_units)) return false;
+      (r.selected_count && !r.selected_units) ||
+      r.aggression_override < 0 || r.aggression_override > CAI_BRAVEHEART + 1) return false;
   const auto& s = *r.state;
   if (s.width < 1 || s.width > 128 || s.height < 1 || s.height > 128 ||
       s.tile_count != s.width * s.height || s.tile_count > 4096 ||
@@ -92,28 +93,31 @@ bool valid_request(const CaiSearchRequest& r) {
 }  // namespace
 
 int32_t cai_abi(void) { return CAI_ABI; }
-const char* cai_version(void) { return "civ5sim.combat_ai/0.5.0 CP-05"; }
+const char* cai_version(void) { return "civ5sim.combat_ai/0.6.0 CP-06"; }
 CaiConfig cai_default_config(void) { return {6000, 2560, 5, 5, CAI_MEDIUM, 1, 0, 1}; }
 CaiContext* cai_new(const CaiConfig* config) {
   if (!config || !valid_config(*config)) return nullptr;
   try { return new CaiContext(*config); } catch (...) { return nullptr; }
 }
 void cai_free(CaiContext* context) { delete context; }
-int32_t cai_search(CaiContext* context, const CaiSearchRequest* request,
+static int32_t run_plan(CaiContext* context, const CaiSearchRequest* request, int mode,
                    CaiAssignment* assignments, int32_t capacity,
                    CaiSearchResult* result) {
   if (result) *result = {CAI_INVALID_REQUEST, 0, {0, 0, 0, 0, 0}};
   if (!context || !request || !result || capacity < 0 ||
       (capacity && !assignments)) return CAI_BAD_ARGUMENT;
   try {
-    if (!valid_request(*request)) return CAI_OK;
+    if (!valid_request(*request) || mode < -1 || mode > CAI_APPROACH) return CAI_OK;
     if (request->expected_turn != request->state->turn ||
         request->side != request->state->active_side) {
       result->reason = CAI_TURN_CHANGED;
     } else if (request->selected_count == 0) {
       result->reason = CAI_NO_PLAN;
     } else {
-      auto plan = combat_ai::find_assignments(context->workspace, context->config, *request);
+      auto config = context->config;
+      if (request->aggression_override) config.aggression = request->aggression_override - 1;
+      auto plan = mode < 0 ? combat_ai::find_assignments(context->workspace, config, *request)
+                           : combat_ai::support_assignments(*request, mode);
       *result = plan.result;
       if (capacity < result->assignment_count) return CAI_BUFFER_TOO_SMALL;
       std::copy(plan.assignments.begin(), plan.assignments.end(), assignments);
@@ -123,4 +127,16 @@ int32_t cai_search(CaiContext* context, const CaiSearchRequest* request,
     *result = {CAI_INVALID_REQUEST, 0, {0, 0, 0, 0, 0}};
     return CAI_OK;
   } catch (...) { return CAI_INTERNAL_ERROR; }
+}
+int32_t cai_search(CaiContext* context, const CaiSearchRequest* request,
+                   CaiAssignment* assignments, int32_t capacity, CaiSearchResult* result) {
+  return run_plan(context, request, -1, assignments, capacity, result);
+}
+int32_t cai_support(CaiContext* context, const CaiSearchRequest* request, int32_t mode,
+                    CaiAssignment* assignments, int32_t capacity, CaiSearchResult* result) {
+  if (mode < CAI_HEAL_BEFORE || mode > CAI_APPROACH) {
+    if (result) *result = {CAI_INVALID_REQUEST, 0, {0,0,0,0,0}};
+    return CAI_BAD_ARGUMENT;
+  }
+  return run_plan(context, request, mode, assignments, capacity, result);
 }

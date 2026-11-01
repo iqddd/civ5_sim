@@ -25,6 +25,7 @@ def build():
     common = [ROOT / "native/combat_ai/model.cpp",
               ROOT / "native/combat_state.cpp", ROOT / "native/geometry.cpp"]
     planner_sources = [ROOT / "native/combat_ai/planner.cpp",
+                       ROOT / "native/combat_ai/support.cpp",
                        ROOT / "native/combat_ai/tactical.cpp"]
     test_sources = [ROOT / "tests/native/combat_ai_model_test.cpp",
                     ROOT / "native/combat.cpp", *common]
@@ -110,7 +111,7 @@ def build():
              "-o", str(out / "combat_ai_model_test")],
             check=True,
         )
-    print("Built standalone combat AI planner (CP-05, ABI 4) and native checks")
+    print("Built standalone combat AI planner (CP-06, ABI 5) and native checks")
 
 
 if __name__ == "__main__":

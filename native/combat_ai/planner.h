@@ -19,4 +19,5 @@ struct SearchWorkspace {
 };
 struct Plan { std::vector<CaiAssignment> assignments; CaiSearchResult result; };
 Plan find_assignments(SearchWorkspace&, const CaiConfig&, const CaiSearchRequest&);
+Plan support_assignments(const CaiSearchRequest&, int32_t mode);
 }  // namespace combat_ai

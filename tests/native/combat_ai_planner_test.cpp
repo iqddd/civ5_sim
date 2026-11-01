@@ -51,6 +51,10 @@ struct Fixture {
     CaiSearchRequest request{&state,0,turn,target,selected.data(),int32_t(selected.size()),{0,-1,nullptr,0}};
     return find_assignments(work,config,request);
   }
+  Plan support(int target, int mode) {
+    CaiSearchRequest request{&state,0,turn,target,selected.data(),int32_t(selected.size()),{0,-1,nullptr,0}};
+    return support_assignments(request,mode);
+  }
   std::unique_ptr<Branch> replay(const Plan& plan) {
     auto branch = root->clone();
     std::vector<bool> finished(units.size(),false);
@@ -211,6 +215,45 @@ void scale_and_last_tile() {
   auto kill=last.search(255); CHECK(!kill.assignments.empty());
   CHECK(last.replay(kill)->state().units[0].tile==255);
 }
+void support_healing() {
+  Fixture safe; safe.add(0,0,0,25); safe.add(0,1,34); safe.start();
+  auto p = safe.support(0,CAI_HEAL_BEFORE);
+  CHECK(p.assignments.size()==1 && p.assignments[0].kind==CAI_FINISH);
+  auto after = safe.replay(p);
+  CHECK(safe.adapter->apply(*after,{END_TURN,-1,-1}).accepted);
+  CHECK(safe.adapter->apply(*after,{END_TURN,-1,-1}).accepted);
+  CHECK(after->state().units[0].hp==35);
+  Fixture moved; moved.add(0,0,0,25); moved.add(0,1,34); moved.units[0].acted=1; moved.start();
+  auto waited=moved.replay(moved.support(0,CAI_HEAL_AFTER));
+  CHECK(moved.adapter->apply(*waited,{END_TURN,-1,-1}).accepted);
+  CHECK(moved.adapter->apply(*waited,{END_TURN,-1,-1}).accepted);
+  CHECK(waited->state().units[0].hp==25);
+  Fixture flee; flee.add(1,0,16,10); flee.add(0,1,17); flee.start();
+  auto danger=make_danger_model(*flee.adapter);
+  int before=danger->incoming(*flee.root,0,16);
+  auto retreat=flee.support(16,CAI_HEAL_BEFORE);
+  auto escaped=flee.replay(retreat);
+  CHECK(escaped->state().units[0].tile!=16);
+  CHECK(danger->incoming(*escaped,0,escaped->state().units[0].tile)<before);
+  Fixture ready; ready.add(0,0,16,25); ready.add(0,1,17); ready.start();
+  CHECK(ready.support(16,CAI_HEAL_BEFORE).assignments.empty()); // Can still attack.
+}
+void support_approach() {
+  Fixture detour; detour.add(0,0,14); detour.add(0,1,20);
+  detour.corridor({14,7,8,9,16,17,18,19,20}); detour.start();
+  auto plan=detour.support(20,CAI_APPROACH);
+  CHECK(!plan.assignments.empty());
+  CHECK(detour.replay(plan)->state().units[0].tile!=14);
+  Fixture blocked; blocked.add(0,0,14); blocked.add(0,0,15); blocked.add(0,1,20);
+  blocked.selected={0}; blocked.corridor({14,15,16,17,18,19,20}); blocked.start();
+  auto p=blocked.support(20,CAI_APPROACH);
+  if(!p.assignments.empty()) CHECK(blocked.replay(p)->state().units[1].tile==15);
+  Fixture last; last.w=16; last.h=16; last.tiles.resize(256);
+  last.add(0,0,254); last.add(0,1,0); last.start();
+  auto end=last.support(255,CAI_APPROACH);
+  CHECK(last.replay(end)->state().units[0].tile==255);
+  CHECK(last.support(254,CAI_APPROACH).assignments.empty());
+}
 int main(int argc,char** argv) {
   try {
     std::string name=argc>1?argv[1]:"";
@@ -222,6 +265,8 @@ int main(int argc,char** argv) {
     else if(name=="contact") contact();
     else if(name=="random_replay") random_replay();
     else if(name=="scale_and_last_tile") scale_and_last_tile();
+    else if(name=="support_healing") support_healing();
+    else if(name=="support_approach") support_approach();
     else throw std::runtime_error("unknown test group");
     std::cout<<name<<" passed\n"; return 0;
   } catch(const std::exception& e) { std::cerr<<e.what()<<"\n"; return 1; }

@@ -1,11 +1,16 @@
-"""CP-05 local-task executor. Full-army coordination belongs to CP-06."""
+"""CP-06 full-battle coordinator and checked, one-command CP executor."""
 
 from collections import deque
 from copy import deepcopy
 from dataclasses import asdict
 
+from civ5map.maps import adjacent, passable
+
+from .combat_ai import (
+    Assignment, Aggression, ContactMemory, Planner, SearchConfig, SearchReason,
+    SupportMode, own_turn,
+)
 from .combat_ai import AssignmentKind as K
-from .combat_ai import ContactMemory, Planner, SearchConfig, SearchReason
 from .engine import Action, digest
 
 
@@ -20,7 +25,7 @@ def hex_distance(map_info, a, b):
 
 
 class CPAgent:
-    """One visible target and one group per turn; one simulator Action per call."""
+    """Sequential army tasks, wide exploration, and one simulator Action per call."""
 
     def __init__(self, config: SearchConfig | None = None):
         self.config = SearchConfig() if config is None else config
@@ -36,6 +41,25 @@ class CPAgent:
         self.side = context["side"]
         self.map = deepcopy(context["map"])
         self.memory = ContactMemory()
+        self._last_seen = {}
+        self._seen_at = [-1] * len(self.map["tiles"])
+        self._objectives = {}
+        self._blocked = {}
+        self._combat_targets = {}
+        self._target_blocked = {}
+        self._routes = {}
+        self._neighbors = {}
+        for tile, value in enumerate(self.map["tiles"]):
+            if not passable(value):
+                continue
+            neighbors = []
+            for direction in range(6):
+                xy = adjacent(self.map, tile % self.map["width"], tile // self.map["width"], direction)
+                if xy is not None:
+                    n = xy[1] * self.map["width"] + xy[0]
+                    if passable(self.map["tiles"][n]):
+                        neighbors.append(n)
+            self._neighbors[tile] = tuple(neighbors)
         self._events = []
         self._turn = None
         self._new_turn()
@@ -49,8 +73,169 @@ class CPAgent:
         self._replan = False
         self._searches = 0
         self._search_limit = 0
+        self._support_calls = 0
+        self._support_limit = 0
         self._visited = set()
         self._last_observation = None
+        self._task = None
+        self._phase = 0
+        self._phase_seen = {0: set(), 2: set(), 3: set()}
+        self._combat_attempts = set()
+        self._approach_attempts = set()
+        self._reservations = []
+
+    def _observe(self, observation):
+        self.memory = self.memory.updated(observation)
+        now = own_turn(observation["turn"], observation["active_side"], self.side)
+        visible = observation["visibility"]
+        enemies = {u["id"]: u for u in observation["units"] if u["side"] != self.side}
+        for tile, seen in enumerate(visible):
+            if seen:
+                self._seen_at[tile] = now
+        active = {c.id for c in self.memory.known_enemies}
+        self._last_seen = {uid: tile for uid, tile in self._last_seen.items()
+                           if uid in active and (not visible[tile] or
+                              (uid in enemies and enemies[uid]["tile"] == tile))}
+        self._last_seen.update({uid: u["tile"] for uid, u in enemies.items()})
+
+    def _distances(self, target):
+        if target not in self._routes:
+            distances = {target: 0} if target in self._neighbors else {}
+            queue = deque(distances)
+            while queue:
+                tile = queue.popleft()
+                for n in self._neighbors[tile]:
+                    if n not in distances:
+                        distances[n] = distances[tile] + 1
+                        queue.append(n)
+            if len(self._routes) >= 64:
+                self._routes.pop(next(iter(self._routes)))
+            self._routes[target] = distances
+        return self._routes[target]
+
+    def _distance(self, start, target):
+        return self._distances(start).get(target, 1_000_000)
+
+    def _select(self, units, target, limit=13):
+        return tuple(u["id"] for u in sorted(units, key=lambda u: (
+            self._distance(u["tile"], target), u["id"]
+        ))[:limit])
+
+    def _explore_target(self, group, observation):
+        key = tuple(sorted(u["id"] for u in group))
+        now = own_turn(observation["turn"], observation["active_side"], self.side)
+        previous = self._objectives.get(key)
+        def distance(tile):
+            return min(self._distance(u["tile"], tile) for u in group)
+        if previous is not None:
+            target, old_distance, stalled, last_turn = previous
+            if last_turn != now:
+                stalled = stalled + 1 if distance(target) >= old_distance else 0
+            if stalled >= 2:
+                self._blocked[key, target] = now + 1
+            elif not observation["visibility"][target]:
+                self._objectives[key] = (target, distance(target), stalled, now)
+                self._reservations.append(target)
+                return target
+        candidates = [t for t in self._neighbors if distance(t) < 1_000_000
+                      and self._blocked.get((key, t), -1) < now]
+        if not candidates:
+            return None
+        target = min(candidates, key=lambda t: (
+            self._seen_at[t],
+            sum(max(0, 5 - hex_distance(self.map, t, other)) for other in self._reservations),
+            distance(t), t,
+        ))
+        self._objectives[key] = (target, distance(target), 0, now)
+        self._reservations.append(target)
+        return target
+
+    def _next_task(self, available, enemies, observation):
+        while self._phase < 4:
+            phase = self._phase
+            if phase == 1:
+                now = own_turn(observation["turn"], observation["active_side"], self.side)
+                by_id = {e["id"]: e for e in enemies}
+                for u in available:
+                    previous = self._combat_targets.get(u["id"])
+                    if previous is not None and previous[0] in by_id:
+                        eid, old_distance, stalled, last_turn = previous
+                        distance = self._distance(u["tile"], by_id[eid]["tile"])
+                        if last_turn != now:
+                            stalled = stalled + 1 if distance >= old_distance else 0
+                        if stalled >= 2:
+                            self._target_blocked[u["id"], eid] = now + 1
+                            self._combat_targets.pop(u["id"], None)
+                        else:
+                            self._combat_targets[u["id"]] = (eid, distance, stalled, now)
+                pairs = [(self._distance(u["tile"], e["tile"]), e["id"], u["id"], e)
+                         for e in enemies for u in available
+                         if (u["id"], e["id"]) not in self._combat_attempts
+                         and self._target_blocked.get((u["id"], e["id"]), -1) < now]
+                if pairs and min(p[0] for p in pairs) < 1_000_000 and self._searches < self._search_limit:
+                    reachable = [p for p in pairs if p[0] < 1_000_000]
+                    _, eid, _, enemy = min(reachable, key=lambda p: (
+                        self._combat_targets.get(p[2], (None,))[0] != p[1], *p[:3]))
+                    candidates = [u for u in available if (u["id"], eid) not in self._combat_attempts
+                                  and self._target_blocked.get((u["id"], eid), -1) < now
+                                  and self._distance(u["tile"], enemy["tile"]) < 1_000_000]
+                    selected = self._select(candidates, enemy["tile"])
+                    self._combat_attempts.update((uid, eid) for uid in selected)
+                    for u in candidates:
+                        if u["id"] in selected and self._combat_targets.get(u["id"], (None,))[0] != eid:
+                            self._combat_targets[u["id"]] = (
+                                eid, self._distance(u["tile"], enemy["tile"]), 0, now)
+                    return {"kind": "combat", "target": enemy["tile"], "selected": selected}
+            else:
+                candidates = [u for u in available if u["id"] not in self._phase_seen[phase]]
+                if candidates:
+                    if phase == 3:
+                        if enemies or self._last_seen:
+                            now = own_turn(observation["turn"], observation["active_side"], self.side)
+                            targets = ([(e["id"], e["tile"]) for e in enemies] if enemies
+                                       else list(self._last_seen.items()))
+                            pairs = [(self._distance(u["tile"], t), eid, t, u["id"])
+                                     for eid, t in targets for u in candidates
+                                     if (u["id"], t) not in self._approach_attempts
+                                     and self._target_blocked.get((u["id"], eid), -1) < now]
+                            pairs = [p for p in pairs if p[0] < 1_000_000]
+                            if not pairs:
+                                self._phase_seen[phase].update(u["id"] for u in candidates)
+                                continue
+                            _, eid, target, _ = min(pairs)
+                            eligible = [u for u in candidates
+                                        if (u["id"], target) not in self._approach_attempts
+                                        and self._target_blocked.get((u["id"], eid), -1) < now
+                                        and self._distance(u["tile"], target) < 1_000_000]
+                            selected = self._select(eligible, target)
+                        else:
+                            anchor = min(candidates, key=lambda u: u["id"])
+                            selected = self._select(candidates, anchor["tile"], 4)
+                            group = [u for u in candidates if u["id"] in selected]
+                            target = self._explore_target(group, observation)
+                        kind = "approach"
+                    else:
+                        selected = tuple(sorted(u["id"] for u in candidates)[:13])
+                        target = next(u["tile"] for u in candidates if u["id"] == selected[0])
+                        kind = "heal_before" if phase == 0 else "heal_after"
+                    self._phase_seen[phase].update(selected)
+                    if target is not None:
+                        if phase == 3:
+                            self._approach_attempts.update((uid, target) for uid in selected)
+                        return {"kind": kind, "target": target, "selected": selected}
+                    continue
+            self._phase += 1
+        return None
+
+    def _finish_task(self, reason, *, retry_approach=False):
+        if self._task is not None:
+            if retry_approach and self._task["kind"] == "approach":
+                self._phase_seen[3].difference_update(self._task["selected"])
+            self._event("task_finished", task_kind=self._task["kind"],
+                        target=self._task["target"], reason=reason)
+        self._task = None
+        self._group = None
+        self._replan = False
 
     def _event(self, kind, **values):
         self._events.append({"event": kind, "turn": self._turn, **values})
@@ -75,6 +260,15 @@ class CPAgent:
         self._event("action", action=asdict(action))
         return action
 
+    def _wait(self, unit, observation, reason):
+        action = Action("skip", unit["id"])
+        a = Assignment(K.FINISH, unit["id"], unit["tile"], unit["tile"],
+                       unit["moves"], 0, 0, 0, 0, -1)
+        self._pending = (action, a, None, deepcopy(observation))
+        self._finished.add(unit["id"])
+        self._event("waiting", unit=unit["id"], reason=reason)
+        return self._issue(action)
+
     def act_with_planning(self, observation, actions, planning):
         if observation["side"] != self.side or observation["active_side"] != self.side:
             raise ValueError("CP agent called for an inactive side")
@@ -83,7 +277,7 @@ class CPAgent:
                 self._cancel("turn_changed")
             self._new_turn()
             self._turn = observation["turn"]
-        self.memory = self.memory.updated(observation)
+        self._observe(observation)
         if self._pending is not None:
             self._cancel("missing_action_result")
         if self._last_observation is not None and observation != self._last_observation:
@@ -92,14 +286,14 @@ class CPAgent:
             return self._end("task_already_finished")
         own = {u["id"]: u for u in observation["units"] if u["side"] == self.side}
         enemies = [u for u in observation["units"] if u["side"] != self.side]
-        if not enemies:
-            return self._end("no_visible_enemy")
         available = [u for u in own.values() if u["moves"] > 0 and not u["waiting"]
                      and u["id"] not in self._finished]
-        if self._group is not None:
-            available = [u for u in available if u["id"] in self._group]
         if not available:
-            return self._end("group_exhausted")
+            return self._end("army_exhausted")
+        if not self._search_limit:
+            n = len(available)
+            self._search_limit = 2*n + (n+12)//13
+            self._support_limit = 3*n + (n+12)//13
         searches_this_call = 0
         while True:
             if self._queue:
@@ -132,43 +326,77 @@ class CPAgent:
                 if a.kind == K.FINISH:
                     self._finished.add(a.unit)
                 return self._issue(action)
-            if self._searches and not getattr(self, "_replan", False):
-                return self._end("plan_completed")
-            if searches_this_call >= 2 or (self._group is not None and self._searches >= self._search_limit):
-                return self._end("search_limit")
-            candidates = [u for u in available if u["id"] not in self._finished]
-            if not candidates:
-                return self._end("group_exhausted")
-            target = min(enemies, key=lambda e: (
-                min(hex_distance(self.map, u["tile"], e["tile"]) for u in candidates), e["id"]
-            ))["tile"]
-            selected = tuple(u["id"] for u in sorted(candidates, key=lambda u: (
-                hex_distance(self.map, u["tile"], target), u["id"]
-            ))[:13])
-            if self._group is None:
-                self._group = selected
-                self._search_limit = 2 * len(selected) + 1
-            identity = digest({"observation": observation, "target": target, "selected": selected})
+            available = [u for u in available if u["id"] not in self._finished]
+            if not available:
+                return self._end("army_exhausted")
+            if self._task is not None and not self._replan:
+                self._finish_task("plan_completed", retry_approach=bool(enemies or self._last_seen))
+            if self._task is None:
+                self._task = self._next_task(available, enemies, observation)
+                if self._task is None:
+                    return self._wait(min(available, key=lambda u: u["id"]), observation,
+                                      "no_useful_task")
+                self._group = self._task["selected"]
+                self._event("task_assigned", task_kind=self._task["kind"],
+                            target=self._task["target"], selected_units=list(self._group))
+            task = self._task
+            selected = tuple(uid for uid in task["selected"]
+                             if any(u["id"] == uid for u in available))
+            if not selected:
+                self._finish_task("group_exhausted")
+                continue
+            if task["kind"] == "combat" and searches_this_call >= 2 and self._searches < self._search_limit:
+                self._replan = True
+                attempted = {uid for uid, _ in self._combat_attempts}
+                idle = next((u for u in available if u["id"] not in selected
+                             and u["id"] in attempted), own[selected[0]])
+                return self._wait(idle, observation, "call_search_limit")
+            if task["kind"] == "combat" and self._searches >= self._search_limit:
+                self._finish_task("search_limit")
+                return self._wait(own[selected[0]], observation, "search_limit")
+            if task["kind"] != "combat" and self._support_calls >= self._support_limit:
+                self._finish_task("support_limit")
+                return self._wait(own[selected[0]], observation, "support_limit")
+            target = task["target"]
+            identity = digest({"observation": observation, "target": target,
+                               "selected": selected, "kind": task["kind"]})
             if identity in self._visited:
-                return self._end("no_progress")
+                self._finish_task("no_progress", retry_approach=bool(enemies or self._last_seen))
+                continue
             self._visited.add(identity)
-            self._searches += 1
-            searches_this_call += 1
-            result = planning.search(target, selected, contacts=self.memory)
-            self._event("search", target=target, selected_units=list(selected),
+            if task["kind"] == "combat":
+                self._searches += 1
+                searches_this_call += 1
+                local = [e for e in enemies if hex_distance(self.map, target, e["tile"]) <= 5
+                         or any(hex_distance(self.map, own[uid]["tile"], e["tile"]) <= 4 for uid in selected)]
+                aggression = self.config.aggression
+                if sum(own[uid]["hp"] for uid in selected) < sum(e["hp"] for e in local):
+                    aggression = min(aggression, Aggression.LOW)
+                self._event("posture", aggression=Aggression(aggression).name.lower(), target=target)
+                result = planning.search(target, selected, contacts=self.memory,
+                                         aggression=Aggression(aggression))
+            else:
+                self._support_calls += 1
+                mode = {"heal_before": SupportMode.HEAL_BEFORE,
+                        "heal_after": SupportMode.HEAL_AFTER,
+                        "approach": SupportMode.APPROACH}[task["kind"]]
+                result = planning.support(target, selected, contacts=self.memory, mode=mode)
+            self._event("search" if task["kind"] == "combat" else "support", target=target,
+                        task_kind=task["kind"], selected_units=list(selected),
                         reason=result.reason.value, stats=asdict(result.stats))
             if result.reason in (SearchReason.INVALID_REQUEST, SearchReason.NOT_IMPLEMENTED):
                 raise RuntimeError(f"CP search failed: {result.reason}")
             if result.reason == SearchReason.TURN_CHANGED:
                 return self._end("turn_changed")
             if not result.assignments:
-                return self._end(result.reason.value)
+                self._finish_task(result.reason.value, retry_approach=bool(enemies or self._last_seen))
+                continue
             self._replan = False
             self._queue.extend(result.assignments)
 
     def on_action_result(self, action, result, observation):
         """Validate immediately, including the action that ends a battle."""
-        self.memory = self.memory.updated(observation)
+        self._observe(observation)
         if self._pending is None:
             self._event("action_result", action=asdict(action), reason="turn_ended")
             self._last_observation = deepcopy(observation)
@@ -227,8 +455,18 @@ class CPAgent:
             if reason is None and a.kind == K.MOVE and a.to_tile != a.command_target:
                 reason = "movement_interrupted"
         self._event("action_result", action=asdict(action), reason=reason or "matched")
+        if result.ok and result.damage > 0 and self._task is not None:
+            for uid in self._task["selected"]:
+                previous = self._combat_targets.get(uid)
+                if previous is not None:
+                    eid, distance, _, last_turn = previous
+                    self._combat_targets[uid] = (eid, distance, 0, last_turn)
         if reason is not None:
             self._cancel(reason)
+            if reason == "new_contact":
+                self._finish_task("new_contact")
+                self._phase = min(self._phase, 1)
+                self._combat_attempts.clear()
         self._last_observation = deepcopy(observation)
 
     def __del__(self):

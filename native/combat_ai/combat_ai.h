@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-/* ABI 4. Structs use native alignment, int32 fields and explicit pointers.
+/* ABI 5. Structs use native alignment, int32 fields and explicit pointers.
    All input arrays are borrowed for one synchronous call; no RNG is accepted.
    A context is owned by its caller and must not be used concurrently. */
 enum CaiStatus { CAI_OK, CAI_BAD_ARGUMENT, CAI_INTERNAL_ERROR, CAI_BUFFER_TOO_SMALL };
@@ -24,7 +24,8 @@ enum CaiAssignmentKind {
   CAI_RESTART, CAI_SWAP, CAI_SWAP_REVERSE, CAI_FINISH_TEMP
 };
 enum CaiMovementRole { CAI_ROLE_NONE, CAI_FIRST_LINE, CAI_SECOND_LINE, CAI_THIRD_LINE };
-enum { CAI_ABI = 4, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
+enum CaiSupportMode { CAI_HEAL_BEFORE, CAI_HEAL_AFTER, CAI_APPROACH };
+enum { CAI_ABI = 5, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
 
 typedef struct CaiConfig {
   int32_t position_capacity, max_completed, max_branches, choices_per_unit;
@@ -62,6 +63,7 @@ typedef struct CaiSearchRequest {
   const int32_t* selected_units;
   int32_t selected_count;
   CaiContactMemory contacts;
+  int32_t aggression_override; /* 0 uses context config; otherwise CaiAggression + 1. */
 } CaiSearchRequest;
 typedef struct CaiAssignment {
   int32_t kind, unit, from_tile, to_tile, remaining_moves, movement_role;
@@ -90,6 +92,9 @@ CAI_API void cai_free(CaiContext* context); /* NULL is allowed. */
 CAI_API int32_t cai_search(CaiContext*, const CaiSearchRequest*,
                           CaiAssignment* assignments, int32_t capacity,
                           CaiSearchResult* result);
+CAI_API int32_t cai_support(CaiContext*, const CaiSearchRequest*, int32_t mode,
+                           CaiAssignment* assignments, int32_t capacity,
+                           CaiSearchResult* result);
 
 #ifdef __cplusplus
 }

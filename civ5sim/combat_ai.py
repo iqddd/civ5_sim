@@ -1,4 +1,4 @@
-"""CP-05 standalone local tactical planner, branch model and danger estimates.
+"""CP-06 tactical and support planners, branch model and danger estimates.
 
 This module is an internal privileged boundary for the CP-source v1 agent.
 Normal Agent.act observations never acquire a PlanningState implicitly.
@@ -48,6 +48,12 @@ class AssignmentKind(IntEnum):
     SWAP = 7
     SWAP_REVERSE = 8
     FINISH_TEMP = 9
+
+
+class SupportMode(IntEnum):
+    HEAL_BEFORE = 0
+    HEAL_AFTER = 1
+    APPROACH = 2
 
 
 @dataclass(frozen=True)
@@ -196,6 +202,7 @@ class SearchRequest:
     target: int
     selected_units: tuple[int, ...]
     contacts: ContactMemory = field(default_factory=ContactMemory)
+    aggression: Aggression | None = None
 
 
 @dataclass(frozen=True)
@@ -237,7 +244,13 @@ class PlanningServices(Protocol):
     """
 
     def search(
-        self, target: int, selected_units: tuple[int, ...], *, contacts: ContactMemory
+        self, target: int, selected_units: tuple[int, ...], *, contacts: ContactMemory,
+        aggression: Aggression | None = None,
+    ) -> SearchResult: ...
+
+    def support(
+        self, target: int, selected_units: tuple[int, ...], *, contacts: ContactMemory,
+        mode: SupportMode,
     ) -> SearchResult: ...
 
 
@@ -266,12 +279,19 @@ class CallPlanningServices:
         self._side = side
         self._turn = turn
 
-    def search(self, target, selected_units, *, contacts):
+    def search(self, target, selected_units, *, contacts, aggression=None):
         if self._state is None:
             raise RuntimeError("Planning service has expired")
         return self._planner.search(SearchRequest(
-            self._state, self._side, self._turn, target, tuple(selected_units), contacts
+            self._state, self._side, self._turn, target, tuple(selected_units), contacts, aggression
         ))
+
+    def support(self, target, selected_units, *, contacts, mode):
+        if self._state is None:
+            raise RuntimeError("Planning service has expired")
+        return self._planner.support(SearchRequest(
+            self._state, self._side, self._turn, target, tuple(selected_units), contacts
+        ), mode)
 
     def expire(self):
         self._state = None
@@ -328,6 +348,7 @@ class _Request(C.Structure):
         ("selected_units", C.POINTER(C.c_int32)),
         ("selected_count", C.c_int32),
         ("contacts", _Contacts),
+        ("aggression_override", C.c_int32),
     ]
 
 
@@ -364,8 +385,11 @@ def _library():
     ):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = arguments, result
-    if lib.cai_abi() != 4:
+    if lib.cai_abi() != 5:
         raise RuntimeError("Unsupported combat AI ABI; rebuild the planner")
+    lib.cai_support.argtypes = [C.c_void_p, C.POINTER(_Request), C.c_int32,
+                               C.POINTER(_Assignment), C.c_int32, C.POINTER(_Result)]
+    lib.cai_support.restype = C.c_int32
     return lib
 
 
@@ -424,9 +448,19 @@ class Planner:
         self.close()
 
     def search(self, request: SearchRequest) -> SearchResult:
+        return self._plan(request)
+
+    def support(self, request: SearchRequest, mode: SupportMode) -> SearchResult:
+        if not isinstance(mode, SupportMode):
+            raise TypeError("mode must be a SupportMode value")
+        return self._plan(request, mode)
+
+    def _plan(self, request: SearchRequest, mode=None) -> SearchResult:
         if not self._handle:
             raise RuntimeError("Planner is closed")
         s = request.state
+        if request.aggression is not None and not isinstance(request.aggression, Aggression):
+            raise TypeError("aggression must be an Aggression value or None")
         boolean(s.wrap_x, "wrap_x")
         boolean(s.fog, "fog")
         # Bound Python-side allocations before constructing any ctypes array.
@@ -469,11 +503,15 @@ class Planner:
             selected,
             len(selected),
             _Contacts(_i32(request.contacts.turn), _i32(request.contacts.side), known, len(known)),
+            0 if request.aggression is None else int(request.aggression) + 1,
         )
+        def invoke(buffer, capacity, result):
+            args = (self._handle, C.byref(packed))
+            if mode is None:
+                return self._lib.cai_search(*args, buffer, capacity, C.byref(result))
+            return self._lib.cai_support(*args, int(mode), buffer, capacity, C.byref(result))
         result = _Result()
-        status = self._lib.cai_search(
-            self._handle, C.byref(packed), None, 0, C.byref(result)
-        )
+        status = invoke(None, 0, result)
         assignments = ()
         if (
             status == 3
@@ -482,9 +520,7 @@ class Planner:
             if not 0 < capacity <= 1_000_000:
                 raise RuntimeError("Invalid native plan size")
             buffer = (_Assignment * capacity)()
-            status = self._lib.cai_search(
-                self._handle, C.byref(packed), buffer, capacity, C.byref(result)
-            )
+            status = invoke(buffer, capacity, result)
             if not 0 <= result.assignment_count <= capacity:
                 raise RuntimeError("Native plan buffer overflow")
             assignments = tuple(

@@ -53,7 +53,7 @@ class PlannerTests(unittest.TestCase):
 
     def test_unit_zero_tile_255_and_complete_board(self):
         p = self.planner()
-        self.assertIn("CP-05", p.version)
+        self.assertIn("CP-06", p.version)
         result = p.search(request())
         self.assertEqual(result.reason, SearchReason.NO_PLAN)
         self.assertEqual(result.assignments, ())
