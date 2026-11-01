@@ -110,7 +110,7 @@ def build():
              "-o", str(out / "combat_ai_model_test")],
             check=True,
         )
-    print("Built standalone combat AI planner (CP-04, ABI 3) and native checks")
+    print("Built standalone combat AI planner (CP-05, ABI 4) and native checks")
 
 
 if __name__ == "__main__":

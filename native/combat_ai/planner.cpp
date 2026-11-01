@@ -190,7 +190,7 @@ class Search {
     child.done[i] = now.hp <= 0 || now.moves <= 0 || now.waiting;
     int to = command.kind == MELEE || command.kind == RANGED ? command.target : now.tile;
     child.assignments.push_back({kind, u.id, u.tile, to, now.moves, roles[i], score,
-                                 transition.result.damage, transition.result.retaliation, killed});
+                                 transition.result.damage, transition.result.retaliation, killed, command.target});
     if (partner >= 0) {
       int j = selected_index[partner];
       if (j < 0) return false;
@@ -198,7 +198,7 @@ class Search {
       child.touched[j] = 1; child.last_kill[j] = 0;
       child.done[j] = next.units[partner].moves <= 0;
       child.assignments.push_back({CAI_SWAP_REVERSE, partner, old.units[partner].tile,
-        next.units[partner].tile, next.units[partner].moves, roles[j], 0, 0, 0, -1});
+        next.units[partner].tile, next.units[partner].moves, roles[j], 0, 0, 0, -1, -1});
     }
     if (!transition.newly_visible.empty()) {
       auto revealed = adapter->prospective_units(*child.branch, transition.newly_visible);
@@ -206,7 +206,7 @@ class Search {
         return x.side != request.side && x.hp > 0;
       });
       child.discovered = child.discovered || enemy;
-      child.assignments.push_back({CAI_RESTART, u.id, -1, -1, now.moves, roles[i], 0, 0, 0, -1});
+      child.assignments.push_back({CAI_RESTART, u.id, -1, -1, now.moves, roles[i], 0, 0, 0, -1, -1});
     }
     return true;
   }
@@ -359,7 +359,7 @@ class Search {
       p.assignments.erase(std::remove_if(p.assignments.begin(), p.assignments.end(), [&](const CaiAssignment& a) {
         return a.unit == id && a.kind == CAI_FINISH_TEMP;
       }), p.assignments.end());
-      p.assignments.push_back({CAI_FINISH, id, u.tile, u.tile, u.moves, roles[i], end, 0, 0, -1});
+      p.assignments.push_back({CAI_FINISH, id, u.tile, u.tile, u.moves, roles[i], end, 0, 0, -1, -1});
     }
     if (losses > config.risk_budget_base + config.risk_budget_per_kill * int(p.killed.size())) return false;
     bool improved = !p.killed.empty() || p.attack_score > 0 || p.discovered ||
@@ -401,7 +401,7 @@ class Search {
       root->done.push_back(initial.units[id].moves <= 0 || initial.units[id].waiting);
       root->moved.push_back(0); root->last_kill.push_back(0); root->touched.push_back(0);
       root->assignments.push_back({CAI_INITIAL,id,initial.units[id].tile,initial.units[id].tile,
-                                  initial.units[id].moves,roles.back(),0,0,0,-1});
+                                  initial.units[id].moves,roles.back(),0,0,0,-1,-1});
     }
     root->rank = rank(*root, initial);
     work.equivalent.emplace(key(*root, initial), std::make_pair(0, 0));
@@ -443,7 +443,7 @@ class Search {
           int i = candidate.selected_order, id = selected[i];
           child->done[i] = 1;
           child->assignments.push_back({CAI_FINISH_TEMP, id, current_view.units[id].tile,
-            current_view.units[id].tile, current_view.units[id].moves, roles[i], 0, 0, 0, -1});
+            current_view.units[id].tile, current_view.units[id].moves, roles[i], 0, 0, 0, -1, -1});
         } else {
           bool accepted = true;
           for (auto command : candidate.commands)

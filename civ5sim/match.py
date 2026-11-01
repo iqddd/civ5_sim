@@ -169,6 +169,14 @@ def run_match(config, agents):
     status, outcome, winner, reason, error = "completed", None, None, None, None
     completed_turns = commands = calls_this_turn = 0
     agent_calls = [0, 0]
+    ai_events = []
+
+    def collect_events(side):
+        drain = getattr(agents[side], "drain_diagnostics", None)
+        if drain is not None:
+            for event in drain():
+                ai_events.append({**deepcopy(event), "side": side, "command": commands})
+
     with Battle(scenario, log=True) as battle:
         for side in range(2):
             try:
@@ -189,6 +197,13 @@ def run_match(config, agents):
                         "seed": seeds[f"agent{side}"],
                     }
                 )
+                if callable(getattr(agents[side], "act_with_planning", None)):
+                    from .combat_ai import Planner
+
+                    if not isinstance(getattr(agents[side], "planner", None), Planner):
+                        raise TypeError("PlanningAgent must own a Planner after reset")
+                    if not agents[side].planner._handle:
+                        raise ValueError("PlanningAgent Planner is closed")
             except Exception as exc:  # noqa: BLE001 -- agent boundary saves failed matches
                 status, reason = "error", "agent_error"
                 error = {
@@ -222,7 +237,21 @@ def run_match(config, agents):
             calls_this_turn += 1
             agent_calls[side] += 1
             try:
-                selected = agents[side].act(battle.observe(side), actions)
+                observation = battle.observe(side)
+                if callable(getattr(agents[side], "act_with_planning", None)):
+                    from .combat_ai import CallPlanningServices, PlanningState
+
+                    planning = CallPlanningServices(
+                        agents[side].planner, PlanningState.from_battle(battle, side),
+                        side, observation["turn"],
+                    )
+                    try:
+                        selected = agents[side].act_with_planning(observation, actions, planning)
+                    finally:
+                        planning.expire()
+                else:
+                    selected = agents[side].act(observation, actions)
+                collect_events(side)
             except Exception as exc:  # noqa: BLE001 -- agent boundary saves failed matches
                 status, reason = "error", "agent_error"
                 error = {
@@ -253,8 +282,19 @@ def run_match(config, agents):
             if action.kind == "end_turn":
                 completed_turns += 1
                 calls_this_turn = 0
+            try:
+                callback = getattr(agents[side], "on_action_result", None)
+                if callable(getattr(agents[side], "act_with_planning", None)) and callback:
+                    callback(action, step, battle.observe(side))
+                collect_events(side)
+            except Exception as exc:  # noqa: BLE001 -- preserve the executed prefix
+                status, reason = "error", "agent_error"
+                error = {"side": side, "phase": "on_action_result",
+                         "message": f"{type(exc).__name__}: {exc}"}
         final = battle.snapshot()
         replay = battle.replay()
+        if ai_events:
+            replay["ai_events"] = ai_events
         settings = asdict(config)
         settings["map"] = deepcopy(scenario["map"])
         result = {

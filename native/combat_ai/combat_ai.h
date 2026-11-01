@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-/* ABI 3. Structs use native alignment, int32 fields and explicit pointers.
+/* ABI 4. Structs use native alignment, int32 fields and explicit pointers.
    All input arrays are borrowed for one synchronous call; no RNG is accepted.
    A context is owned by its caller and must not be used concurrently. */
 enum CaiStatus { CAI_OK, CAI_BAD_ARGUMENT, CAI_INTERNAL_ERROR, CAI_BUFFER_TOO_SMALL };
@@ -24,7 +24,7 @@ enum CaiAssignmentKind {
   CAI_RESTART, CAI_SWAP, CAI_SWAP_REVERSE, CAI_FINISH_TEMP
 };
 enum CaiMovementRole { CAI_ROLE_NONE, CAI_FIRST_LINE, CAI_SECOND_LINE, CAI_THIRD_LINE };
-enum { CAI_ABI = 3, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
+enum { CAI_ABI = 4, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
 
 typedef struct CaiConfig {
   int32_t position_capacity, max_completed, max_branches, choices_per_unit;
@@ -66,6 +66,7 @@ typedef struct CaiSearchRequest {
 typedef struct CaiAssignment {
   int32_t kind, unit, from_tile, to_tile, remaining_moves, movement_role;
   int32_t score, damage, self_damage, killed_unit;
+  int32_t command_target; /* Original command destination; -1 for bookkeeping. */
 } CaiAssignment;
 typedef struct CaiSearchStats {
   int32_t checked, generated, completed, pruned, peak_positions;

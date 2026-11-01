@@ -1,0 +1,171 @@
+{
+  "map": {
+    "schema": 1,
+    "width": 4,
+    "height": 3,
+    "row_parity": 0,
+    "wrap_x": false,
+    "tiles": [
+      {
+        "terrain": "grass",
+        "elevation": "flat",
+        "feature": null,
+        "rivers": [
+          -1,
+          -1,
+          -1
+        ]
+      },
+      {
+        "terrain": "grass",
+        "elevation": "flat",
+        "feature": null,
+        "rivers": [
+          -1,
+          -1,
+          -1
+        ]
+      },
+      {
+        "terrain": "grass",
+        "elevation": "flat",
+        "feature": null,
+        "rivers": [
+          -1,
+          -1,
+          -1
+        ]
+      },
+      {
+        "terrain": "grass",
+        "elevation": "flat",
+        "feature": null,
+        "rivers": [
+          -1,
+          -1,
+          -1
+        ]
+      },
+      {
+        "terrain": "grass",
+        "elevation": "flat",
+        "feature": null,
+        "rivers": [
+          -1,
+          -1,
+          -1
+        ]
+      },
+      {
+        "terrain": "grass",
+        "elevation": "flat",
+        "feature": null,
+        "rivers": [
+          -1,
+          -1,
+          -1
+        ]
+      },
+      {
+        "terrain": "grass",
+        "elevation": "flat",
+        "feature": null,
+        "rivers": [
+          -1,
+          -1,
+          -1
+        ]
+      },
+      {
+        "terrain": "grass",
+        "elevation": "flat",
+        "feature": null,
+        "rivers": [
+          -1,
+          -1,
+          -1
+        ]
+      },
+      {
+        "terrain": "grass",
+        "elevation": "flat",
+        "feature": null,
+        "rivers": [
+          -1,
+          -1,
+          -1
+        ]
+      },
+      {
+        "terrain": "grass",
+        "elevation": "flat",
+        "feature": null,
+        "rivers": [
+          -1,
+          -1,
+          -1
+        ]
+      },
+      {
+        "terrain": "grass",
+        "elevation": "flat",
+        "feature": null,
+        "rivers": [
+          -1,
+          -1,
+          -1
+        ]
+      },
+      {
+        "terrain": "grass",
+        "elevation": "flat",
+        "feature": null,
+        "rivers": [
+          -1,
+          -1,
+          -1
+        ]
+      }
+    ],
+    "spawn_candidates": [
+      [
+        [
+          1,
+          1
+        ],
+        [
+          0,
+          1
+        ]
+      ],
+      [
+        [
+          2,
+          1
+        ],
+        [
+          3,
+          1
+        ]
+      ]
+    ]
+  },
+  "armies": [
+    [
+      "warrior",
+      "archer"
+    ],
+    [
+      "warrior",
+      "archer"
+    ]
+  ],
+  "max_rounds": 10,
+  "seed": 42,
+  "fog": true,
+  "random_damage": true,
+  "agents": [
+    "cp",
+    "cp"
+  ]
+}

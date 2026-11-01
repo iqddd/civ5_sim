@@ -64,7 +64,7 @@ struct Fixture {
       CHECK(before.units[a.unit].tile == a.from_tile);
       int kind = a.kind == CAI_MOVE ? MOVE : a.kind == CAI_MELEE ? MELEE :
                  a.kind == CAI_RANGED ? RANGED : SWAP;
-      auto transition = adapter->apply(*branch,{kind,a.unit,a.to_tile});
+      auto transition = adapter->apply(*branch,{kind,a.unit,a.command_target});
       CHECK(transition.accepted);
       CHECK(transition.result.damage == a.damage);
       CHECK(transition.result.retaliation == a.self_damage);
@@ -169,12 +169,13 @@ void contact() {
   f.add(4,0,24); f.add(0,1,29,1); f.start();
   CHECK(!f.visibility[29]);
   auto p=f.search(29); CHECK(!p.assignments.empty());
-  bool restart=false, continued=false;
+  bool restart=false, continued=false, interrupted=false;
   for(auto a:p.assignments) {
     if(a.kind==CAI_RESTART) restart=true;
     if(restart && (a.kind==CAI_MOVE || a.kind==CAI_MELEE)) continued=true;
+    if(a.kind==CAI_MOVE && a.command_target!=a.to_tile) interrupted=true;
   }
-  CHECK(restart); CHECK(continued); f.replay(p);
+  CHECK(restart); CHECK(continued); CHECK(interrupted); f.replay(p);
 }
 void random_replay() {
   std::mt19937 random(42);

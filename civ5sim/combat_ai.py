@@ -1,4 +1,4 @@
-"""CP-04 standalone local tactical planner, branch model and danger estimates.
+"""CP-05 standalone local tactical planner, branch model and danger estimates.
 
 This module is an internal privileged boundary for the CP-source v1 agent.
 Normal Agent.act observations never acquire a PlanningState implicitly.
@@ -210,6 +210,7 @@ class Assignment:
     damage: int
     self_damage: int
     killed_unit: int
+    command_target: int = -1
 
 
 @dataclass(frozen=True)
@@ -229,9 +230,9 @@ class SearchResult:
 
 
 class PlanningServices(Protocol):
-    """Future call-scoped capability supplied by the match organizer in CP-05.
+    """Call-scoped capability supplied by the match organizer.
 
-    Implementation owns the detached input and planner, checks call lifetime,
+    Implementation owns the detached input, borrows the agent's planner, checks call lifetime,
     and expires when act_with_planning returns. No Battle/RNG property.
     """
 
@@ -243,7 +244,7 @@ class PlanningServices(Protocol):
 class PlanningAgent(Protocol):
     """Explicit opt-in dispatch, alongside the ordinary Agent protocol.
 
-    CP-05 will dispatch only agents declaring this interface; ordinary policies
+    The organizer dispatches agents declaring this interface; ordinary policies
     continue receiving act(observation, actions). Exactly one Action is returned.
     """
 
@@ -254,6 +255,27 @@ class PlanningAgent(Protocol):
     def act_with_planning(
         self, observation: dict, actions: tuple[Action, ...], planning: PlanningServices
     ) -> Action: ...
+
+
+class CallPlanningServices:
+    """Organizer-owned, expiring search capability; contains no Battle or RNG."""
+
+    def __init__(self, planner: "Planner", state: PlanningState, side: int, turn: int):
+        self._planner = planner
+        self._state = state
+        self._side = side
+        self._turn = turn
+
+    def search(self, target, selected_units, *, contacts):
+        if self._state is None:
+            raise RuntimeError("Planning service has expired")
+        return self._planner.search(SearchRequest(
+            self._state, self._side, self._turn, target, tuple(selected_units), contacts
+        ))
+
+    def expire(self):
+        self._state = None
+        self._planner = None
 
 
 def _structure(name, names):
@@ -342,7 +364,7 @@ def _library():
     ):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = arguments, result
-    if lib.cai_abi() != 3:
+    if lib.cai_abi() != 4:
         raise RuntimeError("Unsupported combat AI ABI; rebuild the planner")
     return lib
 
@@ -359,7 +381,7 @@ class Planner:
     """Owned search context. Independent instances may run concurrently.
 
     Use as a context manager. Calls/close on the same instance must be serialized.
-    Returns a local plan; execution through simulator Actions belongs to CP-05.
+    Returns a local plan; CPAgent executes it through simulator Actions.
     """
 
     def __init__(self, config: SearchConfig | None = None):

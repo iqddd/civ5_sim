@@ -41,7 +41,11 @@ def load_agent(spec):
         return RandomAgent()
     if spec == "end_turn":
         return EndTurnAgent()
+    if spec == "cp":
+        from .cp_agent import CPAgent
+
+        return CPAgent()
     module, separator, name = spec.partition(":")
     if not separator or not module or not name:
-        raise ValueError("Agent must be random, end_turn or module:factory")
+        raise ValueError("Agent must be random, end_turn, cp or module:factory")
     return getattr(importlib.import_module(module), name)()

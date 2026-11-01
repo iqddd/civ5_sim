@@ -92,7 +92,7 @@ bool valid_request(const CaiSearchRequest& r) {
 }  // namespace
 
 int32_t cai_abi(void) { return CAI_ABI; }
-const char* cai_version(void) { return "civ5sim.combat_ai/0.4.0 CP-04"; }
+const char* cai_version(void) { return "civ5sim.combat_ai/0.5.0 CP-05"; }
 CaiConfig cai_default_config(void) { return {6000, 2560, 5, 5, CAI_MEDIUM, 1, 0, 1}; }
 CaiContext* cai_new(const CaiConfig* config) {
   if (!config || !valid_config(*config)) return nullptr;
