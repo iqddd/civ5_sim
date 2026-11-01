@@ -1,4 +1,8 @@
-"""Build the standalone CP-01 planner; no game checkout or combat DLL required."""
+"""Build the CP planner and branch tests using the prepared combat geometry.
+
+Run tools/build_combat.py once to prepare the extracted rules/geometry inputs.
+The resulting planner does not link to the combat DLL or GameCore.
+"""
 
 import os
 import subprocess
@@ -10,7 +14,18 @@ ROOT = Path(__file__).resolve().parents[1]
 def build():
     out = ROOT / "build"
     out.mkdir(exist_ok=True)
+    missing = [name for name in ("combat_rules.h", "cp_geometry.inc")
+               if not (out / name).is_file()]
+    if missing:
+        raise RuntimeError(
+            f"Missing prepared combat inputs: {', '.join(missing)}. "
+            "Run python tools/build_combat.py first."
+        )
     source = ROOT / "native/combat_ai/combat_ai.cpp"
+    common = [ROOT / "native/combat_ai/model.cpp",
+              ROOT / "native/combat_state.cpp", ROOT / "native/geometry.cpp"]
+    test_sources = [ROOT / "tests/native/combat_ai_model_test.cpp",
+                    ROOT / "native/combat.cpp", *common]
     # Compile the C++ adapter declarations as part of every build as well.
     check = out / "combat_ai_header_check.cpp"
     check.write_text(
@@ -41,8 +56,12 @@ def build():
         vcvars = Path(vs) / "VC/Auxiliary/Build/vcvars64.bat"
         command = (
             f'@call "{vcvars}" >nul\n'
-            f'@cl /nologo /std:c++17 /EHsc /O2 /LD /utf-8 /W4 /I"{include}" '
-            f'"{source}" "{check}" /link /OUT:combat_ai.dll\n'
+            f'@cl /nologo /std:c++17 /EHsc /O2 /LD /utf-8 /W4 /I"{include}" /I"{out}" '
+            + " ".join(f'"{p}"' for p in [source, check, *common])
+            + ' /link /OUT:combat_ai.dll\n@if errorlevel 1 exit /b %errorlevel%\n'
+            + f'@cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W4 /I"{include}" /I"{out}" '
+            + " ".join(f'"{p}"' for p in test_sources)
+            + ' /link /OUT:combat_ai_model_test.exe\n'
         )
         (out / "compile_combat_ai.cmd").write_text(command, encoding="utf-8")
         subprocess.run(["cmd", "/c", "compile_combat_ai.cmd"], cwd=out, check=True)
@@ -58,14 +77,24 @@ def build():
                 "-Wextra",
                 "-I",
                 str(include),
+                "-I",
+                str(out),
                 str(source),
                 str(check),
+                *(str(p) for p in common),
                 "-o",
                 str(out / "libcombat_ai.so"),
             ],
             check=True,
         )
-    print("Built standalone combat AI scaffold (CP-01, ABI 1)")
+        subprocess.run(
+            ["c++", "-std=c++17", "-O3", "-Wall", "-Wextra",
+             "-I", str(include), "-I", str(out),
+             *(str(p) for p in test_sources),
+             "-o", str(out / "combat_ai_model_test")],
+            check=True,
+        )
+    print("Built standalone combat AI model (CP-02, ABI 1) and native checks")
 
 
 if __name__ == "__main__":

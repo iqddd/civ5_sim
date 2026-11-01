@@ -41,19 +41,25 @@ Start-Process artifacts\pangaea-42\viewer.html
 .venv\Scripts\python.exe -m civ5map view artifacts\manual.json --out artifacts\manual-view.html
 ```
 
-## Каркас Combat AI
+## Combat AI
 
-CP-01 добавляет автономный C++17-модуль и Python-обёртку локального поиска.
+CP-01 добавил автономный C++17-модуль и Python-обёртку локального поиска.
+CP-02 (`0.2.0`, C ABI 1) добавляет изолированные ветви и адаптер общих
+боевых правил для гипотетических команд с фиксированным броском 600.
 Пока непустой корректный запрос возвращает `not_implemented`; играющий агент
 будет добавлен следующими этапами. [Контракт и карта переноса](docs/combat-ai-contract.md)
 содержат интерфейсы, бюджеты и источники данных.
 
 ```powershell
+.venv\Scripts\python.exe tools\build_combat.py
 .venv\Scripts\python.exe tools\build_combat_ai.py
-.venv\Scripts\python.exe -m unittest discover -s tests -p test_combat_ai.py -v
+.venv\Scripts\python.exe -m unittest discover -s tests -p test_combat_ai*.py -v
 ```
 
-Сборка каркаса не требует установленной игры, исходников CP или боевой DLL.
+Сначала сборка боевого ядра подготавливает `build/combat_rules.h` и
+`build/cp_geometry.inc`; сборка AI использует их, не связываясь с боевой DLL.
+Она также создаёт native-тест ветвей. Оценка угроз, поиск и играющий агент
+относятся к будущим этапам CP-03–07.
 
 ## Что перенесено
 

@@ -1,4 +1,4 @@
-"""CP-01 standalone planner contract. Search is a validated, explicit stub.
+"""CP-02 standalone model and planner contract. Search remains an explicit stub.
 
 This module is an internal privileged boundary for the CP-source v1 agent.
 Normal Agent.act observations never acquire a PlanningState implicitly.
@@ -302,7 +302,7 @@ class Planner:
     """Owned search context. Independent instances may run concurrently.
 
     Use as a context manager. Calls/close on the same instance must be serialized.
-    In CP-01 valid nonempty requests return NOT_IMPLEMENTED, never fake success.
+    In CP-02 valid nonempty requests still return NOT_IMPLEMENTED.
     """
 
     def __init__(self, config: SearchConfig | None = None):

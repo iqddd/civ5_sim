@@ -204,7 +204,7 @@ def build(cp, game):
         vcvars = Path(vs) / "VC/Auxiliary/Build/vcvars64.bat"
         command = (
             f'@call "{vcvars}" >nul\n@cl /nologo /std:c++17 /EHsc /O2 /LD /utf-8 /W4 '
-            f'/I"{out}" "{ROOT / "native/combat.cpp"}" "{ROOT / "native/geometry.cpp"}" '
+            f'/I"{out}" "{ROOT / "native/combat.cpp"}" "{ROOT / "native/combat_state.cpp"}" "{ROOT / "native/geometry.cpp"}" '
             "combat_reference.cpp "
             "/link /OUT:combat.dll\n"
         )
@@ -223,6 +223,7 @@ def build(cp, game):
                 "-I",
                 str(out),
                 str(ROOT / "native/combat.cpp"),
+                str(ROOT / "native/combat_state.cpp"),
                 str(ROOT / "native/geometry.cpp"),
                 str(out / "combat_reference.cpp"),
                 "-o",

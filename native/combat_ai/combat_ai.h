@@ -82,7 +82,7 @@ CAI_API void cai_free(CaiContext* context); /* NULL is allowed. */
    Invalid API pointers/capacity return CAI_BAD_ARGUMENT. result is overwritten
    on every call when non-NULL. Future plans are copied to caller-owned storage;
    insufficient capacity returns CAI_BUFFER_TOO_SMALL and the required count,
-   without a partial copy. CP-01 always returns an empty plan. */
+   without a partial copy. CP-02 still returns an empty plan. */
 CAI_API int32_t cai_search(CaiContext*, const CaiSearchRequest*,
                           CaiAssignment* assignments, int32_t capacity,
                           CaiSearchResult* result);
