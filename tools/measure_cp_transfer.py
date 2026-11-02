@@ -87,6 +87,8 @@ def instrument(directory, baseline):
             text = replace(text, "    auto child = std::make_unique<TacticalPosition>();",
                            "    COUNT(0); auto child = std::make_unique<TacticalPosition>();")
             marker = "    auto old = view(*child.branch);"
+            if marker not in text:
+                marker = "  auto old = TacticalView(*child.branch,side);"
             text = replace(text, marker, "    COUNT(1);\n" + marker)
             if baseline:
                 text = replace(text, "          auto combo = copy(*first);",

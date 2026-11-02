@@ -1,305 +1,435 @@
 // Local CP tactical search, adapted from CvTacticalAI.cpp:6634-10594.
-// See docs/combat-ai-contract.md for deliberate changes from the pinned CP.
+// See docs/combat-ai-contract.md and combat-ai-cp-transfer.md for departures.
 #include "planner.h"
 #include "cp_tactical.h"
 #include "../combat_state.h"
 #include <algorithm>
-#include <cmath>
+#include <cassert>
 #include <limits>
-#include <numeric>
-#include <tuple>
+#include <stdexcept>
 
 namespace combat_ai {
-void SearchWorkspace::clear() { positions.clear(); open.clear(); equivalent.clear(); }
 namespace {
-using namespace combat_rules;
+void require_invariant(bool condition, const char* message) {
+  // Also enforce internal invariants in release builds, before indexing arrays.
+  if (!condition) throw std::logic_error(message);
+  assert(condition);
+}
+
+void set_swap_reverse_score(TacticalPosition& child, const CpMove& move) {
+  require_invariant(child.assignments.size() >= 2,"swap reverse without a swap");
+  const auto& forward = child.assignments[child.assignments.size()-2];
+  auto& reverse = child.assignments.back();
+  require_invariant(forward.kind == CAI_SWAP && reverse.kind == CAI_SWAP_REVERSE &&
+      reverse.unit == move.unit && reverse.to_tile == move.tile &&
+      forward.from_tile == reverse.to_tile && forward.to_tile == reverse.from_tile,
+      "swap reverse does not match the physical swap");
+  assert(child.assignments.back().kind == CAI_SWAP_REVERSE);
+  reverse.score = move.score;
+}
+} // namespace
+
+SelectedUnits::SelectedUnits(const int32_t* selected, int32_t count, int32_t roster_size)
+    : slots(size_t(roster_size),SlotIdx{}) {
+  for (int32_t slot_index = 0; slot_index < count; ++slot_index) {
+    UnitId unit{selected[slot_index]};
+    require_invariant(unit.value >= 0 && unit.value < roster_size,"invalid selected unit ID");
+    require_invariant(!slots[unit].valid(),"duplicate selected unit ID");
+    units.push_back(unit);
+    slots[unit] = SlotIdx{slot_index};
+  }
+}
+SlotIdx SelectedUnits::slot_of(UnitId unit) const {
+  require_invariant(unit.value >= 0 && size_t(unit.value) < slots.size(),"unit ID outside roster");
+  SlotIdx slot = slots[unit];
+  require_invariant(slot.valid(),"candidate uses a unit outside the selected group");
+  return slot;
+}
+
+bool terminal_position(const TacticalPosition& position, const std::vector<int32_t>& initial_enemy_ids) {
+  bool all_finished = std::all_of(position.slot_states.begin(),position.slot_states.end(),
+      [](SlotState state) { return state != SlotState::Pending; });
+  if (all_finished) return true;
+  if (initial_enemy_ids.empty()) return false;
+  // Fix to CP isEarlyFinish (:8733): newly discovered casualties cannot replace
+  // an initial target. The early-finish objective remains the ORIGINAL set.
+  return std::all_of(initial_enemy_ids.begin(),initial_enemy_ids.end(),[&](int32_t enemy_id) {
+    return std::find(position.killed.begin(),position.killed.end(),enemy_id) != position.killed.end();
+  });
+}
+
+void finalize_assignments(TacticalPosition& position, const FinalEvaluation& evaluation) {
+  require_invariant(evaluation.accepted,"cannot finalize a rejected position");
+  for (const auto& finish : evaluation.finishes) {
+    require_invariant(finish.kind == CAI_FINISH,"invalid final assignment kind");
+    require_invariant(std::none_of(position.assignments.begin(),position.assignments.end(),
+        [&](const CaiAssignment& record) { return record.kind == CAI_FINISH && record.unit == finish.unit; }),
+        "unit already finalized");
+  }
+  position.assignments.erase(std::remove_if(position.assignments.begin(),position.assignments.end(),
+      [&](const CaiAssignment& record) {
+    return record.kind == CAI_FINISH_TEMP && std::any_of(evaluation.finishes.begin(),evaluation.finishes.end(),
+        [&](const CaiAssignment& finish) { return finish.unit == record.unit; });
+  }),position.assignments.end());
+  position.assignments.insert(position.assignments.end(),evaluation.finishes.begin(),evaluation.finishes.end());
+}
+
+bool CandidateExecutor::apply_command(TacticalPosition& child, Command command, SlotIdx slot, int32_t score) {
+  using namespace combat_rules;
+  auto old = TacticalView(*child.branch,side);
+  UnitId unit_id{command.unit};
+  const auto before = old.units[unit_id.value];
+  int32_t partner_id = command.kind == SWAP ? old.occupied[command.target] : CAI_NO_ID;
+  auto transition = adapter.apply(*child.branch,command);
+  if (!transition.accepted) return false;
+  auto next = TacticalView(*child.branch,side);
+  const auto after = next.units[unit_id.value];
+  if (command.kind == MOVE && after.tile == before.tile && after.moves == before.moves &&
+      transition.newly_visible.empty()) return false;
+
+  CaiAssignmentKind kind = command.kind == MOVE ? CAI_MOVE : command.kind == SWAP ? CAI_SWAP :
+                           command.kind == MELEE ? CAI_MELEE : CAI_RANGED;
+  int32_t killed_unit = CAI_NO_ID;
+  if (command.kind == MELEE || command.kind == RANGED) {
+    int32_t target_id = old.occupied[command.target];
+    // State::kill normalizes HP to zero; roots reject negative HP.
+    if (target_id >= 0 && next.units[target_id].hp == 0) {
+      killed_unit = target_id;
+      child.killed.push_back(target_id);
+      std::sort(child.killed.begin(),child.killed.end());
+    }
+    child.attack_score += score;
+  }
+  child.move_flags[slot] = command.kind == SWAP ? MoveFlag::Swapped :
+                           command.kind == MOVE ? MoveFlag::Moved : MoveFlag::None;
+  child.last_kill[slot] = killed_unit >= 0;
+  child.touched[slot] = 1;
+  child.slot_states[slot] = after.hp <= 0 || after.moves <= 0 || after.waiting
+      ? SlotState::Finished : SlotState::Pending;
+
+  auto record = stationary_assignment(kind,before,tactics.roles[slot],score);
+  record.to_tile = command.kind == MELEE || command.kind == RANGED ? command.target : after.tile;
+  record.remaining_moves = after.moves;
+  record.damage = transition.result.damage;
+  record.self_damage = transition.result.retaliation;
+  record.killed_unit = killed_unit;
+  record.command_target = command.target;
+  child.assignments.push_back(record);
+
+  if (partner_id >= 0) {
+    UnitId partner{partner_id};
+    SlotIdx partner_slot = selected.slot_of(partner);
+    child.move_flags[partner_slot] = MoveFlag::Swapped;
+    child.touched[partner_slot] = 1;
+    child.last_kill[partner_slot] = 0;
+    child.slot_states[partner_slot] = next.units[partner.value].moves <= 0
+        ? SlotState::Finished : SlotState::Pending;
+    auto reverse = stationary_assignment(CAI_SWAP_REVERSE,old.units[partner.value],tactics.roles[partner_slot]);
+    reverse.to_tile = next.units[partner.value].tile;
+    reverse.remaining_moves = next.units[partner.value].moves;
+    child.assignments.push_back(reverse);
+  }
+
+  if (!transition.newly_visible.empty()) {
+    auto revealed = adapter.prospective_units(*child.branch,transition.newly_visible);
+    bool enemy_contact = false;
+    for (const auto& enemy : revealed) {
+      if (enemy.side == side || enemy.hp <= 0) continue;
+      enemy_contact = true;
+      if (child.restart_source) continue;
+      UnitId observer = unit_id;
+      // A physical swap updates both sight sources. Attribute a contact to a
+      // participant which actually sees it, rather than the combo's first ID.
+      if (partner_id >= 0 && !adapter.can_see(*child.branch,after.tile,enemy.tile) &&
+          adapter.can_see(*child.branch,next.units[partner_id].tile,enemy.tile))
+        observer = UnitId{partner_id};
+      child.restart_source = observer;
+    }
+    child.discovered = child.discovered || enemy_contact;
+    if (enemy_contact && command.kind == MOVE) child.move_flags[slot] = MoveFlag::None;
+    tactics.extend_plots(child,transition.newly_visible);
+  }
+  return true;
+}
+
+bool CandidateExecutor::apply(TacticalPosition& child, const CpCombo& candidate) {
+  using namespace combat_rules;
+  require_invariant(!candidate.moves.empty() && candidate.moves.size() <= 2,"invalid combo size");
+  require_invariant(!child.restart_source,"unflushed contact in parent position");
+  // Check IDs and pair structure before the first physical mutation. The
+  // reverse record itself is checked after executing the physical swap.
+  const int32_t tile_count = child.branch->state().tile_count;
+  for (size_t move_index = 0; move_index < candidate.moves.size(); ++move_index) {
+    const auto& move = candidate.moves[move_index];
+    selected.slot_of(UnitId{move.unit});
+    require_invariant(move.kind >= CP_MOVE && move.kind <= CP_SWAP_REVERSE,"invalid internal move kind");
+    require_invariant(move.tile >= 0 && move.tile < tile_count,"invalid internal target tile");
+    if (move_index > 0)
+      require_invariant(move.unit != candidate.moves.front().unit,"two assignments for the same unit in a combo");
+    if (move.kind == CP_SWAP_REVERSE)
+      require_invariant(move_index == 1 && candidate.moves.front().kind == CP_SWAP,"orphan swap reverse");
+    if (move.kind == CP_SWAP)
+      require_invariant(move_index == 0 && candidate.moves.size() == 2 &&
+          candidate.moves[1].kind == CP_SWAP_REVERSE,"swap lacks reverse bookkeeping");
+  }
+
+  for (const auto& move : candidate.moves) {
+    UnitId unit_id{move.unit};
+    SlotIdx slot = selected.slot_of(unit_id);
+    if (move.kind == CP_SWAP_REVERSE) {
+      set_swap_reverse_score(child,move);
+      continue;
+    }
+    if (move.kind == CP_FINISH_TEMP || move.kind == CP_BLOCKED) {
+      const auto current = child.branch->state().units[unit_id.value];
+      child.slot_states[slot] = move.kind == CP_BLOCKED ? SlotState::Blocked : SlotState::Finished;
+      child.last_kill[slot] = 0;
+      auto kind = move.kind == CP_BLOCKED ? CAI_BLOCKED : CAI_FINISH_TEMP;
+      child.assignments.push_back(stationary_assignment(kind,current,tactics.roles[slot],move.score));
+      continue;
+    }
+    int32_t kind = move.kind == CP_MELEE ? MELEE : move.kind == CP_RANGED ? RANGED :
+                   move.kind == CP_SWAP ? SWAP : MOVE;
+    if (!apply_command(child,{kind,unit_id.value,move.tile},slot,move.score)) return false;
+    if (move.kind == CP_FORCED) child.move_flags[slot] = MoveFlag::None;
+  }
+
+  // CP makeNextAssignments appends RESTART after both actions. Preserve atomic
+  // order, but record the first actual observer rather than an arbitrary anchor.
+  if (child.restart_source) {
+    UnitId observer = *child.restart_source;
+    SlotIdx slot = selected.slot_of(observer);
+    const auto current = child.branch->state().units[observer.value];
+    auto restart = stationary_assignment(CAI_RESTART,current,tactics.roles[slot]);
+    restart.from_tile = CAI_NO_ID;
+    restart.to_tile = CAI_NO_ID;
+    restart.remaining_moves = 0;
+    child.assignments.push_back(restart);
+    child.restart_source.reset();
+  }
+  return true;
+}
+
+void SearchWorkspace::clear() {
+  positions.clear();
+  open.clear();
+  equivalent.clear();
+}
+namespace {
+constexpr int32_t kBreadthFirstGenerations = 3; // CP TACTSIM_BREADTH_FIRST_GENERATIONS.
 class Search {
   SearchWorkspace& work;
   const CaiConfig& config;
   const CaiSearchRequest& request;
   std::unique_ptr<RulesAdapter> adapter;
-  std::unique_ptr<CpTactics> cp;
-  std::vector<int32_t> selected, selected_index, roles, initial_distance;
-  std::vector<CaiUnit> initial_units;
-  std::vector<int32_t> initial_enemies;
+  std::unique_ptr<CpTactics> tactics;
+  SelectedUnits selected;
+  SlotValues<int32_t> roles;
+  UnitValues<CaiUnit> initial_units;
+  std::vector<int32_t> initial_enemy_ids;
   CaiSearchStats stats{};
-  bool depth_first = false, exhausted = false;
-  int32_t best = -1, best_score = std::numeric_limits<int32_t>::min();
-  float bias = 1.f;
+  bool depth_first = false;
+  bool exhausted = false;
+  int32_t best_position = -1;
+  int32_t best_score = std::numeric_limits<int32_t>::min();
 
-  TacticalView view(const Branch& branch) const { return TacticalView(branch,request.side); }
   std::unique_ptr<TacticalPosition> copy(const TacticalPosition& parent) {
+    require_invariant(!parent.restart_source,"queued parent has an unflushed contact");
     auto child = std::make_unique<TacticalPosition>();
     child->branch = parent.branch->clone();
     child->assignments = parent.assignments;
     child->plots = parent.plots;
-    child->done = parent.done; child->moved = parent.moved;
-    child->last_kill = parent.last_kill; child->touched = parent.touched;
-    child->killed = parent.killed; child->attack_score = parent.attack_score;
+    child->slot_states = parent.slot_states;
+    child->move_flags = parent.move_flags;
+    child->last_kill = parent.last_kill;
+    child->touched = parent.touched;
+    child->killed = parent.killed;
+    child->attack_score = parent.attack_score;
     child->discovered = parent.discovered;
     child->generation = parent.generation + 1;
     return child;
   }
-  bool apply(TacticalPosition& child, Command command, int i, int score) {
-    auto old = view(*child.branch);
-    const auto u = old.units[command.unit];
-    int partner = command.kind == SWAP ? old.occupied[command.target] : -1;
-    auto transition = adapter->apply(*child.branch, command);
-    if (!transition.accepted) return false;
-    auto next = view(*child.branch);
-    const auto now = next.units[command.unit];
-    if (command.kind == MOVE && now.tile == u.tile && now.moves == u.moves &&
-        transition.newly_visible.empty()) return false;
-    int kind = command.kind == MOVE ? CAI_MOVE : command.kind == SWAP ? CAI_SWAP :
-               command.kind == MELEE ? CAI_MELEE : CAI_RANGED;
-    int killed = -1;
-    if (command.kind == MELEE || command.kind == RANGED) {
-      int target = old.occupied[command.target];
-      if (target >= 0 && next.units[target].hp == 0) {
-        killed = target;
-        child.killed.push_back(target);
-        std::sort(child.killed.begin(), child.killed.end());
-      }
-      child.attack_score += score;
+  std::vector<int32_t> key(const TacticalPosition& position, const TacticalView& view) const {
+    std::vector<int32_t> result;
+    for (const auto& unit : view.units) {
+      if (unit.side != request.side && !view.visibility[unit.tile]) continue;
+      result.insert(result.end(),{unit.id,unit.tile,unit.hp,unit.moves,unit.attacked,unit.acted,unit.fortified,unit.waiting});
     }
-    // Only new enemy contact makes an ordinary move forced (see below).
-    child.moved[i] = command.kind == SWAP ? 2 : int(command.kind == MOVE);
-    child.last_kill[i] = killed >= 0;
-    child.touched[i] = 1;
-    child.done[i] = now.hp <= 0 || now.moves <= 0 || now.waiting;
-    int to = command.kind == MELEE || command.kind == RANGED ? command.target : now.tile;
-    child.assignments.push_back({kind, u.id, u.tile, to, now.moves, roles[i], score,
-                                 transition.result.damage, transition.result.retaliation, killed, command.target});
-    if (partner >= 0) {
-      int j = selected_index[partner];
-      if (j < 0) return false;
-      child.moved[j] = 2;
-      child.touched[j] = 1; child.last_kill[j] = 0;
-      child.done[j] = next.units[partner].moves <= 0;
-      child.assignments.push_back({CAI_SWAP_REVERSE, partner, old.units[partner].tile,
-        next.units[partner].tile, next.units[partner].moves, roles[j], 0, 0, 0, -1, -1});
+    result.push_back(-2);
+    result.insert(result.end(),view.visibility.begin(),view.visibility.end());
+    result.insert(result.end(),position.plots.begin(),position.plots.end());
+    for (int32_t slot_index = 0; slot_index < int32_t(selected.size()); ++slot_index) {
+      SlotIdx slot{slot_index};
+      result.insert(result.end(),{int32_t(position.slot_states[slot]),int32_t(position.move_flags[slot]),
+          position.last_kill[slot],position.touched[slot]});
     }
-    if (!transition.newly_visible.empty()) {
-      auto revealed = adapter->prospective_units(*child.branch, transition.newly_visible);
-      bool enemy = std::any_of(revealed.begin(), revealed.end(), [&](const CaiUnit& x) {
-        return x.side != request.side && x.hp > 0;
-      });
-      child.discovered = child.discovered || enemy;
-      child.pending_restart = child.pending_restart || enemy;
-      if (enemy && command.kind == MOVE) child.moved[i] = 0;
-      cp->extend_plots(child,transition.newly_visible);
-    }
-    return true;
-  }
-  std::vector<int32_t> key(const TacticalPosition& p, const TacticalView& v) {
-    std::vector<int32_t> out;
-    for (const auto& u : v.units) {
-      // Never use an unobserved enemy's true position for tactical decisions.
-      if (u.side != request.side && !v.visibility[u.tile]) continue;
-      out.insert(out.end(), {u.id,u.tile,u.hp,u.moves,u.attacked,u.acted,u.fortified,u.waiting});
-    }
-    out.push_back(-2);
-    out.insert(out.end(), v.visibility.begin(), v.visibility.end());
-    out.insert(out.end(), p.plots.begin(), p.plots.end());
-    for (int i = 0; i < int(selected.size()); ++i)
-      out.insert(out.end(), {p.done[i], p.moved[i], p.last_kill[i], p.touched[i]});
-    out.push_back(int(p.discovered));
-    out.push_back(int(p.killed.size()));
-    out.insert(out.end(), p.killed.begin(), p.killed.end());
-    const auto& memory = p.branch->contacts();
-    out.insert(out.end(), {memory.turn,memory.side});
+    result.push_back(int32_t(position.discovered));
+    result.push_back(int32_t(position.killed.size()));
+    result.insert(result.end(),position.killed.begin(),position.killed.end());
+    const auto& memory = position.branch->contacts();
+    result.insert(result.end(),{memory.turn,memory.side});
     for (auto contact : memory.known_enemies)
-      out.insert(out.end(), {contact.id,contact.last_seen_own_turn});
-    return out;
+      result.insert(result.end(),{contact.id,contact.last_seen_own_turn});
+    return result;
   }
-  bool terminal(const TacticalPosition& p) const {
-    bool all_done = std::all_of(p.done.begin(), p.done.end(), [](int x) { return x != 0; });
-    return all_done || (!initial_enemies.empty() && initial_enemies.size()==p.killed.size());
+  bool heap_compare(int32_t left, int32_t right) const {
+    const auto& a = *work.positions[left];
+    const auto& b = *work.positions[right];
+    if (a.generation != b.generation)
+      return depth_first ? a.generation < b.generation : a.generation > b.generation;
+    if (a.rank != b.rank) return a.rank < b.rank;
+    return left > right;
   }
-  bool complete(TacticalPosition& p, const TacticalView& v, int& score) {
-    if (p.finalized) { score = p.final_score; return true; }
-    int losses = 0, positive = 0, negative = 0, target_before = 0, target_after = 0;
-    score = p.rank;
-    auto board = cp->board(p);
-    for (int i = 0; i < int(selected.size()); ++i) {
-      int id = selected[i];
-      const auto& u = v.units[id];
-      // CP addAvailableUnit excludes root-unavailable units. They remain in
-      // the physical state as occupancy and support, without a new finish order.
-      if (p.done[i] == 2 || initial_units[id].moves <= 0 || initial_units[id].waiting) continue;
-      if (u.hp <= 0) { score -= initial_units[id].hp; continue; }
-      // Early finish leaves untouched, still-available units to later tasks.
-      if (!p.done[i]) { if (!p.touched[i]) score += 123; continue; }
-      bool acceptable = false;
-      int end = cp->move_score(p, board, i, u.tile, 0, true, &acceptable).score;
-      if (!acceptable) ++losses;
-      auto latest = std::find_if(p.assignments.rbegin(),p.assignments.rend(),[&](const CaiAssignment& a) {
-        return a.unit == id && (a.kind == CAI_MOVE || a.kind == CAI_SWAP ||
-               (a.kind == CAI_MELEE && a.killed_unit >= 0));
-      });
-      score += latest == p.assignments.rend() ? end : std::max(0,end-latest->score);
-      int distance = board.plots[u.tile].distance;
-      int ideal = roles[i] == CAI_FIRST_LINE ? 1 : 2;
-      if (roles[i] == CAI_THIRD_LINE) {
-        positive += initial_distance[i] == 1 && distance > 1;
-        negative += initial_distance[i] > 1 && distance == 1;
-      } else {
-        positive += initial_distance[i] != ideal && distance == ideal;
-        negative += initial_distance[i] == ideal && distance != ideal;
-      }
-      target_before += adapter->distance(initial_units[id].tile, request.target);
-      target_after += adapter->distance(u.tile, request.target);
-      // Replace deferred bookkeeping records, then append a single final record.
-      p.assignments.erase(std::remove_if(p.assignments.begin(), p.assignments.end(), [&](const CaiAssignment& a) {
-        return a.unit == id && a.kind == CAI_FINISH_TEMP;
-      }), p.assignments.end());
-      p.assignments.push_back({CAI_FINISH, id, u.tile, u.tile, u.moves, roles[i], end, 0, 0, -1, -1});
+  void record_completion(int32_t position_index, int32_t score) {
+    ++stats.completed;
+    if (best_position < 0 || score > best_score) {
+      best_position = position_index;
+      best_score = score;
     }
-    if (losses > config.risk_budget_base + config.risk_budget_per_kill * int(p.killed.size())) return false;
-    bool attacked=std::any_of(p.assignments.begin(),p.assignments.end(),[](const CaiAssignment& a) {
-      return a.kind==CAI_MELEE || a.kind==CAI_RANGED;
-    });
-    bool improved = !p.killed.empty() || p.discovered ||
-                    (!board.enemies.empty() ? (positive > negative ||
-                     (positive == negative && attacked)) : target_after < target_before);
-    if (improved) { p.finalized = true; p.final_score = score; }
-    return improved;
+    // max_completed is a search budget too. A valid best plan may therefore
+    // accompany BUDGET_EXHAUSTED, even when this completion empties the heap.
+    if (stats.completed >= config.max_completed) exhausted = true;
   }
-  bool heap_compare(int a, int b) const {
-    const auto& x = *work.positions[a]; const auto& y = *work.positions[b];
-    if (x.generation != y.generation)
-      return depth_first ? x.generation < y.generation : x.generation > y.generation;
-    if (x.rank != y.rank) return x.rank < y.rank;
-    return a > b;
-  }
- public:
-  Search(SearchWorkspace& w, const CaiConfig& c, const CaiSearchRequest& r)
-      : work(w), config(c), request(r), adapter(make_rules_adapter(*r.state, r.side)),
-        selected(r.selected_units, r.selected_units + r.selected_count),
-        selected_index(r.state->unit_count, -1) {}
-  Plan run() {
-    work.clear();
-    ContactMemory memory{request.contacts.turn, request.contacts.side, {}};
-    for (int i = 0; i < request.contacts.known_enemy_count; ++i)
-      memory.known_enemies.push_back({request.contacts.known_enemies[i].id,
-                                    request.contacts.known_enemies[i].last_seen_own_turn});
-    auto root = std::make_unique<TacticalPosition>();
-    root->branch = adapter->root(*request.state, memory);
-    auto initial = view(*root->branch);
-    initial_units = initial.units;
-    for (int i = 0; i < int(selected.size()); ++i) {
-      int id = selected[i]; selected_index[id] = i;
-      root->done.push_back(initial.units[id].moves <= 0 || initial.units[id].waiting ? 2 : 0);
-      root->moved.push_back(0); root->last_kill.push_back(0); root->touched.push_back(0);
-    }
-    cp = std::make_unique<CpTactics>(*adapter,*root->branch,config,request);
-    cp->initialize(*root);
-    roles = cp->roles; initial_distance = cp->initial_distance;
-    initial_enemies = cp->initial_enemies; bias = cp->bias;
-    auto board = cp->board(*root);
-    for (int i = 0; i < int(selected.size()); ++i) {
-      int id = selected[i], tile = initial.units[id].tile;
-      int score = cp->move_score(*root,board,i,tile,0,true,nullptr,true).score;
-      root->assignments.push_back({CAI_INITIAL,id,tile,tile,initial.units[id].moves,roles[i],score,0,0,-1,-1});
-      if (root->done[i] == 2)
-        root->assignments.push_back({CAI_BLOCKED,id,tile,tile,initial.units[id].moves,roles[i],0,0,0,-1,-1});
-    }
-    work.equivalent.emplace(key(*root, initial), std::make_pair(0, 0));
-    work.positions.push_back(std::move(root)); work.open.push_back(0);
-    stats.generated = stats.peak_positions = 1;
-    auto compare = [&](int a, int b) { return heap_compare(a,b); };
-    while (!work.open.empty() && !exhausted) {
-      if (!depth_first && work.positions[work.open.front()]->generation > 3) {
-        depth_first = true;
-        std::make_heap(work.open.begin(), work.open.end(), compare);
-      }
-      std::pop_heap(work.open.begin(), work.open.end(), compare);
-      int current = work.open.back(); work.open.pop_back();
-      auto& parent = *work.positions[current];
-      auto current_view = view(*parent.branch);
-      auto equivalent = work.equivalent.find(key(parent, current_view));
-      if (equivalent != work.equivalent.end() && equivalent->second.second != current) {
-        ++stats.pruned; continue;
-      }
-      ++stats.checked;
-      if (terminal(parent)) {
-        int score;
-        if (complete(parent, current_view, score)) {
-          ++stats.completed;
-          if (best < 0 || score > best_score) { best = current; best_score = score; }
-          if (stats.completed >= config.max_completed && !work.open.empty()) { exhausted = true; break; }
-        } else ++stats.pruned;
-        continue;
-      }
-      if (stats.generated >= config.position_capacity) { exhausted = true; break; }
-      auto choices = cp->candidates(parent,depth_first);
-      int children = 0;
-      for (auto& candidate : choices) {
-        if (children >= (depth_first ? 1 : config.max_branches)) break;
-        if (stats.generated >= config.position_capacity) { exhausted = true; break; }
-        auto child = copy(parent);
-        bool accepted = true;
-        for (auto move : candidate.moves) {
-          int i = selected_index[move.unit], id = move.unit;
-          if (move.kind == CP_SWAP_REVERSE) {
-            child->assignments.back().score = move.score;
-            continue;
-          }
-          if (move.kind == CP_FINISH_TEMP || move.kind == CP_BLOCKED) {
-            child->done[i] = move.kind == CP_BLOCKED ? 2 : 1;
-            child->last_kill[i] = 0;
-            child->assignments.push_back({move.kind == CP_BLOCKED ? CAI_BLOCKED : CAI_FINISH_TEMP,
-              id, current_view.units[id].tile,current_view.units[id].tile,
-              current_view.units[id].moves,roles[i],move.score,0,0,-1,-1});
-          } else {
-            int kind = move.kind == CP_MELEE ? MELEE : move.kind == CP_RANGED ? RANGED :
-                       move.kind == CP_SWAP ? SWAP : MOVE;
-            if (!apply(*child,{kind,id,move.tile},i,move.score)) { accepted=false; break; }
-            if (move.kind == CP_FORCED) child->moved[i] = 0;
-          }
-        }
-        if (!accepted) { ++stats.pruned; continue; }
-        if (child->pending_restart) {
-          int id = candidate.moves.front().unit;
-          child->assignments.push_back({CAI_RESTART,id,-1,-1,0,roles[selected_index[id]],0,0,0,-1,-1});
-          child->pending_restart = false;
-        }
-        child->rank = parent.rank;
-        for (auto move : candidate.moves)
-          if (move.kind != CP_BLOCKED && move.kind != CP_FINISH_TEMP) child->rank += move.score;
-        auto next = view(*child->branch);
-        auto identity = key(*child, next);
-        auto found = work.equivalent.find(identity);
-        if (found != work.equivalent.end() && found->second.first >= child->attack_score) {
-          ++stats.pruned; continue;
-        }
-        bool finished = terminal(*child);
-        int final_score = 0;
-        if (finished && !complete(*child, next, final_score)) { ++stats.pruned; continue; }
-        int id = int(work.positions.size());
-        work.equivalent[std::move(identity)] = {child->attack_score, id};
-        work.positions.push_back(std::move(child));
-        ++stats.generated; ++children;
-        stats.peak_positions = stats.generated;
-        if (finished) {
-          ++stats.completed;
-          if (best < 0 || final_score > best_score) { best = id; best_score = final_score; }
-          if (stats.completed >= config.max_completed) { exhausted = true; break; }
-        } else {
-          work.open.push_back(id); std::push_heap(work.open.begin(), work.open.end(), compare);
-        }
-      }
-      // Accepted terminal nodes have already updated best; pool exhaustion
-      // therefore always preserves the best completed plan seen so far.
-    }
-    Plan plan{{}, {exhausted ? CAI_BUDGET_EXHAUSTED : best < 0 ? CAI_NO_PLAN : CAI_COMPLETED, 0, stats}};
-    if (best >= 0) plan.assignments = work.positions[best]->assignments;
+  Plan result() const {
+    Plan plan{};
+    plan.result.reason = exhausted ? CAI_BUDGET_EXHAUSTED : best_position < 0 ? CAI_NO_PLAN : CAI_COMPLETED;
+    plan.result.stats = stats;
+    if (best_position >= 0) plan.assignments = work.positions[best_position]->assignments;
     plan.result.assignment_count = int32_t(plan.assignments.size());
     return plan;
   }
+ public:
+  Search(SearchWorkspace& workspace, const CaiConfig& settings, const CaiSearchRequest& input)
+      : work(workspace), config(settings), request(input), adapter(make_rules_adapter(*input.state,input.side)),
+        selected(input.selected_units,input.selected_count,input.state->unit_count) {}
+  Plan run() {
+    work.clear();
+    ContactMemory memory{request.contacts.turn,request.contacts.side,{}};
+    for (int32_t contact_index = 0; contact_index < request.contacts.known_enemy_count; ++contact_index)
+      memory.known_enemies.push_back({request.contacts.known_enemies[contact_index].id,
+                                     request.contacts.known_enemies[contact_index].last_seen_own_turn});
+    auto root = std::make_unique<TacticalPosition>();
+    root->branch = adapter->root(*request.state,memory);
+    auto initial = TacticalView(*root->branch,request.side);
+    initial_units = UnitValues<CaiUnit>{initial.units};
+    for (int32_t slot_index = 0; slot_index < int32_t(selected.size()); ++slot_index) {
+      SlotIdx slot{slot_index};
+      UnitId unit_id = selected.unit_at(slot);
+      const auto& unit = initial_units[unit_id];
+      root->slot_states.push_back(unit.moves <= 0 || unit.waiting ? SlotState::Blocked : SlotState::Pending);
+      root->move_flags.push_back(MoveFlag::None);
+      root->last_kill.push_back(0);
+      root->touched.push_back(0);
+    }
+    tactics = std::make_unique<CpTactics>(*adapter,*root->branch,config,request);
+    tactics->initialize(*root);
+    roles = tactics->roles;
+    initial_enemy_ids = tactics->initial_enemies;
+    auto board = tactics->board(*root);
+    for (int32_t slot_index = 0; slot_index < int32_t(selected.size()); ++slot_index) {
+      SlotIdx slot{slot_index};
+      UnitId unit_id = selected.unit_at(slot);
+      const auto& unit = initial_units[unit_id];
+      int32_t score = tactics->move_score(*root,board,slot,unit.tile,0,true,nullptr,true).score;
+      root->assignments.push_back(stationary_assignment(CAI_INITIAL,unit,roles[slot],score));
+      if (root->slot_states[slot] == SlotState::Blocked)
+        root->assignments.push_back(stationary_assignment(CAI_BLOCKED,unit,roles[slot]));
+    }
+    work.equivalent.emplace(key(*root,initial),std::make_pair(0,0));
+    work.positions.push_back(std::move(root));
+    stats.generated = 1;
+    stats.peak_positions = 1;
+
+    // Terminal children are evaluated before enqueueing. Only the root needs
+    // this separate check; every node subsequently popped is non-terminal.
+    if (terminal_position(*work.positions.front(),initial_enemy_ids)) {
+      ++stats.checked;
+      auto evaluation = tactics->evaluate_final_position(*work.positions.front());
+      if (evaluation.accepted) {
+        finalize_assignments(*work.positions.front(),evaluation);
+        record_completion(0,evaluation.score);
+      } else ++stats.pruned;
+      return result();
+    }
+    work.open.push_back(0);
+    CandidateExecutor executor{*adapter,*tactics,selected,request.side};
+    auto compare = [&](int32_t left, int32_t right) { return heap_compare(left,right); };
+    while (!work.open.empty() && !exhausted) {
+      if (!depth_first && work.positions[work.open.front()]->generation > kBreadthFirstGenerations) {
+        depth_first = true;
+        std::make_heap(work.open.begin(),work.open.end(),compare);
+      }
+      std::pop_heap(work.open.begin(),work.open.end(),compare);
+      int32_t current_index = work.open.back();
+      work.open.pop_back();
+      const auto& parent = *work.positions[current_index];
+      assert(!terminal_position(parent,initial_enemy_ids));
+      auto current_view = TacticalView(*parent.branch,request.side);
+      auto equivalent = work.equivalent.find(key(parent,current_view));
+      if (equivalent != work.equivalent.end() && equivalent->second.second != current_index) {
+        ++stats.pruned;
+        continue;
+      }
+      ++stats.checked;
+      if (stats.generated >= config.position_capacity) {
+        exhausted = true;
+        break;
+      }
+      auto choices = tactics->candidates(parent,depth_first);
+      int32_t children = 0;
+      for (const auto& candidate : choices) {
+        if (children >= (depth_first ? 1 : config.max_branches)) break;
+        if (stats.generated >= config.position_capacity) {
+          exhausted = true;
+          break;
+        }
+        auto child = copy(parent);
+        if (!executor.apply(*child,candidate)) {
+          ++stats.pruned;
+          continue;
+        }
+        child->rank = parent.rank;
+        for (const auto& move : candidate.moves)
+          if (move.kind != CP_BLOCKED && move.kind != CP_FINISH_TEMP) child->rank += move.score;
+        auto next = TacticalView(*child->branch,request.side);
+        auto identity = key(*child,next);
+        auto found = work.equivalent.find(identity);
+        if (found != work.equivalent.end() && found->second.first >= child->attack_score) {
+          ++stats.pruned;
+          continue;
+        }
+        bool finished = terminal_position(*child,initial_enemy_ids);
+        FinalEvaluation evaluation;
+        if (finished) {
+          evaluation = tactics->evaluate_final_position(*child);
+          if (!evaluation.accepted) {
+            ++stats.pruned;
+            continue;
+          }
+          finalize_assignments(*child,evaluation);
+        }
+        int32_t child_index = int32_t(work.positions.size());
+        work.equivalent[std::move(identity)] = {child->attack_score,child_index};
+        work.positions.push_back(std::move(child));
+        ++stats.generated;
+        ++children;
+        // Peak retained pool occupancy. With the current monotonic pool it
+        // equals generated; temporary rejected children are outside this pool.
+        stats.peak_positions = std::max(stats.peak_positions,int32_t(work.positions.size()));
+        if (finished) {
+          record_completion(child_index,evaluation.score);
+          if (exhausted) break;
+        } else {
+          work.open.push_back(child_index);
+          std::push_heap(work.open.begin(),work.open.end(),compare);
+        }
+      }
+    }
+    return result();
+  }
 };
-}  // namespace
+} // namespace
 Plan find_assignments(SearchWorkspace& workspace, const CaiConfig& config, const CaiSearchRequest& request) {
-  return Search(workspace, config, request).run();
+  return Search(workspace,config,request).run();
 }
-}  // namespace combat_ai
+} // namespace combat_ai

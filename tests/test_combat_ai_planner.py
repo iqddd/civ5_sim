@@ -61,3 +61,12 @@ class LocalPlannerTests(unittest.TestCase):
 
     def test_cp_area_capacity_admits_participant_center_before_neighbors(self):
         self.check_native("cp_area_capacity")
+
+    def test_planner_target_ids_and_candidate_invariants(self):
+        self.check_native("planner_invariants")
+
+    def test_planner_rejected_evaluation_does_not_rewrite_assignments(self):
+        self.check_native("planner_finalization")
+
+    def test_planner_contact_source_and_atomic_swap_bookkeeping(self):
+        self.check_native("planner_combo_contacts")

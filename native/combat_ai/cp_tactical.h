@@ -5,10 +5,12 @@
 #include <map>
 
 namespace combat_ai {
-enum CpMoveKind { CP_MOVE, CP_MELEE, CP_RANGED, CP_FINISH_TEMP, CP_BLOCKED,
+enum CpMoveKind : int32_t { CP_MOVE, CP_MELEE, CP_RANGED, CP_FINISH_TEMP, CP_BLOCKED,
                   CP_FORCED, CP_SWAP, CP_SWAP_REVERSE };
 struct CpMove {
-  int unit = -1, tile = -1, kind = CP_MOVE, score = -1000;
+  int unit = -1, tile = -1;
+  CpMoveKind kind = CP_MOVE;
+  int score = -1000;
   int remaining = 0, self_damage = 0, near_kill = -1;
   bool kill = false;
 };
@@ -40,16 +42,18 @@ class CpTactics {
   Damage damage(int attacker, int from, int defender, int to, int extra,
                 bool unknown_origin = false);
   bool cover(const CpBoard&, int tile) const;
-  EndScore turn_end(const TacticalPosition&, const CpBoard&, int i, int tile,
+  EndScore turn_end(const TacticalPosition&, const CpBoard&, SlotIdx slot, int tile,
                     int incoming, bool kill, int extra_self, bool final,
                     bool relaxed, bool full_moves) const;
-  CpMove attack(const TacticalPosition&, const CpBoard&, int i, int from, int enemy);
-  int potential(const TacticalPosition&, const CpBoard&, int i, int tile,
+  CpMove attack(const TacticalPosition&, const CpBoard&, SlotIdx slot, int from, int enemy);
+  int potential(const TacticalPosition&, const CpBoard&, SlotIdx slot, int tile,
                 int num_attacks, int& near_kill);
-  bool can_end(const TacticalPosition&, const CpBoard&, int i, const CpMove&, int tile);
+  bool can_end(const TacticalPosition&, const CpBoard&, SlotIdx slot, const CpMove&, int tile);
  public:
   TacticalView initial;
-  std::vector<int> roles, safe, initial_distance, initial_enemies, active_order;
+  SlotValues<int32_t> roles, safe, initial_distance;
+  std::vector<int> initial_enemies;
+  std::vector<SlotIdx> active_order;
   float bias = 1.f;
   // ABI 5 has no historical damage input: the empty profile explicitly means
   // zero. A C++ caller with real history can provide one value per roster ID.
@@ -59,10 +63,13 @@ class CpTactics {
   void extend_plots(TacticalPosition&, const std::vector<int32_t>&) const;
   CpBoard board(const TacticalPosition&) const;
   int danger(int unit, int tile, int self_damage, const std::vector<int>& killed);
-  CpMove move_score(const TacticalPosition&, const CpBoard&, int i, int tile,
+  CpMove move_score(const TacticalPosition&, const CpBoard&, SlotIdx slot, int tile,
                     int remaining, bool final, bool* acceptable = nullptr,
                     bool initial_eval = false);
-  std::vector<CpMove> preferred(const TacticalPosition&, const CpBoard&, int i, int limit);
+  std::vector<CpMove> preferred(const TacticalPosition&, const CpBoard&, SlotIdx slot, int limit);
   std::vector<CpCombo> candidates(const TacticalPosition&, bool depth_first);
+  // Pure with respect to the supplied position; only context query caches may
+  // change. No FINISH records are installed until the caller accepts it.
+  FinalEvaluation evaluate_final_position(const TacticalPosition&);
 };
 } // namespace combat_ai

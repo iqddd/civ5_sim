@@ -15,6 +15,9 @@
 namespace combat_ai {
 namespace {
 constexpr int impossible = -1000;
+// CvTacticalAI.cpp:addFinishMovesIfAcceptable: reward an untouched unit left
+// available after early completion. This is a CP score, not a movement cost.
+constexpr int kUntouchedEarlyFinishBonus = 123;
 bool passable(const CaiBattleState& s, int t) {
   return s.tiles[t].elevation < 2 && s.tiles[t].feature != 5;
 }
@@ -93,9 +96,9 @@ CpBoard CpTactics::board(const TacticalPosition& p) const {
       const auto& u=b.view.units[id];
       if (u.side!=side) { plot.enemy=id; b.enemies.push_back(id); }
       else {
-        int i=index[id];
+        SlotIdx i{index[id]};
         plot.blocked=!admitted[id];
-        plot.end=admitted[id] ? p.done[i]==1 : bool(initial.units[id].waiting);
+        plot.end=admitted[id] ? p.slot_states[i]==SlotState::Finished : bool(initial.units[id].waiting);
       }
     }
   }
@@ -138,9 +141,9 @@ bool CpTactics::cover(const CpBoard& b, int t) const {
     if (b.plots[n].valid && b.plots[n].distance<plot.distance && !b.plots[n].end) return false;
   return true;
 }
-EndScore CpTactics::turn_end(const TacticalPosition& p, const CpBoard& b, int i, int t,
+EndScore CpTactics::turn_end(const TacticalPosition& p, const CpBoard& b, SlotIdx i, int t,
     int incoming, bool kill, int extra_self, bool final, bool relaxed, bool full_moves) const {
-  const auto& u=initial.units[selected[i]];
+  const auto& u=initial.units[selected[i.value]];
   const auto& plot=b.plots[t];
   int friends=(final?plot.friends_end:plot.friends)+int(relaxed);
   bool acceptable=!(plot.enemies>3 || (plot.enemies==3 && bias<1.f));
@@ -173,9 +176,9 @@ EndScore CpTactics::turn_end(const TacticalPosition& p, const CpBoard& b, int i,
   (void)p;
   return {result,acceptable};
 }
-CpMove CpTactics::move_score(const TacticalPosition& p, const CpBoard& b, int i,
+CpMove CpTactics::move_score(const TacticalPosition& p, const CpBoard& b, SlotIdx i,
                             int t, int remaining, bool final, bool* acceptable, bool initial_eval) {
-  const auto& u=b.view.units[selected[i]];
+  const auto& u=b.view.units[selected[i.value]];
   CpMove move{u.id,t,CP_MOVE,impossible,remaining};
   if (acceptable) *acceptable=false;
   if (!b.plots[t].valid) return move;
@@ -197,8 +200,8 @@ CpMove CpTactics::move_score(const TacticalPosition& p, const CpBoard& b, int i,
   if (acceptable) *acceptable=true;
   return move;
 }
-CpMove CpTactics::attack(const TacticalPosition& p, const CpBoard& b, int i, int from, int enemy) {
-  const auto& u=b.view.units[selected[i]]; const auto& e=b.view.units[enemy];
+CpMove CpTactics::attack(const TacticalPosition& p, const CpBoard& b, SlotIdx i, int from, int enemy) {
+  const auto& u=b.view.units[selected[i.value]]; const auto& e=b.view.units[enemy];
   CpMove result{u.id,e.tile,ranged(u.type)?CP_RANGED:CP_MELEE,impossible};
   auto d=damage(u.id,from,enemy,e.tile,initial.units[enemy].hp-e.hp);
   if (d.code) return result;
@@ -226,9 +229,9 @@ CpMove CpTactics::attack(const TacticalPosition& p, const CpBoard& b, int i, int
   result.score=dealt; result.self_damage=received;
   return result;
 }
-int CpTactics::potential(const TacticalPosition& p, const CpBoard& b, int i, int t,
+int CpTactics::potential(const TacticalPosition& p, const CpBoard& b, SlotIdx i, int t,
                          int num_attacks, int& near_kill) {
-  const auto& u=b.view.units[selected[i]];
+  const auto& u=b.view.units[selected[i.value]];
   int best=0; near_kill=-1;
   for (int id : b.enemies) {
     int to=b.view.units[id].tile, distance=adapter.distance(t,to);
@@ -242,19 +245,19 @@ int CpTactics::potential(const TacticalPosition& p, const CpBoard& b, int i, int
   }
   return num_attacks>0 ? num_attacks*best/2 : best/4;
 }
-bool CpTactics::can_end(const TacticalPosition& p, const CpBoard& b, int i, const CpMove& m, int t) {
+bool CpTactics::can_end(const TacticalPosition& p, const CpBoard& b, SlotIdx i, const CpMove& m, int t) {
   if (!b.plots[t].valid) return false;
   if (safe[i]==0) return true;
   int self=initial.units[m.unit].hp-b.view.units[m.unit].hp;
   int incoming=danger(m.unit,t,self,p.killed);
-  int count=0; for (int state : p.done) count+=state==0;
+  int count=0; for (SlotState state : p.slot_states) count+=state==SlotState::Pending;
   return turn_end(p,b,i,t,incoming,m.kill,m.self_damage,true,count>1,
                   m.remaining==combat_rules::moves[b.view.units[m.unit].type]).acceptable;
 }
-std::vector<CpMove> CpTactics::preferred(const TacticalPosition& p, const CpBoard& b, int i, int limit) {
+std::vector<CpMove> CpTactics::preferred(const TacticalPosition& p, const CpBoard& b, SlotIdx i, int limit) {
   std::vector<CpMove> moves, shots;
-  const auto& u=b.view.units[selected[i]];
-  if (p.done[i] || !b.plots[u.tile].valid) return moves;
+  const auto& u=b.view.units[selected[i.value]];
+  if (p.slot_states[i]!=SlotState::Pending || !b.plots[u.tile].valid) return moves;
   for (auto reach : adapter.move_intents(*p.branch,u.id)) {
     int t=reach.tile;
     if ((CAI_CP_AREA && adapter.distance(target,t)>6) || !b.plots[t].valid || b.plots[t].blocked) continue;
@@ -295,7 +298,7 @@ std::vector<CpMove> CpTactics::preferred(const TacticalPosition& p, const CpBoar
         m.kind=CP_FINISH_TEMP; moves.push_back(m);
       }
     } else {
-      if (p.moved[i] || b.plots[t].end) continue;
+      if (p.move_flags[i]!=MoveFlag::None || b.plots[t].end) continue;
       int attacks=u.attacked?0:std::min(1,(reach.remaining_moves+59)/60);
       m.score+=potential(p,b,i,t,attacks,m.near_kill)*10;
       if ((m.remaining>60 && u.type==4) || can_end(p,b,i,m,t)) {
@@ -332,12 +335,13 @@ void CpTactics::initialize(TacticalPosition& p) {
   // Only admitted participants may subsequently add their neighborhoods.
   bool have_target_enemies=!board(p).enemies.empty();
   roles.assign(selected.size(),CAI_FIRST_LINE); safe.assign(selected.size(),0);
-  for (int i=0; i<int(selected.size()); ++i) {
-    const auto& u=initial.units[selected[i]];
+  for (int slot_index=0; slot_index<int(selected.size()); ++slot_index) {
+    SlotIdx i{slot_index};
+    const auto& u=initial.units[selected[i.value]];
     roles[i]=movement_role(u,damage_history[u.id]);
     bool projected_to_die=damage_history[u.id]>u.hp;
     if (!admitted[u.id] || (!have_target_enemies && projected_to_die)) {
-      p.done[i]=2; admitted[u.id]=0;
+      p.slot_states[i]=SlotState::Blocked; admitted[u.id]=0;
     }
   }
   for (int id : selected) if (admitted[id]) {
@@ -359,10 +363,11 @@ void CpTactics::initialize(TacticalPosition& p) {
     for (int n=0; n<s.tile_count; ++n)
       if (p.plots[n] && b.plots[n].distance<=3 && adapter.distance(t,n)==2 && adapter.can_see(root,t,n))
         ++visibility_score[t];
-  for (int i=0; i<int(selected.size()); ++i) {
-    const auto& u=initial.units[selected[i]];
+  for (int slot_index=0; slot_index<int(selected.size()); ++slot_index) {
+    SlotIdx i{slot_index};
+    const auto& u=initial.units[selected[i.value]];
     initial_distance.push_back(b.plots[u.tile].distance);
-    if (!admitted[u.id]) { p.done[i]=2; continue; }
+    if (!admitted[u.id]) { p.slot_states[i]=SlotState::Blocked; continue; }
     // Root-only safe-plot count, before the tactical/non-sim plot filter.
     for (auto reach : adapter.move_intents(root,u.id))
       if ((!CAI_CP_AREA || adapter.distance(reach.tile,target)<=6) &&
@@ -372,22 +377,22 @@ void CpTactics::initialize(TacticalPosition& p) {
   }
   // dropSuperfluousUnits: importance is the first preferred action, including
   // BLOCKED (-10). Retain stable input order on equal scores.
-  std::vector<int> importance(selected.size(),0);
+  SlotValues<int32_t> importance(selected.size(),0);
   int keep=std::min(int(CAI_MAX_SELECTED),int(active_order.size()));
-  for (int i : active_order) {
+  for (SlotIdx i : active_order) {
     if (keep<=0) break;
     auto choices=preferred(p,b,i,1);
     importance[i]=choices.empty()?impossible:choices.front().score;
-    const auto& u=initial.units[selected[i]];
+    const auto& u=initial.units[selected[i.value]];
     if (u.hp<50) { // Default leader offense=0; no leader metadata in the ABI.
       if (!choices.empty() && choices.front().kind==CP_MOVE && u.moves<180) {
         importance[i]=impossible; --keep;
       } else importance[i]/=2;
     }
   }
-  std::stable_sort(active_order.begin(),active_order.end(),[&](int a,int b) { return importance[a]>importance[b]; });
+  std::stable_sort(active_order.begin(),active_order.end(),[&](SlotIdx a,SlotIdx b) { return importance[a]>importance[b]; });
   keep=std::max(0,keep);
-  for (int j=keep; j<int(active_order.size()); ++j) p.done[active_order[j]]=2;
+  for (int j=keep; j<int(active_order.size()); ++j) p.slot_states[active_order[j]]=SlotState::Blocked;
   active_order.resize(keep);
 }
 void CpTactics::extend_plots(TacticalPosition& p, const std::vector<int32_t>& added) const {
@@ -397,7 +402,7 @@ void CpTactics::extend_plots(TacticalPosition& p, const std::vector<int32_t>& ad
 std::vector<CpCombo> CpTactics::candidates(const TacticalPosition& p, bool depth_first) {
   auto b=board(p);
   std::vector<CpMove> overall;
-  for (int i : active_order) if (!p.done[i]) {
+  for (SlotIdx i : active_order) if (p.slot_states[i]==SlotState::Pending) {
     auto choices=preferred(p,b,i,depth_first?2:config.choices_per_unit);
     overall.insert(overall.end(),choices.begin(),choices.end());
   }
@@ -419,11 +424,11 @@ std::vector<CpCombo> CpTactics::candidates(const TacticalPosition& p, bool depth
     }
     int blocker=b.view.occupied[primary.tile];
     if (blocker<0) { add(primary); continue; }
-    if (!CAI_CP_COMBOS || index[blocker]<0 || p.done[index[blocker]]) continue;
+    if (!CAI_CP_COMBOS || index[blocker]<0 || p.slot_states[SlotIdx{index[blocker]}]!=SlotState::Pending) continue;
     for (auto freeing : overall) if (freeing.unit==blocker && freeing.kind==CP_MOVE) {
       if (primary.score+freeing.score < -10) continue;
       if (freeing.tile==b.view.units[primary.unit].tile) {
-        if (p.moved[index[blocker]]==2) continue;
+        if (p.move_flags[SlotIdx{index[blocker]}]==MoveFlag::Swapped) continue;
         // Simulator swaps have explicit physical restrictions in addition to
         // CP's reciprocal intentions (notably adjacency and available moves).
         if (!adapter.can_execute(*p.branch,{combat_rules::SWAP,primary.unit,primary.tile})) continue;
@@ -436,5 +441,65 @@ std::vector<CpCombo> CpTactics::candidates(const TacticalPosition& p, bool depth
   }
   std::stable_sort(result.begin(),result.end(),[](const CpCombo& a,const CpCombo& b) { return a.score>b.score; });
   return result;
+}
+FinalEvaluation CpTactics::evaluate_final_position(const TacticalPosition& position) {
+  FinalEvaluation evaluation;
+  evaluation.score = position.rank;
+  auto current = board(position);
+  int unsafe_positions = 0;
+  int positive_changes = 0;
+  int negative_changes = 0;
+  int target_distance_before = 0;
+  int target_distance_after = 0;
+
+  for (int slot_index = 0; slot_index < int(selected.size()); ++slot_index) {
+    SlotIdx slot{slot_index};
+    UnitId unit_id{selected[slot.value]};
+    const auto& unit = current.view.units[unit_id.value];
+    const auto& original = initial.units[unit_id.value];
+    if (position.slot_states[slot] == SlotState::Blocked || original.moves <= 0 || original.waiting)
+      continue;
+    if (unit.hp <= 0) {
+      evaluation.score -= original.hp;
+      continue;
+    }
+    if (position.slot_states[slot] == SlotState::Pending) {
+      if (!position.touched[slot]) evaluation.score += kUntouchedEarlyFinishBonus;
+      continue;
+    }
+
+    bool safe_end = false;
+    int end_score = move_score(position,current,slot,unit.tile,0,true,&safe_end).score;
+    if (!safe_end) ++unsafe_positions;
+    auto latest_move = std::find_if(position.assignments.rbegin(),position.assignments.rend(),
+        [&](const CaiAssignment& record) {
+      return record.unit == unit_id.value && (record.kind == CAI_MOVE || record.kind == CAI_SWAP ||
+             (record.kind == CAI_MELEE && record.killed_unit >= 0));
+    });
+    evaluation.score += latest_move == position.assignments.rend()
+        ? end_score : std::max(0,end_score-latest_move->score);
+
+    int distance = current.plots[unit.tile].distance;
+    if (roles[slot] == CAI_THIRD_LINE) {
+      positive_changes += initial_distance[slot] == 1 && distance > 1;
+      negative_changes += initial_distance[slot] > 1 && distance == 1;
+    } else {
+      int ideal_distance = roles[slot] == CAI_FIRST_LINE ? 1 : 2;
+      positive_changes += initial_distance[slot] != ideal_distance && distance == ideal_distance;
+      negative_changes += initial_distance[slot] == ideal_distance && distance != ideal_distance;
+    }
+    target_distance_before += adapter.distance(original.tile,target);
+    target_distance_after += adapter.distance(unit.tile,target);
+    evaluation.finishes.push_back(stationary_assignment(CAI_FINISH,unit,roles[slot],end_score));
+  }
+
+  int loss_limit = config.risk_budget_base + config.risk_budget_per_kill * int(position.killed.size());
+  bool attacked = std::any_of(position.assignments.begin(),position.assignments.end(),
+      [](const CaiAssignment& record) { return record.kind == CAI_MELEE || record.kind == CAI_RANGED; });
+  bool improved = !position.killed.empty() || position.discovered ||
+      (!current.enemies.empty() ? (positive_changes > negative_changes ||
+       (positive_changes == negative_changes && attacked)) : target_distance_after < target_distance_before);
+  evaluation.accepted = unsafe_positions <= loss_limit && improved;
+  return evaluation;
 }
 } // namespace combat_ai

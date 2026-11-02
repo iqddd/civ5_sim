@@ -9,6 +9,8 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <cstring>
+#include <type_traits>
 
 using namespace combat_ai;
 using namespace combat_rules;
@@ -259,8 +261,10 @@ struct TacticalFixture {
   std::unique_ptr<CpTactics> tactics;
   TacticalFixture(Fixture& f, int target, const std::vector<int32_t>& history={}) {
     position.branch=f.root->clone();
-    position.done.assign(f.selected.size(),0); position.moved=position.done;
-    position.last_kill=position.done; position.touched=position.done;
+    position.slot_states.assign(f.selected.size(),SlotState::Pending);
+    position.move_flags.assign(f.selected.size(),MoveFlag::None);
+    position.last_kill.assign(f.selected.size(),0);
+    position.touched.assign(f.selected.size(),0);
     CaiSearchRequest request{&f.state,0,f.turn,target,f.selected.data(),int32_t(f.selected.size()),{0,-1,nullptr,0}};
     tactics=std::make_unique<CpTactics>(*f.adapter,*f.root,f.config,request,history);
     tactics->initialize(position);
@@ -272,18 +276,18 @@ void cp_area_and_preferences() {
   TacticalFixture f(distant,9);
   auto board=f.tactics->board(f.position);
   CHECK(board.plots[0].valid); CHECK(!board.plots[2].valid);
-  auto preferred=f.tactics->preferred(f.position,board,0,9);
+  auto preferred=f.tactics->preferred(f.position,board,SlotIdx{0},9);
   CHECK(std::any_of(preferred.begin(),preferred.end(),[](CpMove m) { return m.kind==CP_MOVE && m.tile==4; }));
   CHECK(preferred.back().kind==CP_BLOCKED && preferred.back().score==-10);
   for (auto m : preferred) if (m.kind==CP_MOVE) CHECK(distant.adapter->distance(m.tile,9)<=6);
   // Starting outside radius six does not exclude a participant with a useful
   // reachable destination. Conversely, all far intents produce only BLOCKED.
   TacticalFixture far(distant,15);
-  auto blocked=far.tactics->preferred(far.position,far.tactics->board(far.position),0,9);
+  auto blocked=far.tactics->preferred(far.position,far.tactics->board(far.position),SlotIdx{0},9);
   CHECK(blocked.size()==1 && blocked[0].kind==CP_BLOCKED);
   Fixture ties; ties.add(0,0,17); ties.start();
   TacticalFixture equal(ties,17);
-  auto top=equal.tactics->preferred(equal.position,equal.tactics->board(equal.position),0,2);
+  auto top=equal.tactics->preferred(equal.position,equal.tactics->board(equal.position),SlotIdx{0},2);
   CHECK(top.size()>3); // More than two actions plus BLOCKED: cutoff ties survive.
   int cutoff=top[1].score;
   for (size_t i=2; i+1<top.size(); ++i) CHECK(top[i].score==cutoff);
@@ -306,7 +310,7 @@ void cp_blocker_combinations() {
   auto before=f.position.branch->state();
   auto old_units=std::vector<CaiUnit>(before.units,before.units+before.unit_count);
   auto board=f.tactics->board(f.position);
-  auto choices=f.tactics->preferred(f.position,board,0,9);
+  auto choices=f.tactics->preferred(f.position,board,SlotIdx{0},9);
   CHECK(std::any_of(choices.begin(),choices.end(),[](CpMove m) { return m.kind==CP_MOVE && m.tile==16; }));
   auto after=f.position.branch->state();
   for (int id=0; id<after.unit_count; ++id)
@@ -324,7 +328,7 @@ void cp_blocker_combinations() {
   CHECK(freeing); // A real blocker, even when the follower is not adjacent.
   corridor.selected={0};
   TacticalFixture omitted(corridor,17);
-  auto blocked=omitted.tactics->preferred(omitted.position,omitted.tactics->board(omitted.position),0,9);
+  auto blocked=omitted.tactics->preferred(omitted.position,omitted.tactics->board(omitted.position),SlotIdx{0},9);
   CHECK(std::none_of(blocked.begin(),blocked.end(),[](CpMove m) { return m.kind==CP_MOVE && m.tile==16; }));
   Fixture swap; swap.add(1,0,16,50); swap.add(3,0,15); swap.add(0,1,17,50);
   swap.corridor({15,16,17}); swap.start(); TacticalFixture reciprocal(swap,17);
@@ -333,9 +337,9 @@ void cp_blocker_combinations() {
     return c.moves.size()==2 && c.moves[0].kind==CP_SWAP && c.moves[1].kind==CP_SWAP_REVERSE;
   }));
   // BLOCKED does not promise cover at turn end; FINISH_TEMP does.
-  f.position.done[1]=2;
+  f.position.slot_states[SlotIdx{1}]=SlotState::Blocked;
   CHECK(!f.tactics->board(f.position).plots[16].end);
-  f.position.done[1]=1;
+  f.position.slot_states[SlotIdx{1}]=SlotState::Finished;
   auto ended=f.tactics->board(f.position);
   CHECK(ended.plots[16].end && ended.plots[15].friends_end==1);
 }
@@ -381,20 +385,20 @@ void cp_history_and_admission() {
   Fixture f; f.w=16; f.h=16; f.tiles.resize(256);
   f.add(0,0,0); f.add(0,1,1); f.start();
   TacticalFixture absent(f,240);
-  CHECK(absent.position.done[0]==0);
-  CHECK(absent.tactics->roles[0]==CAI_FIRST_LINE);
+  CHECK(absent.position.slot_states[SlotIdx{0}]==SlotState::Pending);
+  CHECK(absent.tactics->roles[SlotIdx{0}]==CAI_FIRST_LINE);
   CHECK(absent.position.plots[0] && absent.position.plots[1]);
   TacticalFixture equality(f,240,{100,0});
-  CHECK(equality.position.done[0]==0); // Strict >, not >=.
+  CHECK(equality.position.slot_states[SlotIdx{0}]==SlotState::Pending); // Strict >, not >=.
   TacticalFixture excluded(f,240,{101,0});
-  CHECK(excluded.position.done[0]==2);
+  CHECK(excluded.position.slot_states[SlotIdx{0}]==SlotState::Blocked);
   CHECK(!excluded.position.plots[0] && !excluded.position.plots[1]);
   CHECK(excluded.tactics->initial_enemies.empty());
   // A remote unrelated enemy cannot admit the unit by being added through
   // its neighborhood before admission. Near the real target it is admitted.
   TacticalFixture frontline(f,1,{101,0});
-  CHECK(frontline.position.done[0]==0);
-  CHECK(frontline.tactics->roles[0]==CAI_THIRD_LINE);
+  CHECK(frontline.position.slot_states[SlotIdx{0}]==SlotState::Pending);
+  CHECK(frontline.tactics->roles[SlotIdx{0}]==CAI_THIRD_LINE);
   CHECK(movement_role(f.units[0],100)==CAI_FIRST_LINE);
   CHECK(movement_role(f.units[0],101)==CAI_THIRD_LINE);
 }
@@ -410,9 +414,158 @@ void cp_area_capacity() {
   TacticalFixture cap(f,target);
   CHECK(std::accumulate(cap.position.plots.begin(),cap.position.plots.end(),0)==255);
   CHECK(cap.position.plots[horse]);
-  auto choices=cap.tactics->preferred(cap.position,cap.tactics->board(cap.position),12,9);
+  auto choices=cap.tactics->preferred(cap.position,cap.tactics->board(cap.position),SlotIdx{12},9);
   CHECK(!choices.empty() && choices.back().kind==CP_BLOCKED);
   CHECK(std::any_of(choices.begin(),choices.end(),[](CpMove m) { return m.kind==CP_MOVE; }));
+}
+void planner_invariants() {
+  static_assert(!std::is_convertible_v<UnitId,SlotIdx>);
+  static_assert(!std::is_convertible_v<SlotIdx,UnitId>);
+  static_assert(!std::is_convertible_v<UnitId,int32_t>);
+  TacticalPosition position;
+  position.slot_states.assign(1,SlotState::Pending);
+  position.killed={3,9};
+  CHECK(!terminal_position(position,{3,4})); // Same count, original #4 survives.
+  position.killed={9};
+  CHECK(!terminal_position(position,{4}));
+  position.killed={3,4,9};
+  CHECK(terminal_position(position,{3,4})); // Extra casualties do not prevent completion.
+  CHECK(!terminal_position(position,{}));
+  position.slot_states[SlotIdx{0}]=SlotState::Finished;
+  CHECK(terminal_position(position,{}));
+
+  Fixture f; f.add(0,0,16); f.add(0,0,9); f.selected={0}; f.start();
+  TacticalFixture tactical(f,18);
+  SelectedUnits selection(f.selected.data(),int32_t(f.selected.size()),int32_t(f.units.size()));
+  CandidateExecutor executor(*f.adapter,*tactical.tactics,selection,0);
+  for (int bad_id : {-1,1,999}) {
+    CpMove bad;
+    bad.unit=bad_id;
+    bad.tile=15;
+    CpCombo candidate{{bad},0};
+    bool rejected=false;
+    try { executor.apply(tactical.position,candidate); }
+    catch (const std::logic_error&) { rejected=true; }
+    CHECK(rejected);
+    CHECK(tactical.position.assignments.empty());
+    CHECK(tactical.position.branch->state().units[0].tile==16);
+  }
+  CpMove orphan;
+  orphan.unit=0;
+  orphan.tile=16;
+  orphan.kind=CP_SWAP_REVERSE;
+  bool rejected=false;
+  try { executor.apply(tactical.position,{{orphan},0}); }
+  catch (const std::logic_error&) { rejected=true; }
+  CHECK(rejected && tactical.position.assignments.empty());
+
+  CpMove unknown_kind;
+  unknown_kind.unit=0;
+  unknown_kind.tile=15;
+  unknown_kind.kind=static_cast<CpMoveKind>(999);
+  bool invalid_kind=false;
+  try { executor.apply(tactical.position,{{unknown_kind},0}); }
+  catch (const std::logic_error&) { invalid_kind=true; }
+  CHECK(invalid_kind && tactical.position.assignments.empty());
+
+  CpMove move;
+  move.unit=0;
+  move.tile=15;
+  CHECK(executor.apply(tactical.position,{{move},0}));
+  CpMove finish;
+  finish.unit=0;
+  finish.tile=16; // Deliberately stale proposal; bookkeeping reads the child.
+  finish.kind=CP_FINISH_TEMP;
+  CHECK(executor.apply(tactical.position,{{finish},0}));
+  CHECK(tactical.position.assignments.back().from_tile==15);
+  CHECK(tactical.position.assignments.back().to_tile==15);
+}
+void planner_finalization() {
+  Fixture unsafe; unsafe.config.risk_budget_base=0; unsafe.config.risk_budget_per_kill=0;
+  unsafe.add(1,0,16,10); unsafe.add(0,1,17); unsafe.start();
+  TacticalFixture f(unsafe,17);
+  f.position.slot_states[SlotIdx{0}]=SlotState::Finished;
+  f.position.touched[SlotIdx{0}]=1;
+  f.position.discovered=true; // Ensure danger, not lack of improvement, rejects it.
+  f.position.assignments.push_back(stationary_assignment(CAI_FINISH_TEMP,unsafe.units[0],CAI_SECOND_LINE));
+  auto before=f.position.assignments;
+  auto states=f.position.slot_states;
+  auto evaluation=f.tactics->evaluate_final_position(f.position);
+  CHECK(!evaluation.accepted);
+  CHECK(f.position.slot_states==states);
+  CHECK(f.position.assignments.size()==before.size());
+  CHECK(std::memcmp(before.data(),f.position.assignments.data(),before.size()*sizeof(CaiAssignment))==0);
+  bool rejected=false;
+  try { finalize_assignments(f.position,evaluation); }
+  catch (const std::logic_error&) { rejected=true; }
+  CHECK(rejected);
+  CHECK(std::memcmp(before.data(),f.position.assignments.data(),before.size()*sizeof(CaiAssignment))==0);
+
+  Fixture safe; safe.add(1,0,16); safe.add(0,1,17,1); safe.start();
+  TacticalFixture accepted(safe,17);
+  SelectedUnits selection(safe.selected.data(),int32_t(safe.selected.size()),int32_t(safe.units.size()));
+  CandidateExecutor executor(*safe.adapter,*accepted.tactics,selection,0);
+  CpMove attack;
+  attack.unit=0;
+  attack.tile=17;
+  attack.kind=CP_RANGED;
+  CHECK(executor.apply(accepted.position,{{attack},0}));
+  auto actions_before=accepted.position.assignments.size();
+  auto valid=accepted.tactics->evaluate_final_position(accepted.position);
+  CHECK(valid.accepted && valid.finishes.size()==1);
+  CHECK(accepted.position.assignments.size()==actions_before);
+  finalize_assignments(accepted.position,valid);
+  CHECK(accepted.position.assignments.size()==actions_before+1);
+  CHECK(accepted.position.assignments.back().kind==CAI_FINISH);
+  auto finalized_count=accepted.position.assignments.size();
+  bool repeated=false;
+  try { finalize_assignments(accepted.position,valid); }
+  catch (const std::logic_error&) { repeated=true; }
+  CHECK(repeated && accepted.position.assignments.size()==finalized_count);
+}
+void planner_combo_contacts() {
+  Fixture f; f.w=10; f.h=7; f.tiles.resize(70); f.fog=1;
+  f.add(0,0,46); f.add(4,0,42); f.add(0,1,24); f.start();
+  CHECK(!f.visibility[24]);
+  TacticalFixture context(f,24);
+  SelectedUnits selection(f.selected.data(),int32_t(f.selected.size()),int32_t(f.units.size()));
+  CandidateExecutor executor(*f.adapter,*context.tactics,selection,0);
+  CpMove freeing;
+  freeing.unit=0;
+  freeing.tile=47;
+  freeing.kind=CP_FORCED;
+  CpMove follower;
+  follower.unit=1;
+  follower.tile=46;
+  CHECK(executor.apply(context.position,{{freeing,follower},0}));
+  const auto& records=context.position.assignments;
+  CHECK(records.size()==3);
+  CHECK(records[0].unit==0 && records[0].kind==CAI_MOVE);
+  CHECK(records[1].unit==1 && records[1].kind==CAI_MOVE);
+  CHECK(records[1].to_tile!=46 && records[1].command_target==46);
+  CHECK(context.position.branch->state().visibility[24]);
+  CHECK(records[2].kind==CAI_RESTART && records[2].unit==1);
+  CHECK(!context.position.restart_source);
+
+  Fixture swap; swap.add(1,0,16,50); swap.add(3,0,15); swap.add(0,1,17,50);
+  swap.corridor({15,16,17}); swap.start();
+  TacticalFixture reciprocal(swap,17);
+  SelectedUnits swapped(swap.selected.data(),int32_t(swap.selected.size()),int32_t(swap.units.size()));
+  CandidateExecutor swap_executor(*swap.adapter,*reciprocal.tactics,swapped,0);
+  CpMove forward;
+  forward.unit=0;
+  forward.tile=15;
+  forward.kind=CP_SWAP;
+  forward.score=11;
+  CpMove reverse;
+  reverse.unit=1;
+  reverse.tile=16;
+  reverse.kind=CP_SWAP_REVERSE;
+  reverse.score=7;
+  CHECK(swap_executor.apply(reciprocal.position,{{forward,reverse},18}));
+  CHECK(reciprocal.position.assignments[0].score==11);
+  CHECK(reciprocal.position.assignments[1].kind==CAI_SWAP_REVERSE);
+  CHECK(reciprocal.position.assignments[1].score==7);
 }
 int main(int argc,char** argv) {
   try {
@@ -432,6 +585,9 @@ int main(int argc,char** argv) {
     else if(name=="cp_forecast_and_danger") cp_forecast_and_danger();
     else if(name=="cp_history_and_admission") cp_history_and_admission();
     else if(name=="cp_area_capacity") cp_area_capacity();
+    else if(name=="planner_invariants") planner_invariants();
+    else if(name=="planner_finalization") planner_finalization();
+    else if(name=="planner_combo_contacts") planner_combo_contacts();
     else throw std::runtime_error("unknown test group");
     std::cout<<name<<" passed\n"; return 0;
   } catch(const std::exception& e) { std::cerr<<e.what()<<"\n"; return 1; }

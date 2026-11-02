@@ -1,6 +1,6 @@
 # Область поиска и комбинации CP Only
 
-2 ноября 2026. Рабочая версия `0.7.1 CP-07`, ABI 5. Источник:
+2 ноября 2026. Рабочая версия `0.7.2 CP-07`, ABI 5. Источник:
 `Community-Patch-DLL@029e5988b7726299d6446ddddaaf3782a9c46d61`, CP Only,
 `BALANCE_VP=0`, `CORE_TWO_PASS_DANGER=0`. Проверка исходников:
 `python tools/check_combat_ai_sources.py`.
@@ -150,6 +150,9 @@ python tools/measure_cp_transfer.py report --out build/cp-transfer-repeat
 
 Полный отчёт и результаты сохраняются в
 `artifacts/combat-ai/cp-transfer-20261102`. Прежние эксперименты не перезаписываются.
+
+Обновление 0.7.2: [исправления инвариантов и явные типы](combat-ai-planner-invariants.md).
+Приведённые ниже ревью и замеры относятся к 0.7.1; архив сохранён неизменным.
 
 ## Результат проверки
 
