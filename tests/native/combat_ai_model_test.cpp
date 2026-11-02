@@ -194,7 +194,69 @@ void turn_and_healing() {
   CHECK(f.branch->state().units[0].hp==60 && f.branch->state().units[0].fortified);
   f.step({MOVE,0,27}); f.step({END_TURN,-1,-1}); f.step({END_TURN,-1,-1});
   CHECK(f.branch->state().units[0].hp==60 && !f.branch->state().units[0].fortified);
-  CHECK(f.branch->contacts().turn==0);
+  CHECK(f.branch->contacts().turn==f.branch->state().turn);
+}
+
+void contact_memory_roundtrip() {
+  auto same_memory = [](const ContactMemory& a, const ContactMemory& b) {
+    CHECK(a.turn==b.turn && a.side==b.side);
+    CHECK(a.known_enemies.size()==b.known_enemies.size());
+    for(size_t i=0;i<a.known_enemies.size();++i) {
+      CHECK(a.known_enemies[i].id==b.known_enemies[i].id);
+      CHECK(a.known_enemies[i].last_seen_own_turn==b.known_enemies[i].last_seen_own_turn);
+    }
+  };
+  for(int observer : {0,1}) {
+    Fixture f;
+    f.units={unit(0,observer,26),unit(0,1-observer,27)};
+    ContactMemory real_memory{0,observer,{}};
+    f.start(real_memory,0,observer);
+    auto sibling=f.branch->clone();
+    const auto sibling_memory=sibling->contacts();
+    CHECK(f.adapter->apply(*f.branch,{END_TURN,-1,-1}).accepted);
+    CHECK(f.adapter->apply(*f.branch,{END_TURN,-1,-1}).accepted);
+    const auto& state=f.branch->state();
+    const auto memory=f.branch->contacts();
+    CHECK(state.turn==2 && memory.turn==state.turn);
+    CHECK(memory.known_enemies.size()==1);
+    CHECK(memory.known_enemies[0].last_seen_own_turn==own_turn(state.turn,state.active_side,observer));
+    auto restored=f.adapter->root(state,memory);
+    same_memory(restored->contacts(),memory);
+    CHECK(restored->state().turn==state.turn);
+    same_memory(sibling->contacts(),sibling_memory);
+    CHECK(real_memory.turn==0 && real_memory.side==observer && real_memory.known_enemies.empty());
+    CHECK(!f.adapter->apply(*f.branch,{MOVE,-1,0}).accepted);
+    same_memory(f.branch->contacts(),memory);
+
+    // A stale real observation is a valid input. The root observes the
+    // current branch without modifying that input or extending hidden ages.
+    auto late=f.input;
+    late.turn=6;
+    auto current=f.adapter->root(late,real_memory);
+    CHECK(current->contacts().turn==6);
+    CHECK(current->contacts().known_enemies[0].last_seen_own_turn==own_turn(6,0,observer));
+    auto current_restored=f.adapter->root(current->state(),current->contacts());
+    same_memory(current_restored->contacts(),current->contacts());
+    CHECK(real_memory.turn==0 && real_memory.known_enemies.empty());
+  }
+
+  Fixture hidden;
+  hidden.fog=1;
+  hidden.units={unit(0,0,26),unit(0,1,80)};
+  hidden.start();
+  ContactMemory remembered{0,0,{{1,0}}};
+  for(int turn : {2,4}) {
+    auto input=hidden.input;
+    input.turn=turn;
+    auto aged=hidden.adapter->root(input,remembered);
+    CHECK(aged->contacts().turn==turn);
+    CaiUnit enemy{};
+    CHECK(hidden.adapter->known_enemy(*aged,1,enemy)==(turn==2));
+    auto restored=hidden.adapter->root(aged->state(),aged->contacts());
+    same_memory(restored->contacts(),aged->contacts());
+    CHECK(hidden.adapter->known_enemy(*restored,1,enemy)==(turn==2));
+    CHECK(remembered.turn==0 && remembered.known_enemies[0].last_seen_own_turn==0);
+  }
 }
 
 void contact() {
@@ -245,6 +307,41 @@ void visibility() {
   CHECK(hidden.remaining(0,29)==0);
   CHECK(hidden.step({MOVE,0,29}).contact_interrupted);
   CHECK(hidden.branch->state().units[0].tile==27);
+}
+
+void adapter_query_contracts() {
+  Fixture attacker;
+  attacker.units={unit(4),unit(0,0,40),unit(4,0,50,0)};
+  attacker.start();
+  CHECK(attacker.adapter->attack_moves(*attacker.branch,{MELEE,0,27})==180);
+  CHECK(attacker.adapter->attack_moves(*attacker.branch,{MELEE,1,41})==0);
+  for(Command command : std::vector<Command>{{MELEE,2,51},{MOVE,0,27}}) {
+    bool rejected=false;
+    try { attacker.adapter->attack_moves(*attacker.branch,command); }
+    catch(const std::invalid_argument&) { rejected=true; }
+    CHECK(rejected);
+  }
+
+  // Visibility belongs to the last accepted transition. Failed commands
+  // preserve it; a subsequent accepted command replaces it, even with empty.
+  Fixture scout;
+  scout.fog=1;
+  scout.units={unit(4),unit(0,1,30)};
+  scout.start();
+  auto move=scout.adapter->apply(*scout.branch,{MOVE,0,28});
+  CHECK(move.accepted && !move.newly_visible.empty());
+  auto revealed=scout.adapter->prospective_units(*scout.branch,move.newly_visible);
+  CHECK(std::any_of(revealed.begin(),revealed.end(),[](const CaiUnit& u) {return u.id==1;}));
+  auto invalid=scout.adapter->apply(*scout.branch,{MOVE,-1,0});
+  CHECK(!invalid.accepted && invalid.newly_visible.empty());
+  auto still_revealed=scout.adapter->prospective_units(*scout.branch,move.newly_visible);
+  CHECK(revealed.size()==still_revealed.size());
+  auto wait=scout.adapter->apply(*scout.branch,{SKIP,0,-1});
+  CHECK(wait.accepted && wait.newly_visible.empty());
+  bool rejected=false;
+  try { scout.adapter->prospective_units(*scout.branch,move.newly_visible); }
+  catch(const std::invalid_argument&) { rejected=true; }
+  CHECK(rejected);
 }
 
 void ownership() {
@@ -308,6 +405,16 @@ void bounds_and_invalid() {
     Fixture edge;edge.parity=parity;edge.wrap=wrap;edge.units={unit(4,0,24)};edge.start();
     CHECK(edge.adapter->distance(24,35)==(wrap?1:11));
     if(wrap) edge.step({MOVE,0,35}); else CHECK(!edge.step({MOVE,0,35}).accepted);
+  }
+  // Both adapter path policies must reject off-map neighbor sentinels.
+  for(int parity : {0,1}) for(int wrap : {0,1}) for(int tile : {0,11,84,95}) {
+    Fixture edge;
+    edge.parity=parity;edge.wrap=wrap;edge.units={unit(4,0,tile)};edge.start();
+    CHECK(!edge.adapter->move_intents(*edge.branch,0).empty());
+    CHECK(!edge.adapter->threatened_tiles(*edge.branch,0).empty());
+    for(auto destination : edge.adapter->move_intents(*edge.branch,0))
+      CHECK(destination.tile>=0 && destination.tile<96);
+    for(int target : edge.adapter->threatened_tiles(*edge.branch,0)) CHECK(target>=0 && target<96);
   }
 }
 
@@ -494,7 +601,7 @@ void danger_cache_and_contacts() {
   CHECK(hidden_danger->incoming(*branch,0,27)>0);
   for(int i=0;i<4;++i) CHECK(hidden.adapter->apply(*branch,{END_TURN,-1,-1}).accepted);
   CHECK(hidden_danger->incoming(*branch,0,27)==0);
-  CHECK(branch->contacts().turn==0);
+  CHECK(branch->contacts().turn==branch->state().turn);
   auto discovered=hidden.branch->clone();
   CHECK(hidden_danger->incoming(*discovered,0,27)==0);
   CHECK(hidden.adapter->apply(*discovered,{MOVE,0,27}).accepted);
@@ -544,6 +651,8 @@ int main(int argc,char** argv) {
     {"movement",movement},{"terrain_and_zoc",terrain_and_zoc},{"swaps",swaps},
     {"combat",combat},{"turn_and_healing",turn_and_healing},{"contact",contact},
     {"visibility",visibility},{"ownership",ownership},{"bounds_and_invalid",bounds_and_invalid},
+    {"contact_memory_roundtrip",contact_memory_roundtrip},
+    {"adapter_query_contracts",adapter_query_contracts},
     {"random_sequences",random_sequences},{"danger_damage",danger_damage},
     {"danger_movement",danger_movement},{"danger_heuristics",danger_heuristics},
     {"danger_cache_and_contacts",danger_cache_and_contacts},{"danger_bounds",danger_bounds}};

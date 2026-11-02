@@ -6,17 +6,29 @@
 #include <vector>
 
 namespace combat_ai {
-struct ReachableTile { int32_t tile, remaining_moves; };
-struct Command { int32_t kind, unit, target; };  // simulator Action kinds
-struct CommandResult { int32_t code, moved, damage, retaliation, attacker_strength, defender_strength; };
-struct Damage { int32_t damage, retaliation, code, attacker_strength, defender_strength; };
+struct ReachableTile {
+  int32_t tile, remaining_moves;
+};
+struct Command {
+  int32_t kind, unit, target;
+};  // simulator Action kinds
+struct CommandResult {
+  int32_t code, moved, damage, retaliation, attacker_strength, defender_strength;
+};
+struct Damage {
+  int32_t damage, retaliation, code, attacker_strength, defender_strength;
+};
 struct Transition {
   bool accepted, contact_interrupted;
   std::vector<int32_t> newly_visible;
   CommandResult result;
 };
-struct Contact { int32_t id, last_seen_own_turn; };
+struct Contact {
+  int32_t id, last_seen_own_turn;
+};
 // Owned counterpart of CaiSearchRequest::contacts, copied for every root.
+// A branch advances turn to its own observation time, including hypothetical
+// transitions. This copy never updates the caller's real observation history.
 struct ContactMemory {
   int32_t turn = 0, side = -1;
   std::vector<Contact> known_enemies;
@@ -24,6 +36,9 @@ struct ContactMemory {
 // Counts observer-turn starts, up to a harmless initial offset. No int32 overflow.
 int32_t own_turn(int32_t turn, int32_t active_side, int32_t observer);
 
+// A branch requires exclusive access, including const queries: state() and
+// danger queries update branch-owned export buffers and caches. Distinct
+// branches may be used independently with the same immutable adapter.
 class Branch {
  public:
   virtual ~Branch() = default;
@@ -32,6 +47,8 @@ class Branch {
   // The view and its arrays are owned by this branch and remain valid until
   // its next state() call, mutation, or destruction. Map tiles are shared.
   virtual const CaiBattleState& state() const = 0;
+  // Branch-local memory, valid for root(state(), contacts()). Real agent
+  // memory remains external and advances only on real observations.
   virtual const ContactMemory& contacts() const = 0;
 };
 
@@ -50,16 +67,18 @@ class RulesAdapter {
   virtual std::vector<int32_t> threatened_tiles(const Branch&, int32_t unit) const = 0;
   // ScoreAttackDamage/GetDanger query at assumed plots, without mutation,
   // movement validation or revealing contacts. Damage uses simulator rules.
-  virtual Damage forecast(const Branch&, int32_t attacker, int32_t from,
-      int32_t defender, int32_t to, int32_t extra_defender_damage = 0,
-      bool ignore_adjacency = true, bool unknown_origin = false) const = 0;
+  virtual Damage forecast(const Branch&, int32_t attacker, int32_t from, int32_t defender,
+                          int32_t to, int32_t extra_defender_damage = 0,
+                          bool ignore_adjacency = true, bool unknown_origin = false) const = 0;
+  // Remaining movement after a proposed MELEE by a living unit. Not a legality
+  // check: callers separately validate the proposed attack and destination.
   virtual int32_t attack_moves(const Branch&, Command) const = 0;
   virtual std::vector<Command> actions(const Branch&) const = 0;
   virtual bool can_execute(const Branch&, Command) const = 0;
   // next_turn refreshes only the attacker's moves/attack/wait flags on a
   // private copy, preserving branch visibility, contact history and turn.
-  virtual Damage preview(const Branch&, Command, bool next_turn = false) const = 0; // roll 600
-  virtual Transition apply(Branch&, Command) const = 0;     // fixed roll 600
+  virtual Damage preview(const Branch&, Command, bool next_turn = false) const = 0;  // roll 600
+  virtual Transition apply(Branch&, Command) const = 0;  // fixed roll 600
   virtual int32_t distance(int32_t from, int32_t to) const = 0;
   virtual std::vector<int32_t> neighbors(int32_t tile) const = 0;
   virtual int32_t defense(int32_t tile) const = 0;
@@ -69,7 +88,8 @@ class RulesAdapter {
   virtual bool can_shoot(const Branch&, int32_t unit, int32_t to) const = 0;
   virtual bool can_target(int32_t from, int32_t to) const = 0;
   // Privileged v1 queries only at the CP source call sites. No RNG access.
-  // prospective_units reads only cells newly visible after an assumed move.
+  // prospective_units reads only cells newly visible in the last accepted
+  // transition. A rejected apply leaves that view unchanged; check accepted.
   virtual std::vector<CaiUnit> prospective_units(
       const Branch&, const std::vector<int32_t>& newly_visible) const = 0;
   // known_enemy requires an ID from ContactMemory; returns false when dead.

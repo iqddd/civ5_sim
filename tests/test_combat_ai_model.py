@@ -33,6 +33,9 @@ class BranchModelTests(unittest.TestCase):
     def test_turn_and_healing(self):
         self.check_native("turn_and_healing")
 
+    def test_contact_memory_roundtrip_and_isolation(self):
+        self.check_native("contact_memory_roundtrip")
+
     def test_contact_stops_command_and_allows_continuation(self):
         self.check_native("contact")
 
@@ -41,6 +44,9 @@ class BranchModelTests(unittest.TestCase):
 
     def test_ownership_and_real_rng_isolation(self):
         self.check_native("ownership")
+
+    def test_adapter_query_preconditions_and_accepted_visibility(self):
+        self.check_native("adapter_query_contracts")
 
     def test_bounds_and_invalid(self):
         self.check_native("bounds_and_invalid")
