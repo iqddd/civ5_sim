@@ -1,7 +1,9 @@
 """Compare two ABI6 planners on fresh requests and replay every plan."""
 
 import argparse
+import gzip
 import hashlib
+import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -19,8 +21,14 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def check(before, after, output):
-    corpus = fresh_cases()
+def check(before, after, output, corpus_path=None):
+    if corpus_path is None:
+        corpus = fresh_cases()
+    elif corpus_path.suffix == ".gz":
+        with gzip.open(corpus_path, "rt", encoding="utf-8") as stream:
+            corpus = json.load(stream)
+    else:
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
     runs = {}
     versions = {}
     for label, dll in (("before", before), ("after", after)):
@@ -33,7 +41,11 @@ def check(before, after, output):
             with ai.Planner(ai.SearchConfig(**config)) as planner:
                 versions[label] = planner.version
                 result = planner.search(load_request(case["request"]))
-            runs[label][name] = {"result": asdict(result), "validation": replay_plan(case, result)}
+            content = asdict(result)
+            diagnostics = content.pop("diagnostics", {})
+            runs[label][name] = {"result": content, "diagnostics": diagnostics,
+                                 "validation": replay_plan(case, result) if "snapshot" in case else
+                                 {"checked": False, "reason": "physical request without a replay snapshot"}}
     rows = []
     for name in corpus:
         old, new = runs["before"][name], runs["after"][name]
@@ -51,7 +63,9 @@ def check(before, after, output):
                                           for p in (ROOT / "native/combat_ai").glob("*") if p.is_file()},
                         "cases": len(rows), "identical": sum(r["identical_result"] for r in rows),
                         "rows": rows})
-    print(f'{len(rows)} cases replay-checked; {sum(r["identical_result"] for r in rows)} identical full results')
+    replay_checked = sum(row["after_validation"]["checked"] for row in rows)
+    print(f'{len(rows)} requests, {replay_checked} replay-checked; '
+          f'{sum(r["identical_result"] for r in rows)} identical full results')
     print("Changed:", [r["case"] for r in rows if not r["identical_result"]])
 
 
@@ -60,5 +74,6 @@ if __name__ == "__main__":
     parser.add_argument("--before", type=Path, required=True)
     parser.add_argument("--after", type=Path, default=ai.LIBRARY_PATH)
     parser.add_argument("--out", type=Path, default=ROOT / "build/planner-refactor-comparison.json")
+    parser.add_argument("--corpus", type=Path, help="Explicit request corpus; optional gzip JSON")
     args = parser.parse_args()
-    check(args.before.resolve(), args.after.resolve(), args.out.resolve())
+    check(args.before.resolve(), args.after.resolve(), args.out.resolve(), args.corpus)

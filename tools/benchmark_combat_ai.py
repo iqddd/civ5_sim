@@ -140,6 +140,8 @@ def aggregate(records):
     cp_diagnostics = Counter()
     cancel_reasons = Counter()
     search_reasons = Counter()
+    recovery_kinds = Counter()
+    waiting_reasons = Counter()
     memory = []
     for record in records:
         case, result = record["case"], record["result"]
@@ -157,6 +159,9 @@ def aggregate(records):
             d = record["checked"]["diagnostics"][side]
             cp_diagnostics.update({k: d[k] for k in ("searches", "support_calls", "empty_searches",
                                                    "empty_support", "replanning_searches")})
+            cp_diagnostics.update({k: d.get(k, 0) for k in ("recovery_calls", "group_reductions", "end_risk_rejections")})
+            recovery_kinds.update(d.get("recovery_kinds", {}))
+            waiting_reasons.update(d.get("waiting_reasons", {}))
             cp_diagnostics.update({"positions_"+k: v for k, v in d["positions"].items()})
             cancel_reasons.update(d["cancellations"])
             search_reasons.update(d["search_reasons"])
@@ -191,6 +196,7 @@ def aggregate(records):
             "peak_process_rss_bytes": distribution(memory),
             "cp_diagnostics": dict(cp_diagnostics), "cancellations": dict(cancel_reasons),
             "search_reasons": dict(search_reasons),
+            "recovery_kinds": dict(recovery_kinds), "waiting_reasons": dict(waiting_reasons),
             "empty_search_fraction": cp_diagnostics["empty_searches"] / max(1, cp_diagnostics["searches"]),
             "replanning_search_fraction": cp_diagnostics["replanning_searches"] / max(1, cp_diagnostics["searches"])}
 

@@ -126,6 +126,17 @@ class ReplayStore:
                 continue  # A just-written result may not yet be complete.
         return sorted(result, key=lambda row: row["id"])
 
+    def status(self):
+        try:
+            value = read_json(self.root / "summary.json")
+            summary = value["summary"]
+            return {"complete": value.get("schema") == 1,
+                    "acceptance": bool(value.get("acceptance")),
+                    "checked": summary["matches"], "failures": len(value.get("failures", [])),
+                    "greedy": summary.get("outcomes", {}).get("opponent/greedy", {}).get("outcomes", {})}
+        except (OSError, KeyError, ValueError, TypeError):
+            return None  # A live summary may be between writes.
+
     def load(self, key):
         with self.lock:
             path = self.paths().get(key)
@@ -159,6 +170,8 @@ def create_server(root, port=8765):
                     self.respond(200, TEMPLATE.read_bytes(), "text/html; charset=utf-8")
                 elif request.path == "/api/matches":
                     self.respond(200, json.dumps(store.catalog(), ensure_ascii=False).encode("utf-8"))
+                elif request.path == "/api/status":
+                    self.respond(200, json.dumps(store.status(), ensure_ascii=False).encode("utf-8"))
                 elif request.path == "/api/replay":
                     key = parse_qs(request.query).get("id", [""])[0]
                     self.respond(200, store.load(key))

@@ -24,7 +24,8 @@ enum CaiAssignmentKind {
   CAI_RESTART, CAI_SWAP, CAI_SWAP_REVERSE, CAI_FINISH_TEMP
 };
 enum CaiMovementRole { CAI_ROLE_NONE, CAI_FIRST_LINE, CAI_SECOND_LINE, CAI_THIRD_LINE };
-enum CaiSupportMode { CAI_HEAL_BEFORE, CAI_HEAL_AFTER, CAI_APPROACH };
+enum CaiSupportMode { CAI_HEAL_BEFORE, CAI_HEAL_AFTER, CAI_APPROACH, CAI_RECOVERY };
+enum CaiRecoveryKind { CAI_RECOVERY_NONE, CAI_RECOVERY_ATTACK, CAI_RECOVERY_RETREAT, CAI_RECOVERY_WAIT };
 enum { CAI_ABI = 6, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
 
 typedef struct CaiConfig {
@@ -78,6 +79,13 @@ typedef struct CaiSearchResult {
   int32_t reason, assignment_count;
   CaiSearchStats stats;
 } CaiSearchResult;
+/* Additive ABI6 diagnostics; result/layout and existing calls are unchanged.
+   Counts are evidence encountered by this bounded search, not a proof of why
+   every possible plan fails. IDs are sorted, unique, and selected by the caller. */
+typedef struct CaiSearchDiagnostics {
+  int32_t budget_exhausted, risk_rejections, improvement_rejections;
+  int32_t bad_unit_count, bad_units[13], recovery_kind;
+} CaiSearchDiagnostics;
 typedef struct CaiContext CaiContext;
 
 CAI_API int32_t cai_abi(void);
@@ -96,6 +104,8 @@ CAI_API int32_t cai_search(CaiContext*, const CaiSearchRequest*,
 CAI_API int32_t cai_support(CaiContext*, const CaiSearchRequest*, int32_t mode,
                            CaiAssignment* assignments, int32_t capacity,
                            CaiSearchResult* result);
+/* Most recent call, overwritten even after an invalid request. */
+CAI_API int32_t cai_search_diagnostics(const CaiContext*, CaiSearchDiagnostics*);
 
 #ifdef __cplusplus
 }

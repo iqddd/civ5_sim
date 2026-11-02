@@ -90,6 +90,10 @@ class CPAgent:
         self._combat_attempts = set()
         self._approach_attempts = set()
         self._reservations = []
+        self._recovery_calls = 0
+        self._recovery_limit = 0
+        self._recovery_attempts = set()
+        self._retry_count = 0
 
     def _observe(self, observation):
         self.memory = self.memory.updated(observation)
@@ -181,11 +185,10 @@ class CPAgent:
                          and self._target_blocked.get((u["id"], e["id"]), -1) < now]
                 if pairs and self._searches < self._search_limit:
                     _, eid, _, enemy = min(pairs, key=lambda p: (
-                        self._combat_targets.get(p[2], (None,))[0] != p[1], *p[:3]))
+                        p[0], self._combat_targets.get(p[2], (None,))[0] != p[1], *p[1:3]))
                     candidates = [u for u in available if (u["id"], eid) not in self._combat_attempts
                                   and self._target_blocked.get((u["id"], eid), -1) < now]
                     selected = self._select(candidates, enemy["tile"])
-                    self._combat_attempts.update((uid, eid) for uid in selected)
                     for u in candidates:
                         if u["id"] in selected and self._combat_targets.get(u["id"], (None,))[0] != eid:
                             self._combat_targets[u["id"]] = (
@@ -236,6 +239,8 @@ class CPAgent:
         if self._task is not None:
             if retry_approach and self._task["kind"] == "approach":
                 self._phase_seen[3].difference_update(self._task["selected"])
+            if self._task["kind"] == "combat":
+                self._phase = min(self._phase, 1)
             self._event("task_finished", task_kind=self._task["kind"],
                         target=self._task["target"], reason=reason)
         self._task = None
@@ -255,6 +260,11 @@ class CPAgent:
         self._replan = True
         self._cancelled_plan = True
         self._event("plan_cancelled", reason=reason)
+        if self._task is not None and self._task["kind"] == "recovery":
+            # Recovery is re-evaluated from real state, never dispatched as an
+            # ordinary healing/approach task after random damage or contact.
+            self._finish_task(reason)
+            self._phase = min(self._phase, 1)
 
     def _end(self, reason):
         self._done = True
@@ -274,6 +284,35 @@ class CPAgent:
         self._finished.add(unit["id"])
         self._event("waiting", unit=unit["id"], reason=reason)
         return self._issue(action)
+
+    def _recover(self, available, observation, planning, *, allow_wait=True):
+        """One bounded tactical decision, outside normal search/support budgets."""
+        state = digest(observation)
+        for unit in sorted(available, key=lambda value: value["id"]):
+            if self._recovery_calls >= self._recovery_limit:
+                return False
+            identity = (state, unit["id"])
+            if identity in self._recovery_attempts:
+                continue
+            self._recovery_attempts.add(identity)
+            self._recovery_calls += 1
+            result = planning.support(unit["tile"], (unit["id"],), contacts=self.memory,
+                                      mode=SupportMode.RECOVERY)
+            self._event("recovery", target=unit["tile"], selected_units=[unit["id"]],
+                        reason=result.reason.value, stats=asdict(result.stats),
+                        assignments=len(result.assignments), diagnostics=asdict(result.diagnostics))
+            if result.reason in (SearchReason.INVALID_REQUEST, SearchReason.NOT_IMPLEMENTED,
+                                 SearchReason.TURN_CHANGED):
+                raise RuntimeError(f"CP recovery failed: {result.reason}")
+            if not allow_wait and result.diagnostics.recovery_kind == "wait":
+                continue
+            if result.assignments:
+                self._task = {"kind": "recovery", "target": unit["tile"], "selected": (unit["id"],)}
+                self._group = self._task["selected"]
+                self._replan = False
+                self._queue.extend(result.assignments)
+                return True
+        return False
 
     def act_with_planning(self, observation, actions, planning):
         if observation["side"] != self.side or observation["active_side"] != self.side:
@@ -300,6 +339,11 @@ class CPAgent:
             n = len(available)
             self._search_limit = 2*n + (n+12)//13
             self._support_limit = 3*n + (n+12)//13
+            # Speculative waits are deferred so APPROACH remains possible.
+            # They may be rechecked after an ally frees a tile. There are at
+            # most 5N physical commands and N distinct unit probes per state.
+            # This is a structural ceiling, not a reason to terminate a unit.
+            self._recovery_limit = n * (5*n + 1)
         searches_this_call = 0
         while True:
             if self._queue:
@@ -337,12 +381,35 @@ class CPAgent:
                 return self._end("army_exhausted")
             if self._task is not None and not self._replan:
                 self._finish_task("plan_completed", retry_approach=bool(enemies or self._last_seen))
+            if (self._task is None and searches_this_call >= 2
+                    and any(action.kind in ("melee", "ranged") for action in actions)
+                    and self._recover(available, observation, planning)):
+                continue
             if self._task is None:
+                if (self._phase >= 4 and searches_this_call < 2 and self._searches < self._search_limit
+                        and any((unit["id"], enemy["id"]) not in self._combat_attempts
+                                for unit in available for enemy in enemies)):
+                    self._phase = 1
                 self._task = self._next_task(available, enemies, observation)
                 if self._task is None:
+                    if self._recover(available, observation, planning):
+                        continue
                     return self._wait(min(available, key=lambda u: u["id"]), observation,
                                       "no_useful_task")
+                # A safe ordinary plan was unavailable for these participants.
+                # Ask the tactical layer about move+attack BEFORE APPROACH can
+                # spend their remaining movement without making that attack.
+                if self._task["kind"] in ("heal_after", "approach") and enemies:
+                    nearby = [u for u in available if any(
+                        hex_distance(self.map, u["tile"], e["tile"]) <= 5 for e in enemies)]
+                    interrupted = self._task
+                    self._task = None
+                    if self._recover(nearby, observation, planning, allow_wait=False):
+                        self._phase_seen[3].difference_update(interrupted["selected"])
+                        continue
+                    self._task = interrupted
                 self._group = self._task["selected"]
+                self._retry_count = 0
                 self._event("task_assigned", task_kind=self._task["kind"],
                             target=self._task["target"], selected_units=list(self._group))
             task = self._task
@@ -352,17 +419,17 @@ class CPAgent:
                 self._finish_task("group_exhausted")
                 continue
             if task["kind"] == "combat" and searches_this_call >= 2 and self._searches < self._search_limit:
-                self._replan = True
-                attempted = {uid for uid, _ in self._combat_attempts}
-                idle = next((u for u in available if u["id"] not in selected
-                             and u["id"] in attempted), own[selected[0]])
-                return self._wait(idle, observation, "call_search_limit")
+                self._finish_task("call_search_limit")
+                self._phase = 2
+                continue
             if task["kind"] == "combat" and self._searches >= self._search_limit:
                 self._finish_task("search_limit")
-                return self._wait(own[selected[0]], observation, "search_limit")
+                self._phase = 2
+                continue
             if task["kind"] != "combat" and self._support_calls >= self._support_limit:
                 self._finish_task("support_limit")
-                return self._wait(own[selected[0]], observation, "support_limit")
+                self._phase = 4
+                continue
             target = task["target"]
             identity = digest({"observation": observation, "target": target,
                                "selected": selected, "kind": task["kind"]})
@@ -373,6 +440,9 @@ class CPAgent:
             if task["kind"] == "combat":
                 self._searches += 1
                 searches_this_call += 1
+                enemy_id = next((enemy["id"] for enemy in enemies if enemy["tile"] == target), None)
+                if enemy_id is not None:
+                    self._combat_attempts.update((uid, enemy_id) for uid in selected)
                 local = [e for e in enemies if hex_distance(self.map, target, e["tile"]) <= 5
                          or any(hex_distance(self.map, own[uid]["tile"], e["tile"]) <= 4 for uid in selected)]
                 aggression = self.config.aggression
@@ -390,13 +460,23 @@ class CPAgent:
             self._event("search" if task["kind"] == "combat" else "support", target=target,
                         task_kind=task["kind"], selected_units=list(selected),
                         reason=result.reason.value, stats=asdict(result.stats),
-                        assignments=len(result.assignments), replanning=self._cancelled_plan)
+                        assignments=len(result.assignments), replanning=self._cancelled_plan,
+                        diagnostics=asdict(result.diagnostics))
             self._cancelled_plan = False
             if result.reason in (SearchReason.INVALID_REQUEST, SearchReason.NOT_IMPLEMENTED):
                 raise RuntimeError(f"CP search failed: {result.reason}")
             if result.reason == SearchReason.TURN_CHANGED:
                 return self._end("turn_changed")
             if not result.assignments:
+                if task["kind"] == "combat" and result.diagnostics.bad_units and self._retry_count < 3:
+                    reduced = tuple(uid for uid in selected if uid not in result.diagnostics.bad_units)
+                    if reduced and len(reduced) < len(selected):
+                        self._event("group_reduced", original_units=list(selected), selected_units=list(reduced),
+                                    bad_units=list(result.diagnostics.bad_units))
+                        task["selected"] = reduced
+                        self._retry_count += 1
+                        self._replan = True
+                        continue
                 self._finish_task(result.reason.value, retry_approach=bool(enemies or self._last_seen))
                 continue
             self._replan = False
@@ -464,15 +544,27 @@ class CPAgent:
                 reason = "movement_interrupted"
         self._event("action_result", action=asdict(action), reason=reason or "matched")
         if result.ok and result.damage > 0 and self._task is not None:
-            for uid in self._task["selected"]:
-                previous = self._combat_targets.get(uid)
-                if previous is not None:
-                    eid, distance, _, last_turn = previous
-                    self._combat_targets[uid] = (eid, distance, 0, last_turn)
+            victim = next((u for u in old.values() if u["side"] != self.side and u["tile"] == action.target), None)
+            if victim is not None:
+                self._combat_targets[action.unit] = (victim["id"], 0, 0,
+                    own_turn(observation["turn"], observation["active_side"], self.side))
+        living_enemies = {u["id"] for u in now.values() if u["side"] != self.side}
+        self._combat_targets = {uid: value for uid, value in self._combat_targets.items()
+                                if value[0] in living_enemies or value[0] in self._last_seen}
+        if result.ok and action.kind not in ("skip", "fortify", "end_turn"):
+            # Attempts refer to a physical position, never the rest of the turn.
+            self._combat_attempts.clear()
+            self._approach_attempts.clear()
+            if self._task is not None:
+                self._phase_seen[3].difference_update(self._task["selected"])
+            if reason is None and self._task is not None and self._task["kind"] == "approach" and living_enemies:
+                reason = "combat_reconsideration"
         if reason is not None:
+            if not result.ok:
+                self._finished.discard(a.unit)
             self._cancel(reason)
-            if reason == "new_contact":
-                self._finish_task("new_contact")
+            if reason in ("new_contact", "combat_reconsideration"):
+                self._finish_task(reason, retry_approach=True)
                 self._phase = min(self._phase, 1)
                 self._combat_attempts.clear()
         self._last_observation = deepcopy(observation)

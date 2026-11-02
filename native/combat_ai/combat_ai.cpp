@@ -93,7 +93,7 @@ bool valid_request(const CaiSearchRequest& r) {
 }  // namespace
 
 int32_t cai_abi(void) { return CAI_ABI; }
-const char* cai_version(void) { return "civ5sim.combat_ai/0.8.0 CP-07"; }
+const char* cai_version(void) { return "civ5sim.combat_ai/0.9.0 CP-07"; }
 CaiConfig cai_default_config(void) { return {6000, 2560, 5, 5, CAI_MEDIUM, 1, 0, 1}; }
 CaiContext* cai_new(const CaiConfig* config) {
   if (!config || !valid_config(*config)) return nullptr;
@@ -104,10 +104,11 @@ static int32_t run_plan(CaiContext* context, const CaiSearchRequest* request, in
                    CaiAssignment* assignments, int32_t capacity,
                    CaiSearchResult* result) {
   if (result) *result = {CAI_INVALID_REQUEST, 0, {0, 0, 0, 0, 0}};
+  if (context) context->workspace.diagnostics = {};
   if (!context || !request || !result || capacity < 0 ||
       (capacity && !assignments)) return CAI_BAD_ARGUMENT;
   try {
-    if (!valid_request(*request) || mode < -1 || mode > CAI_APPROACH) return CAI_OK;
+    if (!valid_request(*request) || mode < -1 || mode > CAI_RECOVERY) return CAI_OK;
     if (request->expected_turn != request->state->turn ||
         request->side != request->state->active_side) {
       result->reason = CAI_TURN_CHANGED;
@@ -117,7 +118,8 @@ static int32_t run_plan(CaiContext* context, const CaiSearchRequest* request, in
       auto config = context->config;
       if (request->aggression_override) config.aggression = request->aggression_override - 1;
       auto plan = mode < 0 ? combat_ai::find_assignments(context->workspace, config, *request)
-                           : combat_ai::support_assignments(*request, mode);
+                 : mode == CAI_RECOVERY ? combat_ai::recovery_assignments(*request,context->workspace.diagnostics)
+                 : combat_ai::support_assignments(*request, mode);
       *result = plan.result;
       if (capacity < result->assignment_count) return CAI_BUFFER_TOO_SMALL;
       std::copy(plan.assignments.begin(), plan.assignments.end(), assignments);
@@ -134,9 +136,15 @@ int32_t cai_search(CaiContext* context, const CaiSearchRequest* request,
 }
 int32_t cai_support(CaiContext* context, const CaiSearchRequest* request, int32_t mode,
                     CaiAssignment* assignments, int32_t capacity, CaiSearchResult* result) {
-  if (mode < CAI_HEAL_BEFORE || mode > CAI_APPROACH) {
+  if (mode < CAI_HEAL_BEFORE || mode > CAI_RECOVERY) {
+    if (context) context->workspace.diagnostics = {};
     if (result) *result = {CAI_INVALID_REQUEST, 0, {0,0,0,0,0}};
     return CAI_BAD_ARGUMENT;
   }
   return run_plan(context, request, mode, assignments, capacity, result);
+}
+int32_t cai_search_diagnostics(const CaiContext* context, CaiSearchDiagnostics* diagnostics) {
+  if (!context || !diagnostics) return CAI_BAD_ARGUMENT;
+  *diagnostics = context->workspace.diagnostics;
+  return CAI_OK;
 }

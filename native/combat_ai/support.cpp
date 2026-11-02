@@ -153,4 +153,134 @@ Plan support_assignments(const CaiSearchRequest& r, int32_t mode) {
   plan.result.assignment_count = int32_t(plan.assignments.size());
   return plan;
 }
+
+// Agreed port policy for a unit returned by bounded normal search. This is
+// deliberately separate from CP's ordinary risk/formation acceptance rules.
+Plan recovery_assignments(const CaiSearchRequest& request, CaiSearchDiagnostics& diagnostics) {
+  Plan plan{{},{CAI_NO_PLAN,0,{}}};
+  if (request.selected_count != 1) {
+    plan.result.reason = CAI_INVALID_REQUEST;
+    return plan;
+  }
+  auto adapter = make_rules_adapter(*request.state,request.side);
+  ContactMemory memory{request.contacts.turn,request.contacts.side,{}};
+  for (int i=0;i<request.contacts.known_enemy_count;++i)
+    memory.known_enemies.push_back({request.contacts.known_enemies[i].id,
+                                   request.contacts.known_enemies[i].last_seen_own_turn});
+  auto root = adapter->root(*request.state,memory);
+  auto danger = make_danger_model(*adapter);
+  int id = request.selected_units[0];
+  TacticalView initial(*root,request.side);
+  auto original = initial.units[id];
+  if (original.hp <= 0 || original.moves <= 0 || original.waiting) return plan;
+  using Rank = std::tuple<int,int,int,int,int,int>;
+  Rank best{1,0,0,0,0,0};
+  std::vector<CaiAssignment> best_attack;
+  auto record = [&](const CaiUnit& before, const Branch& after, Command command,
+                    const Transition& transition) {
+    const auto now = after.state().units[id];
+    auto kind = command.kind == combat_rules::MOVE ? CAI_MOVE :
+                command.kind == combat_rules::MELEE ? CAI_MELEE : CAI_RANGED;
+    auto assignment = stationary_assignment(kind,before,CAI_ROLE_NONE);
+    assignment.to_tile = kind == CAI_MOVE ? now.tile : command.target;
+    assignment.command_target = command.target;
+    assignment.remaining_moves = now.moves;
+    assignment.damage = transition.result.damage;
+    assignment.self_damage = transition.result.retaliation;
+    if (kind != CAI_MOVE) {
+      int enemy = initial.occupied[command.target];
+      if (enemy >= 0 && after.state().units[enemy].hp <= 0) assignment.killed_unit = enemy;
+    }
+    return assignment;
+  };
+  auto attacks = [&](const Branch& source, const std::vector<CaiAssignment>& prefix) {
+    bool found = false;
+    const auto before = source.state().units[id];
+    for (auto command : adapter->actions(source)) {
+      if (command.unit != id || (command.kind != combat_rules::MELEE && command.kind != combat_rules::RANGED))
+        continue;
+      // Recovery never plans an attack on an enemy discovered only by its
+      // hypothetical approach. Real contact returns control to dispatch.
+      int victim = initial.occupied[command.target];
+      if (victim < 0 || initial.units[victim].side == request.side) continue;
+      auto branch = source.clone();
+      auto transition = adapter->apply(*branch,command);
+      ++plan.result.stats.checked;
+      if (!transition.accepted) continue;
+      found = true;
+      auto assignment = record(before,*branch,command,transition);
+      auto now = branch->state().units[id];
+      int incoming = now.hp > 0 ? danger->incoming(*branch,id,now.tile) : 0;
+      Rank rank{-int(assignment.killed_unit >= 0),-assignment.damage,assignment.self_damage,
+                incoming,command.target,command.kind};
+      if (best_attack.empty() || rank < best) {
+        best = rank;
+        best_attack = prefix;
+        best_attack.push_back(assignment);
+      }
+    }
+    return found;
+  };
+  // An immediate legal attack has priority over every hypothetical approach.
+  if (!attacks(*root,{})) {
+    for (auto command : adapter->actions(*root)) {
+      if (command.unit != id || command.kind != combat_rules::MOVE) continue;
+      auto branch = root->clone();
+      auto transition = adapter->apply(*branch,command);
+      ++plan.result.stats.checked;
+      if (!transition.accepted || transition.contact_interrupted) continue;
+      TacticalView next(*branch,request.side);
+      if (next.enemies != initial.enemies) continue;
+      auto movement = record(original,*branch,command,transition);
+      if (movement.remaining_moves <= 0) continue;
+      attacks(*branch,{movement});
+    }
+  }
+  if (!best_attack.empty()) {
+    plan.assignments = std::move(best_attack);
+    diagnostics.recovery_kind = CAI_RECOVERY_ATTACK;
+  } else {
+    // CP FindSafestPlotInReach compression/support terms, with the extra
+    // conservative requirement that the raw incoming danger strictly falls.
+    int current = danger->incoming(*root,id,original.tile);
+    int best_tile = original.tile;
+    auto safety_rank = std::make_tuple(std::numeric_limits<int>::max(),0,0);
+    for (auto reachable : adapter->reachable(*root,id)) {
+      int tile = reachable.tile;
+      if (tile == original.tile || occupied_contact(*adapter,*root,tile)) continue;
+      int incoming = danger->incoming(*root,id,tile);
+      ++plan.result.stats.checked;
+      if (incoming >= current) continue;
+      int compressed = incoming > 144 ? 12*int(std::sqrt(double(incoming))) : incoming;
+      if (!original.acted)
+        compressed += NEUTRAL_HEAL_RATE + ((original.type!=2 && original.type!=4)?3:0);
+      int enemies = 0;
+      bool exposed = false;
+      for (int enemy : initial.enemies) {
+        enemies += adapter->distance(tile,initial.units[enemy].tile)==1;
+        exposed = exposed || adapter->can_see(*root,initial.units[enemy].tile,tile);
+      }
+      if (exposed) compressed += compressed/4;
+      if (enemies) compressed += compressed/10;
+      auto rank = std::make_tuple(compressed+(enemies-friends_at(initial,*adapter,tile,request.side,id))*13,
+                                  incoming,tile);
+      if (rank < safety_rank) { safety_rank = rank; best_tile = tile; }
+    }
+    if (best_tile != original.tile) {
+      Command command{combat_rules::MOVE,id,best_tile};
+      auto transition = adapter->apply(*root,command);
+      if (transition.accepted) {
+        plan.assignments.push_back(record(original,*root,command,transition));
+        diagnostics.recovery_kind = CAI_RECOVERY_RETREAT;
+      }
+    }
+    if (plan.assignments.empty()) {
+      plan.assignments.push_back(stationary_assignment(CAI_FINISH,original,CAI_ROLE_NONE));
+      diagnostics.recovery_kind = CAI_RECOVERY_WAIT;
+    }
+  }
+  plan.result.reason = CAI_COMPLETED;
+  plan.result.assignment_count = int32_t(plan.assignments.size());
+  return plan;
+}
 } // namespace combat_ai

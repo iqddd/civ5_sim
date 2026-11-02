@@ -54,6 +54,7 @@ class SupportMode(IntEnum):
     HEAL_BEFORE = 0
     HEAL_AFTER = 1
     APPROACH = 2
+    RECOVERY = 3
 
 
 @dataclass(frozen=True)
@@ -232,10 +233,20 @@ class SearchStats:
 
 
 @dataclass(frozen=True)
+class SearchDiagnostics:
+    budget_exhausted: bool = False
+    risk_rejections: int = 0
+    improvement_rejections: int = 0
+    bad_units: tuple[int, ...] = ()
+    recovery_kind: str = "none"
+
+
+@dataclass(frozen=True)
 class SearchResult:
     assignments: tuple[Assignment, ...]
     reason: SearchReason
     stats: SearchStats
+    diagnostics: SearchDiagnostics = field(default_factory=SearchDiagnostics)
 
 
 class PlanningServices(Protocol):
@@ -371,6 +382,12 @@ class _Result(C.Structure):
     ]
 
 
+class _Diagnostics(C.Structure):
+    _fields_ = [("budget_exhausted", C.c_int32), ("risk_rejections", C.c_int32),
+                ("improvement_rejections", C.c_int32), ("bad_unit_count", C.c_int32),
+                ("bad_units", C.c_int32 * 13), ("recovery_kind", C.c_int32)]
+
+
 @lru_cache(maxsize=1)
 def _library():
     if not LIBRARY_PATH.exists():
@@ -401,6 +418,10 @@ def _library():
     lib.cai_support.argtypes = [C.c_void_p, C.POINTER(_Request), C.c_int32,
                                C.POINTER(_Assignment), C.c_int32, C.POINTER(_Result)]
     lib.cai_support.restype = C.c_int32
+    # ABI6 additions are optional for read-only comparisons to older planners.
+    if hasattr(lib, "cai_search_diagnostics"):
+        lib.cai_search_diagnostics.argtypes = [C.c_void_p, C.POINTER(_Diagnostics)]
+        lib.cai_search_diagnostics.restype = C.c_int32
     return lib
 
 
@@ -546,8 +567,20 @@ class Planner:
             )
         if status != 0:
             raise RuntimeError(f"Native planner failed with status {status}")
+        diagnostics = SearchDiagnostics()
+        if hasattr(self._lib, "cai_search_diagnostics"):
+            packed_diagnostics = _Diagnostics()
+            if self._lib.cai_search_diagnostics(self._handle, C.byref(packed_diagnostics)) != 0:
+                raise RuntimeError("Native diagnostics failed")
+            if not 0 <= packed_diagnostics.bad_unit_count <= 13 or not 0 <= packed_diagnostics.recovery_kind <= 3:
+                raise RuntimeError("Invalid native diagnostics")
+            diagnostics = SearchDiagnostics(bool(packed_diagnostics.budget_exhausted),
+                packed_diagnostics.risk_rejections, packed_diagnostics.improvement_rejections,
+                tuple(packed_diagnostics.bad_units[:packed_diagnostics.bad_unit_count]),
+                ("none", "attack", "retreat", "wait")[packed_diagnostics.recovery_kind])
         return SearchResult(
             assignments,
             list(SearchReason)[result.reason],
             SearchStats(*(getattr(result.stats, f.name) for f in fields(SearchStats))),
+            diagnostics,
         )

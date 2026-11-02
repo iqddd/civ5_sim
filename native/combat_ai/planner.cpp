@@ -271,6 +271,7 @@ void SearchWorkspace::clear(bool hard) {
   // retaining the preallocated array. The simulator also supports new maps.
   if (hard) positions.clear();
   used_positions = 0;
+  diagnostics = {};
   open.clear();
   equivalent.clear();
 }
@@ -347,6 +348,20 @@ class Search {
     plan.result.assignment_count = int32_t(plan.assignments.size());
     return plan;
   }
+  void record_evaluation(const FinalEvaluation& evaluation) {
+    auto& diagnostics = work.diagnostics;
+    diagnostics.risk_rejections += evaluation.risk_rejected;
+    diagnostics.improvement_rejections += evaluation.improvement_rejected;
+    if (evaluation.bad_unit >= 0) {
+      auto begin = diagnostics.bad_units;
+      auto end = begin + diagnostics.bad_unit_count;
+      if (std::find(begin,end,evaluation.bad_unit) == end) {
+        require_invariant(diagnostics.bad_unit_count < CAI_MAX_SELECTED,"bad unit list overflow");
+        diagnostics.bad_units[diagnostics.bad_unit_count++] = evaluation.bad_unit;
+        std::sort(begin,begin + diagnostics.bad_unit_count);
+      }
+    }
+  }
  public:
   Search(SearchWorkspace& workspace, const CaiConfig& settings, const CaiSearchRequest& input)
       : work(workspace), config(settings), request(input), adapter(make_rules_adapter(*input.state,input.side)),
@@ -417,6 +432,7 @@ class Search {
     if (terminal_position(work.positions.front(),initial_enemy_ids)) {
       ++stats.checked;
       auto evaluation = tactics->evaluate_final_position(work.positions.front());
+      record_evaluation(evaluation);
       if (evaluation.accepted) {
         finalize_assignments(work.positions.front(),evaluation);
         record_completion(0,evaluation.score);
@@ -475,6 +491,7 @@ class Search {
         FinalEvaluation evaluation;
         if (finished) {
           evaluation = tactics->evaluate_final_position(*child);
+          record_evaluation(evaluation);
           if (!evaluation.accepted) {
             ++stats.pruned;
             continue;
@@ -508,6 +525,8 @@ Plan find_assignments(SearchWorkspace& workspace, const CaiConfig& config, const
     SearchWorkspace& workspace;
     ~Cleanup() { workspace.release_unused_branches(); }
   } cleanup{workspace};
-  return Search(workspace,config,request).run();
+  auto plan = Search(workspace,config,request).run();
+  workspace.diagnostics.budget_exhausted = plan.result.reason == CAI_BUDGET_EXHAUSTED;
+  return plan;
 }
 } // namespace combat_ai

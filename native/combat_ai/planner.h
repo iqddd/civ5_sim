@@ -28,6 +28,8 @@ struct FinalEvaluation {
   bool accepted = false;
   int32_t score = 0;
   std::vector<CaiAssignment> finishes;
+  int32_t bad_unit = CAI_NO_ID;
+  bool risk_rejected = false, improvement_rejected = false;
 };
 bool terminal_position(const TacticalPosition&, const std::vector<int32_t>& initial_enemy_ids);
 void finalize_assignments(TacticalPosition&, const FinalEvaluation&);
@@ -55,6 +57,7 @@ class CandidateExecutor {
   bool apply(TacticalPosition&, const CpCombo&);
 };
 struct SearchWorkspace {
+  CaiSearchDiagnostics diagnostics{};
   // CvTactPosStorage: fixed addresses, peek at the next slot and consume only
   // after accepting a child. Rejected children reuse the unconsumed slot.
   std::vector<TacticalPosition> positions;
@@ -69,4 +72,5 @@ struct SearchWorkspace {
 struct Plan { std::vector<CaiAssignment> assignments; CaiSearchResult result; };
 Plan find_assignments(SearchWorkspace&, const CaiConfig&, const CaiSearchRequest&);
 Plan support_assignments(const CaiSearchRequest&, int32_t mode);
+Plan recovery_assignments(const CaiSearchRequest&, CaiSearchDiagnostics&);
 }  // namespace combat_ai

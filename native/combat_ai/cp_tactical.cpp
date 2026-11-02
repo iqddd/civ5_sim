@@ -827,6 +827,7 @@ FinalEvaluation CpTactics::evaluate_final_position(const TacticalPosition &posit
   int negative_changes = 0;
   int target_distance_before = 0;
   int target_distance_after = 0;
+  int loss_limit = config.risk_budget_base + config.risk_budget_per_kill * int(position.killed.size());
 
   for (int slot_index = 0; slot_index < int(selected.size()); ++slot_index) {
     SlotIdx slot{slot_index};
@@ -856,8 +857,13 @@ FinalEvaluation CpTactics::evaluate_final_position(const TacticalPosition &posit
 
     auto end = move_score(position, current, slot, unit.tile, 0, MoveEvaluation::Final);
     int end_score = end.move.score;
-    if (!end.acceptable)
+    if (!end.acceptable) {
       ++unsafe_positions;
+      // CP:addFinishMovesIfAcceptable returns the first offender after the
+      // available loss allowance is consumed. Do not change evaluation order.
+      if (unsafe_positions > loss_limit && evaluation.bad_unit < 0)
+        evaluation.bad_unit = unit_id.value;
+    }
     auto last_move = latest_move_score(position, unit_id);
     evaluation.score += last_move ? std::max(0, end_score - *last_move) : end_score;
 
@@ -875,7 +881,6 @@ FinalEvaluation CpTactics::evaluate_final_position(const TacticalPosition &posit
     evaluation.finishes.push_back(stationary_assignment(CAI_FINISH, unit, roles[slot], end_score));
   }
 
-  int loss_limit = config.risk_budget_base + config.risk_budget_per_kill * int(position.killed.size());
   bool attacked = has_attack_assignment(position);
   // Contract: docs/combat-ai-contract.md#plan-acceptance.
   bool improved = !position.killed.empty() || position.discovered ||
@@ -883,6 +888,8 @@ FinalEvaluation CpTactics::evaluate_final_position(const TacticalPosition &posit
                                                (positive_changes == negative_changes && attacked))
                                             : target_distance_after < target_distance_before);
   evaluation.accepted = unsafe_positions <= loss_limit && improved;
+  evaluation.risk_rejected = unsafe_positions > loss_limit;
+  evaluation.improvement_rejected = !improved;
   return evaluation;
 }
 } // namespace combat_ai

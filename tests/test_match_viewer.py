@@ -133,6 +133,15 @@ class MatchViewerTests(unittest.TestCase):
                 self.assertIn(b'id="timeline"', response.read())
             with urlopen(base + "/api/matches") as response:
                 self.assertEqual(len(json.load(response)), 1)
+            with urlopen(base + "/api/status") as response:
+                self.assertIsNone(json.load(response))
+            (self.root / "summary.json").write_text(json.dumps({"acceptance": False,
+                "summary": {"matches": 7, "outcomes": {"opponent/greedy": {"outcomes": {"win": 4, "loss": 3}}}}}))
+            with urlopen(base + "/api/status") as response:
+                status = json.load(response)
+                self.assertFalse(status["complete"])
+                self.assertEqual(status["checked"], 7)
+                self.assertEqual(status["greedy"], {"win": 4, "loss": 3})
             with urlopen(base + "/api/replay?id=match/replay.json") as response:
                 self.assertTrue(json.load(response)["verified"])
             with self.assertRaises(HTTPError) as error:

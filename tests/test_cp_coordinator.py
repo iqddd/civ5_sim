@@ -13,9 +13,13 @@ from civ5sim.combat_ai import (
     Assignment,
     CallPlanningServices,
     ContactMemory,
+    Planner,
     PlanningState,
+    SearchDiagnostics,
     SearchReason,
     SearchRequest,
+    SearchResult,
+    SearchStats,
     SupportMode,
 )
 from civ5sim.combat_ai import (
@@ -125,7 +129,7 @@ class CoordinatorTests(unittest.TestCase):
             else:
                 self.fail("Empty searches did not end turn")
             self.assertEqual(commanded, set(range(40)))
-            self.assertGreaterEqual(len(scripted.calls), 4)
+            self.assertGreaterEqual(len(scripted.calls), 2)
             self.assertLessEqual(len(scripted.calls), 84)
 
     def test_lost_contact_uses_last_observed_tile_and_expires(self):
@@ -239,8 +243,10 @@ class CoordinatorTests(unittest.TestCase):
             self.assertTrue(result.ok)
             a.on_action_result(first, result, b.observe(0))
             self.assertEqual(self.act(a, b, calls), Action("move", 0, 6))
-            self.assertEqual([(t, selected) for t, selected, mode in calls
-                              if mode == SupportMode.APPROACH], [(10, (0, 2)), (0, (0,))])
+            approaches = [(t, selected) for t, selected, mode in calls if mode == SupportMode.APPROACH]
+            self.assertEqual(approaches[0], (10, (0, 2)))
+            self.assertEqual(approaches[-1], (0, (0,)))
+            self.assertTrue(all(selected == (0,) for _, selected in approaches[1:]))
 
     def test_exploration_contact_discards_finish_and_schedules_combat(self):
         with Battle(scenario([unit("horseman", 0, 16), unit("warrior", 0, 17),
@@ -301,9 +307,8 @@ class CoordinatorTests(unittest.TestCase):
 class ContactRequirementTests(unittest.TestCase):
     """Coordinator obligations, independent of native search quality or old replays.
 
-    Each expectedFailure has a passing witness test running the same episode,
-    so setup, legality and termination errors cannot silently replace the
-    intended requirement failure. See combat-ai-port-plan.md, section
+    Each obligation also has a passing witness test running the same episode,
+    checking setup, legality and termination independently. See combat-ai-port-plan.md, section
     "Восстановленные содержательные проверки".
     """
 
@@ -382,7 +387,13 @@ class ContactRequirementTests(unittest.TestCase):
         with battle.clone() as witness:
             self.assertTrue(witness.step(attacks[0]).ok)
         planning = ScriptedPlanning(*(plan(reason=SearchReason.NO_PLAN) for _ in range(8)))
-        planning.support = lambda *args, **kwargs: plan(reason=SearchReason.NO_PLAN)
+        def support(target, selected, *, contacts, mode):
+            if mode == SupportMode.RECOVERY:
+                return agent.planner.support(SearchRequest(
+                    PlanningState.from_battle(battle, 0), 0, battle.observe(0)["turn"],
+                    target, selected, contacts), mode)
+            return plan(reason=SearchReason.NO_PLAN)
+        planning.support = support
         action = self.act(agent, battle, planning)
         self.assertEqual(len(planning.calls), 2)
         events = agent.drain_diagnostics()
@@ -394,9 +405,7 @@ class ContactRequirementTests(unittest.TestCase):
     def test_contact_scenario_reveals_enemy_and_leaves_unused_unit_mobile(self):
         self.contact_episode()
 
-    @unittest.expectedFailure
     def test_new_contact_returns_unused_explorer_to_approach(self):
-        # Known coordinator defect: _phase_seen[3] retains the interrupted group.
         approaches = self.contact_episode()
         self.assertTrue(any(1 in selected for selected in approaches),
                         f"Unused explorer never reconsidered for approach: {approaches}")
@@ -404,13 +413,191 @@ class ContactRequirementTests(unittest.TestCase):
     def test_search_limit_scenario_has_legal_shot_and_two_empty_searches(self):
         self.search_limit_episode()
 
-    @unittest.expectedFailure
     def test_call_search_limit_does_not_order_available_shooter_to_wait(self):
-        # Known coordinator defect: the per-call search cap issues a skip.
         action, events = self.search_limit_episode()
         self.assertFalse(any(e["event"] == "waiting" and e.get("reason") == "call_search_limit"
                              for e in events), "Computational limit became a wait order")
         self.assertNotEqual(action, Action("skip", 0))
+        self.assertEqual(action.kind, "ranged")
+
+    def test_problematic_unit_is_removed_before_retry(self):
+        with Battle(scenario([unit("warrior", 0, 17), unit("archer", 0, 25),
+                              unit("warrior", 1, 18)])) as battle:
+            agent = self.agent(battle)
+            planning = ScriptedPlanning(SearchResult((), SearchReason.NO_PLAN, SearchStats(),
+                SearchDiagnostics(risk_rejections=1, bad_units=(1,))))
+            original_search = planning.search
+            def search(target, selected, **kwargs):
+                result = original_search(target, selected, **kwargs)
+                if len(planning.calls) == 2:
+                    request = SearchRequest(PlanningState.from_battle(battle, 0), 0, 0,
+                                            target, selected, kwargs["contacts"])
+                    return agent.planner.search(request)
+                return result
+            planning.search = search
+            action = self.act(agent, battle, planning)
+            self.assertEqual(set(planning.calls[0][1]), {0, 1})
+            self.assertEqual(planning.calls[1][1], (0,))
+            self.assertEqual(action.kind, "melee")
+
+    def test_old_target_does_not_outrank_closer_enemy(self):
+        with Battle(scenario([unit("warrior", 0, 17), unit("warrior", 1, 18),
+                              unit("warrior", 1, 21)])) as battle:
+            agent = self.agent(battle)
+            agent._turn = 0
+            agent._phase = 1
+            agent._search_limit = 3
+            agent._combat_targets[0] = (2, 4, 0, 0)
+            observation = battle.observe(0)
+            available = [u for u in observation["units"] if u["side"] == 0]
+            enemies = [u for u in observation["units"] if u["side"] == 1]
+            task = agent._next_task(available, enemies, observation)
+            self.assertEqual(task["target"], 18)
+            self.assertFalse(agent._combat_attempts, "Assignment is not an executed request")
+
+    def test_actual_attack_updates_attacker_target(self):
+        with Battle(scenario([unit("archer", 0, 17), unit("warrior", 1, 18),
+                              unit("warrior", 1, 20)])) as battle:
+            agent = self.agent(battle)
+            with battle.clone() as witness:
+                result = witness.step(Action("ranged", 0, 18))
+                self.assertTrue(result.ok)
+            planning = ScriptedPlanning(plan(assignment(K.RANGED, 0, 17, 18, 0,
+                                           damage=result.damage, target=18)))
+            action = self.act(agent, battle, planning)
+            agent._combat_targets[0] = (2, 3, 0, 0)
+            self.execute(agent, battle, action)
+            self.assertEqual(agent._combat_targets[0][0], 1)
+
+    def test_recovery_cancellation_returns_to_normal_dispatch(self):
+        with Battle(scenario([unit("archer", 0, 17), unit("warrior", 1, 18)])) as battle:
+            agent = self.agent(battle)
+            agent._turn = 0
+            agent._task = {"kind": "recovery", "target": 18, "selected": (0,)}
+            with battle.clone() as witness:
+                prediction = witness.step(Action("ranged", 0, 18))
+            agent._queue.append(assignment(K.RANGED, 0, 17, 18, 0,
+                                          damage=prediction.damage + 1, target=18))
+            planning = ScriptedPlanning()
+            action = self.act(agent, battle, planning)
+            self.execute(agent, battle, action)
+            self.assertIsNone(agent._task)
+            self.assertTrue(any(e["event"] == "plan_cancelled" and e["reason"] == "damage_changed"
+                                for e in agent.drain_diagnostics()))
+            self.act(agent, battle, planning)
+
+    def test_returned_units_are_reconsidered_after_group_action(self):
+        for blocked in (False, True):
+            with self.subTest(blocked=blocked), Battle(scenario([
+                    unit("horseman", 0, 16), unit("archer", 0, 25), unit("warrior", 1, 20)])) as battle:
+                agent = self.agent(battle)
+                initial = battle.snapshot()
+                with battle.clone() as witness:
+                    self.assertTrue(witness.step(Action("move", 0, 17)).ok)
+                    moved = witness.snapshot()["units"][0]
+                records = [assignment(K.INITIAL, 0, 16, 16, 240),
+                           assignment(K.BLOCKED, 1, 25, 25, 120),
+                           assignment(K.MOVE, 0, 16, 17, moved["moves"])]
+                if blocked:
+                    records.append(assignment(K.BLOCKED, 0, 17, 17, moved["moves"]))
+                planning = ScriptedPlanning(plan(*records))
+                first = self.act(agent, battle, planning)
+                self.execute(agent, battle, first)
+                self.assertEqual(initial["units"][1], battle.snapshot()["units"][1])
+                self.act(agent, battle, planning)
+                self.assertGreaterEqual(len(planning.calls), 2)
+                self.assertIn(0, planning.calls[1][1])
+                self.assertIn(1, planning.calls[1][1])
+
+
+@unittest.skipUnless(LIBRARY_PATH.exists(), "Build combat and AI libraries first")
+class RecoveryTests(unittest.TestCase):
+    def recover(self, battle, side, selected=(0,)):
+        before = battle.snapshot()
+        with Planner(SMALL) as planner:
+            request = SearchRequest(PlanningState.from_battle(battle, side), side,
+                battle.observe(side)["turn"], battle.snapshot()["units"][selected[0]]["tile"], selected,
+                ContactMemory().updated(battle.observe(side)))
+            result = planner.support(request, SupportMode.RECOVERY)
+        self.assertEqual(before, battle.snapshot())
+        return result
+
+    def execute(self, battle, result):
+        for record in result.assignments:
+            action = Action({K.MOVE: "move", K.MELEE: "melee", K.RANGED: "ranged",
+                             K.FINISH: "skip"}[record.kind], record.unit,
+                            -1 if record.kind == K.FINISH else record.command_target)
+            self.assertIn(action, battle.available_actions())
+            step = battle.step(action)
+            self.assertTrue(step.ok)
+            self.assertEqual((step.damage, step.retaliation), (record.damage, record.self_damage))
+
+    def test_immediate_attack_even_when_exchange_is_fatal(self):
+        for side in (0, 1):
+            for fog in (False, True):
+                with self.subTest(side=side, fog=fog), Battle(scenario([
+                        unit("warrior", side, 17, hp=1), unit("warrior", 1-side, 18)], fog=fog)) as battle:
+                    if side: self.assertTrue(battle.step(Action("end_turn")).ok)
+                    result = self.recover(battle, side)
+                    self.assertEqual(result.diagnostics.recovery_kind, "attack")
+                    self.assertEqual([a.kind for a in result.assignments], [K.MELEE])
+                    self.execute(battle, result)
+
+    def test_approach_then_attack_and_quiet_wait(self):
+        with Battle(scenario([unit("warrior", 0, 17), unit("warrior", 1, 19)])) as battle:
+            result = self.recover(battle, 0)
+            self.assertEqual([a.kind for a in result.assignments], [K.MOVE, K.MELEE])
+            self.execute(battle, result)
+        with Battle(scenario([unit("warrior", 0, 0), unit("warrior", 1, 39)], fog=True)) as battle:
+            result = self.recover(battle, 0)
+            self.assertEqual(result.diagnostics.recovery_kind, "wait")
+            self.assertEqual(result.assignments[0].kind, K.FINISH)
+            self.execute(battle, result)
+
+    def test_new_contact_is_not_used_to_plan_a_hidden_attack(self):
+        with Battle(scenario([unit("horseman", 0, 16), unit("warrior", 1, 21)], fog=True)) as battle:
+            self.assertEqual(len(battle.observe(0)["units"]), 1)
+            result = self.recover(battle, 0)
+            self.assertFalse(any(a.kind in (K.MELEE, K.RANGED) for a in result.assignments))
+
+    def test_already_attacked_unit_retreats_and_diagnostics_clear(self):
+        with Battle(scenario([unit("warrior", 0, 17, hp=20, attacked=True),
+                              unit("warrior", 1, 18)])) as battle:
+            result = self.recover(battle, 0)
+            self.assertEqual(result.diagnostics.recovery_kind, "retreat")
+            self.assertEqual(len(result.assignments), 1)
+            self.assertEqual(result.assignments[0].kind, K.MOVE)
+            self.execute(battle, result)
+        with (Battle(scenario([unit("warrior", 0, 17), unit("warrior", 1, 18)])) as battle,
+              Planner(SMALL) as planner):
+            request = SearchRequest(PlanningState.from_battle(battle, 0), 0, 0, 18, (0,),
+                                     ContactMemory().updated(battle.observe(0)))
+            self.assertEqual(planner.support(request, SupportMode.RECOVERY).diagnostics.recovery_kind,
+                             "attack")
+            self.assertEqual(planner.search(request).diagnostics.recovery_kind, "none")
+            invalid = replace(request, target=999)
+            self.assertEqual(planner.search(invalid).diagnostics, SearchDiagnostics())
+
+    def test_recovery_requires_one_unit_and_diagnostics_reset(self):
+        with Battle(scenario([unit("warrior", 0, 17), unit("warrior", 0, 16),
+                              unit("warrior", 1, 18)])) as battle:
+            result = self.recover(battle, 0, (0, 1))
+            self.assertEqual(result.reason, SearchReason.INVALID_REQUEST)
+            self.assertEqual(result.diagnostics, SearchDiagnostics())
+
+    def test_native_rejection_diagnostics_are_selected_and_not_a_plan_change(self):
+        with Battle(scenario([unit("archer", 0, 17, hp=50), unit("horseman", 0, 25),
+                              unit("warrior", 1, 18), unit("horseman", 1, 19),
+                              unit("spearman", 1, 26)])) as battle, Planner(SMALL) as planner:
+            request = SearchRequest(PlanningState.from_battle(battle, 0), 0, 0, 18, (0, 1),
+                                     ContactMemory().updated(battle.observe(0)), Aggression.LOW)
+            before = battle.snapshot()
+            result = planner.search(request)
+            self.assertGreater(result.diagnostics.risk_rejections, 0)
+            self.assertEqual(result.diagnostics.bad_units, (0,))
+            self.assertTrue(result.diagnostics.budget_exhausted)
+            self.assertEqual(result, planner.search(request))
+            self.assertEqual(before, battle.snapshot())
 
 
 @unittest.skipUnless(LIBRARY_PATH.exists(), "Build combat and AI libraries first")

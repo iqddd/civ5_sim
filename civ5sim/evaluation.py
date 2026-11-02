@@ -80,6 +80,8 @@ def write_report(path, summary, full, failures, suite):
               f"поисков после отмены плана: {summary['replanning_search_fraction']:.2%}."),
               f"Счётчики CP: `{json.dumps(summary['cp_diagnostics'], ensure_ascii=False)}`.",
               f"Причины отмены: `{json.dumps(summary['cancellations'], ensure_ascii=False)}`.", "",
+              f"Тактическое продолжение: `{json.dumps(summary.get('recovery_kinds', {}), ensure_ascii=False)}`.",
+              f"Причины ожидания: `{json.dumps(summary.get('waiting_reasons', {}), ensure_ascii=False)}`.", "",
               (f"Набор ограничен {len(suite['fields'])} конфигурациями и {len(suite['seeds'])} seed; "
                "он не доказывает превосходство над оригинальным DLL AI."),
               ("Поиск оценивает гипотетический урон при броске 600 и допускает привилегированные запросы; "
@@ -192,13 +194,14 @@ def diagnostics(replay, config):
         events = [e for e in replay.get("ai_events", []) if e["side"] == side]
         searches = [e for e in events if e["event"] == "search"]
         support = [e for e in events if e["event"] == "support"]
+        recovery = [e for e in events if e["event"] == "recovery"]
         for event in searches:
             stats = event["stats"]
             if not (0 <= stats["completed"] <= config.max_completed and
                     0 <= stats["peak_positions"] <= config.position_capacity and
                     stats["generated"] <= config.position_capacity):
                 raise AssertionError(f"Search budget exceeded: {event}")
-        for event in searches + support:
+        for event in searches + support + recovery:
             if not 1 <= len(event["selected_units"]) <= 13:
                 raise AssertionError("Invalid local group size")
             if event["reason"] in ("invalid_request", "not_implemented", "turn_changed"):
@@ -210,11 +213,21 @@ def diagnostics(replay, config):
             if (sum(e["event"] == "search" for e in turn_events) > 2*n + (n+12)//13 or
                 sum(e["event"] == "support" for e in turn_events) > 3*n + (n+12)//13):
                 raise AssertionError("Coordinator request budget exceeded")
+            if sum(e["event"] == "recovery" for e in turn_events) > n * (5*n + 1):
+                raise AssertionError("Coordinator recovery budget exceeded")
+            if any(e["event"] == "waiting" and e.get("reason") in
+                   ("call_search_limit", "search_limit", "support_limit") for e in turn_events):
+                raise AssertionError("Computational limit became a wait order")
         result.append({
             "searches": len(searches), "support_calls": len(support),
             "empty_searches": sum(e["assignments"] == 0 for e in searches),
             "empty_support": sum(e["assignments"] == 0 for e in support),
             "replanning_searches": sum(e["replanning"] for e in searches),
+            "recovery_calls": len(recovery),
+            "recovery_kinds": dict(Counter(e.get("diagnostics", {}).get("recovery_kind", "none") for e in recovery)),
+            "group_reductions": sum(e["event"] == "group_reduced" for e in events),
+            "waiting_reasons": dict(Counter(e["reason"] for e in events if e["event"] == "waiting")),
+            "end_risk_rejections": sum(e.get("diagnostics", {}).get("risk_rejections", 0) for e in searches),
             "cancellations": dict(Counter(e["reason"] for e in events
                                           if e["event"] == "plan_cancelled")),
             "search_reasons": dict(Counter(e["reason"] for e in searches)),
