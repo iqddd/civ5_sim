@@ -3,12 +3,23 @@ import unittest
 from copy import deepcopy
 from dataclasses import asdict, replace
 
+from test_cp_agent import SMALL, ScriptedPlanning, scenario, unit
 from test_maps import field
-from test_cp_agent import SMALL, scenario, unit, ScriptedPlanning
+
 from civ5sim import Action, Battle, MatchConfig, run_match
 from civ5sim.combat_ai import (
-    LIBRARY_PATH, Aggression, Assignment, AssignmentKind as K, CallPlanningServices,
-    ContactMemory, PlanningState, SearchRequest, SearchReason, SupportMode,
+    LIBRARY_PATH,
+    Aggression,
+    Assignment,
+    CallPlanningServices,
+    ContactMemory,
+    PlanningState,
+    SearchReason,
+    SearchRequest,
+    SupportMode,
+)
+from civ5sim.combat_ai import (
+    AssignmentKind as K,
 )
 from civ5sim.cp_agent import CPAgent
 from civ5sim.engine import digest
@@ -76,9 +87,16 @@ class CoordinatorTests(unittest.TestCase):
                 a = self.agent(b)
                 commands = self.turn(a, b)
                 self.assertEqual({c.unit for c in commands if c.unit >= 0}, set(range(count)))
-                searches = [e for e in a.drain_diagnostics() if e["event"] == "search"]
-                self.assertGreaterEqual(len(searches), 2)
+                events = a.drain_diagnostics()
+                searches = [e for e in events if e["event"] == "search"]
+                approaches = [e for e in events if e["event"] == "support" and e["task_kind"] == "approach"]
+                # The native CP destination filter now decides applicability;
+                # the coordinator no longer excludes starts at distance > 6.
+                self.assertTrue(searches)
                 self.assertTrue(all(len(e["selected_units"]) <= 13 for e in searches))
+                self.assertTrue(all(e["assignments"] == 0 for e in searches))
+                self.assertGreaterEqual(len(approaches), 2)
+                self.assertTrue(all(len(e["selected_units"]) <= 13 for e in approaches))
                 self.assertLessEqual(a._searches, 2*count+(count+12)//13)
 
     def test_wounded_unit_waits_and_naturally_heals(self):
@@ -91,8 +109,8 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual(b.observe(0)["units"][0]["hp"], 70)
 
     def test_empty_search_still_covers_army_and_bounds_calls(self):
-        with Battle(scenario([unit("warrior", 0, i) for i in range(40)] +
-                             [unit("warrior", 1, 127)], width=16, height=8)) as b:
+        with Battle(scenario([unit("warrior", 0, i) for i in range(41) if i != 27] +
+                             [unit("warrior", 1, 27)], width=8, height=8)) as b:
             a = self.agent(b)
             scripted = ScriptedPlanning()
             commanded = set()

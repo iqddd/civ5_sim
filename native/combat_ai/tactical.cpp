@@ -16,10 +16,10 @@ TacticalView::TacticalView(const Branch& branch, int32_t side) {
     if (u.side != side) enemies.push_back(u.id);
   }
 }
-int32_t movement_role(const CaiUnit& u, int32_t incoming) {
+int32_t movement_role(const CaiUnit& u, int32_t damage_taken_last_turn) {
   if (u.type == 1 || u.type == 2) return CAI_SECOND_LINE;
-  // CP's isProjectedToDieNextTurn, using our branch-local danger model.
-  return incoming >= u.hp ? CAI_THIRD_LINE : CAI_FIRST_LINE;
+  // CvUnit::isProjectedToDieNextTurn is historical damage, NOT GetDanger.
+  return damage_taken_last_turn > u.hp ? CAI_THIRD_LINE : CAI_FIRST_LINE;
 }
 int32_t enemy_distance(const TacticalView& v, const RulesAdapter& a, int32_t tile) {
   int result = 4;

@@ -7,9 +7,12 @@ struct TacticalPosition {
   std::unique_ptr<Branch> branch;
   std::vector<CaiAssignment> assignments;
   std::vector<int32_t> done, moved, last_kill, touched, killed;
+  // Tactical plots grow only when a simulated move reveals cells. done==2
+  // means BLOCKED: the unit remains available to the outer coordinator.
+  std::vector<int32_t> plots;
   int32_t generation = 0, attack_score = 0, rank = 0;
   int32_t final_score = 0;
-  bool discovered = false, finalized = false;
+  bool discovered = false, finalized = false, pending_restart = false;
 };
 struct SearchWorkspace {
   std::vector<std::unique_ptr<TacticalPosition>> positions;

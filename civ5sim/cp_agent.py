@@ -7,8 +7,14 @@ from dataclasses import asdict
 from civ5map.maps import adjacent, passable
 
 from .combat_ai import (
-    Assignment, Aggression, ContactMemory, Planner, SearchConfig, SearchReason,
-    SupportMode, own_turn,
+    Aggression,
+    Assignment,
+    ContactMemory,
+    Planner,
+    SearchConfig,
+    SearchReason,
+    SupportMode,
+    own_turn,
 )
 from .combat_ai import AssignmentKind as K
 from .engine import Action, digest
@@ -71,6 +77,7 @@ class CPAgent:
         self._finished = set()
         self._done = False
         self._replan = False
+        self._cancelled_plan = False
         self._searches = 0
         self._search_limit = 0
         self._support_calls = 0
@@ -172,13 +179,11 @@ class CPAgent:
                          for e in enemies for u in available
                          if (u["id"], e["id"]) not in self._combat_attempts
                          and self._target_blocked.get((u["id"], e["id"]), -1) < now]
-                if pairs and min(p[0] for p in pairs) < 1_000_000 and self._searches < self._search_limit:
-                    reachable = [p for p in pairs if p[0] < 1_000_000]
-                    _, eid, _, enemy = min(reachable, key=lambda p: (
+                if pairs and self._searches < self._search_limit:
+                    _, eid, _, enemy = min(pairs, key=lambda p: (
                         self._combat_targets.get(p[2], (None,))[0] != p[1], *p[:3]))
                     candidates = [u for u in available if (u["id"], eid) not in self._combat_attempts
-                                  and self._target_blocked.get((u["id"], eid), -1) < now
-                                  and self._distance(u["tile"], enemy["tile"]) < 1_000_000]
+                                  and self._target_blocked.get((u["id"], eid), -1) < now]
                     selected = self._select(candidates, enemy["tile"])
                     self._combat_attempts.update((uid, eid) for uid in selected)
                     for u in candidates:
@@ -248,6 +253,7 @@ class CPAgent:
         self._queue.clear()
         self._pending = None
         self._replan = True
+        self._cancelled_plan = True
         self._event("plan_cancelled", reason=reason)
 
     def _end(self, reason):
@@ -383,7 +389,9 @@ class CPAgent:
                 result = planning.support(target, selected, contacts=self.memory, mode=mode)
             self._event("search" if task["kind"] == "combat" else "support", target=target,
                         task_kind=task["kind"], selected_units=list(selected),
-                        reason=result.reason.value, stats=asdict(result.stats))
+                        reason=result.reason.value, stats=asdict(result.stats),
+                        assignments=len(result.assignments), replanning=self._cancelled_plan)
+            self._cancelled_plan = False
             if result.reason in (SearchReason.INVALID_REQUEST, SearchReason.NOT_IMPLEMENTED):
                 raise RuntimeError(f"CP search failed: {result.reason}")
             if result.reason == SearchReason.TURN_CHANGED:

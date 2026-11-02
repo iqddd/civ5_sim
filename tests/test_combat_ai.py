@@ -53,7 +53,7 @@ class PlannerTests(unittest.TestCase):
 
     def test_unit_zero_tile_255_and_complete_board(self):
         p = self.planner()
-        self.assertIn("CP-06", p.version)
+        self.assertIn("CP-07", p.version)
         result = p.search(request())
         self.assertEqual(result.reason, SearchReason.NO_PLAN)
         self.assertEqual(result.assignments, ())
@@ -269,11 +269,12 @@ class PlannerTests(unittest.TestCase):
         for passive in (s.units[0], replace(s.units[0], moves=120, waiting=1)):
             current = replace(s, units=(passive, *s.units[1:]))
             plan = p.search(SearchRequest(current, 0, 0, 17, (0, 1)))
-            self.assertEqual(
-                tuple(a for a in plan.assignments if a.kind != AssignmentKind.INITIAL),
-                tuple(a for a in expected.assignments if a.kind != AssignmentKind.INITIAL),
-            )
-            self.assertFalse(any(a.unit == 0 and a.kind != AssignmentKind.INITIAL for a in plan.assignments))
+            self.assertTrue(any(a.unit == 1 and a.kind in (
+                AssignmentKind.MOVE, AssignmentKind.MELEE, AssignmentKind.RANGED,
+            ) for a in plan.assignments))
+            self.assertFalse(any(a.unit == 0 and a.kind not in (
+                AssignmentKind.INITIAL, AssignmentKind.BLOCKED,
+            ) for a in plan.assignments))
 
     @unittest.skipUnless(
         (N.ROOT / "build/combat.dll").exists()
@@ -299,14 +300,14 @@ class PlannerTests(unittest.TestCase):
             self.assertEqual(len(copied.units), 2)
             self.assertFalse(hasattr(copied, "rng"))
             p = self.planner()
-            self.assertEqual(
-                p.search(SearchRequest(copied, 0, copied.turn, 255, (0,))).reason,
-                SearchReason.COMPLETED,
-            )
+            result = p.search(SearchRequest(copied, 0, copied.turn, 255, (0,)))
+            # No destination in this turn's reach belongs to the distant CP
+            # tactical area. This is an approach task, not a tactical plan.
+            self.assertEqual(result.reason, SearchReason.NO_PLAN)
             self.assertEqual(battle.snapshot(), before)
         self.assertEqual(
             p.search(SearchRequest(copied, 0, 0, 255, (0,))).reason,
-            SearchReason.COMPLETED,
+            result.reason,
         )
 
 

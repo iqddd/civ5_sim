@@ -43,7 +43,19 @@ class RulesAdapter {
   // Planned reach uses known occupancy and ignores future contacts; those can
   // stop a move earlier or change its cost. Adjacent moves use the direct edge.
   virtual std::vector<ReachableTile> reachable(const Branch&, int32_t unit) const = 0;
+  // CP MOVEFLAG_IGNORE_STACKING_SELF: occupied friendly destinations remain
+  // intentions, not executable commands. Enemy cells are endpoints only.
+  virtual std::vector<ReachableTile> move_intents(const Branch&, int32_t unit) const = 0;
+  // CP danger-map reach: maximum moves, ignore occupancy and ZOC.
+  virtual std::vector<int32_t> threatened_tiles(const Branch&, int32_t unit) const = 0;
+  // ScoreAttackDamage/GetDanger query at assumed plots, without mutation,
+  // movement validation or revealing contacts. Damage uses simulator rules.
+  virtual Damage forecast(const Branch&, int32_t attacker, int32_t from,
+      int32_t defender, int32_t to, int32_t extra_defender_damage = 0,
+      bool ignore_adjacency = true, bool unknown_origin = false) const = 0;
+  virtual int32_t attack_moves(const Branch&, Command) const = 0;
   virtual std::vector<Command> actions(const Branch&) const = 0;
+  virtual bool can_execute(const Branch&, Command) const = 0;
   // next_turn refreshes only the attacker's moves/attack/wait flags on a
   // private copy, preserving branch visibility, contact history and turn.
   virtual Damage preview(const Branch&, Command, bool next_turn = false) const = 0; // roll 600
@@ -55,6 +67,7 @@ class RulesAdapter {
   virtual bool can_see(const Branch&, int32_t from, int32_t to) const = 0;
   // Geometric targeting from a living ranged unit; ignores movement and target contents.
   virtual bool can_shoot(const Branch&, int32_t unit, int32_t to) const = 0;
+  virtual bool can_target(int32_t from, int32_t to) const = 0;
   // Privileged v1 queries only at the CP source call sites. No RNG access.
   // prospective_units reads only cells newly visible after an assumed move.
   virtual std::vector<CaiUnit> prospective_units(

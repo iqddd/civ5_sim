@@ -10,7 +10,7 @@ struct TacticalView {
   std::vector<int32_t> visibility, enemies, occupied;
   TacticalView(const Branch&, int32_t side);
 };
-int32_t movement_role(const CaiUnit&, int32_t incoming);
+int32_t movement_role(const CaiUnit&, int32_t damage_taken_last_turn);
 int32_t enemy_distance(const TacticalView&, const RulesAdapter&, int32_t tile);
 int32_t formation_score(int32_t role, int32_t distance, bool have_enemies);
 EndScore score_turn_end(const CaiConfig&, const RulesAdapter&, DangerModel&,

@@ -177,6 +177,107 @@ class Adapter final : public RulesAdapter {
     for (const auto& a : branch(base).rules.actions()) out.push_back({a.kind,a.unit,a.target});
     return out;
   }
+  bool can_execute(const Branch& base, Command c) const override {
+    return branch(base).rules.validate({c.kind,c.unit,c.target})==combat_rules::OK;
+  }
+  std::vector<ReachableTile> move_intents(const Branch& base, int32_t id) const override {
+    const auto& b = branch(base); unit(b,id);
+    const auto& u = b.rules.units[id];
+    if (u.hp <= 0 || u.moves <= 0 || u.waiting || u.side != b.rules.side) return {};
+    std::vector<int> remaining(geo->tiles.size(),-1);
+    std::priority_queue<std::pair<int,int>> queue;
+    remaining[u.tile] = u.moves; queue.push({u.moves,u.tile});
+    while (!queue.empty()) {
+      auto [left,from] = queue.top(); queue.pop();
+      if (left != remaining[from] || left <= 0) continue;
+      int occupant = b.rules.known_unit(from,u.side);
+      if (from != u.tile && occupant >= 0 && b.rules.units[occupant].side != u.side) continue;
+      for (int to : geo->neighbors[from]) if (geo->passable(to)) {
+        int after = left - b.rules.movement(u,from,to,left,u.side);
+        if (after > remaining[to]) {
+          remaining[to] = after; queue.push({after,to});
+        }
+      }
+    }
+    std::vector<ReachableTile> out;
+    for (int t = 0; t < int(remaining.size()); ++t) if (remaining[t] >= 0) {
+      int left = remaining[t];
+      if (t != u.tile && geo->distance(u.tile,t) == 1)
+        left = u.moves - b.rules.movement(u,u.tile,t,u.moves,u.side);
+      out.push_back({t,left});
+    }
+    return out;
+  }
+  std::vector<int32_t> threatened_tiles(const Branch& base, int32_t id) const override {
+    const auto& b = branch(base); unit(b,id);
+    const auto& u = b.rules.units[id];
+    if (u.hp <= 0) return {};
+    // CvDangerPlots::UpdateDangerSingleUnit, CP Only CORE_TWO_PASS_DANGER=0.
+    // No branch copying, assumed enemy movement, occupancy or ZOC queries.
+    std::vector<int> left(geo->tiles.size(),-1);
+    std::priority_queue<std::pair<int,int>> queue;
+    left[u.tile] = combat_rules::moves[u.type]; queue.push({left[u.tile],u.tile});
+    while (!queue.empty()) {
+      auto [remaining,from] = queue.top(); queue.pop();
+      if (remaining != left[from] || remaining <= 0) continue;
+      for (int to : geo->neighbors[from]) if (geo->passable(to)) {
+        int cost = b.rules.river(from,to) || (u.type == 2 && geo->rough(to)) ?
+                   remaining : std::min(remaining,geo->cost(to));
+        int after = remaining-cost;
+        if (after > left[to]) { left[to] = after; queue.push({after,to}); }
+      }
+    }
+    std::vector<bool> attacked(left.size(),false);
+    for (int t = 0; t < int(left.size()); ++t) {
+      if (combat_rules::ranged[u.type]) {
+        if (left[t] > 0) for (int target : geo->targets[t]) attacked[target] = true;
+      } else if (left[t] >= 0) attacked[t] = true;
+    }
+    std::vector<int32_t> out;
+    for (int t = 0; t < int(attacked.size()); ++t) if (attacked[t]) out.push_back(t);
+    return out;
+  }
+  Damage forecast(const Branch& base, int32_t attacker, int32_t from,
+      int32_t defender, int32_t to, int32_t extra_damage, bool ignore_adjacency,
+      bool unknown_origin) const override {
+    const auto& b = branch(base); unit(b,attacker); unit(b,defender); tile(from); tile(to);
+    const auto& a = b.rules.units[attacker]; const auto& d = b.rules.units[defender];
+    if (a.hp <= 0 || d.hp <= 0 || a.side == d.side || extra_damage < 0 || !geo->passable(to))
+      return {0,0,combat_rules::BAD_TARGET,0,0};
+    bool shot = combat_rules::ranged[a.type] != 0;
+    // Preserve the pinned GetSimulatedDamageFromAttackOnUnit call convention:
+    // for melee, iExtraDefenderDamage goes to GetMaxAttackStrength's extra
+    // attacker damage argument; ranged applies it to the defender instead.
+    // Same five-type strength service/constants as State::strengths, with
+    // explicit assumed coordinates and CP's preview damage convention. Keep
+    // this query inside the AI: it does not change the kernel rules passport.
+    int ahp=a.hp-(shot?0:extra_damage), dhp=d.hp-(shot?extra_damage:0);
+    int am=-((100-ahp)*WOUNDED_DAMAGE_MULTIPLIER/100)+b.rules.class_bonus(a,d);
+    int dm=-((100-dhp)*WOUNDED_DAMAGE_MULTIPLIER/100)+b.rules.class_bonus(d,a);
+    bool no_terrain=d.type==2 || d.type==4;
+    int terrain=geo->defense(to);
+    dm+=no_terrain?std::min(terrain,0):terrain;
+    if (d.fortified && !no_terrain) dm+=FORTIFY_MODIFIER_PER_TURN;
+    if (!shot) {
+      if (!unknown_origin && b.rules.river(from,to)) am+=RIVER_ATTACK_MODIFIER;
+      int ours=ignore_adjacency?0:b.rules.supports(to,a.side,attacker,a.side,true);
+      int theirs=ignore_adjacency || unknown_origin?0:b.rules.supports(from,d.side,defender,a.side,true);
+      am+=std::max(0,ours-theirs)*BONUS_PER_ADJACENT_FRIEND;
+      dm+=std::max(0,theirs-ours)*BONUS_PER_ADJACENT_FRIEND;
+    }
+    int as=std::max(1,(shot?combat_rules::ranged[a.type]:combat_rules::strength[a.type])*std::max(10,100+am));
+    int ds=std::max(1,(shot && combat_rules::ranged[d.type]?combat_rules::ranged[d.type]:combat_rules::strength[d.type])*std::max(10,100+dm));
+    // CP's scoring preview returns uncapped deterministic damage. Real
+    // transitions separately apply overkill/mutual-death correction.
+    return {combat_rules::damage(as,ds,CAI_FIXED_ROLL),
+            shot ? 0 : combat_rules::damage(ds,as,CAI_FIXED_ROLL),0,as,ds};
+  }
+  int32_t attack_moves(const Branch& base, Command c) const override {
+    const auto& b = branch(base); unit(b,c.unit); tile(c.target);
+    const auto& u = b.rules.units[c.unit];
+    if (u.type != 4) return 0;
+    return std::max(0,u.moves-b.rules.movement(u,u.tile,c.target,u.moves,u.side));
+  }
   Damage preview(const Branch& base, Command c, bool next_turn = false) const override {
     const auto& current = branch(base).rules;
     auto evaluate = [&](const State& s) -> Damage {
@@ -228,6 +329,11 @@ class Adapter final : public RulesAdapter {
     const auto& u = b.rules.units[id];
     const auto& v = geo->targets[u.tile];
     return u.hp > 0 && combat_rules::ranged[u.type] && std::binary_search(v.begin(),v.end(),to);
+  }
+  bool can_target(int32_t from, int32_t to) const override {
+    tile(from); tile(to);
+    const auto& targets=geo->targets[from];
+    return std::binary_search(targets.begin(),targets.end(),to);
   }
   std::vector<CaiUnit> prospective_units(const Branch& base, const std::vector<int32_t>& tiles) const override {
     const auto& b = branch(base); std::vector<CaiUnit> out;
@@ -286,22 +392,29 @@ class Adapter final : public RulesAdapter {
     int total = 0;
     // AddFogDanger(origin, enemy, 2, false): each hidden passable origin
     // candidate contributes to a disk of radius two, not the whole map.
-    for (int id : visible_enemies)
-      for (int hidden = 0; hidden < int(geo->tiles.size()); ++hidden)
-        if (geo->passable(hidden) && !b.rules.known(observer,hidden) &&
-            geo->distance(projected.units[id].tile,hidden) <= 2 &&
-            geo->distance(hidden,target) <= 2) ++total;
+    if (b.rules.fog)
+      for (int id : visible_enemies)
+        for (int hidden = 0; hidden < int(geo->tiles.size()); ++hidden)
+          if (geo->passable(hidden) && !b.rules.known(observer,hidden) &&
+              geo->distance(projected.units[id].tile,hidden) <= 2 &&
+              geo->distance(hidden,target) <= 2) ++total;
 
     if (projected.units[defender].tile != target) {
-      projected.units[defender].tile = target;
+      projected.relocate(projected.units[defender], target);
       projected.units[defender].fortified = 0;
-      projected.rebuild();
     }
     projected.side = 1 - observer;
     // Reachability assumes complete knowledge of the admitted physical
     // position. The probability discount above uses a separate knowledge map.
     projected.fog = 0;
     for (int id : enemies) {
+      const auto& original = projected.units[id];
+      const bool shot = combat_rules::ranged[original.type] != 0;
+      // Every traversed edge costs at least 60; a positive remainder is
+      // required to attack. This conservative bound only skips impossible
+      // attackers, before allocating a response and running pathfinding.
+      if (geo->distance(original.tile, target) >
+          combat_rules::moves[original.type] / 60 + (shot ? 2 : 1)) continue;
       State response = projected;
       auto& attacker = response.units[id];
       attacker.moves = combat_rules::moves[attacker.type];
@@ -310,7 +423,6 @@ class Adapter final : public RulesAdapter {
       response.paths(id,remaining,previous);
       int best = 0;
       int origin = attacker.tile;
-      bool shot = combat_rules::ranged[attacker.type] != 0;
       for (int from = 0; from < int(remaining.size()); ++from) {
         if (remaining[from] <= 0 ||
             (response.occupied[from] >= 0 && from != origin)) continue;
@@ -322,9 +434,9 @@ class Adapter final : public RulesAdapter {
         // cannot mutate sibling candidate attacks or the real branch.
         State attack = response;
         auto& a = attack.units[id];
-        a.tile = from; a.moves = remaining[from];
+        if (from != origin) attack.relocate(a, from);
+        a.moves = remaining[from];
         if (from != origin) a.fortified = 0;
-        attack.rebuild();
         if (attack.validate({shot ? combat_rules::RANGED : combat_rules::MELEE,id,target}) != combat_rules::OK)
           continue;
         auto damage = attack.combat(id,defender,shot,false);

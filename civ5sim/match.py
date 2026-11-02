@@ -10,6 +10,7 @@ from civ5map.maps import components, load, passable, validate
 
 from .agents import load_agent
 from .engine import UNIT_TYPES, Battle, action_value, boolean, digest, integer
+from .telemetry import measure
 
 
 @dataclass(frozen=True)
@@ -135,11 +136,13 @@ class MatchOutcome:
             )
 
 
-def run_match(config, agents):
+def run_match(config, agents, *, metrics=None):
     """Run two agent objects/specifications and return privileged match artifacts.
 
     Invalid configuration raises before invoking agents. Agent failures instead
     return status=error with a replay of the successfully executed prefix.
+    metrics, when supplied, receives wall-clock sample dictionaries separately
+    from the deterministic result/replay. Collectors must not raise exceptions.
     """
     scenario = create_scenario(config)
     config = deepcopy(config)
@@ -233,24 +236,29 @@ def run_match(config, agents):
                     "message": "max_calls_per_turn exceeded",
                 }
                 break
-            actions = tuple(battle.available_actions())
+            with measure(metrics, "prepare_actions", side=side, turn=completed_turns):
+                actions = tuple(battle.available_actions())
             calls_this_turn += 1
             agent_calls[side] += 1
             try:
-                observation = battle.observe(side)
+                with measure(metrics, "prepare_observation", side=side, turn=completed_turns):
+                    observation = battle.observe(side)
                 if callable(getattr(agents[side], "act_with_planning", None)):
                     from .combat_ai import CallPlanningServices, PlanningState
 
-                    planning = CallPlanningServices(
-                        agents[side].planner, PlanningState.from_battle(battle, side),
-                        side, observation["turn"],
-                    )
+                    with measure(metrics, "prepare_planning", side=side, turn=completed_turns):
+                        planning = CallPlanningServices(
+                            agents[side].planner, PlanningState.from_battle(battle, side),
+                            side, observation["turn"], metrics=metrics,
+                        )
                     try:
-                        selected = agents[side].act_with_planning(observation, actions, planning)
+                        with measure(metrics, "act", side=side, turn=completed_turns):
+                            selected = agents[side].act_with_planning(observation, actions, planning)
                     finally:
                         planning.expire()
                 else:
-                    selected = agents[side].act(observation, actions)
+                    with measure(metrics, "act", side=side, turn=completed_turns):
+                        selected = agents[side].act(observation, actions)
                 collect_events(side)
             except Exception as exc:  # noqa: BLE001 -- agent boundary saves failed matches
                 status, reason = "error", "agent_error"
@@ -285,7 +293,8 @@ def run_match(config, agents):
             try:
                 callback = getattr(agents[side], "on_action_result", None)
                 if callable(getattr(agents[side], "act_with_planning", None)) and callback:
-                    callback(action, step, battle.observe(side))
+                    with measure(metrics, "callback", side=side, turn=observation["turn"]):
+                        callback(action, step, battle.observe(side))
                 collect_events(side)
             except Exception as exc:  # noqa: BLE001 -- preserve the executed prefix
                 status, reason = "error", "agent_error"

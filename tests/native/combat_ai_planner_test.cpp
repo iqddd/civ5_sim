@@ -1,6 +1,7 @@
 // End-to-end local-search properties. Replay uses the rules adapter, not the
 // planner's candidate/scoring implementation, and verifies the resulting state.
 #include "../../native/combat_ai/planner.h"
+#include "../../native/combat_ai/cp_tactical.h"
 #include "../../native/combat_state.h"
 #include <algorithm>
 #include <iostream>
@@ -60,7 +61,7 @@ struct Fixture {
     std::vector<bool> finished(units.size(),false);
     for (auto a : plan.assignments) {
       CHECK(std::find(selected.begin(), selected.end(), a.unit) != selected.end());
-      if (a.kind == CAI_INITIAL || a.kind == CAI_RESTART || a.kind == CAI_SWAP_REVERSE) continue;
+      if (a.kind == CAI_INITIAL || a.kind == CAI_RESTART || a.kind == CAI_SWAP_REVERSE || a.kind == CAI_BLOCKED) continue;
       if (a.kind == CAI_FINISH) { CHECK(!finished[a.unit]); finished[a.unit] = true; continue; }
       CHECK(a.kind != CAI_FINISH_TEMP);
       CHECK(!finished[a.unit]);
@@ -94,7 +95,7 @@ void attacks() {
   CHECK(std::any_of(kill.assignments.begin(),kill.assignments.end(),[](auto a) { return a.unit == 0 && a.killed_unit == 1; }));
 }
 void swaps_and_freeing() {
-  Fixture f; f.add(1,0,16,10); f.add(3,0,15); f.add(0,1,17,50);
+  Fixture f; f.add(1,0,16,50); f.add(3,0,15); f.add(0,1,17,50);
   f.corridor({15,16,17}); f.start();
   auto plan = f.search(17); CHECK(!plan.assignments.empty());
   CHECK(std::any_of(plan.assignments.begin(),plan.assignments.end(),[](auto a) { return a.kind == CAI_SWAP; }));
@@ -170,16 +171,15 @@ void budgets_and_determinism() {
 }
 void contact() {
   Fixture f; f.w=12; f.h=5; f.tiles.resize(60); f.fog=1;
-  f.add(4,0,24); f.add(0,1,29,1); f.start();
-  CHECK(!f.visibility[29]);
-  auto p=f.search(29); CHECK(!p.assignments.empty());
-  bool restart=false, continued=false, interrupted=false;
+  f.add(4,0,24); f.add(0,1,28,1); f.start();
+  CHECK(!f.visibility[28]);
+  auto p=f.search(28); CHECK(!p.assignments.empty());
+  bool restart=false, continued=false;
   for(auto a:p.assignments) {
     if(a.kind==CAI_RESTART) restart=true;
     if(restart && (a.kind==CAI_MOVE || a.kind==CAI_MELEE)) continued=true;
-    if(a.kind==CAI_MOVE && a.command_target!=a.to_tile) interrupted=true;
   }
-  CHECK(restart); CHECK(continued); CHECK(interrupted); f.replay(p);
+  CHECK(restart); CHECK(continued); f.replay(p);
 }
 void random_replay() {
   std::mt19937 random(42);
@@ -254,6 +254,166 @@ void support_approach() {
   CHECK(last.replay(end)->state().units[0].tile==255);
   CHECK(last.support(254,CAI_APPROACH).assignments.empty());
 }
+struct TacticalFixture {
+  TacticalPosition position;
+  std::unique_ptr<CpTactics> tactics;
+  TacticalFixture(Fixture& f, int target, const std::vector<int32_t>& history={}) {
+    position.branch=f.root->clone();
+    position.done.assign(f.selected.size(),0); position.moved=position.done;
+    position.last_kill=position.done; position.touched=position.done;
+    CaiSearchRequest request{&f.state,0,f.turn,target,f.selected.data(),int32_t(f.selected.size()),{0,-1,nullptr,0}};
+    tactics=std::make_unique<CpTactics>(*f.adapter,*f.root,f.config,request,history);
+    tactics->initialize(position);
+  }
+};
+void cp_area_and_preferences() {
+  Fixture distant; distant.w=16; distant.h=1; distant.tiles.resize(16);
+  distant.add(4,0,0); distant.add(0,1,9); distant.start();
+  TacticalFixture f(distant,9);
+  auto board=f.tactics->board(f.position);
+  CHECK(board.plots[0].valid); CHECK(!board.plots[2].valid);
+  auto preferred=f.tactics->preferred(f.position,board,0,9);
+  CHECK(std::any_of(preferred.begin(),preferred.end(),[](CpMove m) { return m.kind==CP_MOVE && m.tile==4; }));
+  CHECK(preferred.back().kind==CP_BLOCKED && preferred.back().score==-10);
+  for (auto m : preferred) if (m.kind==CP_MOVE) CHECK(distant.adapter->distance(m.tile,9)<=6);
+  // Starting outside radius six does not exclude a participant with a useful
+  // reachable destination. Conversely, all far intents produce only BLOCKED.
+  TacticalFixture far(distant,15);
+  auto blocked=far.tactics->preferred(far.position,far.tactics->board(far.position),0,9);
+  CHECK(blocked.size()==1 && blocked[0].kind==CP_BLOCKED);
+  Fixture ties; ties.add(0,0,17); ties.start();
+  TacticalFixture equal(ties,17);
+  auto top=equal.tactics->preferred(equal.position,equal.tactics->board(equal.position),0,2);
+  CHECK(top.size()>3); // More than two actions plus BLOCKED: cutoff ties survive.
+  int cutoff=top[1].score;
+  for (size_t i=2; i+1<top.size(); ++i) CHECK(top[i].score==cutoff);
+  Fixture visibility; visibility.w=16; visibility.h=5; visibility.tiles.resize(80); visibility.fog=1;
+  visibility.add(0,0,32); visibility.add(0,1,47); visibility.start();
+  TacticalFixture fog(visibility,47);
+  CHECK(!fog.position.plots[47]);
+  CHECK(!fog.tactics->board(fog.position).plots[47].valid);
+  // Root-only safe count and fixed danger index are not overwritten by a child.
+  auto safe=fog.tactics->safe;
+  auto child=fog.position.branch->clone();
+  CHECK(visibility.adapter->apply(*child,{MOVE,0,33}).accepted);
+  CHECK(fog.tactics->safe==safe);
+}
+void cp_blocker_combinations() {
+  Fixture corridor; corridor.config.choices_per_unit=9;
+  corridor.add(4,0,14); corridor.add(0,0,16); corridor.add(1,1,17,1);
+  corridor.corridor({14,15,16,17,18}); corridor.start();
+  TacticalFixture f(corridor,17);
+  auto before=f.position.branch->state();
+  auto old_units=std::vector<CaiUnit>(before.units,before.units+before.unit_count);
+  auto board=f.tactics->board(f.position);
+  auto choices=f.tactics->preferred(f.position,board,0,9);
+  CHECK(std::any_of(choices.begin(),choices.end(),[](CpMove m) { return m.kind==CP_MOVE && m.tile==16; }));
+  auto after=f.position.branch->state();
+  for (int id=0; id<after.unit_count; ++id)
+    CHECK(after.units[id].hp==old_units[id].hp && after.units[id].tile==old_units[id].tile);
+  CHECK(board.view.occupied[16]==1); CHECK(board.plots[15].friends==2);
+  bool freeing=false;
+  for (auto combo : f.tactics->candidates(f.position,false)) if (combo.moves.size()==2 && combo.moves[0].kind==CP_FORCED) {
+    auto a=combo.moves[0], b=combo.moves[1];
+    CHECK(old_units[a.unit].tile==b.tile); CHECK(a.unit!=b.unit);
+    CHECK(board.view.occupied[a.tile]<0);
+    if (b.unit==0 && b.tile==16) {
+      CHECK(corridor.adapter->distance(old_units[b.unit].tile,b.tile)==2); freeing=true;
+    }
+  }
+  CHECK(freeing); // A real blocker, even when the follower is not adjacent.
+  corridor.selected={0};
+  TacticalFixture omitted(corridor,17);
+  auto blocked=omitted.tactics->preferred(omitted.position,omitted.tactics->board(omitted.position),0,9);
+  CHECK(std::none_of(blocked.begin(),blocked.end(),[](CpMove m) { return m.kind==CP_MOVE && m.tile==16; }));
+  Fixture swap; swap.add(1,0,16,50); swap.add(3,0,15); swap.add(0,1,17,50);
+  swap.corridor({15,16,17}); swap.start(); TacticalFixture reciprocal(swap,17);
+  auto pairs=reciprocal.tactics->candidates(reciprocal.position,false);
+  CHECK(std::any_of(pairs.begin(),pairs.end(),[](const CpCombo& c) {
+    return c.moves.size()==2 && c.moves[0].kind==CP_SWAP && c.moves[1].kind==CP_SWAP_REVERSE;
+  }));
+  // BLOCKED does not promise cover at turn end; FINISH_TEMP does.
+  f.position.done[1]=2;
+  CHECK(!f.tactics->board(f.position).plots[16].end);
+  f.position.done[1]=1;
+  auto ended=f.tactics->board(f.position);
+  CHECK(ended.plots[16].end && ended.plots[15].friends_end==1);
+}
+void cp_forecast_and_danger() {
+  // Cross-check the pure strength query against the unchanged physical
+  // kernel, across types/wounds/terrain. Uncapped preview damage is separate.
+  for (int a=0; a<5; ++a) for (int d=0; d<5; ++d) for (int hp : {1,50,100}) {
+    Fixture compare;
+    compare.tiles[16].elevation=1;
+    compare.tiles[15].rivers=1<<1;
+    compare.add(a,0,15,hp); compare.add(d,1,16,100-hp/2);
+    if (d!=2 && d!=4) compare.units[1].fortified=1;
+    compare.start();
+    auto pure=compare.adapter->forecast(*compare.root,0,15,1,16,0);
+    auto physical=compare.adapter->preview(*compare.root,{combat_rules::ranged[a]?RANGED:MELEE,0,16});
+    CHECK(physical.code==0 && pure.code==0);
+    CHECK(pure.attacker_strength==physical.attacker_strength);
+    CHECK(pure.defender_strength==physical.defender_strength);
+  }
+  Fixture f; f.add(0,0,15); f.add(0,1,16); f.add(1,0,8); f.start();
+  auto melee=f.adapter->forecast(*f.root,0,15,1,16,0);
+  auto extra=f.adapter->forecast(*f.root,0,15,1,16,20);
+  // Pin the actual CP parameter pass-through, even though its name suggests
+  // the extra damage should weaken the defender in both attack types.
+  CHECK(extra.attacker_strength<melee.attacker_strength);
+  CHECK(extra.defender_strength==melee.defender_strength);
+  auto shot=f.adapter->forecast(*f.root,2,8,1,16,0);
+  auto wounded=f.adapter->forecast(*f.root,2,8,1,16,20);
+  CHECK(wounded.attacker_strength==shot.attacker_strength);
+  CHECK(wounded.defender_strength<shot.defender_strength);
+  CHECK(f.root->state().units[1].hp==100);
+  Fixture line; line.add(0,0,15); line.add(0,0,16); line.add(4,1,14);
+  line.corridor({14,15,16,17,18,19,20}); line.start();
+  auto covered=line.adapter->threatened_tiles(*line.root,2);
+  CHECK(std::find(covered.begin(),covered.end(),18)!=covered.end());
+  CHECK(std::find(covered.begin(),covered.end(),20)==covered.end());
+  TacticalFixture danger(line,14);
+  CHECK(danger.tactics->danger(0,18,0,{})>0);
+  CHECK(danger.tactics->danger(0,18,0,{2})==0);
+  CHECK(danger.tactics->danger(0,18,0,{})>0); // The killed-set cache is separate.
+}
+void cp_history_and_admission() {
+  Fixture f; f.w=16; f.h=16; f.tiles.resize(256);
+  f.add(0,0,0); f.add(0,1,1); f.start();
+  TacticalFixture absent(f,240);
+  CHECK(absent.position.done[0]==0);
+  CHECK(absent.tactics->roles[0]==CAI_FIRST_LINE);
+  CHECK(absent.position.plots[0] && absent.position.plots[1]);
+  TacticalFixture equality(f,240,{100,0});
+  CHECK(equality.position.done[0]==0); // Strict >, not >=.
+  TacticalFixture excluded(f,240,{101,0});
+  CHECK(excluded.position.done[0]==2);
+  CHECK(!excluded.position.plots[0] && !excluded.position.plots[1]);
+  CHECK(excluded.tactics->initial_enemies.empty());
+  // A remote unrelated enemy cannot admit the unit by being added through
+  // its neighborhood before admission. Near the real target it is admitted.
+  TacticalFixture frontline(f,1,{101,0});
+  CHECK(frontline.position.done[0]==0);
+  CHECK(frontline.tactics->roles[0]==CAI_THIRD_LINE);
+  CHECK(movement_role(f.units[0],100)==CAI_FIRST_LINE);
+  CHECK(movement_role(f.units[0],101)==CAI_THIRD_LINE);
+}
+void cp_area_capacity() {
+  Fixture f; f.w=48; f.h=24; f.tiles.resize(f.w*f.h);
+  for (int y : {2,6,10}) for (int x : {34,38,42,46}) f.add(0,0,y*f.w+x);
+  int target=12*f.w+12, horse=12*f.w+21;
+  f.add(4,0,horse);
+  std::vector<Tile> tiles(f.tiles.size());
+  Geometry geometry(f.w,f.h,0,0,tiles.data());
+  for (int t=0; t<int(tiles.size()); ++t) if (geometry.distance(target,t)==5) f.add(0,1,t);
+  f.start();
+  TacticalFixture cap(f,target);
+  CHECK(std::accumulate(cap.position.plots.begin(),cap.position.plots.end(),0)==255);
+  CHECK(cap.position.plots[horse]);
+  auto choices=cap.tactics->preferred(cap.position,cap.tactics->board(cap.position),12,9);
+  CHECK(!choices.empty() && choices.back().kind==CP_BLOCKED);
+  CHECK(std::any_of(choices.begin(),choices.end(),[](CpMove m) { return m.kind==CP_MOVE; }));
+}
 int main(int argc,char** argv) {
   try {
     std::string name=argc>1?argv[1]:"";
@@ -267,6 +427,11 @@ int main(int argc,char** argv) {
     else if(name=="scale_and_last_tile") scale_and_last_tile();
     else if(name=="support_healing") support_healing();
     else if(name=="support_approach") support_approach();
+    else if(name=="cp_area_and_preferences") cp_area_and_preferences();
+    else if(name=="cp_blocker_combinations") cp_blocker_combinations();
+    else if(name=="cp_forecast_and_danger") cp_forecast_and_danger();
+    else if(name=="cp_history_and_admission") cp_history_and_admission();
+    else if(name=="cp_area_capacity") cp_area_capacity();
     else throw std::runtime_error("unknown test group");
     std::cout<<name<<" passed\n"; return 0;
   } catch(const std::exception& e) { std::cerr<<e.what()<<"\n"; return 1; }

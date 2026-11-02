@@ -45,7 +45,11 @@ def load_agent(spec):
         from .cp_agent import CPAgent
 
         return CPAgent()
+    if spec == "greedy":
+        from .greedy_agent import GreedyAgent
+
+        return GreedyAgent()
     module, separator, name = spec.partition(":")
     if not separator or not module or not name:
-        raise ValueError("Agent must be random, end_turn, cp or module:factory")
+        raise ValueError("Agent must be random, end_turn, greedy, cp or module:factory")
     return getattr(importlib.import_module(module), name)()

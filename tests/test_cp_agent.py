@@ -231,7 +231,7 @@ class ExecutorTests(unittest.TestCase):
                 service.search(19, (0,), contacts=ContactMemory())
 
     def test_search_limit_bounds_replanning_despite_progress(self):
-        with Battle(scenario([unit("horseman", 0, 0), unit("warrior", 1, 31)])) as b:
+        with Battle(scenario([unit("horseman", 0, 0), unit("warrior", 1, 19)])) as b:
             a = self.agent(b)
             # Wrong predicted movement forces cancellation after each real move.
             p = ScriptedPlanning(*(plan(assignment(K.MOVE, 0, i, i + 1, 0))

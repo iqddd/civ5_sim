@@ -46,3 +46,18 @@ class LocalPlannerTests(unittest.TestCase):
 
     def test_support_approach_detours_occupancy_and_last_tile(self):
         self.check_native("support_approach")
+
+    def test_cp_area_destinations_visibility_and_preference_ties(self):
+        self.check_native("cp_area_and_preferences")
+
+    def test_cp_blocker_intentions_freeing_swaps_and_end_turn_cover(self):
+        self.check_native("cp_blocker_combinations")
+
+    def test_cp_pinned_forecast_parameters_and_root_danger_index(self):
+        self.check_native("cp_forecast_and_danger")
+
+    def test_cp_damage_history_predicate_and_admission_before_neighborhoods(self):
+        self.check_native("cp_history_and_admission")
+
+    def test_cp_area_capacity_admits_participant_center_before_neighbors(self):
+        self.check_native("cp_area_capacity")

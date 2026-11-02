@@ -1,4 +1,4 @@
-"""CP-06 tactical and support planners, branch model and danger estimates.
+"""CP-07 tactical and support planners, branch model and danger estimates.
 
 This module is an internal privileged boundary for the CP-source v1 agent.
 Normal Agent.act observations never acquire a PlanningState implicitly.
@@ -273,29 +273,38 @@ class PlanningAgent(Protocol):
 class CallPlanningServices:
     """Organizer-owned, expiring search capability; contains no Battle or RNG."""
 
-    def __init__(self, planner: "Planner", state: PlanningState, side: int, turn: int):
+    def __init__(self, planner: "Planner", state: PlanningState, side: int, turn: int,
+                 *, metrics=None):
         self._planner = planner
         self._state = state
         self._side = side
         self._turn = turn
+        self._metrics = metrics
 
     def search(self, target, selected_units, *, contacts, aggression=None):
         if self._state is None:
             raise RuntimeError("Planning service has expired")
-        return self._planner.search(SearchRequest(
-            self._state, self._side, self._turn, target, tuple(selected_units), contacts, aggression
-        ))
+        from .telemetry import measure
+
+        with measure(self._metrics, "search", side=self._side, turn=self._turn):
+            return self._planner.search(SearchRequest(
+                self._state, self._side, self._turn, target, tuple(selected_units), contacts, aggression
+            ))
 
     def support(self, target, selected_units, *, contacts, mode):
         if self._state is None:
             raise RuntimeError("Planning service has expired")
-        return self._planner.support(SearchRequest(
-            self._state, self._side, self._turn, target, tuple(selected_units), contacts
-        ), mode)
+        from .telemetry import measure
+
+        with measure(self._metrics, "support", side=self._side, turn=self._turn):
+            return self._planner.support(SearchRequest(
+                self._state, self._side, self._turn, target, tuple(selected_units), contacts
+            ), mode)
 
     def expire(self):
         self._state = None
         self._planner = None
+        self._metrics = None
 
 
 def _structure(name, names):
@@ -426,6 +435,7 @@ class Planner:
         if not self._handle:
             raise ValueError("Invalid search configuration or native allocation failed")
         self.config = config
+        self._assignment_buffer = (_Assignment * 256)()
 
     @property
     def version(self):
@@ -511,16 +521,18 @@ class Planner:
                 return self._lib.cai_search(*args, buffer, capacity, C.byref(result))
             return self._lib.cai_support(*args, int(mode), buffer, capacity, C.byref(result))
         result = _Result()
-        status = invoke(None, 0, result)
+        buffer = self._assignment_buffer
+        capacity = len(buffer)
+        status = invoke(buffer, capacity, result)
         assignments = ()
-        if (
-            status == 3
-        ):  # Repeat the deterministic search with caller-owned output storage.
+        if status == 3:  # Unusually long plans grow the retained output buffer.
             capacity = result.assignment_count
             if not 0 < capacity <= 1_000_000:
                 raise RuntimeError("Invalid native plan size")
             buffer = (_Assignment * capacity)()
+            self._assignment_buffer = buffer
             status = invoke(buffer, capacity, result)
+        if status == 0:
             if not 0 <= result.assignment_count <= capacity:
                 raise RuntimeError("Native plan buffer overflow")
             assignments = tuple(

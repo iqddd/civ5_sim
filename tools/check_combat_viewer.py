@@ -32,7 +32,11 @@ def check(url, screenshot):
         page.wait_for_timeout(750)
         assert page.locator("#timeline").input_value() == paused
         page.click("#last")
-        assert "Матч завершён" in page.locator("#turnLabel").inner_text()
+        label = page.locator("#turnLabel").inner_text()
+        if page.evaluate("Boolean(data.experiment)"):
+            assert "Конец найденного плана" in label
+        else:
+            assert "Матч завершён" in label
         page.click("#first")
         page.keyboard.press("ArrowRight")
         assert page.locator("#timeline").input_value() == "1"
@@ -44,7 +48,7 @@ def check(url, screenshot):
         page.click("#zoomReset")
         assert page.locator("#map").get_attribute("viewBox") == viewbox
         page.check("#coords")
-        assert page.locator("#map text").count() > 200
+        assert page.locator("#map text").count() >= page.evaluate("data.map.width*data.map.height")
         catalog = page.request.get(url.rstrip("/") + "/api/matches").json()
         fog_match = next((m for m in catalog if m["fog"]), None)
         if fog_match:

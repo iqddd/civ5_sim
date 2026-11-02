@@ -78,6 +78,7 @@ def prepare_replay(path):
         "result": None if result is None else {key: result.get(key) for key in (
             "agents", "outcome", "winner", "reason", "status", "seeds")},
         "verified": True,
+        "experiment": replay.get("experiment"),
     }
 
 
