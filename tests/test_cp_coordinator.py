@@ -3,7 +3,7 @@ import unittest
 from copy import deepcopy
 from dataclasses import asdict, replace
 
-from test_cp_agent import SMALL, ScriptedPlanning, scenario, unit
+from test_cp_agent import SMALL, ScriptedPlanning, assignment, plan, scenario, unit
 from test_maps import field
 
 from civ5sim import Action, Battle, MatchConfig, run_match
@@ -295,6 +295,122 @@ class CoordinatorTests(unittest.TestCase):
             service.expire()
             with self.assertRaisesRegex(RuntimeError, "expired"):
                 service.support(18, (0,), contacts=ContactMemory(), mode=SupportMode.APPROACH)
+
+
+@unittest.skipUnless(LIBRARY_PATH.exists(), "Build combat and AI libraries first")
+class ContactRequirementTests(unittest.TestCase):
+    """Coordinator obligations, independent of native search quality or old replays.
+
+    Each expectedFailure has a passing witness test running the same episode,
+    so setup, legality and termination errors cannot silently replace the
+    intended requirement failure. See combat-ai-port-plan.md, section
+    "Восстановленные содержательные проверки".
+    """
+
+    def agent(self, battle):
+        agent = CPAgent(SMALL)
+        agent.reset({"map": battle._map, "side": 0})
+        self.addCleanup(agent.close)
+        return agent
+
+    def act(self, agent, battle, planning):
+        before = battle.snapshot()
+        action = agent.act_with_planning(battle.observe(0), tuple(battle.available_actions()), planning)
+        self.assertEqual(before, battle.snapshot(), "Planning changed real state or RNG")
+        self.assertIn(action, battle.available_actions())
+        return action
+
+    def execute(self, agent, battle, action):
+        result = battle.step(action)
+        self.assertTrue(result.ok, result)
+        agent.on_action_result(action, result, battle.observe(0))
+
+    def finish_turn(self, agent, battle, planning):
+        for _ in range(16):
+            action = self.act(agent, battle, planning)
+            if action.kind == "end_turn":
+                return
+            self.execute(agent, battle, action)
+        self.fail("Coordinator did not finish the bounded scenario")
+
+    def contact_episode(self):
+        battle = self.enterContext(Battle(scenario([
+            unit("horseman", 0, 16), unit("warrior", 0, 17), unit("warrior", 1, 21),
+        ], fog=True)))
+        agent = self.agent(battle)
+        agent._explore_target = lambda group, observation: 19
+        before = battle.observe(0)
+        self.assertEqual({u["id"] for u in before["units"]}, {0, 1})
+        with battle.clone() as witness:
+            self.assertTrue(witness.step(Action("move", 0, 19)).ok)
+            moved = next(u for u in witness.observe(0)["units"] if u["id"] == 0)
+
+        planning = ScriptedPlanning(*(plan(reason=SearchReason.NO_PLAN) for _ in range(8)))
+        approaches = []
+
+        def support(target, selected, *, contacts, mode):
+            if mode == SupportMode.APPROACH:
+                approaches.append(selected)
+                if len(approaches) == 1:
+                    return plan(assignment(K.MOVE, 0, 16, moved["tile"], moved["moves"], target=19))
+            return plan(reason=SearchReason.NO_PLAN)
+
+        planning.support = support
+        action = self.act(agent, battle, planning)
+        self.assertEqual(action, Action("move", 0, 19))
+        self.assertEqual(set(approaches[0]), {0, 1})
+        self.execute(agent, battle, action)
+        observation = battle.observe(0)
+        self.assertIn(2, {u["id"] for u in observation["units"]})
+        unused = next(u for u in observation["units"] if u["id"] == 1)
+        self.assertEqual(unused, next(u for u in before["units"] if u["id"] == 1))
+        self.assertTrue(any(a.kind == "move" and a.unit == 1 for a in battle.available_actions()))
+        self.assertTrue(any(e["event"] == "plan_cancelled" and e["reason"] == "new_contact"
+                            for e in agent.drain_diagnostics()))
+        self.finish_turn(agent, battle, planning)
+        self.assertLessEqual(len(planning.calls), agent._search_limit)
+        return approaches[1:]
+
+    def search_limit_episode(self):
+        battle = self.enterContext(Battle(scenario([
+            unit("archer", 0, 17), unit("warrior", 1, 18),
+            unit("warrior", 1, 19), unit("warrior", 1, 20),
+        ])))
+        agent = self.agent(battle)
+        attacks = [a for a in battle.available_actions() if a.kind == "ranged" and a.unit == 0]
+        self.assertTrue(attacks, "The shooter must have a legal attack before dispatch")
+        with battle.clone() as witness:
+            self.assertTrue(witness.step(attacks[0]).ok)
+        planning = ScriptedPlanning(*(plan(reason=SearchReason.NO_PLAN) for _ in range(8)))
+        planning.support = lambda *args, **kwargs: plan(reason=SearchReason.NO_PLAN)
+        action = self.act(agent, battle, planning)
+        self.assertEqual(len(planning.calls), 2)
+        events = agent.drain_diagnostics()
+        self.execute(agent, battle, action)
+        self.finish_turn(agent, battle, planning)
+        self.assertLessEqual(len(planning.calls), agent._search_limit)
+        return action, events
+
+    def test_contact_scenario_reveals_enemy_and_leaves_unused_unit_mobile(self):
+        self.contact_episode()
+
+    @unittest.expectedFailure
+    def test_new_contact_returns_unused_explorer_to_approach(self):
+        # Known coordinator defect: _phase_seen[3] retains the interrupted group.
+        approaches = self.contact_episode()
+        self.assertTrue(any(1 in selected for selected in approaches),
+                        f"Unused explorer never reconsidered for approach: {approaches}")
+
+    def test_search_limit_scenario_has_legal_shot_and_two_empty_searches(self):
+        self.search_limit_episode()
+
+    @unittest.expectedFailure
+    def test_call_search_limit_does_not_order_available_shooter_to_wait(self):
+        # Known coordinator defect: the per-call search cap issues a skip.
+        action, events = self.search_limit_episode()
+        self.assertFalse(any(e["event"] == "waiting" and e.get("reason") == "call_search_limit"
+                             for e in events), "Computational limit became a wait order")
+        self.assertNotEqual(action, Action("skip", 0))
 
 
 @unittest.skipUnless(LIBRARY_PATH.exists(), "Build combat and AI libraries first")

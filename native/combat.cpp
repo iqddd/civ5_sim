@@ -17,7 +17,7 @@ struct Battle : State {
 };
 }  // namespace
 
-int sim_abi() { return 1; }
+int sim_abi() { return 2; }
 const char* sim_rules() { return RULES_FINGERPRINT; }
 uint64_t sim_memory(void* p, int include_geometry) {
   if (!p) return 0;
@@ -106,9 +106,11 @@ int sim_units(void* p, int observer, Unit* out) {
           out[i].attacked = -1;
           out[i].acted = -1;
           out[i].waiting = -1;
+          out[i].damage_taken_this_turn = -1;
+          out[i].damage_taken_last_turn = -1;
         }
       } else
-        out[i] = {-1, -1, -1, -1, -1, -1, -1, -1, -1};
+        out[i] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
     }
   return int(s.units.size());
 }

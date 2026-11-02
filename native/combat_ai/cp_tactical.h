@@ -58,7 +58,6 @@ class CpTactics {
   std::vector<int> root_visible, visibility_score;
   bool initialization_started = false;
   bool visibility_scores_ready = false;
-  std::vector<int32_t> damage_history;
   std::vector<std::vector<int>> attackers;
   std::vector<int> fog_danger;
   std::map<std::vector<int>, int> danger_cache;
@@ -89,10 +88,8 @@ public:
   std::vector<int> initial_enemies;
   std::vector<SlotIdx> active_order;
   float bias = 1.f;
-  // ABI 5 has no historical damage input: the empty profile explicitly means
-  // zero. A C++ caller with real history can provide one value per roster ID.
-  CpTactics(const RulesAdapter &, const Branch &, const CaiConfig &, const CaiSearchRequest &,
-            const std::vector<int32_t> &previous_damage = {});
+  // Root units own the last-turn history. It is fixed throughout this search.
+  CpTactics(const RulesAdapter &, const Branch &, const CaiConfig &, const CaiSearchRequest &);
   // One-shot setup. Reinitializing the same search context is an invariant error.
   void initialize(TacticalPosition &);
   void extend_plots(TacticalPosition &, const std::vector<int32_t> &) const;

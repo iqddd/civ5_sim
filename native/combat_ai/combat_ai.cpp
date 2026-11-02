@@ -59,7 +59,7 @@ bool valid_request(const CaiSearchRequest& r) {
         u.tile < 0 || u.tile >= s.tile_count || u.hp < 0 || u.hp > 100 ||
         u.moves < 0 || u.moves > max_moves[u.type] || !bit(u.attacked) ||
         !bit(u.acted) || !bit(u.fortified) || !bit(u.waiting) ||
-        (u.fortified && (u.type == 2 || u.type == 4)))
+        (u.fortified && (u.type == 2 || u.type == 4)) || u.damage_taken_last_turn < 0)
       return false;
     const auto& t = s.tiles[u.tile];
     if (t.elevation >= 2 || t.feature == 5) return false;
@@ -93,7 +93,7 @@ bool valid_request(const CaiSearchRequest& r) {
 }  // namespace
 
 int32_t cai_abi(void) { return CAI_ABI; }
-const char* cai_version(void) { return "civ5sim.combat_ai/0.7.5 CP-07"; }
+const char* cai_version(void) { return "civ5sim.combat_ai/0.8.0 CP-07"; }
 CaiConfig cai_default_config(void) { return {6000, 2560, 5, 5, CAI_MEDIUM, 1, 0, 1}; }
 CaiContext* cai_new(const CaiConfig* config) {
   if (!config || !valid_config(*config)) return nullptr;

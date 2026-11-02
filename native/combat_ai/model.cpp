@@ -19,7 +19,7 @@ void require(bool condition, const char* message) {
 }
 CaiUnit export_unit(int id, const Unit& u) {
   return {id, u.type, u.side, u.tile, u.hp, u.moves, u.attacked, u.acted,
-          u.fortified, u.waiting};
+          u.fortified, u.waiting, u.damage_taken_last_turn};
 }
 CommandResult export_result(const Result& r) {
   return {r.code, r.moved, r.damage, r.retaliation, r.attacker_strength,
@@ -129,7 +129,8 @@ class Adapter final : public RulesAdapter {
     for (int i = 0; i < s.unit_count; ++i) {
       const auto& u = s.units[i];
       require(u.id == i, "invalid unit id");
-      b->rules.units.push_back({u.type,u.side,u.tile,u.hp,u.moves,u.attacked,u.acted,u.fortified,u.waiting});
+      b->rules.units.push_back({u.type,u.side,u.tile,u.hp,u.moves,u.attacked,u.acted,u.fortified,u.waiting,
+                                0,u.damage_taken_last_turn});
     }
     require(combat_rules::valid_units(*geo, b->rules.units.data(), s.unit_count), "invalid units");
     b->rules.side = s.active_side; b->rules.turn = s.turn; b->rules.fog = s.fog;

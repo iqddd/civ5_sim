@@ -68,8 +68,8 @@ def main():
                 print(json.dumps({"commands": len(actions), **battle.army_status()}))
         else:
             value = json.loads(args.source.read_text(encoding="utf-8"))
-            if value.get("schema") != 1 or value.get("kind") != "civ5sim.replay":
-                raise ValueError("Expected civ5sim.replay schema 1")
+            if value.get("schema") != 2 or value.get("kind") != "civ5sim.replay":
+                raise ValueError("Expected civ5sim.replay schema 2")
             with Battle(value["initial"]) as battle:
                 for i, entry in enumerate(value["steps"]):
                     result = battle.step(entry["action"])

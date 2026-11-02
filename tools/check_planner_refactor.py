@@ -1,8 +1,7 @@
-"""Compare two ABI5 planners on the archived corpus and replay every plan."""
+"""Compare two ABI6 planners on fresh requests and replay every plan."""
 
 import argparse
 import hashlib
-import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -13,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 from civ5sim import combat_ai as ai
 from civ5sim.engine import digest
 from civ5sim.evaluation import write_json
-from tools.experiment_combat_ai import load_request, replay_plan
+from tools.tactical_corpus import fresh_cases, load_request, replay_plan
 
 
 def sha(path):
@@ -21,8 +20,7 @@ def sha(path):
 
 
 def check(before, after, output):
-    inputs = ROOT / "artifacts/combat-ai/experiments-v1/inputs.json"
-    corpus = json.loads(inputs.read_text())
+    corpus = fresh_cases()
     runs = {}
     versions = {}
     for label, dll in (("before", before), ("after", after)):
@@ -48,7 +46,7 @@ def check(before, after, output):
             row["after"] = new["result"]
         rows.append(row)
     write_json(output, {"versions": versions, "before_dll_sha256": sha(before),
-                        "after_dll_sha256": sha(after), "inputs_sha256": sha(inputs),
+                        "after_dll_sha256": sha(after), "inputs_sha256": digest(corpus),
                         "source_sha256": {str(p.relative_to(ROOT)): sha(p)
                                           for p in (ROOT / "native/combat_ai").glob("*") if p.is_file()},
                         "cases": len(rows), "identical": sum(r["identical_result"] for r in rows),
@@ -61,6 +59,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("--before", type=Path, required=True)
     parser.add_argument("--after", type=Path, default=ai.LIBRARY_PATH)
-    parser.add_argument("--out", type=Path, default=ROOT / "artifacts/combat-ai/planner-invariants-20261102.json")
+    parser.add_argument("--out", type=Path, default=ROOT / "build/planner-refactor-comparison.json")
     args = parser.parse_args()
     check(args.before.resolve(), args.after.resolve(), args.out.resolve())

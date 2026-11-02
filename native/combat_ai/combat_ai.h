@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-/* ABI 5. Structs use native alignment, int32 fields and explicit pointers.
+/* ABI 6. Structs use native alignment, int32 fields and explicit pointers.
    All input arrays are borrowed for one synchronous call; no RNG is accepted.
    A context is owned by its caller and must not be used concurrently. */
 enum CaiStatus { CAI_OK, CAI_BAD_ARGUMENT, CAI_INTERNAL_ERROR, CAI_BUFFER_TOO_SMALL };
@@ -25,7 +25,7 @@ enum CaiAssignmentKind {
 };
 enum CaiMovementRole { CAI_ROLE_NONE, CAI_FIRST_LINE, CAI_SECOND_LINE, CAI_THIRD_LINE };
 enum CaiSupportMode { CAI_HEAL_BEFORE, CAI_HEAL_AFTER, CAI_APPROACH };
-enum { CAI_ABI = 5, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
+enum { CAI_ABI = 6, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
 
 typedef struct CaiConfig {
   int32_t position_capacity, max_completed, max_branches, choices_per_unit;
@@ -39,6 +39,7 @@ typedef struct CaiConfig {
 typedef struct CaiTile { int32_t terrain, elevation, feature, rivers; } CaiTile;
 typedef struct CaiUnit {
   int32_t id, type, side, tile, hp, moves, attacked, acted, fortified, waiting;
+  int32_t damage_taken_last_turn; /* CP defender-damage history, nonnegative. */
 } CaiUnit;
 typedef struct CaiBattleState {
   int32_t width, height, row_parity, wrap_x;

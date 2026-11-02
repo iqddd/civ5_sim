@@ -272,7 +272,7 @@ def passport(config_path, suite):
     with Planner(search_config(suite)) as planner:
         version = planner.version
     cp = json.loads((ROOT / "docs/combat-ai-sources.json").read_text(encoding="utf-8"))
-    return {"schema": 1, "kind": "civ5sim.combat_ai_passport", "port": version, "abi": 5,
+    return {"schema": 1, "kind": "civ5sim.combat_ai_passport", "port": version, "abi": 6,
             "cp": cp, "search": suite["search"], "seeds": suite["seeds"],
             "configuration_sha256": sha256(Path(config_path).read_bytes()).hexdigest(),
             "resolved_suite_sha256": digest(suite), "source_sha256": sources,

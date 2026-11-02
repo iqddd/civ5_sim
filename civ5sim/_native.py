@@ -25,6 +25,8 @@ class Unit(C.Structure):
             "acted",
             "fortified",
             "waiting",
+            "damage_taken_this_turn",
+            "damage_taken_last_turn",
         )
     ]
 
@@ -90,6 +92,6 @@ def library():
     ):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = arguments, result
-    if lib.sim_abi() != 1:
+    if lib.sim_abi() != 2:
         raise RuntimeError("Unsupported combat kernel ABI; rebuild the kernel")
     return lib

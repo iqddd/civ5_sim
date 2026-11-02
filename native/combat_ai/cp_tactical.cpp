@@ -30,7 +30,7 @@ constexpr int kEnemyAreaRadius = 2;
 constexpr int kFogRadius = 2;
 // CvDangerPlots.cpp:24,913 converts hypothetical hidden attackers to danger units.
 constexpr int kFogDefaultDanger = 1;
-// CvTacticalAI.cpp:10359-10361. No personality input in ABI 5: use the
+// CvTacticalAI.cpp:10359-10361. No personality input in ABI 6: use the
 // agreed midpoint of CP's 0..10 offense scale, rather than its lower bound.
 constexpr int kDefaultOffenseFlavor = 5;
 constexpr int kMinHpForTacticalSearch = 50 - 2 * kDefaultOffenseFlavor;
@@ -64,16 +64,10 @@ bool better(const CpMove &left, const CpMove &right) {
 }
 } // namespace
 CpTactics::CpTactics(const RulesAdapter &rules, const Branch &branch, const CaiConfig &settings,
-                     const CaiSearchRequest &request, const std::vector<int32_t> &previous_damage)
+                     const CaiSearchRequest &request)
     : adapter(rules), root(branch), config(settings), root_state(branch.state()), side(request.side),
       target(request.target), selected(request.selected_units, request.selected_count, root_state.unit_count),
       admitted_at_setup(root_state.unit_count, 0), initial(branch, request.side) {
-  damage_history = previous_damage;
-  if (damage_history.empty())
-    damage_history.assign(initial.units.size(), 0);
-  if (damage_history.size() != initial.units.size() ||
-      std::any_of(damage_history.begin(), damage_history.end(), [](int damage) { return damage < 0; }))
-    throw std::invalid_argument("invalid previous-turn damage history");
   root_visible = initial.visibility;
   visibility_score.assign(root_state.tile_count, 0);
   for (int slot_index = 0; slot_index < int(selected.size()); ++slot_index) {
@@ -551,8 +545,8 @@ void CpTactics::initialize(TacticalPosition &position) {
   for (int slot_index = 0; slot_index < int(selected.size()); ++slot_index) {
     SlotIdx slot{slot_index};
     const auto &original = root_unit(slot);
-    roles[slot] = movement_role(original, damage_history[original.id]);
-    bool projected_to_die = damage_history[original.id] > original.hp;
+    roles[slot] = movement_role(original, original.damage_taken_last_turn);
+    bool projected_to_die = original.damage_taken_last_turn > original.hp;
     if (!admitted_at_setup[UnitId{original.id}] || (!have_target_enemies && projected_to_die)) {
       position.slot_states[slot] = SlotState::ExcludedAtRoot;
       admitted_at_setup[UnitId{original.id}] = 0;

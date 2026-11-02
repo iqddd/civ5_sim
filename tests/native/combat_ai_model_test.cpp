@@ -21,8 +21,8 @@ Unit unit(int type = 0, int side = 0, int tile = 26, int hp = 100) {
   return {type, side, tile, hp, moves[type], 0, 0, 0, 0};
 }
 bool same(const Unit& a, const CaiUnit& b) {
-  return std::tie(a.type,a.side,a.tile,a.hp,a.moves,a.attacked,a.acted,a.fortified,a.waiting)
-      == std::tie(b.type,b.side,b.tile,b.hp,b.moves,b.attacked,b.acted,b.fortified,b.waiting);
+  return std::tie(a.type,a.side,a.tile,a.hp,a.moves,a.attacked,a.acted,a.fortified,a.waiting,a.damage_taken_last_turn)
+      == std::tie(b.type,b.side,b.tile,b.hp,b.moves,b.attacked,b.acted,b.fortified,b.waiting,b.damage_taken_last_turn);
 }
 auto command_key(Command a) { return std::make_tuple(a.kind, a.unit, a.target); }
 
@@ -47,7 +47,8 @@ struct Fixture {
     for (auto t : tiles) input_tiles.push_back({t.terrain,t.elevation,t.feature,t.rivers});
     for (int i=0;i<int(units.size());++i) {
       const auto& u = units[i];
-      input_units.push_back({i,u.type,u.side,u.tile,u.hp,u.moves,u.attacked,u.acted,u.fortified,u.waiting});
+      input_units.push_back({i,u.type,u.side,u.tile,u.hp,u.moves,u.attacked,u.acted,u.fortified,u.waiting,
+                            u.damage_taken_last_turn});
     }
     visibility.resize(tiles.size());
     sim_visibility(real,observer,visibility.data());

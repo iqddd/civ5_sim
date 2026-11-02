@@ -32,8 +32,8 @@ def prepare_replay(path):
     """
     path = Path(path)
     replay = read_json(path)
-    if replay.get("schema") != 1 or replay.get("kind") != "civ5sim.replay":
-        raise ValueError("Ожидался реплей civ5sim.replay, schema 1")
+    if replay.get("schema") != 2 or replay.get("kind") != "civ5sim.replay":
+        raise ValueError("Ожидался реплей civ5sim.replay, schema 2")
     if not isinstance(replay.get("steps"), list):
         raise TypeError("В реплее отсутствует список команд")
     fields = ("tile", "hp", "moves", "attacked", "acted", "fortified", "waiting")

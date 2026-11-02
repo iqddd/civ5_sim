@@ -88,6 +88,7 @@ class PlanningUnit:
     acted: int = 0
     fortified: int = 0
     waiting: int = 0
+    damage_taken_last_turn: int = 0
 
 
 @dataclass(frozen=True)
@@ -123,7 +124,8 @@ class PlanningState:
                 for t in battle._encode_tiles()
             ),
             units=tuple(
-                PlanningUnit(i, *(getattr(u, f.name) for f in fields(PlanningUnit)[1:]))
+                PlanningUnit(i, *(0 if f.name == "damage_taken_last_turn" and u.side != side else getattr(u, f.name)
+                                  for f in fields(PlanningUnit)[1:]))
                 for i, u in enumerate(battle._units())
             ),
             visibility=tuple(int(v) for v in observed["visibility"]),
@@ -394,7 +396,7 @@ def _library():
     ):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = arguments, result
-    if lib.cai_abi() != 5:
+    if lib.cai_abi() != 6:
         raise RuntimeError("Unsupported combat AI ABI; rebuild the planner")
     lib.cai_support.argtypes = [C.c_void_p, C.POINTER(_Request), C.c_int32,
                                C.POINTER(_Assignment), C.c_int32, C.POINTER(_Result)]

@@ -7,12 +7,15 @@
 #define SIM_API extern "C" __attribute__((visibility("default")))
 #endif
 
-// Version 1 C ABI. Every integer is int32 except the explicit RNG state.
+// Version 2 C ABI. Every integer is int32 except the explicit RNG state.
 struct Tile {
   int terrain, elevation, feature, rivers;
 };
 struct Unit {
   int type, side, tile, hp, moves, attacked, acted, fortified, waiting;
+  // CP history: defender damage only; rotate when this side starts its turn.
+  int damage_taken_this_turn = 0;
+  int damage_taken_last_turn = 0;
 };
 struct Action {
   int kind, unit, target;

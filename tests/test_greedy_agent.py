@@ -52,7 +52,11 @@ class GreedyApproachTests(unittest.TestCase):
             agent = self.agent(battle, 0)
             actions = tuple(battle.available_actions())
             self.assertIn(Action("melee", 0, 18), actions)
-            self.assertEqual(agent.act(battle.observe(0), actions), Action("melee", 0, 18))
+            before = battle.snapshot()
+            attack = agent.act(battle.observe(0), actions)
+            self.assertEqual(before, battle.snapshot())
+            self.assertEqual(attack, Action("melee", 0, 18))
+            self.assertTrue(battle.step(attack).ok)
 
     def test_hidden_enemy_changes_do_not_affect_sparse_id_approach(self):
         choices = []

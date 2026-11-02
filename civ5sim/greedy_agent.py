@@ -45,7 +45,8 @@ class GreedyAgent:
         # missing enemy slots convey no information about hidden/dead units.
         observed = sorted(observation["units"], key=lambda u: u["id"])
         indices = {u["id"]: i for i, u in enumerate(observed)}
-        units = [{k: v for k, v in u.items() if k != "id"} for u in observed]
+        units = [{k: v for k, v in u.items() if k not in
+                  ("id", "damage_taken_this_turn", "damage_taken_last_turn")} for u in observed]
         scenario = {"schema": 1, "kind": "civ5sim.scenario", "map": self.map,
                     "units": units, "active_side": self.side, "fog": False,
                     "random_damage": False, "seed": 0}

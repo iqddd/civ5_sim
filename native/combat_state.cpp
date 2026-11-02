@@ -220,6 +220,12 @@ Result State::step(Action a, const std::function<int()>& roll,
     if (a.kind == END_TURN) {
       side = 1 - side;
       ++turn;
+      // CvUnit::flipDamageReceivedPerTurn / CvPlayer::SetAllUnitsUnprocessed.
+      // Rotate before healing; healing does not subtract from this history.
+      for (Unit& unit : units) if (unit.side == side) {
+        unit.damage_taken_last_turn = unit.damage_taken_this_turn;
+        unit.damage_taken_this_turn = 0;
+      }
       for (Unit& u : units)
         if (u.side == side && u.hp > 0) {
           if (!u.acted) {
@@ -318,6 +324,11 @@ Result State::step(Action a, const std::function<int()>& roll,
     int defender = occupied[a.target];
     Result result = combat(a.unit, defender, a.kind == RANGED, false, roll);
     Unit& d = units[defender];
+    // CvUnitCombat.cpp:1895-1901 explicitly excludes the attacker's retaliation
+    // damage. Actual defender damage is capped by HP in combat(). Saturation
+    // only protects externally supplied counters near int32's limit.
+    d.damage_taken_this_turn = int(std::min(int64_t(std::numeric_limits<int>::max()),
+        int64_t(d.damage_taken_this_turn) + result.damage));
     int spent = movement(u, u.tile, d.tile, u.moves, u.side);
     if (a.kind == RANGED) spent = 60;
     u.moves = std::max(0, u.moves - spent);
@@ -359,7 +370,8 @@ bool valid_units(const Geometry& g, const Unit* units, int n) {
         !g.passable(u.tile) || u.moves < 0 || u.moves > moves[u.type] ||
         u.attacked < 0 || u.attacked > 1 || u.acted < 0 || u.acted > 1 ||
         u.fortified < 0 || u.fortified > 1 || u.waiting < 0 || u.waiting > 1 ||
-        (u.fortified && (u.type == 2 || u.type == 4)))
+        (u.fortified && (u.type == 2 || u.type == 4)) ||
+        u.damage_taken_this_turn < 0 || u.damage_taken_last_turn < 0)
       return false;
     if (u.hp > 0 && occupied[u.tile]++) return false;
   }

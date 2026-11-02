@@ -151,7 +151,7 @@ class Battle:
         ):
             raise ValueError("Snapshot uses a different rules passport")
         tiles = self._encode_tiles()
-        units = self._encode_units(scenario["units"])
+        units = self._encode_units(scenario["units"], require_history=scenario["kind"] == "civ5sim.snapshot")
         self._handle = self._lib.sim_new(
             w,
             h,
@@ -182,11 +182,13 @@ class Battle:
         if (
             not isinstance(scenario, dict)
             or type(scenario.get("schema")) is not int
-            or scenario["schema"] != 1
         ):
-            raise ValueError("Expected battle schema 1")
+            raise ValueError("Expected versioned battle data")
         if scenario.get("kind") not in ("civ5sim.scenario", "civ5sim.snapshot"):
             raise ValueError("Expected civ5sim.scenario or civ5sim.snapshot")
+        expected = 2 if scenario["kind"] == "civ5sim.snapshot" else 1
+        if scenario["schema"] != expected:
+            raise ValueError(f"Expected {scenario['kind']} schema {expected}")
 
     def _encode_tiles(self):
         tiles = self._map["tiles"]
@@ -221,7 +223,7 @@ class Battle:
             )
         return result
 
-    def _encode_units(self, values):
+    def _encode_units(self, values, *, require_history=False):
         if not isinstance(values, list) or len(values) > 512:
             raise ValueError("units must be a list with at most 512 units")
         result = (N.Unit * len(values))()
@@ -243,6 +245,12 @@ class Battle:
                     tile[0], "x", 0, w - 1
                 )
             tile = integer(tile, "tile", 0, w * h - 1)
+            history_fields = ("damage_taken_this_turn", "damage_taken_last_turn")
+            if require_history and not set(history_fields) <= value.keys():
+                raise ValueError("Snapshot units must include complete damage history")
+            history = [integer(value.get(name, 0), name) for name in history_fields]
+            if not require_history and any(history):
+                raise ValueError("New scenarios start with zero damage history; use a snapshot to resume")
             result[i] = N.Unit(
                 kind,
                 integer(value["side"], "side", 0, 1),
@@ -255,6 +263,7 @@ class Battle:
                     int(boolean(value.get(n, False), n))
                     for n in ("attacked", "acted", "fortified", "waiting")
                 ],
+                *history,
             )
         return result
 
@@ -309,6 +318,8 @@ class Battle:
             "tile": u.tile,
             "hp": u.hp,
             "moves": u.moves,
+            "damage_taken_this_turn": u.damage_taken_this_turn,
+            "damage_taken_last_turn": u.damage_taken_last_turn,
             **{
                 n: bool(getattr(u, n))
                 for n in ("attacked", "acted", "fortified", "waiting")
@@ -418,7 +429,7 @@ class Battle:
         info = self._info()
         units = [self._unit_dict(u, i) for i, u in enumerate(self._units())]
         return {
-            "schema": 1,
+            "schema": 2,
             "kind": "civ5sim.snapshot",
             "rules": deepcopy(self._rules),
             "map": deepcopy(self._map),
@@ -444,7 +455,7 @@ class Battle:
         if not self._logging:
             raise RuntimeError("Enable log=True to collect a replay")
         return {
-            "schema": 1,
+            "schema": 2,
             "kind": "civ5sim.replay",
             "initial": deepcopy(self._initial),
             "steps": deepcopy(self._journal),
@@ -479,7 +490,7 @@ class Battle:
             )
         if value["kind"] == "civ5sim.snapshot" and value.get("rules") != self._rules:
             raise ValueError("Snapshot uses a different rules passport")
-        self._restore_state(value, self._encode_units(value["units"]))
+        self._restore_state(value, self._encode_units(value["units"], require_history=value["kind"] == "civ5sim.snapshot"))
         self._action_buffer = None
         self._observation_buffers = {}
         self._initial = self.snapshot()

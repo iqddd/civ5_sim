@@ -40,7 +40,8 @@ struct Fixture {
     std::vector<Tile> ts;
     std::vector<Unit> us;
     for (auto t : tiles) ts.push_back({t.terrain,t.elevation,t.feature,t.rivers});
-    for (auto u : units) us.push_back({u.type,u.side,u.tile,u.hp,u.moves,u.attacked,u.acted,u.fortified,u.waiting});
+    for (auto u : units) us.push_back({u.type,u.side,u.tile,u.hp,u.moves,u.attacked,u.acted,u.fortified,u.waiting,
+                                      0,u.damage_taken_last_turn});
     auto geometry = std::make_shared<Geometry>(w,h,parity,wrap,ts.data());
     State physical(geometry); physical.units = us; physical.fog = fog; physical.rebuild();
     visibility.resize(tiles.size());
@@ -259,14 +260,14 @@ void support_approach() {
 struct TacticalFixture {
   TacticalPosition position;
   std::unique_ptr<CpTactics> tactics;
-  TacticalFixture(Fixture& f, int target, const std::vector<int32_t>& history={}) {
+  TacticalFixture(Fixture& f, int target) {
     position.branch=f.root->clone();
     position.slot_states.assign(f.selected.size(),SlotState::Pending);
     position.move_flags.assign(f.selected.size(),MoveFlag::None);
     position.last_kill.assign(f.selected.size(),0);
     position.touched.assign(f.selected.size(),0);
     CaiSearchRequest request{&f.state,0,f.turn,target,f.selected.data(),int32_t(f.selected.size()),{0,-1,nullptr,0}};
-    tactics=std::make_unique<CpTactics>(*f.adapter,*f.root,f.config,request,history);
+    tactics=std::make_unique<CpTactics>(*f.adapter,*f.root,f.config,request);
     tactics->initialize(position);
   }
 };
@@ -398,23 +399,41 @@ void cp_forecast_and_danger() {
 void cp_history_and_admission() {
   Fixture f; f.w=16; f.h=16; f.tiles.resize(256);
   f.add(0,0,0); f.add(0,1,1); f.start();
-  TacticalFixture absent(f,240);
-  CHECK(absent.position.slot_states[SlotIdx{0}]==SlotState::Pending);
-  CHECK(absent.tactics->roles[SlotIdx{0}]==CAI_FIRST_LINE);
-  CHECK(absent.position.plots[0] && absent.position.plots[1]);
-  TacticalFixture equality(f,240,{100,0});
-  CHECK(equality.position.slot_states[SlotIdx{0}]==SlotState::Pending); // Strict >, not >=.
-  TacticalFixture excluded(f,240,{101,0});
+  {
+    TacticalFixture absent(f,240);
+    CHECK(absent.position.slot_states[SlotIdx{0}]==SlotState::Pending);
+    CHECK(absent.tactics->roles[SlotIdx{0}]==CAI_FIRST_LINE);
+    CHECK(absent.position.plots[0] && absent.position.plots[1]);
+  }
+  f.units[0].damage_taken_last_turn=100;
+  f.start();
+  {
+    TacticalFixture equality(f,240);
+    CHECK(equality.position.slot_states[SlotIdx{0}]==SlotState::Pending); // Strict >, not >=.
+  }
+  f.units[0].damage_taken_last_turn=101;
+  f.start();
+  TacticalFixture excluded(f,240);
   check_root_exclusion(f,excluded,SlotIdx{0});
   CHECK(!excluded.position.plots[0] && !excluded.position.plots[1]);
   CHECK(excluded.tactics->initial_enemies.empty());
   // A remote unrelated enemy cannot admit the unit by being added through
   // its neighborhood before admission. Near the real target it is admitted.
-  TacticalFixture frontline(f,1,{101,0});
+  TacticalFixture frontline(f,1);
   CHECK(frontline.position.slot_states[SlotIdx{0}]==SlotState::Pending);
   CHECK(frontline.tactics->roles[SlotIdx{0}]==CAI_THIRD_LINE);
   CHECK(movement_role(f.units[0],100)==CAI_FIRST_LINE);
   CHECK(movement_role(f.units[0],101)==CAI_THIRD_LINE);
+  for (int type : {1,2}) {
+    Fixture ranged_fixture;
+    ranged_fixture.add(type,0,0);
+    ranged_fixture.add(0,1,1);
+    ranged_fixture.units[0].damage_taken_last_turn=101;
+    ranged_fixture.start();
+    TacticalFixture second_line(ranged_fixture,1);
+    CHECK(second_line.position.slot_states[SlotIdx{0}]==SlotState::Pending);
+    CHECK(second_line.tactics->roles[SlotIdx{0}]==CAI_SECOND_LINE);
+  }
 }
 void cp_area_capacity() {
   Fixture f; f.w=48; f.h=24; f.tiles.resize(f.w*f.h);
