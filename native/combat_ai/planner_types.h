@@ -48,12 +48,15 @@ template<class Index, class Value> class IndexedValues {
 template<class T> using SlotValues = IndexedValues<SlotIdx,T>;
 template<class T> using UnitValues = IndexedValues<UnitId,T>;
 
+// Contract: docs/combat-ai-contract.md#slot-states.
 enum class SlotState : uint8_t {
-  Pending,
-  Finished,
+  Pending = 0,
+  Finished = 1,
   // BLOCKED never consumes a physical turn; the coordinator may reuse a
-  // still-available unit. Also used for root-ineligible selected units.
-  Blocked
+  // still-available unit, even if it already acted in this search branch.
+  Blocked = 2,
+  // Excluded during root admission/pruning; never participates in this search.
+  ExcludedAtRoot = 3
 };
 enum class MoveFlag : uint8_t { None, Moved, Swapped };
 

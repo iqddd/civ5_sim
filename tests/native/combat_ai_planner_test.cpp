@@ -270,6 +270,20 @@ struct TacticalFixture {
     tactics->initialize(position);
   }
 };
+void check_root_exclusion(const Fixture& fixture, TacticalFixture& context, SlotIdx slot) {
+  int unit=fixture.selected[slot.value];
+  CHECK(context.position.slot_states[slot]==SlotState::ExcludedAtRoot);
+  CHECK(std::find(context.tactics->active_order.begin(),context.tactics->active_order.end(),slot)==
+        context.tactics->active_order.end());
+  auto board=context.tactics->board(context.position);
+  CHECK(context.tactics->preferred(context.position,board,slot,5).empty());
+  for (bool depth_first : {false,true})
+    for (const auto& candidate : context.tactics->candidates(context.position,depth_first))
+      for (const auto& move : candidate.moves) CHECK(move.unit!=unit);
+  auto evaluation=context.tactics->evaluate_final_position(context.position);
+  CHECK(std::none_of(evaluation.finishes.begin(),evaluation.finishes.end(),
+      [unit](const CaiAssignment& record) { return record.unit==unit; }));
+}
 void cp_area_and_preferences() {
   Fixture distant; distant.w=16; distant.h=1; distant.tiles.resize(16);
   distant.add(4,0,0); distant.add(0,1,9); distant.start();
@@ -391,7 +405,7 @@ void cp_history_and_admission() {
   TacticalFixture equality(f,240,{100,0});
   CHECK(equality.position.slot_states[SlotIdx{0}]==SlotState::Pending); // Strict >, not >=.
   TacticalFixture excluded(f,240,{101,0});
-  CHECK(excluded.position.slot_states[SlotIdx{0}]==SlotState::Blocked);
+  check_root_exclusion(f,excluded,SlotIdx{0});
   CHECK(!excluded.position.plots[0] && !excluded.position.plots[1]);
   CHECK(excluded.tactics->initial_enemies.empty());
   // A remote unrelated enemy cannot admit the unit by being added through
@@ -523,7 +537,99 @@ void planner_finalization() {
   catch (const std::logic_error&) { repeated=true; }
   CHECK(repeated && accepted.position.assignments.size()==finalized_count);
 }
+void planner_root_exclusion() {
+  static_assert(int(SlotState::Pending)==0);
+  static_assert(int(SlotState::Finished)==1);
+  static_assert(int(SlotState::Blocked)==2);
+  static_assert(int(SlotState::ExcludedAtRoot)==3);
+  for (bool waiting : {false,true}) {
+    Fixture f;
+    f.add(0,0,8);
+    f.add(1,0,28);
+    f.add(0,1,29,1);
+    if (waiting) f.units[0].waiting=1;
+    else f.units[0].moves=0;
+    f.start();
+    TacticalFixture context(f,29);
+    check_root_exclusion(f,context,SlotIdx{0});
+    auto plan=f.search(29);
+    CHECK(!plan.assignments.empty());
+    CHECK(std::count_if(plan.assignments.begin(),plan.assignments.end(),
+        [](const CaiAssignment& record) { return record.unit==0 && record.kind==CAI_BLOCKED; })==1);
+    CHECK(std::none_of(plan.assignments.begin(),plan.assignments.end(),
+        [](const CaiAssignment& record) { return record.unit==0 && record.kind==CAI_FINISH; }));
+    CHECK(f.replay(plan)->state().units[2].hp==0);
+  }
+
+  // dropSuperfluousUnits can exclude an admitted, physically available unit.
+  // Its neighborhood/occupancy must retain the original admission semantics.
+  Fixture pruned;
+  pruned.w=16; pruned.h=1; pruned.tiles.resize(16);
+  pruned.add(0,0,0,40);
+  pruned.add(0,1,4);
+  pruned.start();
+  TacticalFixture context(pruned,4);
+  CHECK(pruned.units[0].moves>0 && !pruned.units[0].waiting);
+  check_root_exclusion(pruned,context,SlotIdx{0});
+  auto board=context.tactics->board(context.position);
+  CHECK(board.plots[0].valid && !board.plots[0].blocked && !board.plots[0].end);
+  CHECK(terminal_position(context.position,context.tactics->initial_enemies));
+}
+void planner_blocked_handoff() {
+  // Compatibility with CP's handoff assumption, not a safety guarantee.
+  Fixture f;
+  f.config.risk_budget_base=0;
+  f.config.risk_budget_per_kill=0;
+  f.add(4,0,8,20);
+  f.add(1,0,28);
+  f.add(0,1,10);
+  f.add(0,1,3);
+  f.add(0,1,17);
+  f.add(0,1,29,1);
+  f.start();
+  TacticalFixture context(f,10);
+  SelectedUnits selection(f.selected.data(),int32_t(f.selected.size()),int32_t(f.units.size()));
+  CandidateExecutor executor(*f.adapter,*context.tactics,selection,0);
+  auto apply_generated=[&](CpMoveKind kind, int unit, int tile) {
+    auto candidates=context.tactics->candidates(context.position,false);
+    auto found=std::find_if(candidates.begin(),candidates.end(),[&](const CpCombo& candidate) {
+      return candidate.moves.size()==1 && candidate.moves[0].kind==kind &&
+             candidate.moves[0].unit==unit && candidate.moves[0].tile==tile;
+    });
+    CHECK(found!=candidates.end());
+    CHECK(executor.apply(context.position,*found));
+    if (kind!=CP_BLOCKED && kind!=CP_FINISH_TEMP) context.position.rank+=found->score;
+  };
+  apply_generated(CP_MOVE,0,9);
+  CHECK(context.position.move_flags[SlotIdx{0}]==MoveFlag::Moved);
+  CHECK(context.position.slot_states[SlotIdx{0}]==SlotState::Pending);
+  CHECK(context.position.branch->state().units[0].moves==180);
+  apply_generated(CP_RANGED,1,29);
+  CHECK(context.position.killed==std::vector<int>{5});
+  apply_generated(CP_BLOCKED,0,9);
+  CHECK(context.position.slot_states[SlotIdx{0}]==SlotState::Blocked);
+  const auto& blocked=context.position.assignments.back();
+  CHECK(blocked.kind==CAI_BLOCKED && blocked.unit==0 && blocked.to_tile==9);
+  CHECK(blocked.remaining_moves==180);
+  auto accepted=context.tactics->evaluate_final_position(context.position);
+  CHECK(accepted.accepted);
+  CHECK(accepted.finishes.size()==1 && accepted.finishes[0].unit==1);
+
+  // Change only bookkeeping: checking the same physical position rejects it.
+  context.position.slot_states[SlotIdx{0}]=SlotState::Finished;
+  CHECK(!context.tactics->evaluate_final_position(context.position).accepted);
+  context.position.slot_states[SlotIdx{0}]=SlotState::Blocked;
+  finalize_assignments(context.position,accepted);
+  CHECK(std::none_of(context.position.assignments.begin(),context.position.assignments.end(),
+      [](const CaiAssignment& record) { return record.unit==0 && record.kind==CAI_FINISH; }));
+  Plan plan;
+  plan.assignments=context.position.assignments;
+  auto after=f.replay(plan);
+  CHECK(after->state().units[0].tile==9 && after->state().units[0].moves==180);
+  CHECK(after->state().units[5].hp==0);
+}
 void planner_combo_contacts() {
+  // Contract: docs/combat-ai-contract.md#restart and #combo-invariants.
   Fixture f; f.w=10; f.h=7; f.tiles.resize(70); f.fog=1;
   f.add(0,0,46); f.add(4,0,42); f.add(0,1,24); f.start();
   CHECK(!f.visibility[24]);
@@ -567,6 +673,192 @@ void planner_combo_contacts() {
   CHECK(reciprocal.position.assignments[1].kind==CAI_SWAP_REVERSE);
   CHECK(reciprocal.position.assignments[1].score==7);
 }
+
+void apply_contract_action(Fixture& fixture, TacticalFixture& context,
+                           CpMoveKind kind, int unit, int tile) {
+  SelectedUnits selection(fixture.selected.data(),int32_t(fixture.selected.size()),int32_t(fixture.units.size()));
+  CandidateExecutor executor(*fixture.adapter,*context.tactics,selection,0);
+  CpMove move;
+  move.unit=unit;
+  move.tile=tile;
+  move.kind=kind;
+  move.score=0;
+  if (!executor.apply(context.position,{{move},0}))
+    throw std::runtime_error("contract action rejected: kind="+std::to_string(kind)+
+        " unit="+std::to_string(unit)+" tile="+std::to_string(tile));
+}
+void contract_continuation() {
+  // Contract: docs/combat-ai-contract.md#continuation and #restart.
+  for (bool enemy_contact : {false,true}) {
+    Fixture f;
+    f.w=12; f.h=5; f.tiles.resize(60); f.fog=1;
+    f.add(4,0,24);
+    if (enemy_contact) f.add(0,1,28);
+    f.start();
+    TacticalFixture context(f,28);
+    auto before=context.tactics->board(context.position);
+    CHECK(!before.plots[27].valid);
+    apply_contract_action(f,context,CP_MOVE,0,26);
+    CHECK(context.position.branch->state().units[0].tile==26);
+    CHECK(context.position.slot_states[SlotIdx{0}]==SlotState::Pending);
+    CHECK(context.position.branch->state().units[0].moves>0);
+    CHECK(context.tactics->board(context.position).plots[27].valid);
+    CHECK(context.position.discovered==enemy_contact);
+    CHECK(context.position.move_flags[SlotIdx{0}]==(enemy_contact?MoveFlag::None:MoveFlag::Moved));
+    int restarts=int(std::count_if(context.position.assignments.begin(),context.position.assignments.end(),
+        [](const CaiAssignment& record) { return record.kind==CAI_RESTART; }));
+    CHECK(restarts==int(enemy_contact));
+    if (enemy_contact) {
+      const auto& restart=context.position.assignments.back();
+      CHECK(restart.kind==CAI_RESTART && restart.unit==0);
+      CHECK(restart.from_tile==CAI_NO_ID && restart.to_tile==CAI_NO_ID && restart.remaining_moves==0);
+    }
+    auto choices=context.tactics->preferred(context.position,context.tactics->board(context.position),SlotIdx{0},9);
+    bool second_move=std::any_of(choices.begin(),choices.end(),[](CpMove move) { return move.kind==CP_MOVE; });
+    CHECK(second_move==enemy_contact);
+  }
+  Fixture forced;
+  forced.add(4,0,16); forced.add(0,1,18); forced.start();
+  TacticalFixture freed(forced,18);
+  apply_contract_action(forced,freed,CP_FORCED,0,15);
+  CHECK(freed.position.move_flags[SlotIdx{0}]==MoveFlag::None);
+  auto choices=freed.tactics->preferred(freed.position,freed.tactics->board(freed.position),SlotIdx{0},9);
+  CHECK(std::any_of(choices.begin(),choices.end(),[](CpMove move) { return move.kind==CP_MOVE; }));
+
+  Fixture attack;
+  attack.add(4,0,16); attack.add(0,1,18); attack.start();
+  TacticalFixture fought(attack,18);
+  apply_contract_action(attack,fought,CP_MOVE,0,17);
+  CHECK(fought.position.move_flags[SlotIdx{0}]==MoveFlag::Moved);
+  apply_contract_action(attack,fought,CP_MELEE,0,18);
+  CHECK(fought.position.move_flags[SlotIdx{0}]==MoveFlag::None);
+}
+void contract_plan_acceptance() {
+  // Contract: docs/combat-ai-contract.md#plan-acceptance.
+  // A generous risk budget isolates the formation/attack predicate.
+  for (bool worsened : {false,true}) {
+    Fixture f;
+    f.config.risk_budget_base=13;
+    f.add(1,0,16); f.add(0,1,18); f.start();
+    TacticalFixture context(f,18);
+    CHECK(context.tactics->initial_distance[SlotIdx{0}]==2);
+    if (worsened) apply_contract_action(f,context,CP_MOVE,0,17);
+    apply_contract_action(f,context,CP_RANGED,0,18);
+    CHECK(context.position.killed.empty());
+    CHECK(context.position.slot_states[SlotIdx{0}]==SlotState::Finished);
+    CHECK(context.tactics->evaluate_final_position(context.position).accepted==!worsened);
+  }
+  Fixture improved;
+  improved.config.risk_budget_base=13;
+  improved.add(1,0,16); improved.add(0,1,17); improved.start();
+  TacticalFixture formation(improved,17);
+  CHECK(formation.tactics->initial_distance[SlotIdx{0}]==1);
+  apply_contract_action(improved,formation,CP_MOVE,0,15);
+  apply_contract_action(improved,formation,CP_FINISH_TEMP,0,15);
+  CHECK(formation.tactics->board(formation.position).plots[15].distance==2);
+  CHECK(formation.tactics->evaluate_final_position(formation.position).accepted);
+
+  Fixture idle;
+  idle.add(1,0,16); idle.add(0,1,18); idle.start();
+  TacticalFixture unchanged(idle,18);
+  apply_contract_action(idle,unchanged,CP_FINISH_TEMP,0,16);
+  CHECK(!unchanged.tactics->evaluate_final_position(unchanged.position).accepted);
+  unchanged.position.discovered=true;
+  CHECK(unchanged.tactics->evaluate_final_position(unchanged.position).accepted);
+
+  Fixture empty;
+  empty.add(4,0,16); empty.start();
+  TacticalFixture approach(empty,20);
+  apply_contract_action(empty,approach,CP_MOVE,0,17);
+  apply_contract_action(empty,approach,CP_FINISH_TEMP,0,17);
+  CHECK(approach.tactics->evaluate_final_position(approach.position).accepted);
+
+  // Kills and discovery override the formation predicate, never the risk budget.
+  Fixture unsafe;
+  unsafe.config.risk_budget_base=0; unsafe.config.risk_budget_per_kill=0;
+  unsafe.add(1,0,16,10); unsafe.add(0,1,17,1); unsafe.add(0,1,18); unsafe.start();
+  TacticalFixture killed(unsafe,17);
+  apply_contract_action(unsafe,killed,CP_RANGED,0,17);
+  CHECK(killed.position.killed==std::vector<int>{1});
+  CHECK(!killed.tactics->evaluate_final_position(killed.position).accepted);
+  killed.position.discovered=true;
+  CHECK(!killed.tactics->evaluate_final_position(killed.position).accepted);
+
+  TacticalFixture discovered(unsafe,17);
+  apply_contract_action(unsafe,discovered,CP_FINISH_TEMP,0,16);
+  discovered.position.discovered=true;
+  CHECK(discovered.position.killed.empty());
+  CHECK(!discovered.tactics->evaluate_final_position(discovered.position).accepted);
+}
+void contract_early_finish() {
+  // Contract: docs/combat-ai-contract.md#early-finish and #slot-states.
+  Fixture f;
+  f.w=16; f.h=1; f.tiles.resize(16);
+  f.config.risk_budget_base=0; f.config.risk_budget_per_kill=0;
+  f.add(4,0,8,20); f.add(1,0,0); f.add(0,0,4);
+  f.add(4,1,10); f.add(0,1,2,1); f.start();
+  TacticalFixture context(f,2);
+  CHECK(context.tactics->initial_enemies==std::vector<int>{4});
+  apply_contract_action(f,context,CP_MOVE,0,7);
+  apply_contract_action(f,context,CP_RANGED,1,2);
+  CHECK(terminal_position(context.position,context.tactics->initial_enemies));
+  CHECK(context.position.slot_states[SlotIdx{0}]==SlotState::Pending);
+  CHECK(context.position.touched[SlotIdx{0}]);
+  CHECK(!context.position.touched[SlotIdx{2}]);
+  auto accepted=context.tactics->evaluate_final_position(context.position);
+  CHECK(accepted.accepted);
+  CHECK(accepted.finishes.size()==1 && accepted.finishes[0].unit==1);
+  context.position.touched[SlotIdx{2}]=1;
+  CHECK(context.tactics->evaluate_final_position(context.position).score==accepted.score-123);
+  context.position.touched[SlotIdx{2}]=0;
+  context.position.touched[SlotIdx{0}]=0;
+  CHECK(context.tactics->evaluate_final_position(context.position).score==accepted.score+123);
+  context.position.touched[SlotIdx{0}]=1;
+  context.position.slot_states[SlotIdx{0}]=SlotState::Finished;
+  CHECK(!context.tactics->evaluate_final_position(context.position).accepted);
+  context.position.slot_states[SlotIdx{0}]=SlotState::Pending;
+  finalize_assignments(context.position,accepted);
+  Plan plan;
+  plan.assignments=context.position.assignments;
+  auto after=f.replay(plan);
+  CHECK(after->state().units[0].tile==7 && after->state().units[0].moves==180);
+  CHECK(after->state().units[3].hp>0 && after->state().units[4].hp==0);
+}
+void contract_combo_invariants() {
+  // Contract: docs/combat-ai-contract.md#combo-invariants.
+  Fixture f;
+  f.add(4,0,16); f.start();
+  TacticalFixture context(f,18);
+  SelectedUnits selection(f.selected.data(),int32_t(f.selected.size()),int32_t(f.units.size()));
+  CandidateExecutor executor(*f.adapter,*context.tactics,selection,0);
+  for (auto kind : {CP_FINISH_TEMP,CP_BLOCKED}) {
+    CpMove move{0,15,CP_MOVE,0};
+    CpMove finish{0,15,kind,0};
+    bool rejected=false;
+    try { executor.apply(context.position,{{move,finish},0}); }
+    catch (const std::logic_error&) { rejected=true; }
+    CHECK(rejected);
+    CHECK(context.position.assignments.empty());
+    CHECK(context.position.branch->state().units[0].tile==16);
+    CHECK(context.position.branch->state().units[0].moves==240);
+    CHECK(context.position.slot_states[SlotIdx{0}]==SlotState::Pending);
+    CHECK(context.position.move_flags[SlotIdx{0}]==MoveFlag::None);
+    CHECK(!context.position.touched[SlotIdx{0}]);
+  }
+}
+void contract_search_budgets() {
+  // Contract: docs/combat-ai-contract.md#search-budgets.
+  // First child kills the only target while the root has been removed from
+  // the otherwise empty queue. Hitting max_completed still exhausts the budget.
+  Fixture f;
+  f.config.max_completed=1;
+  f.add(1,0,16); f.add(0,1,18,1); f.start();
+  auto plan=f.search(18);
+  CHECK(plan.result.reason==CAI_BUDGET_EXHAUSTED);
+  CHECK(plan.result.stats.checked==1 && plan.result.stats.generated==2);
+  CHECK(plan.result.stats.completed==1);
+  CHECK(f.replay(plan)->state().units[1].hp==0);
+}
 int main(int argc,char** argv) {
   try {
     std::string name=argc>1?argv[1]:"";
@@ -587,7 +879,14 @@ int main(int argc,char** argv) {
     else if(name=="cp_area_capacity") cp_area_capacity();
     else if(name=="planner_invariants") planner_invariants();
     else if(name=="planner_finalization") planner_finalization();
+    else if(name=="planner_root_exclusion") planner_root_exclusion();
+    else if(name=="planner_blocked_handoff") planner_blocked_handoff();
     else if(name=="planner_combo_contacts") planner_combo_contacts();
+    else if(name=="contract_continuation") contract_continuation();
+    else if(name=="contract_plan_acceptance") contract_plan_acceptance();
+    else if(name=="contract_early_finish") contract_early_finish();
+    else if(name=="contract_combo_invariants") contract_combo_invariants();
+    else if(name=="contract_search_budgets") contract_search_budgets();
     else throw std::runtime_error("unknown test group");
     std::cout<<name<<" passed\n"; return 0;
   } catch(const std::exception& e) { std::cerr<<e.what()<<"\n"; return 1; }

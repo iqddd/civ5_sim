@@ -68,5 +68,26 @@ class LocalPlannerTests(unittest.TestCase):
     def test_planner_rejected_evaluation_does_not_rewrite_assignments(self):
         self.check_native("planner_finalization")
 
+    def test_planner_root_exclusions_keep_public_blocked_records(self):
+        self.check_native("planner_root_exclusion")
+
+    def test_planner_blocked_after_moving_keeps_cp_handoff_policy(self):
+        self.check_native("planner_blocked_handoff")
+
     def test_planner_contact_source_and_atomic_swap_bookkeeping(self):
         self.check_native("planner_combo_contacts")
+
+    def test_contract_continuation_and_restart(self):
+        self.check_native("contract_continuation")
+
+    def test_contract_plan_acceptance(self):
+        self.check_native("contract_plan_acceptance")
+
+    def test_contract_early_finish_and_untouched_bonus(self):
+        self.check_native("contract_early_finish")
+
+    def test_contract_combo_invariants_before_mutation(self):
+        self.check_native("contract_combo_invariants")
+
+    def test_contract_search_budgets_with_empty_remaining_queue(self):
+        self.check_native("contract_search_budgets")

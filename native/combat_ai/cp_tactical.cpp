@@ -15,6 +15,7 @@
 namespace combat_ai {
 namespace {
 constexpr int impossible = -1000;
+// Contract: docs/combat-ai-contract.md#early-finish.
 // CvTacticalAI.cpp:addFinishMovesIfAcceptable: reward an untouched unit left
 // available after early completion. This is a CP score, not a movement cost.
 constexpr int kUntouchedEarlyFinishBonus = 123;
@@ -298,6 +299,7 @@ std::vector<CpMove> CpTactics::preferred(const TacticalPosition& p, const CpBoar
         m.kind=CP_FINISH_TEMP; moves.push_back(m);
       }
     } else {
+      // Contract: docs/combat-ai-contract.md#continuation.
       if (p.move_flags[i]!=MoveFlag::None || b.plots[t].end) continue;
       int attacks=u.attacked?0:std::min(1,(reach.remaining_moves+59)/60);
       m.score+=potential(p,b,i,t,attacks,m.near_kill)*10;
@@ -341,7 +343,7 @@ void CpTactics::initialize(TacticalPosition& p) {
     roles[i]=movement_role(u,damage_history[u.id]);
     bool projected_to_die=damage_history[u.id]>u.hp;
     if (!admitted[u.id] || (!have_target_enemies && projected_to_die)) {
-      p.slot_states[i]=SlotState::Blocked; admitted[u.id]=0;
+      p.slot_states[i]=SlotState::ExcludedAtRoot; admitted[u.id]=0;
     }
   }
   for (int id : selected) if (admitted[id]) {
@@ -367,7 +369,7 @@ void CpTactics::initialize(TacticalPosition& p) {
     SlotIdx i{slot_index};
     const auto& u=initial.units[selected[i.value]];
     initial_distance.push_back(b.plots[u.tile].distance);
-    if (!admitted[u.id]) { p.slot_states[i]=SlotState::Blocked; continue; }
+    if (!admitted[u.id]) { p.slot_states[i]=SlotState::ExcludedAtRoot; continue; }
     // Root-only safe-plot count, before the tactical/non-sim plot filter.
     for (auto reach : adapter.move_intents(root,u.id))
       if ((!CAI_CP_AREA || adapter.distance(reach.tile,target)<=6) &&
@@ -392,7 +394,7 @@ void CpTactics::initialize(TacticalPosition& p) {
   }
   std::stable_sort(active_order.begin(),active_order.end(),[&](SlotIdx a,SlotIdx b) { return importance[a]>importance[b]; });
   keep=std::max(0,keep);
-  for (int j=keep; j<int(active_order.size()); ++j) p.slot_states[active_order[j]]=SlotState::Blocked;
+  for (int j=keep; j<int(active_order.size()); ++j) p.slot_states[active_order[j]]=SlotState::ExcludedAtRoot;
   active_order.resize(keep);
 }
 void CpTactics::extend_plots(TacticalPosition& p, const std::vector<int32_t>& added) const {
@@ -439,6 +441,8 @@ std::vector<CpCombo> CpTactics::candidates(const TacticalPosition& p, bool depth
       }
     }
   }
+  // Contract: docs/combat-ai-contract.md#candidate-order; score orders candidates,
+  // while the executor's caller accumulates rank excluding finish/block records.
   std::stable_sort(result.begin(),result.end(),[](const CpCombo& a,const CpCombo& b) { return a.score>b.score; });
   return result;
 }
@@ -457,13 +461,22 @@ FinalEvaluation CpTactics::evaluate_final_position(const TacticalPosition& posit
     UnitId unit_id{selected[slot.value]};
     const auto& unit = current.view.units[unit_id.value];
     const auto& original = initial.units[unit_id.value];
-    if (position.slot_states[slot] == SlotState::Blocked || original.moves <= 0 || original.waiting)
+    // Contract: docs/combat-ai-contract.md#slot-states.
+    if (position.slot_states[slot] == SlotState::ExcludedAtRoot || original.moves <= 0 || original.waiting)
+      continue;
+    // Pinned CP 029e5988, CvTacticalAI.cpp:8761-8763, addFinishMovesIfAcceptable:
+    // A_BLOCKED with movement left is handed back without checking its end
+    // position, even after acting. Safe continuation is assumed, not verified.
+    // Keep that CP policy separate from root exclusion; neither emits FINISH.
+    if (position.slot_states[slot] == SlotState::Blocked)
       continue;
     if (unit.hp <= 0) {
       evaluation.score -= original.hp;
       continue;
     }
     if (position.slot_states[slot] == SlotState::Pending) {
+      // Contract: docs/combat-ai-contract.md#early-finish. Acted Pending units
+      // are also handed back without end-position evaluation, but earn no bonus.
       if (!position.touched[slot]) evaluation.score += kUntouchedEarlyFinishBonus;
       continue;
     }
@@ -496,6 +509,7 @@ FinalEvaluation CpTactics::evaluate_final_position(const TacticalPosition& posit
   int loss_limit = config.risk_budget_base + config.risk_budget_per_kill * int(position.killed.size());
   bool attacked = std::any_of(position.assignments.begin(),position.assignments.end(),
       [](const CaiAssignment& record) { return record.kind == CAI_MELEE || record.kind == CAI_RANGED; });
+  // Contract: docs/combat-ai-contract.md#plan-acceptance.
   bool improved = !position.killed.empty() || position.discovered ||
       (!current.enemies.empty() ? (positive_changes > negative_changes ||
        (positive_changes == negative_changes && attacked)) : target_distance_after < target_distance_before);
