@@ -1,4 +1,5 @@
 #include "cp_tactical.h"
+#include "storage_metrics.h"
 #include "../combat_state.h"
 #include <algorithm>
 #include <cmath>
@@ -156,18 +157,19 @@ int CpTactics::danger(int unit, int tile, int self_damage, const std::vector<int
   danger_cache.emplace(std::move(key), total);
   return total;
 }
-CpBoard CpTactics::board(const TacticalPosition &position) const {
-  CpBoard board(*position.branch, side);
+CpBoard CpTactics::rebuild_board(const TacticalPosition &position) const {
+  CAI_STORAGE_COUNT(BoardRebuild);
+  CpBoard board(TacticalView(*position.branch, side));
   board.plots.resize(board.view.visibility.size());
   for (int tile = 0; tile < int(board.plots.size()); ++tile)
     if (position.plots[tile]) {
-      auto &plot = board.plots[tile];
+      auto &plot = board.plots.add(tile);
       plot.valid = true;
       int occupant = board.view.occupied[tile];
       if (occupant >= 0) {
         const auto &unit = board.view.units[occupant];
         if (unit.side != side) {
-          plot.enemy = occupant;
+          plot.enemy = static_cast<int16_t>(occupant);
           board.enemies.push_back(occupant);
         } else {
           UnitId unit_id{occupant};
@@ -191,7 +193,7 @@ CpBoard CpTactics::board(const TacticalPosition &position) const {
           continue;
         if (!board.view.visibility[neighbor]) {
           if (passable(root_state, neighbor))
-            board.plots[tile].edge = true;
+            board.plots.at(tile).edge = true;
         } else {
           int occupant = board.view.occupied[neighbor];
           if (occupant >= 0 && board.view.units[occupant].side != side &&
@@ -202,10 +204,10 @@ CpBoard CpTactics::board(const TacticalPosition &position) const {
     }
   for (int tile = 0; tile < int(board.plots.size()); ++tile)
     if (board.plots[tile].valid) {
-      auto &plot = board.plots[tile];
+      auto &plot = board.plots.at(tile);
       for (int occupant : distance_enemies) {
         int distance = adapter.distance(tile, board.view.units[occupant].tile);
-        plot.distance = std::min(plot.distance, distance);
+        plot.distance = static_cast<uint8_t>(std::min(int(plot.distance), distance));
         plot.enemies += distance == 1;
       }
       for (int neighbor : adapter.neighbors(tile))
@@ -218,6 +220,64 @@ CpBoard CpTactics::board(const TacticalPosition &position) const {
         }
     }
   return board;
+}
+const CpBoard &CpTactics::board(const TacticalPosition &position) const {
+  if (!position.tactical_board)
+    position.tactical_board = rebuild_board(position);
+  auto &current = *position.tactical_board;
+  TacticalView next(*position.branch, side);
+  bool refresh_volatile = current.view.visibility != next.visibility ||
+                          current.view.enemies != next.enemies;
+  for (int tile = 0; !refresh_volatile && tile < int(position.plots.size()); ++tile)
+    refresh_volatile = current.plots[tile].valid != bool(position.plots[tile]);
+  for (int enemy : next.enemies)
+    refresh_volatile = refresh_volatile || current.view.units[enemy].tile != next.units[enemy].tile;
+  // CP:8995 refreshVolatilePlotProperties; kills and discoveries invalidate
+  // enemy distance/adjacency and unknown-edge fields throughout the area.
+  if (refresh_volatile) {
+    position.tactical_board = rebuild_board(position);
+    return *position.tactical_board;
+  }
+  CAI_STORAGE_COUNT(BoardUpdate);
+  // CP:CvTacticalPlot::friendlyUnitMovingIn/Out and friendlyUnitEndTurn:
+  // ordinary movement and FINISH affect only occupancy and adjacent support.
+  std::vector<uint8_t> dirty(position.plots.size(), 0);
+  for (int tile = 0; tile < int(position.plots.size()); ++tile) {
+    if (!current.plots[tile].valid)
+      continue;
+    auto &plot = current.plots.at(tile);
+    int occupant = next.occupied[tile];
+    bool finished = false;
+    if (occupant >= 0 && next.units[occupant].side == side) {
+      UnitId unit_id{occupant};
+      finished = admitted_at_setup[unit_id]
+                     ? position.slot_states[selected.slot_of(unit_id)] == SlotState::Finished
+                     : bool(root_unit(unit_id).waiting);
+    }
+    if (current.view.occupied[tile] == occupant && plot.end == finished)
+      continue;
+    plot.end = finished;
+    plot.blocked = occupant >= 0 && next.units[occupant].side == side &&
+                   !admitted_at_setup[UnitId{occupant}];
+    dirty[tile] = 1;
+    for (int neighbor : adapter.neighbors(tile))
+      dirty[neighbor] = 1;
+  }
+  current.view = std::move(next);
+  for (int tile = 0; tile < int(dirty.size()); ++tile) {
+    if (!dirty[tile] || !current.plots[tile].valid)
+      continue;
+    auto &plot = current.plots.at(tile);
+    plot.friends = plot.friends_end = 0;
+    for (int neighbor : adapter.neighbors(tile)) {
+      int occupant = current.view.occupied[neighbor];
+      if (current.plots[neighbor].valid && occupant >= 0 && current.view.units[occupant].side == side) {
+        ++plot.friends;
+        plot.friends_end += current.plots[neighbor].end;
+      }
+    }
+  }
+  return current;
 }
 bool CpTactics::cover(const CpBoard &board, int tile) const {
   const auto &plot = board.plots[tile];
@@ -376,9 +436,13 @@ int CpTactics::potential(const TacticalPosition &position, const CpBoard &board,
   int best_score = 0;
   for (int enemy_id : board.enemies) {
     int destination = board.view.units[enemy_id].tile, distance = adapter.distance(tile, destination);
-    if (distance < 1 || distance > attack_range(now.type) ||
-        (ranged(now.type) && !adapter.can_target(tile, destination)))
+    if (distance < 1 || distance > attack_range(now.type))
       continue;
+    if (ranged(now.type)) {
+      const auto &targets = ranged_targets(now.id, tile);
+      if (!std::binary_search(targets.begin(), targets.end(), destination))
+        continue;
+    }
     auto value = attack(position, board, slot, tile, enemy_id);
     if (value.kill && num_attacks > 0 && value.score > 0) {
       value.score += 100;
@@ -407,13 +471,50 @@ bool CpTactics::can_end(const TacticalPosition &position, const CpBoard &board, 
   query.has_full_moves = move.remaining == combat_rules::moves[now.type];
   return turn_end(board, slot, tile, query).acceptable;
 }
+const std::vector<ReachableTile> &CpTactics::move_plots(
+    const TacticalPosition &position, const CpBoard &board, SlotIdx slot) {
+  const auto &unit = current_unit(board, slot);
+  // Pinned CP:8140,9247: unit/start/moves/freed enemy plots. Friendly stacking
+  // does not affect move_intents. Unlike GameCore's root-backed pathfinder,
+  // this adapter uses branch visibility/ZOC, so newly observed enemies must
+  // participate in the key too. Enemy units cannot relocate during our search.
+  std::vector<int> key{unit.id, unit.tile, unit.moves};
+  key.insert(key.end(), position.killed.begin(), position.killed.end());
+  key.push_back(-1);
+  key.insert(key.end(), board.view.enemies.begin(), board.view.enemies.end());
+  auto found = reach_cache.find(key);
+  if (found != reach_cache.end()) {
+    CAI_STORAGE_COUNT(ReachHit);
+    return found->second;
+  }
+  CAI_STORAGE_COUNT(ReachMiss);
+  // Store geometric intentions; tactical validity/blocking is filtered at use.
+  // This preserves CP's lazy reuse without freezing the pre-discovery area.
+  return reach_cache.emplace(std::move(key), adapter.move_intents(*position.branch, unit.id)).first->second;
+}
+const std::vector<int> &CpTactics::ranged_targets(int unit, int from) {
+  auto key = std::make_pair(unit, from);
+  auto found = ranged_target_cache.find(key);
+  if (found != ranged_target_cache.end()) {
+    CAI_STORAGE_COUNT(RangeHit);
+    return found->second;
+  }
+  CAI_STORAGE_COUNT(RangeMiss);
+  // CP:9332-9341 ignores visibility here; target validity is checked at use.
+  // Store geometric tiles, not a branch's enemy list. Terrain never changes.
+  std::vector<int> targets;
+  for (int tile = 0; tile < root_state.tile_count; ++tile)
+    if (tile != from && adapter.distance(from, tile) <= kRangedAttackRange && adapter.can_target(from, tile))
+      targets.push_back(tile);
+  return ranged_target_cache.emplace(key, std::move(targets)).first->second;
+}
 std::vector<CpMove> CpTactics::preferred(const TacticalPosition &position, const CpBoard &board, SlotIdx slot,
                                          int limit) {
   std::vector<CpMove> moves, shots;
   const auto &now = current_unit(board, slot);
   if (position.slot_states[slot] != SlotState::Pending || !board.plots[now.tile].valid)
     return moves;
-  for (auto reach : adapter.move_intents(*position.branch, now.id)) {
+  for (auto reach : move_plots(position, board, slot)) {
     int tile = reach.tile;
     if ((CAI_CP_AREA && adapter.distance(target, tile) > kMaxDestinationDistance) ||
         !board.plots[tile].valid || board.plots[tile].blocked)
@@ -445,11 +546,9 @@ std::vector<CpMove> CpTactics::preferred(const TacticalPosition &position, const
         move_score(position, board, slot, tile, reach.remaining_moves, MoveEvaluation::Intermediate).move;
     if (tile == now.tile) {
       if (config.aggression != CAI_NONE && ranged(now.type) && !now.attacked && now.moves > 0) {
-        for (int enemy : board.enemies) {
-          int destination = board.view.units[enemy].tile;
-          // can_shoot and can_target share the same geometric targeting table;
-          // the former also checks the current unit is a living ranged type.
-          if (!adapter.can_shoot(*position.branch, now.id, destination))
+        for (int destination : ranged_targets(now.id, tile)) {
+          int enemy = board.plots[destination].enemy;
+          if (enemy < 0)
             continue;
           auto attack_move = attack(position, board, slot, tile, enemy);
           if (attack_move.score < 0)
@@ -552,6 +651,8 @@ void CpTactics::initialize(TacticalPosition &position) {
       admitted_at_setup[UnitId{original.id}] = 0;
     }
   }
+  // Admission changed the non-sim blocking flags in the provisional board.
+  position.tactical_board.reset();
   for (int slot_index = 0; slot_index < int(selected.size()); ++slot_index) {
     SlotIdx slot{slot_index};
     if (!admitted_at_setup[selected.unit_at(slot)])
@@ -564,8 +665,8 @@ void CpTactics::initialize(TacticalPosition &position) {
       add_plot(neighbor);
   }
   if (!CAI_CP_AREA)
-    std::fill(position.plots.begin(), position.plots.end(), 1); // Benchmark ablation only.
-  auto initial_board = board(position);
+    std::fill(position.plots.begin(), position.plots.end(), uint8_t{1}); // Benchmark ablation only.
+  const auto &initial_board = board(position);
   initial_enemies = initial_board.enemies;
   int our_units = 0;
   for (int slot_index = 0; slot_index < int(selected.size()); ++slot_index)
@@ -591,7 +692,7 @@ void CpTactics::initialize(TacticalPosition &position) {
       continue;
     }
     // Root-only safe-plot count, before the tactical/non-sim plot filter.
-    for (auto reach : adapter.move_intents(root, original.id))
+    for (auto reach : move_plots(position, initial_board, slot))
       if ((!CAI_CP_AREA || adapter.distance(reach.tile, target) <= kMaxDestinationDistance) &&
           (initial.occupied[reach.tile] < 0 || initial.occupied[reach.tile] == original.id) &&
           danger(original.id, reach.tile, 0, {}) < original.hp)
@@ -632,7 +733,7 @@ void CpTactics::extend_plots(TacticalPosition &position, const std::vector<int32
     }
 }
 std::vector<CpCombo> CpTactics::candidates(const TacticalPosition &position, bool depth_first) {
-  auto current = board(position);
+  const auto &current = board(position);
   std::vector<CpMove> overall;
   for (SlotIdx slot : active_order)
     if (position.slot_states[slot] == SlotState::Pending) {
@@ -720,7 +821,7 @@ std::vector<CpCombo> CpTactics::candidates(const TacticalPosition &position, boo
 FinalEvaluation CpTactics::evaluate_final_position(const TacticalPosition &position) {
   FinalEvaluation evaluation;
   evaluation.score = position.rank;
-  auto current = board(position);
+  const auto &current = board(position);
   int unsafe_positions = 0;
   int positive_changes = 0;
   int negative_changes = 0;

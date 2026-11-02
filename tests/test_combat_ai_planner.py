@@ -20,6 +20,15 @@ class LocalPlannerTests(unittest.TestCase):
     def test_focus_fire_and_finishing(self):
         self.check_native("attacks")
 
+    def test_storage_caches_follow_contact_movement_and_kills(self):
+        self.check_native("cp_storage_caches")
+
+    def test_incremental_tactical_fields_match_full_rebuild(self):
+        self.check_native("cp_storage_boards")
+
+    def test_position_pool_reuse_and_compact_index_boundaries(self):
+        self.check_native("cp_storage_pool")
+
     def test_swaps_freeing_and_omitted_friendlies(self):
         self.check_native("swaps_and_freeing")
 

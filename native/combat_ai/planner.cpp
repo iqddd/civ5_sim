@@ -2,6 +2,7 @@
 // Current behavior: docs/combat-ai-contract.md; CP mapping: combat-ai-cp-transfer.md.
 #include "planner.h"
 #include "cp_tactical.h"
+#include "storage_metrics.h"
 #include "../combat_state.h"
 #include <algorithm>
 #include <cassert>
@@ -265,10 +266,18 @@ bool CandidateExecutor::apply(TacticalPosition& child, const CpCombo& candidate)
   return true;
 }
 
-void SearchWorkspace::clear() {
-  positions.clear();
+void SearchWorkspace::clear(bool hard) {
+  // CP:10349/10763, reset(player changed)/wipe(): free position containers,
+  // retaining the preallocated array. The simulator also supports new maps.
+  if (hard) positions.clear();
+  used_positions = 0;
   open.clear();
   equivalent.clear();
+}
+void SearchWorkspace::release_unused_branches() {
+  // A smaller subsequent request must not retain unrelated old map geometries.
+  for (size_t index = size_t(used_positions); index < positions.size(); ++index)
+    positions[index].branch.reset();
 }
 namespace {
 constexpr int32_t kBreadthFirstGenerations = 3; // CP TACTSIM_BREADTH_FIRST_GENERATIONS.
@@ -288,28 +297,32 @@ class Search {
   int32_t best_position = -1;
   int32_t best_score = std::numeric_limits<int32_t>::min();
 
-  std::unique_ptr<TacticalPosition> copy(const TacticalPosition& parent) {
+  TacticalPosition& copy(const TacticalPosition& parent) {
     require_invariant(!parent.restart_source,"queued parent has an unflushed contact");
-    auto child = std::make_unique<TacticalPosition>();
-    child->branch = parent.branch->clone();
+    CAI_STORAGE_COUNT(PositionCopy);
+    auto* child = &work.positions.at(work.used_positions);
+    child->branch = parent.branch->clone_into(std::move(child->branch));
     child->assignments = parent.assignments;
     child->plots = parent.plots;
+    child->tactical_board = parent.tactical_board;
     child->slot_states = parent.slot_states;
     child->move_flags = parent.move_flags;
     child->last_kill = parent.last_kill;
     child->touched = parent.touched;
     child->killed = parent.killed;
     child->attack_score = parent.attack_score;
+    child->rank = parent.rank;
     child->discovered = parent.discovered;
     child->generation = parent.generation + 1;
-    return child;
+    child->restart_source.reset();
+    return *child;
   }
   std::vector<int32_t> key(const TacticalPosition& position, const TacticalView& view) const {
     return search_position_key(position,view,request.side,selected);
   }
   bool heap_compare(int32_t left, int32_t right) const {
-    const auto& a = *work.positions[left];
-    const auto& b = *work.positions[right];
+    const auto& a = work.positions[left];
+    const auto& b = work.positions[right];
     if (a.generation != b.generation)
       return depth_first ? a.generation < b.generation : a.generation > b.generation;
     if (a.rank != b.rank) return a.rank < b.rank;
@@ -330,7 +343,7 @@ class Search {
     Plan plan{};
     plan.result.reason = exhausted ? CAI_BUDGET_EXHAUSTED : best_position < 0 ? CAI_NO_PLAN : CAI_COMPLETED;
     plan.result.stats = stats;
-    if (best_position >= 0) plan.assignments = work.positions[best_position]->assignments;
+    if (best_position >= 0) plan.assignments = work.positions[best_position].assignments;
     plan.result.assignment_count = int32_t(plan.assignments.size());
     return plan;
   }
@@ -339,12 +352,35 @@ class Search {
       : work(workspace), config(settings), request(input), adapter(make_rules_adapter(*input.state,input.side)),
         selected(input.selected_units,input.selected_count,input.state->unit_count) {}
   Plan run() {
-    work.clear();
+    const auto& state = *request.state;
+    std::vector<int32_t> map_key{state.width,state.height,state.row_parity,state.wrap_x};
+    map_key.reserve(4 + size_t(state.tile_count) * 4);
+    for (int32_t tile = 0; tile < state.tile_count; ++tile) {
+      const auto& value = state.tiles[tile];
+      map_key.insert(map_key.end(),{value.terrain,value.elevation,value.feature,value.rivers});
+    }
+    work.clear(work.previous_side != request.side || work.previous_map != map_key);
+    work.previous_side = request.side;
+    work.previous_map = std::move(map_key);
+    // Preallocate objects once, without constructing thousands of physical
+    // branches. No resize is allowed while parent references are in use.
+    work.positions.resize(size_t(config.position_capacity));
     ContactMemory memory{request.contacts.turn,request.contacts.side,{}};
     for (int32_t contact_index = 0; contact_index < request.contacts.known_enemy_count; ++contact_index)
       memory.known_enemies.push_back({request.contacts.known_enemies[contact_index].id,
                                      request.contacts.known_enemies[contact_index].last_seen_own_turn});
-    auto root = std::make_unique<TacticalPosition>();
+    auto* root = &work.positions.front();
+    root->assignments.clear();
+    root->plots.clear();
+    root->tactical_board.reset();
+    root->slot_states.assign(0,SlotState::Pending);
+    root->move_flags.assign(0,MoveFlag::None);
+    root->last_kill.assign(0,0);
+    root->touched.assign(0,0);
+    root->killed.clear();
+    root->generation = root->attack_score = root->rank = 0;
+    root->discovered = false;
+    root->restart_source.reset();
     root->branch = adapter->root(*request.state,memory);
     auto initial = TacticalView(*root->branch,request.side);
     initial_units = UnitValues<CaiUnit>{initial.units};
@@ -372,17 +408,17 @@ class Search {
         root->assignments.push_back(stationary_assignment(CAI_BLOCKED,unit,roles[slot]));
     }
     work.equivalent.emplace(key(*root,initial),std::make_pair(0,0));
-    work.positions.push_back(std::move(root));
+    work.used_positions = 1;
     stats.generated = 1;
     stats.peak_positions = 1;
 
     // Terminal children are evaluated before enqueueing. Only the root needs
     // this separate check; every node subsequently popped is non-terminal.
-    if (terminal_position(*work.positions.front(),initial_enemy_ids)) {
+    if (terminal_position(work.positions.front(),initial_enemy_ids)) {
       ++stats.checked;
-      auto evaluation = tactics->evaluate_final_position(*work.positions.front());
+      auto evaluation = tactics->evaluate_final_position(work.positions.front());
       if (evaluation.accepted) {
-        finalize_assignments(*work.positions.front(),evaluation);
+        finalize_assignments(work.positions.front(),evaluation);
         record_completion(0,evaluation.score);
       } else ++stats.pruned;
       return result();
@@ -391,14 +427,14 @@ class Search {
     CandidateExecutor executor{*adapter,*tactics,selected,request.side};
     auto compare = [&](int32_t left, int32_t right) { return heap_compare(left,right); };
     while (!work.open.empty() && !exhausted) {
-      if (!depth_first && work.positions[work.open.front()]->generation > kBreadthFirstGenerations) {
+      if (!depth_first && work.positions[work.open.front()].generation > kBreadthFirstGenerations) {
         depth_first = true;
         std::make_heap(work.open.begin(),work.open.end(),compare);
       }
       std::pop_heap(work.open.begin(),work.open.end(),compare);
       int32_t current_index = work.open.back();
       work.open.pop_back();
-      const auto& parent = *work.positions[current_index];
+      const auto& parent = work.positions[current_index];
       assert(!terminal_position(parent,initial_enemy_ids));
       auto current_view = TacticalView(*parent.branch,request.side);
       auto equivalent = work.equivalent.find(key(parent,current_view));
@@ -419,7 +455,7 @@ class Search {
           exhausted = true;
           break;
         }
-        auto child = copy(parent);
+        auto* child = &copy(parent);
         if (!executor.apply(*child,candidate)) {
           ++stats.pruned;
           continue;
@@ -445,14 +481,14 @@ class Search {
           }
           finalize_assignments(*child,evaluation);
         }
-        int32_t child_index = int32_t(work.positions.size());
+        int32_t child_index = work.used_positions;
         work.equivalent[std::move(identity)] = {child->attack_score,child_index};
-        work.positions.push_back(std::move(child));
+        ++work.used_positions;
         ++stats.generated;
         ++children;
         // Peak retained pool occupancy. With the current monotonic pool it
         // equals generated; temporary rejected children are outside this pool.
-        stats.peak_positions = std::max(stats.peak_positions,int32_t(work.positions.size()));
+        stats.peak_positions = std::max(stats.peak_positions,work.used_positions);
         if (finished) {
           record_completion(child_index,evaluation.score);
           if (exhausted) break;
@@ -467,6 +503,11 @@ class Search {
 };
 } // namespace
 Plan find_assignments(SearchWorkspace& workspace, const CaiConfig& config, const CaiSearchRequest& request) {
+  // Release obsolete branch geometries on both normal and exceptional exits.
+  struct Cleanup {
+    SearchWorkspace& workspace;
+    ~Cleanup() { workspace.release_unused_branches(); }
+  } cleanup{workspace};
   return Search(workspace,config,request).run();
 }
 } // namespace combat_ai

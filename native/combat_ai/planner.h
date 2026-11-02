@@ -1,6 +1,7 @@
 #pragma once
 #include "tactical.h"
 #include "planner_types.h"
+#include "cp_position.h"
 #include <map>
 #include <optional>
 
@@ -13,7 +14,10 @@ struct TacticalPosition {
   SlotValues<int32_t> last_kill, touched;
   std::vector<int32_t> killed;
   // Tactical plots grow only when a simulated move reveals cells.
-  std::vector<int32_t> plots;
+  std::vector<uint8_t> plots;
+  // Copied with the CP position. board() synchronizes changed occupancy/end
+  // fields lazily; enemy/visibility changes refresh volatile properties.
+  mutable std::optional<CpBoard> tactical_board;
   int32_t generation = 0, attack_score = 0, rank = 0;
   bool discovered = false;
   // Transient: first actual contact source in this atomic candidate. Flushed
@@ -51,10 +55,16 @@ class CandidateExecutor {
   bool apply(TacticalPosition&, const CpCombo&);
 };
 struct SearchWorkspace {
-  std::vector<std::unique_ptr<TacticalPosition>> positions;
+  // CvTactPosStorage: fixed addresses, peek at the next slot and consume only
+  // after accepting a child. Rejected children reuse the unconsumed slot.
+  std::vector<TacticalPosition> positions;
+  int32_t used_positions = 0;
+  int32_t previous_side = CAI_NO_ID;
+  std::vector<int32_t> previous_map;
   std::vector<int32_t> open;
   std::map<std::vector<int32_t>, std::pair<int32_t, int32_t>> equivalent;
-  void clear();
+  void clear(bool hard = false);
+  void release_unused_branches();
 };
 struct Plan { std::vector<CaiAssignment> assignments; CaiSearchResult result; };
 Plan find_assignments(SearchWorkspace&, const CaiConfig&, const CaiSearchRequest&);

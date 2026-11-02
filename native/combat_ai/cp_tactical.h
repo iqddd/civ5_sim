@@ -3,6 +3,9 @@
 // Source mapping and engine-query adaptations: docs/combat-ai-cp-transfer.md.
 #include "planner.h"
 #include <map>
+#include <array>
+#include <initializer_list>
+#include <stdexcept>
 
 namespace combat_ai {
 // Pinned CP's finite invalid score also participates in candidate arithmetic.
@@ -25,24 +28,32 @@ struct CpMove {
   int remaining = 0, self_damage = 0, near_kill = -1;
   bool kill = false;
 };
+class CpComboMoves {
+  std::array<CpMove, 2> values{}; // CP SComboMove: at most two atomic assignments.
+  uint8_t count = 0;
+public:
+  CpComboMoves(std::initializer_list<CpMove> moves = {}) {
+    for (auto move : moves) push_back(move);
+  }
+  void push_back(CpMove move) {
+    if (count == values.size()) throw std::logic_error("combo exceeds two assignments");
+    values[count++] = move;
+  }
+  size_t size() const { return count; }
+  bool empty() const { return count == 0; }
+  const CpMove &operator[](size_t index) const { return values.at(index); }
+  const CpMove &front() const { return (*this)[0]; }
+  auto begin() const { return values.begin(); }
+  auto end() const { return values.begin() + count; }
+};
 struct CpCombo {
-  std::vector<CpMove> moves;
+  CpComboMoves moves;
   int score = 0;
 };
 enum class MoveEvaluation { Intermediate, Initial, Final };
 struct MoveScore {
   CpMove move;
   bool acceptable = false;
-};
-struct CpPlot {
-  bool valid = false, blocked = false, end = false, edge = false;
-  int enemy = -1, distance = 4, enemies = 0, friends = 0, friends_end = 0;
-};
-struct CpBoard {
-  TacticalView view;
-  std::vector<CpPlot> plots;
-  std::vector<int> enemies;
-  explicit CpBoard(const Branch &b, int side) : view(b, side) {}
 };
 // A search owns one context, including the root danger index and caches. The
 // root branch must outlive it. These are not caches shared across searches.
@@ -62,6 +73,12 @@ class CpTactics {
   std::vector<int> fog_danger;
   std::map<std::vector<int>, int> danger_cache;
   std::map<std::vector<int>, Damage> attack_cache;
+  // CvTacticalAI.h:SPathFinderStartPos / TCachedRangeAttackPlots. Search-local;
+  // the simulator additionally keys the observed enemy topology (see cpp).
+  std::map<std::vector<int>, std::vector<ReachableTile>> reach_cache;
+  std::map<std::pair<int, int>, std::vector<int>> ranged_target_cache;
+  const std::vector<ReachableTile> &move_plots(const TacticalPosition &, const CpBoard &, SlotIdx);
+  const std::vector<int> &ranged_targets(int unit, int from);
   const CaiUnit &root_unit(UnitId) const;
   const CaiUnit &root_unit(SlotIdx) const;
   const CaiUnit &current_unit(const CpBoard &, SlotIdx) const;
@@ -93,7 +110,9 @@ public:
   // One-shot setup. Reinitializing the same search context is an invariant error.
   void initialize(TacticalPosition &);
   void extend_plots(TacticalPosition &, const std::vector<int32_t> &) const;
-  CpBoard board(const TacticalPosition &) const;
+  const CpBoard &board(const TacticalPosition &) const;
+  // Slow independent rebuild for storage-consistency checks, not scoring.
+  CpBoard rebuild_board(const TacticalPosition &) const;
   int danger(int unit, int tile, int self_damage, const std::vector<int> &killed);
   MoveScore move_score(const TacticalPosition &, const CpBoard &, SlotIdx slot, int tile, int remaining_moves,
                        MoveEvaluation mode);

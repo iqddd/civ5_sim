@@ -1,4 +1,5 @@
 #include "model.h"
+#include "storage_metrics.h"
 #include "../combat_state.h"
 #include <algorithm>
 #include <iterator>
@@ -149,11 +150,31 @@ class OwnedBranch final : public Branch {
               std::shared_ptr<const std::vector<CaiTile>> map_tiles, int side)
       : rules(std::move(geometry)), observer(side), tiles(std::move(map_tiles)) {}
   std::unique_ptr<Branch> clone() const override {
+    CAI_STORAGE_COUNT(BranchAllocation);
     auto copy = std::make_unique<OwnedBranch>(*this);
     // Export buffers are branch-owned. Never retain the parent's raw view.
     copy->snapshot = {};
     copy->danger_cache.clear();
     return copy;
+  }
+  std::unique_ptr<Branch> clone_into(std::unique_ptr<Branch> storage) const override {
+    auto* copy = dynamic_cast<OwnedBranch*>(storage.get());
+    if (!copy)
+      return clone();
+    require(copy != this, "cannot overwrite the source branch");
+    CAI_STORAGE_COUNT(BranchReuse);
+    // Vector assignment retains capacity. No cached export pointers or danger
+    // results survive; immutable geometry belongs to the source search now.
+    copy->rules = rules;
+    copy->observer = observer;
+    copy->memory = memory;
+    copy->last_accepted_visibility = last_accepted_visibility;
+    copy->tiles = tiles;
+    copy->units.clear();
+    copy->visibility.clear();
+    copy->snapshot = {};
+    copy->danger_cache.clear();
+    return storage;
   }
   const CaiBattleState& state() const override {
     units.clear();

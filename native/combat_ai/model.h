@@ -43,6 +43,9 @@ class Branch {
  public:
   virtual ~Branch() = default;
   virtual std::unique_ptr<Branch> clone() const = 0;
+  // Internal storage hook. Adapters may reuse a disposable branch's buffers;
+  // the default keeps the ordinary cloning contract for other adapters.
+  virtual std::unique_ptr<Branch> clone_into(std::unique_ptr<Branch>) const { return clone(); }
   // Own mutable unit/visibility state; immutable map tables may be shared.
   // The view and its arrays are owned by this branch and remain valid until
   // its next state() call, mutation, or destruction. Map tiles are shared.

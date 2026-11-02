@@ -1087,6 +1087,131 @@ void cp_average_personality() {
   }
 }
 
+void cp_storage_caches() {
+  // A freshly initialized context is a cache-empty oracle for the SAME
+  // heuristic, not an assertion that its preferred plan is optimal.
+  auto compare = [](Fixture& f, TacticalFixture& context, int target) {
+    TacticalFixture empty(f,target);
+    for (bool depth : {false,true}) {
+      auto actual=context.tactics->candidates(context.position,depth);
+      auto expected=empty.tactics->candidates(context.position,depth);
+      CHECK(actual.size()==expected.size());
+      for (size_t i=0;i<actual.size();++i) {
+        CHECK(actual[i].score==expected[i].score);
+        CHECK(actual[i].moves.size()==expected[i].moves.size());
+        for (size_t j=0;j<actual[i].moves.size();++j) {
+          const auto& a=actual[i].moves[j]; const auto& b=expected[i].moves[j];
+          CHECK(a.unit==b.unit && a.tile==b.tile && a.kind==b.kind && a.score==b.score);
+          CHECK(a.remaining==b.remaining && a.self_damage==b.self_damage);
+          CHECK(a.near_kill==b.near_kill && a.kill==b.kill);
+        }
+      }
+    }
+  };
+  for (bool fog : {false,true}) {
+    Fixture f; f.w=12; f.h=5; f.tiles.resize(60); f.fog=fog;
+    f.add(4,0,24); f.add(1,0,12); f.add(0,1,28,1); f.start();
+    TacticalFixture context(f,28);
+    compare(f,context,28);
+    compare(f,context,28); // repeated lookups in the same position
+    apply_contract_action(f,context,CP_MOVE,0,26);
+    compare(f,context,28); // movement, new observation, tactical-area growth
+    apply_contract_action(f,context,CP_FORCED,0,27);
+    apply_contract_action(f,context,CP_MELEE,0,28);
+    CHECK(context.position.killed==std::vector<int32_t>{2});
+    compare(f,context,28); // freed plot and removed enemy ZOC
+  }
+}
+
+void check_tactical_board(TacticalFixture& context) {
+  const auto& actual=context.tactics->board(context.position);
+  auto expected=context.tactics->rebuild_board(context.position);
+  CHECK(actual.enemies==expected.enemies);
+  CHECK(actual.view.occupied==expected.view.occupied);
+  CHECK(actual.view.visibility==expected.view.visibility);
+  CHECK(actual.plots.size()==expected.plots.size());
+  for (size_t tile=0;tile<actual.plots.size();++tile) {
+    const auto& a=actual.plots[tile]; const auto& b=expected.plots[tile];
+    CHECK(a.valid==b.valid && a.blocked==b.blocked && a.end==b.end && a.edge==b.edge);
+    CHECK(a.enemy==b.enemy && a.distance==b.distance && a.enemies==b.enemies);
+    CHECK(a.friends==b.friends && a.friends_end==b.friends_end);
+  }
+}
+
+void cp_storage_boards() {
+  for (int seed=0;seed<40;++seed) {
+    Fixture f; f.w=8; f.h=6; f.tiles.resize(48);
+    f.fog=seed&1; f.parity=(seed>>1)&1; f.wrap=(seed>>2)&1;
+    f.add(seed%5,0,16); f.add((seed+1)%5,0,17); f.add((seed+2)%5,0,24);
+    f.add(0,1,20,seed%3==0?1:100); f.add(3,1,28); f.add(1,1,37);
+    f.start(); TacticalFixture context(f,20);
+    SelectedUnits selected(f.selected.data(),int32_t(f.selected.size()),int32_t(f.units.size()));
+    CandidateExecutor executor(*f.adapter,*context.tactics,selected,0);
+    for (int step=0;step<12;++step) {
+      check_tactical_board(context);
+      auto choices=context.tactics->candidates(context.position,step>3);
+      bool advanced=false;
+      for (const auto& candidate : choices) {
+        advanced=executor.apply(context.position,candidate);
+        // A rejected attempt ends this disposable scenario. Its physical
+        // state still has to agree with a complete property rebuild.
+        break;
+      }
+      check_tactical_board(context);
+      if (!advanced) break;
+    }
+  }
+}
+
+void cp_storage_pool() {
+  SearchWorkspace reused;
+  for (int iteration=0;iteration<16;++iteration) {
+    Fixture f;
+    if ((iteration/2)&1) { f.w=16; f.h=16; f.tiles.resize(256); }
+    f.fog=(iteration/2)&1; f.parity=(iteration>>2)&1; f.wrap=(iteration>>3)&1;
+    f.add(iteration%5,0,0); f.add(1,0,1); f.add(0,1,3); f.add(3,1,4);
+    f.start();
+    f.config.position_capacity=(iteration%3==0?13:iteration%3==1?180:1000);
+    CaiSearchRequest request{&f.state,0,0,3,f.selected.data(),int32_t(f.selected.size()),{0,-1,nullptr,0}};
+    SearchWorkspace fresh;
+    auto actual=find_assignments(reused,f.config,request);
+    auto expected=find_assignments(fresh,f.config,request);
+    CHECK(actual.result.reason==expected.result.reason);
+    CHECK(std::memcmp(&actual.result.stats,&expected.result.stats,sizeof(CaiSearchStats))==0);
+    CHECK(actual.assignments.size()==expected.assignments.size());
+    for (size_t i=0;i<actual.assignments.size();++i)
+      CHECK(std::memcmp(&actual.assignments[i],&expected.assignments[i],sizeof(CaiAssignment))==0);
+    CHECK(reused.used_positions==actual.result.stats.generated);
+    CHECK(reused.positions.size()==size_t(f.config.position_capacity));
+    for (size_t i=size_t(reused.used_positions);i<reused.positions.size();++i)
+      CHECK(!reused.positions[i].branch);
+    f.replay(actual);
+  }
+  // Same geometry, other player: CP requests a hard wipe of every position.
+  Fixture switched; switched.w=16; switched.h=16; switched.tiles.resize(256);
+  switched.parity=1; switched.wrap=1;
+  switched.add(0,0,0); switched.add(1,0,1); switched.add(4,1,3); switched.add(0,1,4);
+  switched.start(); switched.state.active_side=1;
+  switched.selected={2,3}; switched.config.max_completed=1;
+  switched.config.position_capacity=1000;
+  reused.positions.back().assignments.reserve(200);
+  CaiSearchRequest other_side{&switched.state,1,0,0,switched.selected.data(),2,{0,-1,nullptr,0}};
+  find_assignments(reused,switched.config,other_side);
+  CHECK(reused.previous_side==1 && reused.used_positions<999);
+  CHECK(reused.positions.back().assignments.capacity()==0);
+  // Explicit CP hard reset destroys retained containers, but not array capacity.
+  size_t capacity=reused.positions.capacity();
+  reused.clear(true);
+  CHECK(reused.positions.empty() && reused.positions.capacity()==capacity);
+  CpPlots plots;
+  plots.resize(4096);
+  for (int i=0;i<255;++i) plots.add(size_t(i+254)).valid=true;
+  CHECK(plots.local_size()==255 && plots[255].valid && !plots[0].valid);
+  bool rejected=false;
+  try { plots.add(4095); } catch(const std::logic_error&) { rejected=true; }
+  CHECK(rejected && !plots[4095].valid);
+}
+
 void cp_context_invariants() {
   Fixture f; f.add(0,0,16); f.add(0,1,18); f.start();
   SelectedUnits selected(f.selected.data(),int32_t(f.selected.size()),int32_t(f.units.size()));
@@ -1146,6 +1271,9 @@ int main(int argc,char** argv) {
     else if(name=="contract_combo_mode") contract_combo_mode();
     else if(name=="cp_hypothetical_flanking") cp_hypothetical_flanking();
     else if(name=="cp_context_invariants") cp_context_invariants();
+    else if(name=="cp_storage_caches") cp_storage_caches();
+    else if(name=="cp_storage_boards") cp_storage_boards();
+    else if(name=="cp_storage_pool") cp_storage_pool();
     else if(name=="cp_average_personality") cp_average_personality();
     else throw std::runtime_error("unknown test group");
     std::cout<<name<<" passed\n"; return 0;
