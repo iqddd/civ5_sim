@@ -112,13 +112,22 @@ def instrument(directory, baseline):
     if not baseline:
         p = native / "cp_tactical.cpp"
         text = '#include "measure.h"\n' + p.read_text()
-        for marker, index in (
-            ("  auto value=adapter.forecast(root,attacker,from,defender,to,extra,true,unknown_origin);", 3),
-            ("  std::vector<int> key{unit,tile,self_damage};", 4),
-            ("  std::vector<CpMove> moves, shots;", 5),
-            ("    for (auto freeing : overall) if (freeing.unit==blocker && freeing.kind==CP_MOVE) {", 6),
-            ("combo.moves.push_back(second);", 8),
+        # Preserve instrumentation of archived sources as well as the current
+        # explicit names/formatting. Fail if neither form matches exactly once.
+        for alternatives, index in (
+            (("  auto value=adapter.forecast(root,attacker,from,defender,to,extra,true,unknown_origin);",
+              "  auto value = adapter.forecast(root, attacker, from, defender, to, extra, true, unknown_origin);"), 3),
+            (("  std::vector<int> key{unit,tile,self_damage};",
+              "  std::vector<int> key{unit, tile, self_damage};"), 4),
+            (("  std::vector<CpMove> moves, shots;",), 5),
+            (("    for (auto freeing : overall) if (freeing.unit==blocker && freeing.kind==CP_MOVE) {",
+              "    for (auto freeing : overall)\n"), 6),
+            (("combo.moves.push_back(second);", "combo.moves.push_back(*second);"), 8),
         ):
+            matches = [candidate for candidate in alternatives if candidate in text]
+            if len(matches) != 1:
+                raise ValueError(f"Ambiguous or missing CP instrumentation: {alternatives}")
+            marker = matches[0]
             text = replace(text, marker, f"COUNT({index}); " + marker)
         p.write_text(text, encoding="utf-8")
     (directory / "measure.h").write_text(
@@ -148,8 +157,15 @@ def build(out, variants):
             if variant in ("common", "area"):
                 p = directory / "native/combat_ai/cp_tactical.cpp"
                 s = p.read_text()
-                # The non-MOVE pairing is part of makeNextAssignments too.
-                s = replace(s, "if (depth_first && k+1<overall.size()", "if (CAI_CP_COMBOS && depth_first && k+1<overall.size()")
+                # Older frozen sources guarded blocker combos only. Current
+                # sources use the macro for both mechanisms without patching.
+                old = "if (depth_first && k+1<overall.size()"
+                guarded = "if (CAI_CP_COMBOS && depth_first && k+1<overall.size()"
+                if old in s:
+                    s = replace(s, old, guarded)
+                # Current C++17 source guards the whole pairing block.
+                elif guarded not in s and "if constexpr (CAI_CP_COMBOS != 0)" not in s:
+                    raise ValueError("Unrecognized CP finish-pairing condition")
                 p.write_text(s, encoding="utf-8")
         instrument(directory, baseline)
         sources = [directory / "native" / p for p in SOURCES]

@@ -91,3 +91,21 @@ class LocalPlannerTests(unittest.TestCase):
 
     def test_contract_search_budgets_with_empty_remaining_queue(self):
         self.check_native("contract_search_budgets")
+
+    def test_contract_moves_never_block_their_own_unit(self):
+        self.check_native("contract_move_destinations")
+
+    def test_contract_swap_histories_are_not_equivalent(self):
+        self.check_native("contract_swap_equivalence")
+
+    def test_contract_combo_switch_controls_blockers_and_finish_pairing(self):
+        self.check_native("contract_combo_mode")
+
+    def test_cp_hypothetical_attacks_exclude_only_counted_attacker(self):
+        self.check_native("cp_hypothetical_flanking")
+
+    def test_cp_context_is_initialized_once_and_maps_optional_slots(self):
+        self.check_native("cp_context_invariants")
+
+    def test_cp_average_personality_uses_strict_forty_hp_pruning_boundary(self):
+        self.check_native("cp_average_personality")

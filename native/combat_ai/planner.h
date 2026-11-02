@@ -27,6 +27,11 @@ struct FinalEvaluation {
 };
 bool terminal_position(const TacticalPosition&, const std::vector<int32_t>& initial_enemy_ids);
 void finalize_assignments(TacticalPosition&, const FinalEvaluation&);
+std::optional<int32_t> latest_move_score(const TacticalPosition&, UnitId);
+bool has_attack_assignment(const TacticalPosition&);
+// Includes history that affects final scoring, not only the physical board.
+std::vector<int32_t> search_position_key(const TacticalPosition&, const TacticalView&,
+                                       int32_t side, const SelectedUnits&);
 
 class CpTactics;
 struct CpCombo;

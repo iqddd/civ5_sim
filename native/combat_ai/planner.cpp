@@ -40,11 +40,59 @@ SelectedUnits::SelectedUnits(const int32_t* selected, int32_t count, int32_t ros
     slots[unit] = SlotIdx{slot_index};
   }
 }
-SlotIdx SelectedUnits::slot_of(UnitId unit) const {
+std::optional<SlotIdx> SelectedUnits::find_slot(UnitId unit) const {
   require_invariant(unit.value >= 0 && size_t(unit.value) < slots.size(),"unit ID outside roster");
   SlotIdx slot = slots[unit];
-  require_invariant(slot.valid(),"candidate uses a unit outside the selected group");
-  return slot;
+  return slot.valid() ? std::optional<SlotIdx>{slot} : std::nullopt;
+}
+SlotIdx SelectedUnits::slot_of(UnitId unit) const {
+  auto slot = find_slot(unit);
+  require_invariant(slot.has_value(),"candidate uses a unit outside the selected group");
+  return *slot;
+}
+
+std::optional<int32_t> latest_move_score(const TacticalPosition& position, UnitId unit) {
+  auto latest = std::find_if(position.assignments.rbegin(),position.assignments.rend(),
+      [&](const CaiAssignment& record) {
+    return record.unit == unit.value && (record.kind == CAI_MOVE || record.kind == CAI_SWAP ||
+           (record.kind == CAI_MELEE && record.killed_unit >= 0));
+  });
+  if (latest == position.assignments.rend()) return std::nullopt;
+  return latest->score;
+}
+
+bool has_attack_assignment(const TacticalPosition& position) {
+  return std::any_of(position.assignments.begin(),position.assignments.end(),
+      [](const CaiAssignment& record) { return record.kind == CAI_MELEE || record.kind == CAI_RANGED; });
+}
+
+std::vector<int32_t> search_position_key(const TacticalPosition& position,
+    const TacticalView& view, int32_t side, const SelectedUnits& selected) {
+  // Contract: docs/combat-ai-contract.md#candidate-order.
+  std::vector<int32_t> result;
+  for (const auto& unit : view.units) {
+    if (unit.side != side && !view.visibility[unit.tile]) continue;
+    result.insert(result.end(),{unit.id,unit.tile,unit.hp,unit.moves,unit.attacked,unit.acted,unit.fortified,unit.waiting});
+  }
+  result.push_back(-2);
+  result.insert(result.end(),view.visibility.begin(),view.visibility.end());
+  result.insert(result.end(),position.plots.begin(),position.plots.end());
+  for (int32_t slot_index = 0; slot_index < int32_t(selected.size()); ++slot_index) {
+    SlotIdx slot{slot_index};
+    auto last_move = latest_move_score(position,selected.unit_at(slot));
+    result.insert(result.end(),{int32_t(position.slot_states[slot]),int32_t(position.move_flags[slot]),
+        position.last_kill[slot],position.touched[slot],int32_t(last_move.has_value()),last_move.value_or(0)});
+  }
+  // Equal physical swaps can have different final contributions: SWAP_REVERSE
+  // is not a last move in CP's accounting. Absence also differs from score 0.
+  result.insert(result.end(),{position.rank,int32_t(has_attack_assignment(position)),int32_t(position.discovered)});
+  result.push_back(int32_t(position.killed.size()));
+  result.insert(result.end(),position.killed.begin(),position.killed.end());
+  const auto& memory = position.branch->contacts();
+  result.insert(result.end(),{memory.turn,memory.side});
+  for (auto contact : memory.known_enemies)
+    result.insert(result.end(),{contact.id,contact.last_seen_own_turn});
+  return result;
 }
 
 bool terminal_position(const TacticalPosition& position, const std::vector<int32_t>& initial_enemy_ids) {
@@ -257,27 +305,7 @@ class Search {
     return child;
   }
   std::vector<int32_t> key(const TacticalPosition& position, const TacticalView& view) const {
-    std::vector<int32_t> result;
-    for (const auto& unit : view.units) {
-      if (unit.side != request.side && !view.visibility[unit.tile]) continue;
-      result.insert(result.end(),{unit.id,unit.tile,unit.hp,unit.moves,unit.attacked,unit.acted,unit.fortified,unit.waiting});
-    }
-    result.push_back(-2);
-    result.insert(result.end(),view.visibility.begin(),view.visibility.end());
-    result.insert(result.end(),position.plots.begin(),position.plots.end());
-    for (int32_t slot_index = 0; slot_index < int32_t(selected.size()); ++slot_index) {
-      SlotIdx slot{slot_index};
-      result.insert(result.end(),{int32_t(position.slot_states[slot]),int32_t(position.move_flags[slot]),
-          position.last_kill[slot],position.touched[slot]});
-    }
-    result.push_back(int32_t(position.discovered));
-    result.push_back(int32_t(position.killed.size()));
-    result.insert(result.end(),position.killed.begin(),position.killed.end());
-    const auto& memory = position.branch->contacts();
-    result.insert(result.end(),{memory.turn,memory.side});
-    for (auto contact : memory.known_enemies)
-      result.insert(result.end(),{contact.id,contact.last_seen_own_turn});
-    return result;
+    return search_position_key(position,view,request.side,selected);
   }
   bool heap_compare(int32_t left, int32_t right) const {
     const auto& a = *work.positions[left];
@@ -338,7 +366,7 @@ class Search {
       SlotIdx slot{slot_index};
       UnitId unit_id = selected.unit_at(slot);
       const auto& unit = initial_units[unit_id];
-      int32_t score = tactics->move_score(*root,board,slot,unit.tile,0,true,nullptr,true).score;
+      int32_t score = tactics->move_score(*root,board,slot,unit.tile,0,MoveEvaluation::Initial).move.score;
       root->assignments.push_back(stationary_assignment(CAI_INITIAL,unit,roles[slot],score));
       if (root->slot_states[slot] == SlotState::ExcludedAtRoot)
         root->assignments.push_back(stationary_assignment(CAI_BLOCKED,unit,roles[slot]));

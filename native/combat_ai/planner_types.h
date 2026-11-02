@@ -2,6 +2,7 @@
 #include "combat_ai.h"
 #include <cassert>
 #include <cstddef>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -66,6 +67,7 @@ class SelectedUnits {
  public:
   SelectedUnits(const int32_t* selected, int32_t count, int32_t roster_size);
   UnitId unit_at(SlotIdx slot) const { return units[slot]; }
+  std::optional<SlotIdx> find_slot(UnitId unit) const;
   SlotIdx slot_of(UnitId unit) const;
   size_t size() const { return units.size(); }
 };

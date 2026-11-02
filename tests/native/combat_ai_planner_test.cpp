@@ -565,7 +565,7 @@ void planner_root_exclusion() {
   // Its neighborhood/occupancy must retain the original admission semantics.
   Fixture pruned;
   pruned.w=16; pruned.h=1; pruned.tiles.resize(16);
-  pruned.add(0,0,0,40);
+  pruned.add(0,0,0,39);
   pruned.add(0,1,4);
   pruned.start();
   TacticalFixture context(pruned,4);
@@ -859,6 +859,241 @@ void contract_search_budgets() {
   CHECK(plan.result.stats.completed==1);
   CHECK(f.replay(plan)->state().units[1].hp==0);
 }
+void contract_move_destinations() {
+  // Contract: docs/combat-ai-contract.md#combo-invariants.
+  // Exercise both stationary paths: FINISH_TEMP and ranged attacks, then
+  // repeat on a moved branch rather than checking only the initial tile.
+  for (int type=0; type<5; ++type) for (int fog : {0,1})
+    for (auto aggression : {CAI_NONE,CAI_MEDIUM}) {
+      Fixture f;
+      f.fog=fog;
+      f.config.aggression=aggression;
+      f.add(type,0,16); f.add(0,1,18); f.start();
+      TacticalFixture context(f,18);
+      auto check=[&]() {
+        auto board=context.tactics->board(context.position);
+        int current_tile=board.view.units[0].tile;
+        for (int limit : {2,5,9,100})
+          for (const auto& move : context.tactics->preferred(context.position,board,SlotIdx{0},limit)) {
+            if (move.kind==CP_MOVE) CHECK(move.tile!=current_tile);
+            if (move.kind==CP_FINISH_TEMP || move.kind==CP_BLOCKED) CHECK(move.tile==current_tile);
+          }
+        for (bool depth_first : {false,true})
+          for (const auto& candidate : context.tactics->candidates(context.position,depth_first)) {
+            CHECK(!candidate.moves.empty() && candidate.moves.size()<=2);
+            if (candidate.moves.size()==2) CHECK(candidate.moves[0].unit!=candidate.moves[1].unit);
+            for (const auto& move : candidate.moves) {
+              if (move.kind==CP_MOVE) CHECK(move.tile!=board.view.units[move.unit].tile);
+              if (move.kind==CP_FORCED)
+                CHECK(candidate.moves.size()==2 && candidate.moves[1].kind==CP_MOVE);
+            }
+          }
+      };
+      check();
+      auto stationary=context.tactics->preferred(context.position,context.tactics->board(context.position),SlotIdx{0},100);
+      CpMoveKind expected=aggression==CAI_NONE || (type!=1 && type!=2) ? CP_FINISH_TEMP : CP_RANGED;
+      CHECK(std::any_of(stationary.begin(),stationary.end(),[expected](const CpMove& move) {
+        return move.kind==expected;
+      }));
+      apply_contract_action(f,context,CP_MOVE,0,15);
+      CHECK(context.position.branch->state().units[0].tile==15);
+      check();
+    }
+}
+void contract_swap_equivalence() {
+  // Contract: docs/combat-ai-contract.md#candidate-order.
+  Fixture f;
+  f.add(1,0,16,50); f.add(3,0,15); f.add(0,1,17,50);
+  f.corridor({15,16,17}); f.start();
+  TacticalFixture origin(f,17);
+  auto candidates=origin.tactics->candidates(origin.position,false);
+  SelectedUnits selected(f.selected.data(),int32_t(f.selected.size()),int32_t(f.units.size()));
+  SearchWorkspace workspace;
+  std::vector<CaiUnit> first_physical;
+  std::vector<CaiUnit> first_final;
+  std::vector<int32_t> scores;
+  for (const auto& combo : candidates) if (combo.moves[0].kind==CP_SWAP) {
+    TacticalFixture child(f,17);
+    CandidateExecutor executor(*f.adapter,*child.tactics,selected,0);
+    CHECK(executor.apply(child.position,combo));
+    child.position.rank=combo.score;
+    auto state=child.position.branch->state();
+    std::vector<CaiUnit> physical(state.units,state.units+state.unit_count);
+    if (first_physical.empty()) first_physical=physical;
+    else CHECK(std::memcmp(first_physical.data(),physical.data(),physical.size()*sizeof(CaiUnit))==0);
+    for (int slot=0; slot<2; ++slot) {
+      CHECK(child.position.slot_states[SlotIdx{slot}]==SlotState::Pending);
+      CHECK(child.position.move_flags[SlotIdx{slot}]==MoveFlag::Swapped);
+      auto preferred=child.tactics->preferred(child.position,child.tactics->board(child.position),SlotIdx{slot},100);
+      CHECK(std::none_of(preferred.begin(),preferred.end(),[](const CpMove& move) { return move.kind==CP_MOVE; }));
+    }
+    auto view=TacticalView(*child.position.branch,0);
+    auto key=search_position_key(child.position,view,0,selected);
+    CHECK(workspace.equivalent.emplace(key,std::make_pair(child.position.attack_score,int(scores.size()))).second);
+    ++child.position.rank;
+    CHECK(search_position_key(child.position,view,0,selected)!=key);
+    --child.position.rank;
+    CHECK(latest_move_score(child.position,UnitId{combo.moves[0].unit}).has_value());
+    CHECK(!latest_move_score(child.position,UnitId{combo.moves[1].unit}).has_value());
+
+    // Both orientations follow the same actually generated continuation.
+    for (auto spec : {std::make_pair(CP_RANGED,0),std::make_pair(CP_FINISH_TEMP,1)}) {
+      auto next=child.tactics->candidates(child.position,false);
+      auto action=std::find_if(next.begin(),next.end(),[&](const CpCombo& candidate) {
+        return candidate.moves.size()==1 && candidate.moves[0].kind==spec.first && candidate.moves[0].unit==spec.second;
+      });
+      CHECK(action!=next.end());
+      CHECK(executor.apply(child.position,*action));
+      if (spec.first!=CP_FINISH_TEMP) child.position.rank+=action->score;
+    }
+    auto final=child.tactics->evaluate_final_position(child.position);
+    CHECK(final.accepted);
+    scores.push_back(final.score);
+    finalize_assignments(child.position,final);
+    Plan plan;
+    plan.assignments=child.position.assignments;
+    auto replay=f.replay(plan);
+    auto after=replay->state();
+    std::vector<CaiUnit> units(after.units,after.units+after.unit_count);
+    if (first_final.empty()) first_final=units;
+    else CHECK(std::memcmp(first_final.data(),units.data(),units.size()*sizeof(CaiUnit))==0);
+  }
+  CHECK(scores.size()==2 && scores[0]!=scores[1]);
+  CHECK(workspace.equivalent.size()==2); // Neither orientation may be lost.
+}
+void contract_combo_mode() {
+  // Contract: docs/combat-ai-contract.md#combo-invariants.
+#if defined(CAI_CP_COMBOS) && CAI_CP_COMBOS == 0
+  constexpr bool enabled=false;
+#else
+  constexpr bool enabled=true;
+#endif
+  Fixture swap;
+  swap.add(1,0,16,50); swap.add(3,0,15); swap.add(0,1,17,50);
+  swap.corridor({15,16,17}); swap.start();
+  TacticalFixture context(swap,17);
+  auto board=context.tactics->board(context.position);
+  bool swap_found=false;
+  for (const auto& candidate : context.tactics->candidates(context.position,false)) {
+    swap_found=swap_found || candidate.moves[0].kind==CP_SWAP;
+    if (!enabled) {
+      CHECK(candidate.moves.size()==1);
+      if (candidate.moves[0].kind==CP_MOVE) CHECK(board.view.occupied[candidate.moves[0].tile]<0);
+    }
+  }
+  CHECK(swap_found==enabled);
+
+  Fixture idle;
+  idle.config.aggression=CAI_NONE;
+  idle.add(0,0,16); idle.add(0,0,9); idle.start();
+  TacticalFixture finishes(idle,16);
+  bool paired=false;
+  for (const auto& candidate : finishes.tactics->candidates(finishes.position,true)) {
+    paired=paired || candidate.moves.size()==2;
+    if (!enabled) CHECK(candidate.moves.size()==1);
+  }
+  CHECK(paired==enabled);
+}
+void cp_hypothetical_flanking() {
+  // Contract: docs/combat-ai-contract.md#hypothetical-flanking.
+  // Check actual occupancy, not a prescribed plan or an assumed optimal move.
+  for (int scenario : {0,1,2}) {
+    Fixture f;
+    f.config.aggression=CAI_BRAVEHEART;
+    if (scenario==0) {
+      f.w=8; f.h=1; f.tiles.resize(8);
+      f.add(0,0,0); f.add(0,1,2);
+    } else {
+      f.add(0,0,scenario==1 ? 16 : 15);
+      f.add(0,1,17);
+    }
+    f.start();
+    TacticalFixture context(f,scenario==0 ? 2 : 17);
+    if (scenario==2) {
+      // A moved branch differs from root: counting must use current occupancy.
+      CHECK(f.adapter->apply(*context.position.branch,{MOVE,0,16}).accepted);
+    }
+    auto board=context.tactics->board(context.position);
+    const auto& attacker=board.view.units[0];
+    const auto& enemy=board.view.units[1];
+    CHECK(board.plots[enemy.tile].friends==(scenario==0 ? 0 : 1));
+    auto preferred=context.tactics->preferred(context.position,board,SlotIdx{0},100);
+    bool checked=false;
+    for (auto reach : f.adapter->move_intents(*context.position.branch,0)) {
+      if (reach.tile==attacker.tile || board.view.occupied[reach.tile]>=0 ||
+          f.adapter->distance(reach.tile,enemy.tile)!=1 || !board.plots[reach.tile].valid) continue;
+      auto candidate=std::find_if(preferred.begin(),preferred.end(),[&](const CpMove& move) {
+        return move.kind==CP_MOVE && move.tile==reach.tile;
+      });
+      if (candidate==preferred.end()) continue;
+      // All fixtures have no other friendly unit, so the attacker's real
+      // position must contribute zero supporting friends, in every scenario.
+      auto forecast=f.adapter->forecast(*f.root,0,reach.tile,1,enemy.tile,0,true,false);
+      CHECK(forecast.code==0);
+      int delta=-board.plots[reach.tile].enemies;
+      int attack_score=forecast.damage+delta*forecast.damage/10;
+      CHECK(attack_score<enemy.hp-1); // No kill/near-kill bonus in this fixture.
+      int attacks=std::min(1,(reach.remaining_moves+59)/60);
+      int potential=attacks>0 ? attacks*attack_score/2 : attack_score/4;
+      auto base=context.tactics->move_score(context.position,board,SlotIdx{0},reach.tile,
+          reach.remaining_moves,MoveEvaluation::Intermediate);
+      CHECK(base.acceptable);
+      CHECK(candidate->score==base.move.score+potential*10);
+      CHECK(candidate->near_kill==-1);
+      checked=true;
+    }
+    CHECK(checked);
+    CHECK(board.view.units[0].tile==(scenario==0 ? 0 : 16));
+    CHECK(board.view.units[0].hp==100 && board.view.units[1].hp==100);
+  }
+}
+
+void cp_average_personality() {
+  // CP's midpoint offense=5 gives a strict HP<40 pruning threshold.
+  for (int hp : {39,40,49,50}) {
+    Fixture f;
+    f.w=16; f.h=1; f.tiles.resize(16);
+    f.add(0,0,0,hp); f.add(0,1,4); f.start();
+    TacticalFixture context(f,4);
+    if (hp<40) {
+      check_root_exclusion(f,context,SlotIdx{0});
+    } else {
+      CHECK(context.position.slot_states[SlotIdx{0}]==SlotState::Pending);
+      CHECK(context.tactics->active_order==std::vector<SlotIdx>{SlotIdx{0}});
+      auto board=context.tactics->board(context.position);
+      auto choices=context.tactics->preferred(context.position,board,SlotIdx{0},1);
+      CHECK(!choices.empty() && choices.front().kind==CP_MOVE);
+    }
+    CHECK(context.position.branch->state().units[0].hp==hp);
+  }
+}
+
+void cp_context_invariants() {
+  Fixture f; f.add(0,0,16); f.add(0,1,18); f.start();
+  SelectedUnits selected(f.selected.data(),int32_t(f.selected.size()),int32_t(f.units.size()));
+  CHECK(selected.find_slot(UnitId{0})==std::optional<SlotIdx>{SlotIdx{0}});
+  CHECK(!selected.find_slot(UnitId{1}));
+  TacticalFixture context(f,18);
+  auto states=context.position.slot_states;
+  auto order=context.tactics->active_order;
+  auto distances=context.tactics->initial_distance;
+  auto safe=context.tactics->safe;
+  bool rejected=false;
+  try { context.tactics->initialize(context.position); }
+  catch (const std::logic_error&) { rejected=true; }
+  CHECK(rejected);
+  CHECK(context.position.slot_states==states && context.tactics->active_order==order);
+  CHECK(context.tactics->initial_distance==distances && context.tactics->safe==safe);
+  CHECK(context.tactics->danger(0,16,0,{1,1})==context.tactics->danger(0,16,0,{1}));
+  CaiSearchRequest request{&f.state,0,f.turn,18,f.selected.data(),int32_t(f.selected.size()),{0,-1,nullptr,0}};
+  CpTactics uninitialized(*f.adapter,*f.root,f.config,request);
+  auto board=context.tactics->board(context.position);
+  rejected=false;
+  try { uninitialized.move_score(context.position,board,SlotIdx{0},16,120,MoveEvaluation::Intermediate); }
+  catch (const std::logic_error&) { rejected=true; }
+  CHECK(rejected);
+}
+
 int main(int argc,char** argv) {
   try {
     std::string name=argc>1?argv[1]:"";
@@ -887,6 +1122,12 @@ int main(int argc,char** argv) {
     else if(name=="contract_early_finish") contract_early_finish();
     else if(name=="contract_combo_invariants") contract_combo_invariants();
     else if(name=="contract_search_budgets") contract_search_budgets();
+    else if(name=="contract_move_destinations") contract_move_destinations();
+    else if(name=="contract_swap_equivalence") contract_swap_equivalence();
+    else if(name=="contract_combo_mode") contract_combo_mode();
+    else if(name=="cp_hypothetical_flanking") cp_hypothetical_flanking();
+    else if(name=="cp_context_invariants") cp_context_invariants();
+    else if(name=="cp_average_personality") cp_average_personality();
     else throw std::runtime_error("unknown test group");
     std::cout<<name<<" passed\n"; return 0;
   } catch(const std::exception& e) { std::cerr<<e.what()<<"\n"; return 1; }
