@@ -130,10 +130,13 @@ class ReplayStore:
         try:
             value = read_json(self.root / "summary.json")
             summary = value["summary"]
+            replacement = value.get("greedy_replacement")
             return {"complete": value.get("schema") == 1,
                     "acceptance": bool(value.get("acceptance")),
                     "checked": summary["matches"], "failures": len(value.get("failures", [])),
-                    "greedy": summary.get("outcomes", {}).get("opponent/greedy", {}).get("outcomes", {})}
+                    "greedy": (replacement["outcomes"] if replacement else
+                               summary.get("outcomes", {}).get("opponent/greedy", {}).get("outcomes", {})),
+                    "replacement": replacement, "mixed_versions": bool(value.get("mixed_versions"))}
         except (OSError, KeyError, ValueError, TypeError):
             return None  # A live summary may be between writes.
 

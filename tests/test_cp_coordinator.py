@@ -94,9 +94,13 @@ class CoordinatorTests(unittest.TestCase):
                 events = a.drain_diagnostics()
                 searches = [e for e in events if e["event"] == "search"]
                 approaches = [e for e in events if e["event"] == "support" and e["task_kind"] == "approach"]
-                # The native CP destination filter now decides applicability;
-                # the coordinator no longer excludes starts at distance > 6.
-                self.assertTrue(searches)
+                # These distant armies cannot reach a fighting position yet.
+                # Recruitment must defer them to APPROACH, not feed them into
+                # a local attack that can hand out premature FINISH records.
+                self.assertFalse(searches)
+                recruitment = [e for e in events if e["event"] == "attack_candidates"]
+                self.assertTrue(recruitment)
+                self.assertTrue(all(not e["selected_units"] for e in recruitment))
                 self.assertTrue(all(len(e["selected_units"]) <= 13 for e in searches))
                 self.assertTrue(all(e["assignments"] == 0 for e in searches))
                 self.assertGreaterEqual(len(approaches), 2)
@@ -598,6 +602,105 @@ class RecoveryTests(unittest.TestCase):
             self.assertTrue(result.diagnostics.budget_exhausted)
             self.assertEqual(result, planner.search(request))
             self.assertEqual(before, battle.snapshot())
+
+
+@unittest.skipUnless(LIBRARY_PATH.exists(), "Build combat and AI libraries first")
+class AttackRecruitmentTests(unittest.TestCase):
+    def query(self, battle, target, selected, side=0):
+        with Planner(SMALL) as planner:
+            before = battle.snapshot()
+            request = SearchRequest(PlanningState.from_battle(battle, side), side,
+                battle.observe(side)["turn"], target, tuple(selected),
+                ContactMemory().updated(battle.observe(side)))
+            result = planner.attack_candidates(request)
+            self.assertEqual(before, battle.snapshot())
+            return result
+
+    def test_melee_adjacency_and_ranged_next_turn_positions(self):
+        for kind, target, expected in (("warrior", 3, (0,)), ("warrior", 4, ()),
+                                        ("archer", 4, (0,)), ("archer", 5, ())):
+            with self.subTest(kind=kind, target=target), Battle(scenario([
+                    unit(kind, 0, 0), unit("warrior", 1, target)], width=10, height=1)) as battle:
+                self.assertEqual(self.query(battle, target, (0,)), expected)
+
+    def test_nearby_blockers_remain_in_group_even_without_path(self):
+        value = scenario([unit("warrior", 0, 0), unit("warrior", 1, 2)], width=10, height=1)
+        value["map"]["tiles"][1]["elevation"] = "mountain"
+        with Battle(value) as battle:
+            self.assertEqual(self.query(battle, 2, (0,)), (0,))
+
+    def test_friendly_stacking_is_ignored_but_enemy_and_sight_are_not(self):
+        with Battle(scenario([unit("warrior", 0, 0), unit("warrior", 0, 1),
+                              unit("warrior", 0, 2), unit("warrior", 1, 3)], width=10, height=1)) as battle:
+            self.assertEqual(self.query(battle, 3, (0,)), (0,))
+        with Battle(scenario([unit("warrior", 0, 0), unit("warrior", 1, 1),
+                              unit("warrior", 1, 3)], width=10, height=1)) as battle:
+            self.assertEqual(self.query(battle, 3, (0,)), ())
+        value = scenario([unit("archer", 0, 0), unit("warrior", 1, 3)], width=10, height=1)
+        value["map"]["tiles"][2]["elevation"] = "mountain"
+        with Battle(value) as battle:
+            self.assertEqual(self.query(battle, 3, (0,)), ())
+
+    def test_filter_is_applied_before_thirteen_unit_limit(self):
+        with Battle(scenario([unit("warrior", 0, i) for i in range(25)] +
+                             [unit("horseman", 0, 254), unit("warrior", 1, 255)],
+                             width=16, height=16)) as battle:
+            self.assertEqual(self.query(battle, 255, tuple(range(26))), (25,))
+
+    def test_both_sides_parity_and_wrap_use_native_geometry(self):
+        for parity in (0, 1):
+            for side in (0, 1):
+                value = scenario([unit("warrior", side, 7), unit("warrior", 1-side, 1)],
+                                 width=8, height=5)
+                value["map"].update(row_parity=parity, wrap_x=True)
+                with self.subTest(parity=parity, side=side), Battle(value) as battle:
+                    if side:
+                        self.assertTrue(battle.step(Action("end_turn")).ok)
+                    self.assertEqual(self.query(battle, 1, (0,), side), (0,))
+
+    def test_far_infantry_is_deferred_and_moves_toward_the_battle(self):
+        value = scenario([unit("warrior", 0, 2), unit("archer", 0, 162),
+                          unit("chariot_archer", 0, 83), unit("spearman", 0, 18),
+                          unit("horseman", 0, 6, hp=73), unit("chariot_archer", 1, 8)],
+                         width=16, height=16, fog=True)
+        with Battle(value) as battle:
+            self.assertEqual(self.query(battle, 8, tuple(range(5))), (4,))
+            agent = CPAgent(SMALL)
+            self.addCleanup(agent.close)
+            agent.reset({"map": battle._map, "side": 0})
+            actions = []
+            for _ in range(40):
+                observation = battle.observe(0)
+                service = CallPlanningServices(agent.planner, PlanningState.from_battle(battle, 0),
+                                                0, observation["turn"])
+                try:
+                    action = agent.act_with_planning(observation, tuple(battle.available_actions()), service)
+                finally:
+                    service.expire()
+                self.assertIn(action, battle.available_actions())
+                actions.append(action)
+                result = battle.step(action)
+                self.assertTrue(result.ok)
+                agent.on_action_result(action, result, battle.observe(0))
+                if action.kind == "end_turn": break
+            else:
+                self.fail("Recruitment did not lead to a bounded turn")
+            first = next(e for e in agent.drain_diagnostics() if e["event"] == "search")
+            self.assertEqual(first["selected_units"], [4])
+            for uid in (0, 3):
+                self.assertTrue(any(a.kind == "move" and a.unit == uid for a in actions), actions)
+
+    def test_query_expires_with_service_and_preserves_search_diagnostics(self):
+        with Battle(scenario([unit("warrior", 0, 0), unit("warrior", 1, 3)],
+                             width=10, height=1)) as battle, Planner(SMALL) as planner:
+            state = PlanningState.from_battle(battle, 0)
+            service = CallPlanningServices(planner, state, 0, 0)
+            self.assertEqual(service.attack_candidates(3, (0,), contacts=ContactMemory()), (0,))
+            service.expire()
+            with self.assertRaisesRegex(RuntimeError, "expired"):
+                service.attack_candidates(3, (0,), contacts=ContactMemory())
+            with self.assertRaises(ValueError):
+                planner.attack_candidates(SearchRequest(state, 0, 0, 3, (0, 0)))
 
 
 @unittest.skipUnless(LIBRARY_PATH.exists(), "Build combat and AI libraries first")

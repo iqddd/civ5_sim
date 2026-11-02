@@ -26,9 +26,9 @@ bool valid_config(const CaiConfig& c) {
          c.risk_budget_base >= 0 && c.risk_budget_base <= 13 &&
          c.risk_budget_per_kill >= 0 && c.risk_budget_per_kill <= 13;
 }
-bool valid_request(const CaiSearchRequest& r) {
+bool valid_request(const CaiSearchRequest& r, int32_t max_selected = CAI_MAX_SELECTED) {
   if (!r.state || r.side < 0 || r.side > 1 || r.expected_turn < 0 ||
-      r.selected_count < 0 || r.selected_count > CAI_MAX_SELECTED ||
+      r.selected_count < 0 || r.selected_count > max_selected ||
       (r.selected_count && !r.selected_units) ||
       r.aggression_override < 0 || r.aggression_override > CAI_BRAVEHEART + 1) return false;
   const auto& s = *r.state;
@@ -93,7 +93,7 @@ bool valid_request(const CaiSearchRequest& r) {
 }  // namespace
 
 int32_t cai_abi(void) { return CAI_ABI; }
-const char* cai_version(void) { return "civ5sim.combat_ai/0.9.0 CP-07"; }
+const char* cai_version(void) { return "civ5sim.combat_ai/0.9.1 CP-07"; }
 CaiConfig cai_default_config(void) { return {6000, 2560, 5, 5, CAI_MEDIUM, 1, 0, 1}; }
 CaiContext* cai_new(const CaiConfig* config) {
   if (!config || !valid_config(*config)) return nullptr;
@@ -147,4 +147,20 @@ int32_t cai_search_diagnostics(const CaiContext* context, CaiSearchDiagnostics* 
   if (!context || !diagnostics) return CAI_BAD_ARGUMENT;
   *diagnostics = context->workspace.diagnostics;
   return CAI_OK;
+}
+int32_t cai_attack_candidates(const CaiContext* context, const CaiSearchRequest* request,
+                              int32_t* units, int32_t capacity, int32_t* count) {
+  if (count) *count = 0;
+  if (!context || !request || !count || capacity < 0 || (capacity && !units))
+    return CAI_BAD_ARGUMENT;
+  try {
+    if (!valid_request(*request,512) || request->expected_turn != request->state->turn ||
+        request->side != request->state->active_side) return CAI_BAD_ARGUMENT;
+    auto selected = combat_ai::attack_candidates(*request);
+    *count = int32_t(selected.size());
+    if (capacity < *count) return CAI_BUFFER_TOO_SMALL;
+    std::copy(selected.begin(),selected.end(),units);
+    return CAI_OK;
+  } catch (const std::invalid_argument&) { return CAI_BAD_ARGUMENT; }
+  catch (...) { return CAI_INTERNAL_ERROR; }
 }

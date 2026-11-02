@@ -106,6 +106,13 @@ CAI_API int32_t cai_support(CaiContext*, const CaiSearchRequest*, int32_t mode,
                            CaiSearchResult* result);
 /* Most recent call, overwritten even after an invalid request. */
 CAI_API int32_t cai_search_diagnostics(const CaiContext*, CaiSearchDiagnostics*);
+/* CP FindUnitsWithinStrikingDistance, before the 13-unit search limit.
+   Up to 512 distinct own living candidate IDs. Returns an ordered subset.
+   Invalid/stale requests return BAD_ARGUMENT; insufficient output capacity
+   returns BUFFER_TOO_SMALL with the required count and no partial output.
+   Does not mutate the snapshot, workspace, or last search diagnostics. */
+CAI_API int32_t cai_attack_candidates(const CaiContext*, const CaiSearchRequest*,
+                                      int32_t* units, int32_t capacity, int32_t* count);
 
 #ifdef __cplusplus
 }

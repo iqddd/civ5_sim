@@ -161,7 +161,7 @@ class CPAgent:
         self._reservations.append(target)
         return target
 
-    def _next_task(self, available, enemies, observation):
+    def _next_task(self, available, enemies, observation, eligibility=None):
         while self._phase < 4:
             phase = self._phase
             if phase == 1:
@@ -182,11 +182,13 @@ class CPAgent:
                 pairs = [(self._distance(u["tile"], e["tile"]), e["id"], u["id"], e)
                          for e in enemies for u in available
                          if (u["id"], e["id"]) not in self._combat_attempts
+                         and (eligibility is None or u["id"] in eligibility.get(e["id"], ()))
                          and self._target_blocked.get((u["id"], e["id"]), -1) < now]
                 if pairs and self._searches < self._search_limit:
                     _, eid, _, enemy = min(pairs, key=lambda p: (
                         p[0], self._combat_targets.get(p[2], (None,))[0] != p[1], *p[1:3]))
                     candidates = [u for u in available if (u["id"], eid) not in self._combat_attempts
+                                  and (eligibility is None or u["id"] in eligibility.get(eid, ()))
                                   and self._target_blocked.get((u["id"], eid), -1) < now]
                     selected = self._select(candidates, enemy["tile"])
                     for u in candidates:
@@ -345,6 +347,7 @@ class CPAgent:
             # This is a structural ceiling, not a reason to terminate a unit.
             self._recovery_limit = n * (5*n + 1)
         searches_this_call = 0
+        eligibility = None
         while True:
             if self._queue:
                 a = self._queue.popleft()
@@ -386,11 +389,21 @@ class CPAgent:
                     and self._recover(available, observation, planning)):
                 continue
             if self._task is None:
+                if eligibility is None:
+                    eligibility = {}
+                    if self._searches < self._search_limit:
+                        roster = tuple(u["id"] for u in available)
+                        for enemy in enemies:
+                            recruited = planning.attack_candidates(enemy["tile"], roster, contacts=self.memory)
+                            eligibility[enemy["id"]] = frozenset(recruited)
+                            self._event("attack_candidates", target=enemy["tile"],
+                                        available_units=list(roster), selected_units=list(recruited))
                 if (self._phase >= 4 and searches_this_call < 2 and self._searches < self._search_limit
                         and any((unit["id"], enemy["id"]) not in self._combat_attempts
+                                and unit["id"] in eligibility.get(enemy["id"], ())
                                 for unit in available for enemy in enemies)):
                     self._phase = 1
-                self._task = self._next_task(available, enemies, observation)
+                self._task = self._next_task(available, enemies, observation, eligibility)
                 if self._task is None:
                     if self._recover(available, observation, planning):
                         continue

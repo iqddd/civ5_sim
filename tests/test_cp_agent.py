@@ -58,6 +58,10 @@ class ScriptedPlanning:
     def support(self, target, selected, *, contacts, mode):
         return plan()
 
+    def attack_candidates(self, target, selected, *, contacts):
+        # Dispatch tests script recruitment separately from physical rules.
+        return tuple(selected)
+
 
 def plan(*assignments, reason=SearchReason.COMPLETED):
     return SearchResult(assignments, reason, SearchStats())

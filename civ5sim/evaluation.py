@@ -40,10 +40,10 @@ def reusable_check(directory, signature, case_id):
         return False
 
 
-def write_report(path, summary, full, failures, suite):
+def write_report(path, summary, full, failures, suite, *, repeats=2):
     search = suite["search"]
     lines = ["# CP-07: качество и стоимость Combat AI v1", "",
-             f"Завершённых случаев: {summary['matches']}; каждый выполнен дважды с проверкой реплея.",
+             f"Завершённых случаев: {summary['matches']}; исполнений каждого: {repeats}, с проверкой реплея.",
              f"Полная приёмка: {'да' if full and not failures else 'нет'}. Технических сбоев: {len(failures)}.", "",
              (f"Профиль CP: {search['position_capacity']}/{search['max_completed']}/"
               f"{search['max_branches']}/{search['choices_per_unit']}, {search['aggression']}, "
@@ -61,7 +61,7 @@ def write_report(path, summary, full, failures, suite):
                          f"{value['remaining_units']['median']} | {value['remaining_hp']['median']} |")
     lines += ["", "В CP–CP каждый матч даёт две оценки сторон; это не два независимых матча.", "",
               "## Время и память", "",
-              "Время — миллисекунды; измерения первого повтора. Второй проверяет детерминизм.",
+              "Время — миллисекунды первого исполнения. Повтор, если запрошен, проверяет детерминизм.",
               "Решение включает подготовку, вызов агента и callback; поиск уже входит в вызов агента.",
               "Ход суммирует решения стороны; последний незавершённый ход также учитывается.", "",
               "| Измерение | N | Медиана | p95 | Максимум |", "|---|---:|---:|---:|---:|"]

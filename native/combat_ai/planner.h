@@ -73,4 +73,5 @@ struct Plan { std::vector<CaiAssignment> assignments; CaiSearchResult result; };
 Plan find_assignments(SearchWorkspace&, const CaiConfig&, const CaiSearchRequest&);
 Plan support_assignments(const CaiSearchRequest&, int32_t mode);
 Plan recovery_assignments(const CaiSearchRequest&, CaiSearchDiagnostics&);
+std::vector<int32_t> attack_candidates(const CaiSearchRequest&);
 }  // namespace combat_ai

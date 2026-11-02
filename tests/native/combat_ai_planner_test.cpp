@@ -1236,6 +1236,22 @@ void cp_context_invariants() {
   try { uninitialized.move_score(context.position,board,SlotIdx{0},16,120,MoveEvaluation::Intermediate); }
   catch (const std::logic_error&) { rejected=true; }
   CHECK(rejected);
+  std::unique_ptr<CaiContext,decltype(&cai_free)> api(cai_new(&f.config),cai_free);
+  CHECK(api);
+  CaiAssignment assignments[128]{}; CaiSearchResult result{};
+  CHECK(cai_search(api.get(),&request,assignments,128,&result)==CAI_OK);
+  CaiSearchDiagnostics before{},after{};
+  CHECK(cai_search_diagnostics(api.get(),&before)==CAI_OK);
+  int32_t output=999,count=-1;
+  CHECK(cai_attack_candidates(api.get(),&request,&output,0,&count)==CAI_BUFFER_TOO_SMALL);
+  CHECK(count==1 && output==999); // No partial output on insufficient capacity.
+  CHECK(cai_attack_candidates(api.get(),&request,&output,1,&count)==CAI_OK);
+  CHECK(count==1 && output==0);
+  CHECK(cai_search_diagnostics(api.get(),&after)==CAI_OK);
+  CHECK(std::memcmp(&before,&after,sizeof(before))==0);
+  request.expected_turn++;
+  CHECK(cai_attack_candidates(api.get(),&request,&output,1,&count)==CAI_BAD_ARGUMENT && count==0);
+  CHECK(cai_attack_candidates(nullptr,&request,&output,1,&count)==CAI_BAD_ARGUMENT && count==0);
 }
 
 int main(int argc,char** argv) {

@@ -154,6 +154,61 @@ Plan support_assignments(const CaiSearchRequest& r, int32_t mode) {
   return plan;
 }
 
+std::vector<int32_t> attack_candidates(const CaiSearchRequest& request) {
+  // Pinned CvTacticalAI.cpp:4529-4612 FindUnitsWithinStrikingDistance, called
+  // by ExecuteAttack (:4143) BEFORE ExecuteAttackWithUnits (:3251-3275).
+  // This is a recruitment query, not a tactical plan or an attack guarantee.
+  auto adapter = make_rules_adapter(*request.state,request.side);
+  ContactMemory memory{request.contacts.turn,request.contacts.side,{}};
+  for (int i=0;i<request.contacts.known_enemy_count;++i)
+    memory.known_enemies.push_back({request.contacts.known_enemies[i].id,
+                                   request.contacts.known_enemies[i].last_seen_own_turn});
+  auto root = adapter->root(*request.state,memory);
+  TacticalView view(*root,request.side);
+  std::vector<int32_t> selected;
+  int target_unit = view.occupied[request.target];
+  if (target_unit < 0 || view.units[target_unit].side == request.side) return selected;
+  constexpr int move_denominator = 60;
+  constexpr int nearby_maneuver_radius = 2;
+  constexpr int ranged_attack_range = 2; // Current five-type profile.
+  for (int i=0;i<request.selected_count;++i) {
+    int id = request.selected_units[i];
+    const auto& unit = view.units[id];
+    if (unit.hp <= 0 || unit.moves <= 0 || unit.waiting) continue;
+    int distance = adapter->distance(unit.tile,request.target);
+    // CP's cheap baseMoves*4 bound precedes pathfinding, not a fixed radius.
+    if (distance > (combat_rules::moves[unit.type]/move_denominator)*4) continue;
+    bool ranged = combat_rules::ranged[unit.type] > 0;
+    bool can_reach = ranged && adapter->can_execute(*root,{combat_rules::RANGED,id,request.target});
+    if (!can_reach) {
+      for (auto tile : adapter->move_intents(*root,id)) {
+        int occupant = view.occupied[tile.tile];
+        // Reach intents also contain enemy endpoints for melee candidates.
+        // These are not standing/firing plots for this recruitment query.
+        if (occupant >= 0 && view.units[occupant].side != request.side) continue;
+        int target_distance = adapter->distance(tile.tile,request.target);
+        if ((!ranged && target_distance == 1) ||
+            (ranged && target_distance >= 1 && target_distance <= ranged_attack_range &&
+             adapter->can_target(tile.tile,request.target))) {
+          // CP explicitly admits reaching a firing/adjacent plot with no
+          // movement left; attacking may only be possible next turn.
+          can_reach = true;
+          break;
+        }
+      }
+    }
+    if (!can_reach && distance > nearby_maneuver_radius) continue;
+    // CP additionally checks expected ranged damage (target HP/20 capped at3).
+    // No city/air/domain branches exist in the supported simulator profile.
+    if (ranged) {
+      auto forecast = adapter->forecast(*root,id,unit.tile,target_unit,request.target);
+      if (forecast.code || forecast.damage < std::min(view.units[target_unit].hp/20,3)) continue;
+    }
+    selected.push_back(id);
+  }
+  return selected;
+}
+
 // Agreed port policy for a unit returned by bounded normal search. This is
 // deliberately separate from CP's ordinary risk/formation acceptance rules.
 Plan recovery_assignments(const CaiSearchRequest& request, CaiSearchDiagnostics& diagnostics) {

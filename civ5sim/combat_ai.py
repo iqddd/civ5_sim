@@ -266,6 +266,9 @@ class PlanningServices(Protocol):
         mode: SupportMode,
     ) -> SearchResult: ...
 
+    def attack_candidates(self, target: int, selected_units: tuple[int, ...], *,
+                          contacts: ContactMemory) -> tuple[int, ...]: ...
+
 
 class PlanningAgent(Protocol):
     """Explicit opt-in dispatch, alongside the ordinary Agent protocol.
@@ -313,6 +316,15 @@ class CallPlanningServices:
             return self._planner.support(SearchRequest(
                 self._state, self._side, self._turn, target, tuple(selected_units), contacts
             ), mode)
+
+    def attack_candidates(self, target, selected_units, *, contacts):
+        if self._state is None:
+            raise RuntimeError("Planning service has expired")
+        from .telemetry import measure
+
+        with measure(self._metrics, "candidates", side=self._side, turn=self._turn):
+            return self._planner.attack_candidates(SearchRequest(
+                self._state, self._side, self._turn, target, tuple(selected_units), contacts))
 
     def expire(self):
         self._state = None
@@ -422,6 +434,10 @@ def _library():
     if hasattr(lib, "cai_search_diagnostics"):
         lib.cai_search_diagnostics.argtypes = [C.c_void_p, C.POINTER(_Diagnostics)]
         lib.cai_search_diagnostics.restype = C.c_int32
+    if hasattr(lib, "cai_attack_candidates"):
+        lib.cai_attack_candidates.argtypes = [C.c_void_p, C.POINTER(_Request), C.POINTER(C.c_int32),
+                                            C.c_int32, C.POINTER(C.c_int32)]
+        lib.cai_attack_candidates.restype = C.c_int32
     return lib
 
 
@@ -488,7 +504,10 @@ class Planner:
             raise TypeError("mode must be a SupportMode value")
         return self._plan(request, mode)
 
-    def _plan(self, request: SearchRequest, mode=None) -> SearchResult:
+    def attack_candidates(self, request: SearchRequest) -> tuple[int, ...]:
+        return self._plan(request, candidates_only=True)
+
+    def _plan(self, request: SearchRequest, mode=None, *, candidates_only=False):
         if not self._handle:
             raise RuntimeError("Planner is closed")
         s = request.state
@@ -500,9 +519,11 @@ class Planner:
         if len(s.tiles) > 4096 or len(s.units) > 512 or len(s.visibility) > 4096:
             raise ValueError("Planning state exceeds kernel limits")
         if (
-            len(request.selected_units) > 13
+            len(request.selected_units) > (512 if candidates_only else 13)
             or len(request.contacts.known_enemies) > 512
         ):
+            if candidates_only:
+                raise ValueError("Invalid attack candidate query")
             return SearchResult((), SearchReason.INVALID_REQUEST, SearchStats())
         tiles = (_Tile * len(s.tiles))(*(_pack(_Tile, t) for t in s.tiles))
         units = (_Unit * len(s.units))(*(_pack(_Unit, u) for u in s.units))
@@ -538,6 +559,17 @@ class Planner:
             _Contacts(_i32(request.contacts.turn), _i32(request.contacts.side), known, len(known)),
             0 if request.aggression is None else int(request.aggression) + 1,
         )
+        if candidates_only:
+            if not hasattr(self._lib, "cai_attack_candidates"):
+                raise RuntimeError("Rebuild combat AI for attack candidate queries")
+            output = (C.c_int32 * 512)()
+            count = C.c_int32()
+            status = self._lib.cai_attack_candidates(self._handle, C.byref(packed), output, 512,
+                                                     C.byref(count))
+            if status or not 0 <= count.value <= len(request.selected_units):
+                raise ValueError(f"Invalid attack candidate query (native status {status})")
+            return tuple(output[:count.value])
+
         def invoke(buffer, capacity, result):
             args = (self._handle, C.byref(packed))
             if mode is None:

@@ -206,6 +206,9 @@ def main():
     parser.add_argument("--config", type=Path, default=ROOT / "scenarios/combat-ai-v1.json")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--case", help="Run one exact case ID")
+    parser.add_argument("--opponent", choices=("greedy", "random"), help="Run only this opponent subset")
+    parser.add_argument("--repeats", type=int, choices=(1, 2), default=2,
+                        help="One measurement, or two identical runs to check reproducibility")
     parser.add_argument("--quick", action="store_true", help="Two small cases; not acceptance")
     parser.add_argument("--resume", action="store_true", help="Reuse checks with identical run signature")
     parser.add_argument("--worker", help=argparse.SUPPRESS)
@@ -235,14 +238,18 @@ def main():
             parser.error("Unknown case ID")
     elif args.quick:
         selected = [selected[0], selected[2]]
-    print(f"Checking tactical regressions; {len(selected)} cases, each repeated", flush=True)
+    if args.opponent:
+        selected = [case for case in selected if args.opponent in case["agents"]]
+    if not selected:
+        parser.error("No matching cases")
+    print(f"Checking tactical regressions; {len(selected)} cases, {args.repeats} run(s) each", flush=True)
     tactical_checks(args.out)
     records = []
     failures = []
     for index, case in enumerate(selected):
         print(f"[{index+1}/{len(selected)}] {case['id']}", flush=True)
         checks = []
-        for repeat in (0, 1):
+        for repeat in range(args.repeats):
             directory = args.out / "matches" / case["id"] / str(repeat)
             checked_path = directory / "checked.json"
             reusable = args.resume and reusable_check(directory, signature, case["id"])
@@ -264,9 +271,9 @@ def main():
                     print(f"  FAILED: {str(exc)[-500:]}", flush=True)
                     break
             checks.append(json.loads(checked_path.read_text(encoding="utf-8")))
-        if len(checks) != 2:
+        if len(checks) != args.repeats:
             continue
-        if checks[0] != checks[1]:
+        if any(check != checks[0] for check in checks[1:]):
             failures.append({"case": case["id"], "error": "Repeat differs"})
             continue
         directory = args.out / "matches" / case["id"] / "0"
@@ -279,16 +286,19 @@ def main():
         summary = aggregate(records)
         write_json(args.out / "summary.json", {"acceptance": False, "summary": summary,
                    "failures": failures, "records": records})
-    full = not args.quick and args.case is None and len(records) == len(cases(suite))
+    full = (not args.quick and args.case is None and not args.opponent and args.repeats == 2
+            and len(records) == len(cases(suite)))
     current = passport(args.config, load_suite(args.config))
     current_signature = digest({k: current[k] for k in ("source_set_sha256", "resolved_suite_sha256",
                                                         "binary_sha256", "python", "platform")})
     if current_signature != signature:
         failures.append({"error": "Sources, suite, binaries or environment changed during the run"})
     write_json(args.out / "summary.json", {"schema": 1, "acceptance": full and not failures,
+               "scope_complete": len(records) == len(selected) and not failures,
+               "opponent": args.opponent, "repeats": args.repeats,
                "run_signature": signature, "summary": aggregate(records),
                "failures": failures, "records": records})
-    write_report(args.out / "report.md", aggregate(records), full, failures, suite)
+    write_report(args.out / "report.md", aggregate(records), full, failures, suite, repeats=args.repeats)
     print(json.dumps({"checked": len(records), "failures": len(failures),
                       "acceptance": full and not failures}), flush=True)
     if failures:
