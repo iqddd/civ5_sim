@@ -66,6 +66,12 @@ struct Fixture {
     std::vector<int> vis(s.tile_count);
     sim_visibility(real,observer,vis.data());
     CHECK(std::equal(vis.begin(),vis.end(),s.visibility));
+    if (s.visibility_history_count) {
+      for (int side=0;side<2;++side) {
+        sim_visibility_history(real,side,vis.data());
+        CHECK(std::equal(vis.begin(),vis.end(),s.visibility_history+side*s.tile_count));
+      }
+    }
     Info info{}; sim_info(real,&info);
     CHECK(info.side == s.active_side && info.turn == s.turn && info.fog == s.fog);
     int count = sim_actions(real,nullptr,0);
@@ -663,9 +669,66 @@ void danger_bounds() {
   CHECK(own_turn(std::numeric_limits<int32_t>::max(),0,0)==1073741824);
 }
 
+void extra_defender_damage() {
+  // Independent physical-state oracle: applying the hypothetical injury to
+  // the real defender must produce the same strengths as the forecast input.
+  // Include existing wounds on both participants, terrain, a river and fortify.
+  for (int a=0;a<5;++a) for (int d=0;d<5;++d)
+    for (int attacker_hp:{51,100}) for (int defender_hp:{21,61,100}) {
+      Fixture original,wounded;
+      for (auto* f:{&original,&wounded}) {
+        f->tiles[27].elevation=1;
+        f->tiles[26].rivers=1<<1;
+        f->tiles[27].rivers=1<<4;
+        f->units={unit(a,0,26,attacker_hp),unit(d,1,27,defender_hp)};
+        if (d!=2 && d!=4) f->units[1].fortified=1;
+      }
+      wounded.units[1].hp-=20;
+      original.start({},1);wounded.start();
+      Info before{};sim_info(original.real,&before);
+      auto sibling=original.branch->clone();
+      auto base=original.adapter->forecast(*original.branch,0,26,1,27,0);
+      auto extra=original.adapter->forecast(*original.branch,0,26,1,27,20);
+      auto actual=wounded.adapter->preview(*wounded.branch,{ranged[a]?RANGED:MELEE,0,27});
+      auto independent=wounded.adapter->forecast(*wounded.branch,0,26,1,27,0);
+      CHECK(extra.code==0 && actual.code==0);
+      CHECK(extra.attacker_strength==base.attacker_strength);
+      CHECK(extra.defender_strength<base.defender_strength);
+      CHECK(extra.attacker_strength==actual.attacker_strength);
+      CHECK(extra.defender_strength==actual.defender_strength);
+      CHECK(extra.damage==independent.damage && extra.retaliation==independent.retaliation);
+      CHECK(extra.damage>=base.damage && extra.retaliation<=base.retaliation);
+      CHECK(original.branch->state().units[0].hp==attacker_hp);
+      CHECK(original.branch->state().units[1].hp==defender_hp);
+      CHECK(sibling->state().units[1].hp==defender_hp);
+      original.equal();
+      Info after{};sim_info(original.real,&after);CHECK(before.rng==after.rng);
+    }
+}
+
+void delayed_visibility() {
+  Fixture f; f.fog=1; f.units={unit(4,0,26),unit(1,1,28)}; f.start();
+  CHECK(f.branch->state().visibility[28]);
+  f.step({MOVE,0,24});
+  CHECK(f.branch->state().units[0].tile==24);
+  CHECK(f.branch->state().visibility[28]);
+  auto reroot=f.adapter->root(f.branch->state(),f.branch->contacts());
+  CHECK(reroot->state().visibility[28]);
+  auto sibling=reroot->clone();
+  auto t=f.adapter->apply(*reroot,{MOVE,0,26});
+  CHECK(t.accepted && !t.contact_interrupted);
+  CHECK(reroot->state().units[0].tile==26);
+  CHECK(sibling->state().units[0].tile==24);
+  f.step({END_TURN,-1,-1});
+  CHECK(!f.branch->state().visibility[28]);
+  CHECK(sibling->state().visibility[28]);
+}
+
 int main(int argc,char** argv) {
   const std::map<std::string,std::function<void()>> cases={
     {"movement",movement},{"terrain_and_zoc",terrain_and_zoc},{"swaps",swaps},
+    {"delayed_visibility",delayed_visibility},
+    {"extra_defender_damage",extra_defender_damage},
     {"combat",combat},{"turn_and_healing",turn_and_healing},{"contact",contact},
     {"visibility",visibility},{"ownership",ownership},{"bounds_and_invalid",bounds_and_invalid},
     {"contact_memory_roundtrip",contact_memory_roundtrip},

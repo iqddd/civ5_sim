@@ -127,6 +127,9 @@ void validate_header(const CaiBattleState& state) {
               state.unit_count <= 512 && (!state.unit_count || state.units) && state.visibility &&
               state.visibility_count == state.tile_count,
           "invalid battle snapshot");
+  require(state.visibility_history_count == 0 ||
+              (state.visibility_history && state.visibility_history_count == 2 * state.tile_count),
+          "invalid visibility history");
   for (int tile_index = 0; tile_index < state.tile_count; ++tile_index) {
     const auto& map_tile = state.tiles[tile_index];
     require(map_tile.terrain >= 0 && map_tile.terrain <= 6 && map_tile.elevation >= 0 &&
@@ -144,6 +147,7 @@ class OwnedBranch final : public Branch {
   std::shared_ptr<const std::vector<CaiTile>> tiles;
   mutable std::vector<CaiUnit> units;
   mutable std::vector<int32_t> visibility;
+  mutable std::vector<int32_t> visibility_history;
   mutable CaiBattleState snapshot{};
   mutable std::map<std::pair<int32_t, int32_t>, int32_t> danger_cache;
   OwnedBranch(std::shared_ptr<const Geometry> geometry,
@@ -172,6 +176,7 @@ class OwnedBranch final : public Branch {
     copy->tiles = tiles;
     copy->units.clear();
     copy->visibility.clear();
+    copy->visibility_history.clear();
     copy->snapshot = {};
     copy->danger_cache.clear();
     return storage;
@@ -183,13 +188,16 @@ class OwnedBranch final : public Branch {
     visibility.resize(tiles->size());
     for (int index = 0; index < int(tiles->size()); ++index)
       visibility[index] = rules.known(observer, index) ? 1 : 0;
+    visibility_history.clear();
+    for (const auto& row : rules.visible_this_turn)
+      visibility_history.insert(visibility_history.end(), row.begin(), row.end());
     snapshot = {rules.g->w,        rules.g->h,
                 rules.g->parity,   rules.g->wrap,
                 tiles->data(),     int32_t(tiles->size()),
                 units.data(),      int32_t(units.size()),
                 visibility.data(), int32_t(visibility.size()),
                 rules.side,        rules.turn,
-                rules.fog};
+                rules.fog, visibility_history.data(), int32_t(visibility_history.size())};
     return snapshot;
   }
   const ContactMemory& contacts() const override { return memory; }
@@ -289,6 +297,18 @@ class Adapter final : public RulesAdapter {
     position->rules.turn = state.turn;
     position->rules.fog = state.fog;
     position->rules.rebuild();
+    // A mid-turn root also owns sight left by departed units. The request's
+    // public mask is authoritative history, and must include current sources.
+    if (state.visibility_history_count) {
+      for (int side = 0; side < 2; ++side)
+        require(position->rules.restore_visibility(side,
+                    state.visibility_history + side * state.tile_count, state.tile_count),
+                "invalid visibility history");
+    } else if (state.fog) {
+      // Standalone fixtures may supply only the observer's public mask.
+      require(position->rules.restore_visibility(observer, state.visibility, state.visibility_count),
+              "visibility mismatch");
+    }
     for (int index = 0; index < state.tile_count; ++index)
       require(state.visibility[index] == int(position->rules.known(observer, index)),
               "visibility mismatch");
@@ -412,14 +432,14 @@ class Adapter final : public RulesAdapter {
         attacker_unit.side == defender_unit.side || extra_damage < 0 || !geo->passable(to))
       return {0, 0, combat_rules::BAD_TARGET, 0, 0};
     bool ranged_attack = is_ranged(attacker_unit);
-    // Preserve the pinned GetSimulatedDamageFromAttackOnUnit call convention:
-    // for melee, iExtraDefenderDamage goes to GetMaxAttackStrength's extra
-    // attacker damage argument; ranged applies it to the defender instead.
+    // Fix the original CP argument mix-up (CvTacticalAI.cpp:6228/6230):
+    // iExtraDefenderDamage belongs to the defender in both attack modes.
+    // Contract: docs/combat-ai-contract.md#extra-defender-damage.
     // Same five-type strength service/constants as State::strengths, with
     // explicit assumed coordinates and CP's preview damage convention. Keep
     // this query inside the AI: it does not change the kernel rules passport.
-    int attacker_hp = attacker_unit.hp - (ranged_attack ? 0 : extra_damage);
-    int defender_hp = defender_unit.hp - (ranged_attack ? extra_damage : 0);
+    int attacker_hp = attacker_unit.hp;
+    int defender_hp = defender_unit.hp - extra_damage;
     int attacker_modifier =
         -((kMaxHitPoints - attacker_hp) * WOUNDED_DAMAGE_MULTIPLIER / kPercent) +
         position.rules.class_bonus(attacker_unit, defender_unit);

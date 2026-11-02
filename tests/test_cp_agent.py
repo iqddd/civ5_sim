@@ -355,8 +355,9 @@ class MatchIntegrationTests(unittest.TestCase):
         config, agents = load_match_config(ROOT / "scenarios/cp-contact-match.json")
         match = run_match(config, agents)
         self.assertEqual(match.result["reason"], "army_destroyed")
-        last = match.replay["ai_events"][-1]
-        self.assertEqual(last["event"], "action_result")
+        # The callback may also cancel the remaining plan after the terminal
+        # command; its action_result must still describe that exact command.
+        last = [e for e in match.replay["ai_events"] if e['event'] == 'action_result'][-1]
         self.assertEqual(last["command"], match.result["commands"])
         self.assertEqual(last["action"], match.replay["steps"][-1]["action"])
         self.verify_replay(match)

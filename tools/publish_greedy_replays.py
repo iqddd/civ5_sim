@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from civ5sim.engine import digest
 from civ5sim.evaluation import write_json
 from tools.benchmark_combat_ai import aggregate
 from tools.summarize_coordinator_acceptance import engagement_audit, verify_waits
@@ -26,20 +27,55 @@ def compressed(path, value):
         json.dump(value, stream, ensure_ascii=False, separators=(",", ":"))
 
 
+def retry_replace(operation):
+    """Windows readers can briefly deny a rename; preserve the old file until success."""
+    deadline = time.monotonic() + 3
+    while True:
+        try:
+            return operation()
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.02)
+
+
 def atomic_json(path, value):
     temporary = path.with_suffix(path.suffix + ".tmp")
     write_json(temporary, value)
-    temporary.replace(path)
+    retry_replace(lambda: temporary.replace(path))
+
+
+def same_initial_position(archive, name, replacement):
+    """Rules/history encoding may change; placement, flags and RNG must not."""
+    with gzip.open(archive / "before-matches.json.gz", "rt", encoding="utf-8") as stream:
+        previous = json.load(stream)[name]["replay.json"]["initial"]
+    def physical(snapshot):
+        return {"map": snapshot["map"], "units": snapshot["units"],
+                "state": {k: v for k, v in snapshot["state"].items() if k != "visibility"}}
+    return digest(physical(previous)) == digest(physical(replacement))
+
+
+def register_refresh(batch, viewer, archive):
+    passport = read(batch / "passport.json")
+    cases = ["matches/" + row["case"] + "/0/replay.json"
+             for row in read(archive / "before-results.json")]
+    value = {"schema": 1, "port": passport["port"],
+             "run_signature": passport["run_signature"], "cases": cases}
+    path = viewer / "replay-refresh.json"
+    if not path.exists() or read(path) != value:
+        atomic_json(path, value)
 
 
 def publish_available(batch, viewer, archive, summary):
     """Publish only workers with a completed replay-verification record."""
     before = {row["case"]: row for row in read(archive / "before-results.json")}
     passport = read(batch / "passport.json")
+    register_refresh(batch, viewer, archive)
     manifest_path = archive / "published.json"
     published = read(manifest_path)["replays"] if manifest_path.exists() else {}
-    backup = (ROOT / "build/cp07-greedy-replaced").resolve()
-    scratch = (ROOT / "build/cp07-greedy-publish-temp").resolve()
+    run_name = archive.name + "-" + passport['run_signature'][:12]
+    backup = (ROOT / "build" / (run_name + "-replaced")).resolve()
+    scratch = (ROOT / "build" / (run_name + "-publish-temp")).resolve()
     backup.mkdir(exist_ok=True)
     scratch.mkdir(exist_ok=True)
     added = 0
@@ -62,7 +98,8 @@ def publish_available(batch, viewer, archive, summary):
             raise ValueError(f"Unverified replay: {name}")
         if checked["run_signature"] != passport["run_signature"]:
             raise ValueError(f"Wrong replay source version: {name}")
-        if result["initial_state_sha256"] != before[name]["result"]["initial_state_sha256"]:
+        if (result["initial_state_sha256"] != before[name]["result"]["initial_state_sha256"]
+                and not same_initial_position(archive, name, read(source / "0/replay.json")["initial"])):
             raise ValueError(f"Initial placement changed: {name}")
         if saved.exists() or temporary.exists():
             raise ValueError(f"Interrupted or duplicate publication: {name}")
@@ -70,8 +107,8 @@ def publish_available(batch, viewer, archive, summary):
         # complete. Only the two final directory renames change visible data.
         shutil.copytree(source, temporary)
         shutil.copyfile(batch / "passport.json", temporary / "passport.json")
-        target.rename(saved)
-        temporary.rename(target)
+        retry_replace(lambda source=target, destination=saved: source.rename(destination))
+        retry_replace(lambda source=temporary, destination=target: source.rename(destination))
         published[name] = hashlib.sha256((target / "0/replay.json").read_bytes()).hexdigest()
         atomic_json(manifest_path, {"replays": published, "viewer_root": str(viewer.relative_to(ROOT)),
                                    "old_folders": str(backup.relative_to(ROOT))})
@@ -113,7 +150,8 @@ def publish(batch, viewer, archive):
             raise ValueError(f"Scenario changed: {name}")
         path = batch / "matches" / name / "0"
         result = read(path / "result.json")
-        if result["initial_state_sha256"] != old["result"]["initial_state_sha256"]:
+        if (result["initial_state_sha256"] != old["result"]["initial_state_sha256"]
+                and not same_initial_position(archive, name, read(path / "replay.json")["initial"])):
             raise ValueError(f"Initial placement or RNG changed: {name}")
         if read(path / "checked.json")["run_signature"] != summary["run_signature"]:
             raise ValueError(f"Unchecked replacement: {name}")
@@ -147,10 +185,13 @@ def publish(batch, viewer, archive):
     write_json(archive / "changed-outcomes.json", changes)
     wins = sum(r["outcome"] == "win" for r in after)
     losses = sum(r["outcome"] == "loss" for r in after)
-    lines = ["# CP против greedy: отбор атакующей группы", "",
-             f"До правки: побед CP — 42, поражений — 22. После: побед — {wins}, поражений — {losses}, ничьих — {64-wins-losses}.",
+    old_wins = sum(r["outcome"] == "win" for r in before)
+    old_losses = sum(r["outcome"] == "loss" for r in before)
+    lines = ["# CP против greedy: сравнение версий", "",
+             f"До правки: побед CP — {old_wins}, поражений — {old_losses}. После: побед — {wins}, поражений — {losses}, ничьих — {64-wins-losses}.",
              "64 разных случая, каждый переигран один раз с прежней расстановкой и seed. Все новые реплеи исполнены и проверены.",
-             "Обычные эвристики поиска, бюджеты, туман, урон и greedy сохранены; изменён допуск участников атакующего запроса.",
+             read(archive / "change.json")["description"] if (archive / "change.json").exists() else
+             "Перенесена CORE_DELAYED_VISIBILITY: открытые клетки остаются видимыми до конца хода.",
              "Это сравнение одного и того же набора сценариев; оно не является доказательством оптимальности или общей силы AI.",
              "Остальные 84 матча панели относятся к предыдущей версии; полная приёмка новой версии CP-07 этим поднабором не закрывается.", "",
              "| Матч | Сторона CP | До | После | HP после | Юнитов после |", "|---|---|---|---|---:|---:|"]
@@ -172,6 +213,7 @@ if __name__ == "__main__":
     if args.watch:
         while True:
             try:
+                register_refresh(args.batch.resolve(), args.viewer.resolve(), args.archive.resolve())
                 value = read(args.batch / "summary.json")
             except (OSError, ValueError):
                 time.sleep(1)

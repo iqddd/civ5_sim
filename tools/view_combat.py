@@ -1,6 +1,8 @@
 """Serve a local, verified step-by-step viewer for saved combat replays."""
 
 import argparse
+import gzip
+import hashlib
 import json
 import sys
 import threading
@@ -36,6 +38,23 @@ def prepare_replay(path):
         raise ValueError("Ожидался реплей civ5sim.replay, schema 2")
     if not isinstance(replay.get("steps"), list):
         raise TypeError("В реплее отсутствует список команд")
+    current_rules = read_json(ROOT / "build/combat_rules.json")
+    if replay["initial"]["rules"] != current_rules:
+        # Historical matches were executed under another kernel. Keep frames
+        # verified by that kernel, bound to these exact replay/result bytes.
+        cache = path.with_name("viewer-cache.json.gz")
+        if cache.exists():
+            with gzip.open(cache, "rt", encoding="utf-8") as stream:
+                archived = json.load(stream)
+            result = path.with_name("result.json")
+            result_hash = hashlib.sha256(result.read_bytes()).hexdigest() if result.exists() else None
+            if (archived.get("kind") == "civ5sim.viewer_cache" and archived.get("schema") == 1
+                    and archived.get("replay_sha256") == hashlib.sha256(path.read_bytes()).hexdigest()
+                    and archived.get("result_sha256") == result_hash
+                    and archived["payload"].get("verified")
+                    and len(archived["payload"]["frames"]) == len(replay["steps"]) + 1):
+                return archived["payload"] | {"visibility_mode": "legacy"}
+        raise ValueError("Для прежних правил нужен архив кадров, проверенный прежним ядром")
     fields = ("tile", "hp", "moves", "attacked", "acted", "fortified", "waiting")
     frames = []
     turns = []
@@ -78,6 +97,7 @@ def prepare_replay(path):
         "result": None if result is None else {key: result.get(key) for key in (
             "agents", "outcome", "winner", "reason", "status", "seeds")},
         "verified": True,
+        "visibility_mode": "delayed",
         "experiment": replay.get("experiment"),
     }
 
@@ -89,6 +109,42 @@ class ReplayStore:
             raise ValueError(f"Каталог или реплей не найден: {self.root}")
         self.cache = OrderedDict()
         self.lock = threading.Lock()
+
+    def refresh_target(self):
+        try:
+            value = read_json(self.root / "replay-refresh.json")
+            if value.get("schema") == 1 and isinstance(value.get("cases"), list):
+                return value
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        return None
+
+    def provenance(self, key, path, target):
+        def optional(candidate):
+            try:
+                value = read_json(candidate)
+                return value if isinstance(value, dict) else {}
+            except (OSError, ValueError, TypeError):
+                return {}
+        case = path.parent.parent if path.parent.name in ("0", "1") else path.parent
+        passport = optional(case / "passport.json")
+        if not passport:
+            passport = optional(self.root / "passport.json")
+        checked = optional(path.with_name("checked.json"))
+        status = "untracked"
+        if target:
+            status = "old"
+            if key in target["cases"]:
+                status = "updated" if (checked.get("replay_verified") is True
+                    and checked.get("run_signature") == target.get("run_signature")
+                    and passport.get("run_signature") == target.get("run_signature")) else "pending"
+        stamp = path.stat()
+        result = path.with_name("result.json")
+        revision = digest({"replay": [stamp.st_mtime_ns, stamp.st_size],
+            "result": result.stat().st_mtime_ns if result.exists() else None,
+            "run": checked.get("run_signature"), "port": passport.get("port")})
+        return {"port": passport.get("port"), "run_signature": checked.get("run_signature"),
+                "refresh_status": status, "revision": revision}
 
     def paths(self):
         paths = [self.root] if self.root.is_file() else self.root.rglob("replay.json")
@@ -106,6 +162,7 @@ class ReplayStore:
 
     def catalog(self):
         result = []
+        target = self.refresh_target()
         for key, path in self.paths().items():
             metadata = path.with_name("result.json")
             if not metadata.exists() and not self.root.is_file():
@@ -121,6 +178,7 @@ class ReplayStore:
                     "commands": value.get("commands"), "outcome": value.get("outcome"),
                     "winner": value.get("winner"), "status": value.get("status"),
                     "armies": [len(a) for a in config.get("armies", [])],
+                    **self.provenance(key, path, target),
                 })
             except (OSError, ValueError, TypeError, AttributeError):
                 continue  # A just-written result may not yet be complete.
@@ -131,12 +189,17 @@ class ReplayStore:
             value = read_json(self.root / "summary.json")
             summary = value["summary"]
             replacement = value.get("greedy_replacement")
+            target = self.refresh_target()
+            if target and (not replacement or replacement.get("run_signature") != target["run_signature"]):
+                replacement = {"cases": 0, "expected": len(target["cases"]),
+                               "run_signature": target["run_signature"], "outcomes": {}}
             return {"complete": value.get("schema") == 1,
                     "acceptance": bool(value.get("acceptance")),
                     "checked": summary["matches"], "failures": len(value.get("failures", [])),
                     "greedy": (replacement["outcomes"] if replacement else
                                summary.get("outcomes", {}).get("opponent/greedy", {}).get("outcomes", {})),
-                    "replacement": replacement, "mixed_versions": bool(value.get("mixed_versions"))}
+                    "replacement": replacement, "target_port": target.get("port") if target else None,
+                    "mixed_versions": bool(value.get("mixed_versions"))}
         except (OSError, KeyError, ValueError, TypeError):
             return None  # A live summary may be between writes.
 
@@ -148,12 +211,15 @@ class ReplayStore:
             stamp = path.stat()
             result_path = path.with_name("result.json")
             result_stamp = result_path.stat().st_mtime_ns if result_path.exists() else None
-            signature = (stamp.st_mtime_ns, stamp.st_size, result_stamp)
+            provenance = self.provenance(key, path, self.refresh_target())
+            signature = (stamp.st_mtime_ns, stamp.st_size, result_stamp,
+                         provenance["revision"], provenance["refresh_status"])
             cached = self.cache.get(key)
             if cached and cached[0] == signature:
                 self.cache.move_to_end(key)
                 return cached[1]
             payload = prepare_replay(path)
+            payload = payload | {"provenance": provenance}
             encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             self.cache[key] = (signature, encoded)
             self.cache.move_to_end(key)

@@ -268,8 +268,17 @@ class Battle:
         return result
 
     def _restore_state(self, scenario, units):
+        masks = None
         if scenario["kind"] == "civ5sim.snapshot":
             state = scenario["state"]
+            rows = state.get("visibility")
+            count = len(self._map["tiles"])
+            if not isinstance(rows, list) or len(rows) != 2 or any(
+                not isinstance(row, list) or len(row) != count for row in rows
+            ):
+                raise ValueError("Snapshot must include two complete visibility masks")
+            values = [int(boolean(value, "visibility")) for row in rows for value in row]
+            masks = (C.c_int * len(values))(*values)
             info = N.Info(
                 integer(state["side"], "side", 0, 1),
                 integer(state["turn"], "turn"),
@@ -289,8 +298,19 @@ class Battle:
                 0,
                 integer(scenario.get("seed", 0), "seed", 0, 2**64 - 1),
             )
-        if self._lib.sim_reset(self._handle, units, len(units), C.byref(info)):
-            raise ValueError("Invalid snapshot or scenario state")
+        temporary = self._lib.sim_clone(self._handle)
+        if not temporary:
+            raise MemoryError("Cannot restore battle")
+        try:
+            if self._lib.sim_reset(temporary, units, len(units), C.byref(info)):
+                raise ValueError("Invalid snapshot or scenario state")
+            if masks is not None and self._lib.sim_restore_visibility(temporary, masks, len(masks)):
+                raise ValueError("Snapshot visibility excludes a current sight source")
+        except BaseException:
+            self._lib.sim_free(temporary)
+            raise
+        self._lib.sim_free(self._handle)
+        self._handle = temporary
 
     def _require_open(self):
         if not self._handle:
@@ -440,8 +460,19 @@ class Battle:
                 "fog": bool(info.fog),
                 "random_damage": bool(info.random),
                 "rng": info.rng,
+                "visibility": self.visibility_history(),
             },
         }
+
+    def visibility_history(self):
+        """Privileged raw history; unlike observation it is not forced on by fog=False."""
+        self._require_open()
+        buffer = (C.c_int * len(self._map['tiles']))()
+        rows = []
+        for side in (0, 1):
+            self._lib.sim_visibility_history(self._handle, side, buffer)
+            rows.append([bool(v) for v in buffer])
+        return rows
 
     def army_status(self):
         """Privileged counts; caller decides whether and when the episode ends."""

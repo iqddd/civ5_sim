@@ -25,6 +25,7 @@ uint64_t sim_memory(void* p, int include_geometry) {
   uint64_t bytes = sizeof(Battle) + s.units.capacity() * sizeof(Unit) +
                    s.occupied.capacity() * sizeof(int);
   for (const auto& v : s.visible) bytes += v.capacity() * sizeof(int);
+  for (const auto& v : s.visible_this_turn) bytes += v.capacity() * sizeof(uint8_t);
   if (include_geometry) {
     const auto& g = *s.g;
     bytes += sizeof(Geometry) + g.tiles.capacity() * sizeof(Tile) +
@@ -121,6 +122,28 @@ int sim_visibility(void* p, int side, int* out) {
     for (int i = 0; i < int(s.occupied.size()); ++i)
       out[i] = s.known(side, i) ? 1 : 0;
   return int(s.occupied.size());
+}
+int sim_visibility_history(void* p, int side, int* out) {
+  if (!p || side < 0 || side > 1) return -1;
+  const auto& s = *static_cast<Battle*>(p);
+  if (out) std::copy(s.visible_this_turn[side].begin(), s.visible_this_turn[side].end(), out);
+  return int(s.occupied.size());
+}
+int sim_restore_visibility(void* p, const int* masks, int count) {
+  if (!p || !masks) return BAD_TARGET;
+  auto& s = *static_cast<Battle*>(p);
+  const int tiles = int(s.occupied.size());
+  if (count != 2 * tiles) return BAD_TARGET;
+  // Validate both rows before committing either: an invalid restore is atomic.
+  for (int side = 0; side < 2; ++side)
+    for (int tile = 0; tile < tiles; ++tile) {
+      int value = masks[side * tiles + tile];
+      if ((value != 0 && value != 1) ||
+          (!value && s.visible[side][tile] > 0)) return BAD_TARGET;
+    }
+  for (int side = 0; side < 2; ++side)
+    s.restore_visibility(side, masks + side * tiles, tiles);
+  return OK;
 }
 int sim_info(void* p, Info* out) {
   if (!p || !out) return -1;

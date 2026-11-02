@@ -377,10 +377,10 @@ void cp_forecast_and_danger() {
   Fixture f; f.add(0,0,15); f.add(0,1,16); f.add(1,0,8); f.start();
   auto melee=f.adapter->forecast(*f.root,0,15,1,16,0);
   auto extra=f.adapter->forecast(*f.root,0,15,1,16,20);
-  // Pin the actual CP parameter pass-through, even though its name suggests
-  // the extra damage should weaken the defender in both attack types.
-  CHECK(extra.attacker_strength<melee.attacker_strength);
-  CHECK(extra.defender_strength==melee.defender_strength);
+  // Contract: extra-defender-damage. Fix CP's wrong melee argument: only
+  // the defender weakens, just as for the ranged forecast below.
+  CHECK(extra.attacker_strength==melee.attacker_strength);
+  CHECK(extra.defender_strength<melee.defender_strength);
   auto shot=f.adapter->forecast(*f.root,2,8,1,16,0);
   auto wounded=f.adapter->forecast(*f.root,2,8,1,16,20);
   CHECK(wounded.attacker_strength==shot.attacker_strength);

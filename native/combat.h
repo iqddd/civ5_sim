@@ -37,6 +37,9 @@ SIM_API void* sim_clone(void*);
 SIM_API int sim_reset(void*, const Unit*, int count, const Info*);
 SIM_API int sim_units(void*, int observer, Unit*);  // observer=-1 is privileged
 SIM_API int sim_visibility(void*, int side, int*);
+// Additive ABI 2 export: restore both public masks, preserving current sources.
+SIM_API int sim_restore_visibility(void*, const int* masks, int count);
+SIM_API int sim_visibility_history(void*, int side, int*);
 SIM_API int sim_info(void*, Info*);
 SIM_API int sim_actions(void*, Action*, int capacity);
 SIM_API Result sim_step(void*, Action);

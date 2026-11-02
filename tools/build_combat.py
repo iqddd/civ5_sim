@@ -33,6 +33,7 @@ def build(cp, game):
         return data.decode("utf-8-sig", errors="replace").replace("\r\n", "\n")
 
     plot = read(sdk / "CvPlot.cpp")
+    read(sdk / "CvPlot.h")  # getVisibilityCount: CORE_DELAYED_VISIBILITY.
     targeting = read(sdk / "CvTargeting.cpp")
     sight = extract(plot, "void CvPlot::changeAdjacentSight(")
     ray = targeting[targeting.index("static int ms_LookBackX") :]
@@ -100,6 +101,7 @@ def build(cp, game):
     if (
         options.get("BALANCE_VP") != 0
         or options.get("BALANCE_CORE_RANGED_ATTACK_PENALTY") != 0
+        or options.get("CORE_DELAYED_VISIBILITY") != 1
     ):
         raise ValueError(
             "Expected the CP Only profile without the VP ranged-defense rule"
@@ -148,6 +150,7 @@ def build(cp, game):
                 "BALANCE_VP",
                 "BALANCE_CORE_RANGED_ATTACK_PENALTY",
                 "SANE_UNIT_MOVEMENT_COST",
+                "CORE_DELAYED_VISIBILITY",
             )
         },
     }

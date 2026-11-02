@@ -78,6 +78,8 @@ def library():
         ("sim_reset", [C.c_void_p, C.POINTER(Unit), C.c_int, C.POINTER(Info)], C.c_int),
         ("sim_units", [C.c_void_p, C.c_int, C.POINTER(Unit)], C.c_int),
         ("sim_visibility", [C.c_void_p, C.c_int, C.POINTER(C.c_int)], C.c_int),
+        ("sim_restore_visibility", [C.c_void_p, C.POINTER(C.c_int), C.c_int], C.c_int),
+        ("sim_visibility_history", [C.c_void_p, C.c_int, C.POINTER(C.c_int)], C.c_int),
         ("sim_info", [C.c_void_p, C.POINTER(Info)], C.c_int),
         ("sim_actions", [C.c_void_p, C.POINTER(Action), C.c_int], C.c_int),
         ("sim_step", [C.c_void_p, Action], Result),

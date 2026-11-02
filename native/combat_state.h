@@ -32,12 +32,17 @@ struct State {
   std::vector<Unit> units;
   std::vector<int> occupied;
   std::array<std::vector<int>, 2> visible;
+  // CP CORE_DELAYED_VISIBILITY: ordinary moves only expand public visibility.
+  // Keep current sight counts separately for the turn-boundary reset.
+  std::array<std::vector<uint8_t>, 2> visible_this_turn;
   int side = 0, turn = 0, fog = 1;
   explicit State(std::shared_ptr<const Geometry> geo);
   void sight(const Unit& u, int delta);
   bool known(int observer, int tile) const;
   int known_unit(int tile, int observer) const;
   void rebuild();
+  void flip_visibility(int observer);
+  bool restore_visibility(int observer, const int* mask, int count);
   bool river(int from, int to) const;
   int movement(const Unit& u, int from, int to, int remaining,
                int observer) const;

@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-/* ABI 6. Structs use native alignment, int32 fields and explicit pointers.
+/* ABI 7. Structs use native alignment, int32 fields and explicit pointers.
    All input arrays are borrowed for one synchronous call; no RNG is accepted.
    A context is owned by its caller and must not be used concurrently. */
 enum CaiStatus { CAI_OK, CAI_BAD_ARGUMENT, CAI_INTERNAL_ERROR, CAI_BUFFER_TOO_SMALL };
@@ -26,7 +26,7 @@ enum CaiAssignmentKind {
 enum CaiMovementRole { CAI_ROLE_NONE, CAI_FIRST_LINE, CAI_SECOND_LINE, CAI_THIRD_LINE };
 enum CaiSupportMode { CAI_HEAL_BEFORE, CAI_HEAL_AFTER, CAI_APPROACH, CAI_RECOVERY };
 enum CaiRecoveryKind { CAI_RECOVERY_NONE, CAI_RECOVERY_ATTACK, CAI_RECOVERY_RETREAT, CAI_RECOVERY_WAIT };
-enum { CAI_ABI = 6, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
+enum { CAI_ABI = 7, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
 
 typedef struct CaiConfig {
   int32_t position_capacity, max_completed, max_branches, choices_per_unit;
@@ -51,6 +51,8 @@ typedef struct CaiBattleState {
   const int32_t* visibility; /* Boolean mask for the requesting side. */
   int32_t visibility_count;
   int32_t active_side, turn, fog;
+  const int32_t* visibility_history; /* Optional raw rows: side 0 then side 1. */
+  int32_t visibility_history_count; /* 0, or 2*tile_count. Not public observations. */
 } CaiBattleState;
 typedef struct CaiContact { int32_t id, last_seen_own_turn; } CaiContact;
 typedef struct CaiContactMemory {

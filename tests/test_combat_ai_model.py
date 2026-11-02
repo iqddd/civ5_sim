@@ -21,6 +21,12 @@ class BranchModelTests(unittest.TestCase):
     def test_movement(self):
         self.check_native("movement")
 
+    def test_delayed_visibility_and_mid_turn_roots(self):
+        self.check_native("delayed_visibility")
+
+    def test_extra_damage_weakens_defender_in_both_attack_modes(self):
+        self.check_native("extra_defender_damage")
+
     def test_terrain_and_zoc(self):
         self.check_native("terrain_and_zoc")
 

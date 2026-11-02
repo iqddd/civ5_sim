@@ -1,5 +1,7 @@
 """Exact replay frames, visibility, catalog selection and local HTTP boundary."""
 
+import gzip
+import hashlib
 import json
 import os
 import tempfile
@@ -88,6 +90,25 @@ class MatchViewerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "команде 1"):
             store.load("match/replay.json")
 
+    def test_historical_frames_require_matching_replay_and_result_hashes(self):
+        path, _, _ = self.write_replay(self.root / "legacy")
+        prepared = prepare_replay(path)
+        replay = json.loads(path.read_text())
+        replay['initial']['rules']['fingerprint'] = 'old-kernel'
+        path.write_text(json.dumps(replay), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'архив кадров'):
+            prepare_replay(path)
+        result = path.with_name('result.json')
+        with gzip.open(path.with_name('viewer-cache.json.gz'), 'wt', encoding='utf-8') as stream:
+            json.dump({'schema': 1, 'kind': 'civ5sim.viewer_cache', 'payload': prepared,
+                'replay_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                'result_sha256': hashlib.sha256(result.read_bytes()).hexdigest()}, stream)
+        self.assertEqual(prepare_replay(path)['visibility_mode'], 'legacy')
+        replay['steps'][0]['state_sha256'] = 'changed'
+        path.write_text(json.dumps(replay), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'архив кадров'):
+            prepare_replay(path)
+
     def test_catalog_deduplicates_repeats_and_rejects_path_escape(self):
         self.write_replay(self.root / "case/0")
         self.write_replay(self.root / "case/1")
@@ -99,6 +120,59 @@ class MatchViewerTests(unittest.TestCase):
             store.load("../replay.json")
         single = ReplayStore(incomplete)
         self.assertEqual(len(single.catalog()), 1)
+
+    def test_rerun_colors_require_matching_checked_passport_and_target(self):
+        path, _, _ = self.write_replay(self.root / "case/0")
+        self.write_replay(self.root / "other/0")
+        target = {'schema': 1, 'port': 'AI/0.9.3', 'run_signature': 'new',
+                  'cases': ['case/0/replay.json']}
+        (self.root/'replay-refresh.json').write_text(json.dumps(target))
+        passport = path.parent.parent/'passport.json'
+        checked = path.with_name('checked.json')
+        passport.write_text(json.dumps({'port': 'AI/0.9.2', 'run_signature': 'old'}))
+        checked.write_text(json.dumps({'replay_verified': True, 'run_signature': 'old'}))
+        store = ReplayStore(self.root)
+        before = {r['id']: r for r in store.catalog()}
+        self.assertEqual(before['case/0/replay.json']['refresh_status'], 'pending')
+        self.assertEqual(before['other/0/replay.json']['refresh_status'], 'old')
+        loaded = json.loads(store.load('case/0/replay.json'))
+        self.assertEqual(loaded['provenance']['port'], 'AI/0.9.2')
+        checked.write_text(json.dumps({'replay_verified': True, 'run_signature': 'new'}))
+        self.assertEqual(store.catalog()[0]['refresh_status'], 'pending')
+        passport.write_text(json.dumps({'port': 'AI/0.9.3', 'run_signature': 'new'}))
+        after = store.catalog()[0]
+        self.assertEqual(after['refresh_status'], 'updated')
+        self.assertNotEqual(after['revision'], before['case/0/replay.json']['revision'])
+        # Even byte-identical replays need a fresh payload after a new run.
+        loaded = json.loads(store.load('case/0/replay.json'))
+        self.assertEqual(loaded['provenance']['port'], 'AI/0.9.3')
+        self.assertEqual(loaded['provenance']['refresh_status'], 'updated')
+        target['run_signature'] = 'next'
+        (self.root/'replay-refresh.json').write_text(json.dumps(target))
+        self.assertEqual(json.loads(store.load('case/0/replay.json'))['provenance']['refresh_status'],
+                         'pending')
+
+    def test_atomic_publication_retries_transient_windows_reader(self):
+        from unittest.mock import patch
+
+        from tools.publish_greedy_replays import atomic_json
+        target = self.root/'summary.json'
+        target.write_text(json.dumps({'old': True}))
+        original = Path.replace
+        attempts = []
+
+        def replace(path, destination):
+            attempts.append(path)
+            if len(attempts) < 3:
+                self.assertEqual(json.loads(target.read_text()), {'old': True})
+                raise PermissionError('Temporary Windows reader')
+            return original(path, destination)
+
+        with patch.object(Path, 'replace', new=replace):
+            atomic_json(target, {'updated': True})
+        self.assertEqual(json.loads(target.read_text()), {'updated': True})
+        self.assertFalse(target.with_suffix('.json.tmp').exists())
+        self.assertEqual(len(attempts), 3)
 
     def test_unrelated_result_is_not_displayed(self):
         path, _, _ = self.write_replay(self.root / "match")

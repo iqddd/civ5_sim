@@ -6,15 +6,19 @@ namespace combat_rules {
 State::State(std::shared_ptr<const Geometry> geo)
       : g(std::move(geo)), occupied(g->tiles.size(), -1) {
     for (auto& v : visible) v.resize(g->tiles.size());
+    for (auto& v : visible_this_turn) v.resize(g->tiles.size());
   }
 
 void State::sight(const Unit& u, int delta) {
     if (u.hp > 0)
-      for (int tile : g->sight[u.tile]) visible[u.side][tile] += delta;
+      for (int tile : g->sight[u.tile]) {
+        visible[u.side][tile] += delta;
+        if (visible[u.side][tile] > 0) visible_this_turn[u.side][tile] = 1;
+      }
   }
 
 bool State::known(int observer, int tile) const {
-    return !fog || visible[observer][tile] > 0;
+    return !fog || visible_this_turn[observer][tile] != 0;
   }
 
 int State::known_unit(int tile, int observer) const {
@@ -26,11 +30,27 @@ int State::known_unit(int tile, int observer) const {
 void State::rebuild() {
     std::fill(occupied.begin(), occupied.end(), -1);
     for (auto& v : visible) std::fill(v.begin(), v.end(), 0);
+    for (auto& v : visible_this_turn) std::fill(v.begin(), v.end(), 0);
     for (int i = 0; i < int(units.size()); ++i)
       if (units[i].hp > 0) {
         occupied[units[i].tile] = i;
         sight(units[i], 1);
       }
+  }
+
+void State::flip_visibility(int observer) {
+    // CvPlot::flipVisibility, CvPlayer::setTurnActive: expire at turn end/start.
+    for (int tile = 0; tile < int(occupied.size()); ++tile)
+      visible_this_turn[observer][tile] = visible[observer][tile] > 0;
+  }
+
+bool State::restore_visibility(int observer, const int* mask, int count) {
+    if (observer < 0 || observer > 1 || !mask || count != int(occupied.size())) return false;
+    for (int tile = 0; tile < count; ++tile)
+      if ((mask[tile] != 0 && mask[tile] != 1) ||
+          (mask[tile] == 0 && visible[observer][tile] > 0)) return false;
+    for (int tile = 0; tile < count; ++tile) visible_this_turn[observer][tile] = uint8_t(mask[tile]);
+    return true;
   }
 
 bool State::river(int from, int to) const {
@@ -93,7 +113,7 @@ int State::supports(int center, int supporting_side, int excluded, int observer,
         // consult that side's hidden visibility sources; it uses known units.
         if (preview) {
           if (units[id].side == observer || known(observer, tile)) ++count;
-        } else if (visible[1 - supporting_side][tile] > 0)
+        } else if (visible_this_turn[1 - supporting_side][tile])
           ++count;
       }
     return count;
@@ -218,7 +238,9 @@ Result State::step(Action a, const std::function<int()>& roll,
     int error = validate(a);
     if (error) return {error, 0, 0, 0, 0, 0};
     if (a.kind == END_TURN) {
+      flip_visibility(side);
       side = 1 - side;
+      flip_visibility(side);
       ++turn;
       // CvUnit::flipDamageReceivedPerTurn / CvPlayer::SetAllUnitsUnprocessed.
       // Rotate before healing; healing does not subtract from this history.

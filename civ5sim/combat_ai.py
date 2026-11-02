@@ -111,6 +111,7 @@ class PlanningState:
     row_parity: int = 0
     wrap_x: bool = False
     fog: bool = True
+    visibility_history: tuple[tuple[int, ...], ...] = ()
 
     @classmethod
     def from_battle(cls, battle: Battle, side: int):
@@ -135,6 +136,7 @@ class PlanningState:
             row_parity=battle._map["row_parity"],
             wrap_x=battle._map["wrap_x"],
             fog=bool(battle._info().fog),
+            visibility_history=tuple(tuple(map(int, row)) for row in battle.visibility_history()),
         )
 
 
@@ -358,6 +360,8 @@ class _State(C.Structure):
         ("active_side", C.c_int32),
         ("turn", C.c_int32),
         ("fog", C.c_int32),
+        ("visibility_history", C.POINTER(C.c_int32)),
+        ("visibility_history_count", C.c_int32),
     ]
 
 
@@ -425,7 +429,7 @@ def _library():
     ):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = arguments, result
-    if lib.cai_abi() != 6:
+    if lib.cai_abi() != 7:
         raise RuntimeError("Unsupported combat AI ABI; rebuild the planner")
     lib.cai_support.argtypes = [C.c_void_p, C.POINTER(_Request), C.c_int32,
                                C.POINTER(_Assignment), C.c_int32, C.POINTER(_Result)]
@@ -528,6 +532,11 @@ class Planner:
         tiles = (_Tile * len(s.tiles))(*(_pack(_Tile, t) for t in s.tiles))
         units = (_Unit * len(s.units))(*(_pack(_Unit, u) for u in s.units))
         visibility = (C.c_int32 * len(s.visibility))(*map(_i32, s.visibility))
+        if s.visibility_history and (len(s.visibility_history) != 2 or any(
+                len(row) != len(s.tiles) for row in s.visibility_history)):
+            raise ValueError("Invalid planning visibility history")
+        history_values = [v for row in s.visibility_history for v in row]
+        history = (C.c_int32 * len(history_values))(*map(_i32, history_values))
         selected = (C.c_int32 * len(request.selected_units))(
             *map(_i32, request.selected_units)
         )
@@ -548,6 +557,8 @@ class Planner:
             _i32(s.active_side),
             _i32(s.turn),
             int(s.fog),
+            history if history_values else None,
+            len(history_values),
         )
         packed = _Request(
             C.pointer(state),

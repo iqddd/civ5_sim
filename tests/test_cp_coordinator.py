@@ -598,7 +598,11 @@ class RecoveryTests(unittest.TestCase):
             before = battle.snapshot()
             result = planner.search(request)
             self.assertGreater(result.diagnostics.risk_rejections, 0)
-            self.assertEqual(result.diagnostics.bad_units, (0,))
+            self.assertIn(0, result.diagnostics.bad_units)
+            # The exact offender set changes with threat estimates; diagnostics
+            # must report only selected IDs, once each, in selection order.
+            self.assertEqual(result.diagnostics.bad_units, tuple(
+                uid for uid in request.selected_units if uid in result.diagnostics.bad_units))
             self.assertTrue(result.diagnostics.budget_exhausted)
             self.assertEqual(result, planner.search(request))
             self.assertEqual(before, battle.snapshot())

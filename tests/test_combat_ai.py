@@ -232,12 +232,12 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(bytes(result.stats), expected_stats)
         self.assertTrue(any(a.killed_unit == 1 for a in buffer))
 
-    def test_mismatched_geometric_visibility_is_invalid(self):
+    def test_accumulated_visibility_valid_but_missing_current_source_invalid(self):
         p = self.planner()
-        self.assertEqual(
-            p.search(request(state=replace(state(), fog=True))).reason,
-            SearchReason.INVALID_REQUEST,
-        )
+        historical = replace(state(), fog=True)
+        self.assertNotEqual(p.search(request(state=historical)).reason, SearchReason.INVALID_REQUEST)
+        missing = replace(historical, visibility=(0,) * len(historical.visibility))
+        self.assertEqual(p.search(request(state=missing)).reason, SearchReason.INVALID_REQUEST)
 
     def test_later_turn_future_attack_keeps_hypothetical_contact_memory(self):
         from civ5sim.combat_ai import AssignmentKind
