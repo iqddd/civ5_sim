@@ -1,4 +1,4 @@
-"""Coordinator target experiment: compare physical prefixes, not CP scores."""
+"""Coordinator targets maximize the joint roster, with one empty-plan fallback."""
 
 import unittest
 from dataclasses import replace
@@ -43,25 +43,44 @@ class TargetSelectionTests(unittest.TestCase):
         return {"kind": "combat", "target": target, "selected": selected,
                 "enemy_id": next(e["id"] for e in self.enemies if e["tile"] == target)}
 
-    def test_shortlist_keeps_nearest_and_adds_larger_group(self):
+    def test_shortlist_prefers_larger_group_even_without_immediate_attackers(self):
         task = self.shortlist({3: {0}, 4: {1, 2}, 5: {0}})
-        self.assertEqual(task["target"], 18)
-        self.assertEqual(task["alternative"]["target"], 13)
-        self.assertEqual(set(task["alternative"]["selected"]), {1, 2})
-        self.assertEqual(task["alternative"]["ranking"]["immediate_attackers"], 0)
+        self.assertEqual(task["target"], 13)
+        self.assertEqual(task["alternative"]["target"], 18)
+        self.assertEqual(set(task["selected"]), {1, 2})
+        self.assertEqual(task["ranking"]["immediate_attackers"], 0)
+        self.assertEqual(task["alternative"]["ranking"]["immediate_attackers"], 1)
+        self.assertEqual(len(task["ranked_candidates"]), 3)
         self.assertFalse(self.agent._combat_attempts)
 
-    def test_rank_uses_readiness_hp_and_exact_pair_and_target_means(self):
+    def test_rank_uses_readiness_hp_exact_target_mean_then_enemy_id(self):
         group = self.task(selected=(0, 1))
         rank = self.agent._group_rank(group, self.own, (Action("ranged", 0, 18),))
         other = self.agent._group_rank(self.task(selected=(0, 1)), self.own, ())
         self.assertGreater(rank, other)
         wounded = {k: {**v, "hp": 50} for k, v in self.own.items()}
         self.assertGreater(other, self.agent._group_rank(self.task(selected=(0, 1)), wounded, ()))
-        # Equal head count/HP: the closer pair wins independently of ID order.
-        close = self.agent._group_rank(self.task(13, (1, 2)), self.own, ())
-        wide = self.agent._group_rank(self.task(13, (0, 2)), self.own, ())
-        self.assertGreater(close, wide)
+        # Exact means: 4/3 must beat 5/3, without integer rounding.
+        original_distance = self.agent._distance
+        distances = {(17, 13): 1, (10, 13): 1, (11, 13): 2,
+                     (17, 18): 1, (10, 18): 2, (11, 18): 2}
+        self.agent._distance = lambda a, b: distances[a, b]
+        near = self.agent._group_rank(self.task(13, (0, 1, 2)), self.own, ())
+        far = self.agent._group_rank(self.task(18, (0, 1, 2)), self.own, ())
+        self.assertGreater(near, far)
+        self.agent._distance = lambda a, b: 1
+        self.assertGreater(self.agent._group_rank(self.task(18), self.own, ()),
+                           self.agent._group_rank(self.task(13), self.own, ()))
+        self.agent._distance = original_distance
+
+    def test_native_admission_and_thirteen_unit_limit_precede_ranking(self):
+        available = [{**self.own[0], "id": i} for i in range(16)]
+        task = self.agent._next_task(available, self.enemies, self.obs,
+                                    {3: set(range(15)), 4: {15}, 5: set()}, ())
+        self.assertEqual(task["target"], 18)
+        self.assertEqual(task["selected"], tuple(range(13)))
+        self.assertEqual(task["ranking"]["participants"], 13)
+        self.assertEqual(task["alternative"]["selected"], (15,))
 
     def test_excluded_and_attempted_pairs_cannot_enter_alternative(self):
         self.agent._combat_attempts.update({(1, 4), (2, 4)})
@@ -76,24 +95,28 @@ class TargetSelectionTests(unittest.TestCase):
         self.assertEqual(len(service.calls), 1)
         self.assertEqual(self.agent._probe_searches, 0)
 
-    def test_larger_group_can_win_without_comparing_tactical_scores(self):
+    def test_nonempty_larger_group_does_not_search_smaller_group(self):
         task = self.shortlist({3: {0}, 4: {1, 2}, 5: {0}})
-        first = plan(replace(assignment(K.RANGED, 0, 17, 18, damage=20), score=99999))
-        second = plan(replace(assignment(K.MELEE, 1, 10, 13, damage=40, retaliation=5), score=-99999))
+        first = plan(replace(assignment(K.MOVE, 1, 10, 9), score=-99999))
+        second = plan(replace(assignment(K.RANGED, 0, 17, 18, damage=100), score=99999))
         service = ScriptedPlanning(first, second)
-        self.assertIs(self.choose(task, service), second)
+        self.assertIs(self.choose(task, service), first)
         self.assertEqual(self.agent._task["target"], 13)
-        self.assertEqual(len(service.calls), 2)
+        self.assertEqual(len(service.calls), 1)
+        self.assertEqual(self.agent._probe_searches, 0)
         # A reduced-group retry cannot spawn a third candidate.
         self.choose(self.agent._task, service)
-        self.assertEqual(len(service.calls), 2)
+        self.assertEqual(len(service.calls), 1)
 
-    def test_tie_keeps_nearest_even_for_different_size_groups(self):
+    def test_empty_primary_tries_next_ranked_target_once(self):
         task = self.shortlist({3: {0}, 4: {1, 2}, 5: {0}})
-        first = plan(assignment(K.RANGED, 0, 17, 18, damage=20))
-        second = plan(assignment(K.MELEE, 1, 10, 13, damage=20))
-        self.assertIs(self.choose(task, ScriptedPlanning(first, second)), first)
+        second = plan(assignment(K.RANGED, 0, 17, 18, damage=20))
+        service = ScriptedPlanning(plan(reason=SearchReason.NO_PLAN), second)
+        self.assertIs(self.choose(task, service), second)
         self.assertEqual(self.agent._task["target"], 18)
+        self.assertEqual(len(service.calls), 2)
+        self.choose(self.agent._task, service)
+        self.assertEqual(len(service.calls), 2)
 
     def test_empty_result_and_budget_exhaustion_never_beat_available_plan(self):
         for first_empty in (True, False):
@@ -123,17 +146,16 @@ class TargetSelectionTests(unittest.TestCase):
         value = self.agent._prefix_value(result, self.obs)
         self.assertEqual((value["net_hp"], value["net_kills"], value["commands"]), (100, 1, 1))
 
-    def test_net_kills_then_own_damage_break_hp_ties(self):
+    def test_found_plan_before_restart_is_used_without_probe(self):
         task = self.task()
         task["alternative"] = self.task(13, (1, 2))
-        first = plan(assignment(K.RANGED, 0, 17, 18, damage=50))
-        second = plan(assignment(K.MELEE, 1, 10, 13, damage=100, retaliation=50))
-        self.assertIs(self.choose(task, ScriptedPlanning(first, second)), second)
-        self.agent._search_cache.clear()
-        task = self.task()
-        task["alternative"] = self.task(13, (1, 2))
-        second = plan(assignment(K.MELEE, 1, 10, 13, damage=60, retaliation=10))
-        self.assertIs(self.choose(task, ScriptedPlanning(first, second)), first)
+        first = plan(assignment(K.MOVE, 0, 17, 16), assignment(K.RESTART, 0, -1, -1))
+        service = ScriptedPlanning(first)
+        self.assertIs(self.choose(task, service), first)
+        self.assertEqual(len(service.calls), 1)
+        event = next(e for e in self.agent.drain_diagnostics() if e["event"] == "target_comparison")
+        self.assertEqual(event["reason"], "max_participants")
+        self.assertEqual(event["candidates"][0]["prefix"]["commands"], 1)
 
     def test_cache_identity_includes_group_target_config_contacts_and_observation(self):
         from civ5sim.combat_ai import ContactMemory

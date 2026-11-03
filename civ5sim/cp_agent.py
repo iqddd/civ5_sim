@@ -4,7 +4,6 @@ from collections import deque
 from copy import deepcopy
 from dataclasses import asdict
 from fractions import Fraction
-from itertools import combinations
 
 from civ5map.maps import adjacent, passable
 
@@ -171,19 +170,15 @@ class CPAgent:
         return target
 
     def _group_rank(self, task, own, actions):
-        """Coordinator shortlist only; this is not a CP tactical score."""
+        """Prefer the largest joint roster; geometry only breaks head-count ties."""
         group = [own[uid] for uid in task["selected"]]
         ready = {a.unit for a in actions if a.kind in ("melee", "ranged")
                  and a.target == task["target"] and a.unit in task["selected"]}
-        pairs = list(combinations(group, 2))
-        pair_distance = sum(self._distance(a["tile"], b["tile"]) for a, b in pairs)
         target_distance = sum(self._distance(u["tile"], task["target"]) for u in group)
         rank = (len(group), len(ready), sum(u["hp"] for u in group),
-                -Fraction(pair_distance, max(1, len(pairs))),
                 -Fraction(target_distance, len(group)), -task["enemy_id"])
         task["ranking"] = {"participants": len(group), "immediate_attackers": len(ready),
-                           "hp": rank[2], "pair_distance_sum": pair_distance,
-                           "pair_count": len(pairs), "target_distance_sum": target_distance}
+                           "hp": rank[2], "target_distance_sum": target_distance}
         return rank
 
     def _next_task(self, available, enemies, observation, eligibility=None, actions=()):
@@ -214,29 +209,29 @@ class CPAgent:
                                              "native_admitted": eligibility is None or u["id"] in eligibility.get(enemy["id"], ()),
                                              "temporarily_blocked": self._target_blocked.get((u["id"], enemy["id"]), -1) >= now}
                                             for u in available]}, self._task)
-                pairs = [(self._distance(u["tile"], e["tile"]), e["id"], u["id"], e)
-                         for e in enemies for u in available
-                         if (u["id"], e["id"]) not in self._combat_attempts
-                         and (eligibility is None or u["id"] in eligibility.get(e["id"], ()))
-                         and self._target_blocked.get((u["id"], e["id"]), -1) < now]
-                if pairs and self._searches < self._search_limit:
-                    _, eid, _, _enemy = min(pairs, key=lambda p: (
-                        p[0], self._combat_targets.get(p[2], (None,))[0] != p[1], *p[1:3]))
+                if self._searches < self._search_limit:
                     options = []
                     own = {u["id"]: u for u in available}
-                    for enemy_id in sorted({p[1] for p in pairs}):
+                    for enemy_id in sorted(by_id):
                         candidate_enemy = by_id[enemy_id]
                         candidates = [u for u in available if (u["id"], enemy_id) not in self._combat_attempts
                                       and (eligibility is None or u["id"] in eligibility.get(enemy_id, ()))
                                       and self._target_blocked.get((u["id"], enemy_id), -1) < now]
+                        if not candidates:
+                            continue
                         options.append({"kind": "combat", "target": candidate_enemy["tile"],
                                         "enemy_id": enemy_id,
                                         "selected": self._select(candidates, candidate_enemy["tile"])})
-                    primary = next(t for t in options if t["enemy_id"] == eid)
-                    alternatives = [t for t in options if t is not primary]
-                    self._group_rank(primary, own, actions)
-                    if alternatives:
-                        primary["alternative"] = max(alternatives, key=lambda t: self._group_rank(t, own, actions))
+                    if not options:
+                        self._phase += 1
+                        continue
+                    options.sort(key=lambda t: self._group_rank(t, own, actions), reverse=True)
+                    primary = options[0]
+                    primary["ranked_candidates"] = [
+                        {"target": t["target"], "selected_units": list(t["selected"]),
+                         "ranking": t["ranking"]} for t in options]
+                    if len(options) > 1:
+                        primary["alternative"] = options[1]
                     return primary
             else:
                 candidates = [u for u in available if u["id"] not in self._phase_seen[phase]]
@@ -475,23 +470,23 @@ class CPAgent:
         return result, reused
 
     def _choose_combat_plan(self, task, observation, own, enemies, planning):
-        # At most one extra full search per ordinary attempt. Reduced-group
-        # retries do not recursively generate another target comparison.
+        # Use the largest joint roster as soon as it has a plan. Only an empty
+        # result permits one fallback search; reduced retries have no fallback.
         alternative = task.pop("alternative", None)
+        ranked_candidates = task.pop("ranked_candidates", None)
         primary_result, primary_reused = self._combat_search(task, observation, own, enemies, planning)
         choices = [(task, primary_result, primary_reused)]
-        if (alternative is not None and primary_result.reason != SearchReason.TURN_CHANGED
+        if (not primary_result.assignments and alternative is not None
+                and primary_result.reason != SearchReason.TURN_CHANGED
                 and self._probe_searches < self._searches):
             result, reused = self._combat_search(alternative, observation, own, enemies, planning, probe=True)
             choices.append((alternative, result, reused))
         winner = 0
         rows = []
-        best = None
         for index, (option, result, reused) in enumerate(choices):
             value = self._prefix_value(result, observation)
-            key = (bool(result.assignments), value["net_hp"], value["net_kills"], -value["own_damage"])
-            if best is None or key > best:
-                winner, best = index, key
+            if result.assignments:
+                winner = index
             rows.append({"target": option["target"], "selected_units": list(option["selected"]),
                          "ranking": option.get("ranking"), "prefix": value,
                          "reason": result.reason.value, "stats": asdict(result.stats),
@@ -505,7 +500,9 @@ class CPAgent:
                 self._combat_targets[uid] = (chosen["enemy_id"], self._distance(own[uid]["tile"], chosen["target"]),
                                              0, own_turn(observation["turn"], observation["active_side"], self.side))
         self._event("target_comparison", candidates=rows, chosen_target=chosen["target"],
-                    chosen_index=winner, reason="physical_prefix" if winner else "nearest_or_tie")
+                    ranked_candidates=ranked_candidates, policy="max_participants",
+                    chosen_index=winner, reason="fallback_after_empty" if winner else
+                    "max_participants" if result.assignments else "all_empty")
         if winner:
             self._event("task_assigned", task_kind="combat", target=chosen["target"],
                         selected_units=list(chosen["selected"]))

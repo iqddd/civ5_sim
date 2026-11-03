@@ -100,16 +100,18 @@ function renderDiagnostics(){
   for(const e of events){
     const p=document.createElement('p');
     if(e.event==='target_comparison'){
-      p.textContent=`${e.side===0?'A':'B'} · Выбрана цель (${xyText(e.chosen_target)})${e.candidates.length===1?' · единственный кандидат':e.chosen_index===0?' · ближайшая цель':' · альтернатива'}`;
+      const choice=e.policy==='max_participants'?(e.reason==='fallback_after_empty'?' · запасная цель после пустого поиска':e.reason==='all_empty'?' · план не найден':' · максимальный совместный состав'):(e.candidates.length===1?' · единственный кандидат':e.chosen_index===0?' · ближайшая цель':' · альтернатива');
+      p.textContent=`${e.side===0?'A':'B'} · Выбрана цель (${xyText(e.chosen_target)})${choice}`;
       panel.append(p);
       for(const [i,c] of e.candidates.entries()){
         const row=document.createElement('p'),v=c.prefix,r=c.ranking;
         let text=`${i===e.chosen_index?'✓ ':''}(${xyText(c.target)}) · юниты ${c.selected_units.join(', ')} · ${reasons[c.reason]||c.reason}`;
         text+=` · урон ${v.enemy_damage}, свои потери HP ${v.own_damage}, разница ${v.net_hp}, убийства ${v.net_kills>=0?'+':''}${v.net_kills}`;
-        if(r)text+=` · атакуют сейчас ${r.immediate_attackers}/${r.participants} · HP ${r.hp} · средняя дистанция между своими ${(r.pair_distance_sum/Math.max(1,r.pair_count)).toFixed(2)}`;
+        if(r){text+=` · атакуют сейчас ${r.immediate_attackers}/${r.participants} · HP ${r.hp}`;if(e.policy==='max_participants')text+=` · средняя дистанция до цели ${(r.target_distance_sum/r.participants).toFixed(2)}`;else if(r.pair_count!==undefined)text+=` · средняя дистанция между своими ${(r.pair_distance_sum/Math.max(1,r.pair_count)).toFixed(2)}`;}
         if(c.reused)text+=' · кэш';
         row.textContent=text;panel.append(row);
       }
+      if(e.ranked_candidates?.length){const row=document.createElement('p');row.textContent='Приоритет целей: '+e.ranked_candidates.map(c=>`(${xyText(c.target)}) — ${c.ranking.participants} юн.`).join('; ');panel.append(row);}
       continue;
     }
     let text=`${e.side===0?'A':'B'} · ${eventNames[e.event]||e.event}`;
