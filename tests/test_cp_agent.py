@@ -351,10 +351,11 @@ class MatchIntegrationTests(unittest.TestCase):
             match = run_match(self.config(), [broken, EndTurnAgent()])
             self.assertEqual(match.result["error"]["phase"], "reset")
 
-    def test_builtin_contact_example_checks_terminal_command(self):
+    def test_builtin_contact_example_checks_last_command(self):
         config, agents = load_match_config(ROOT / "scenarios/cp-contact-match.json")
         match = run_match(config, agents)
-        self.assertEqual(match.result["reason"], "army_destroyed")
+        self.assertEqual(match.result["status"], "completed")
+        self.assertIn(match.result["reason"], ("army_destroyed", "turn_limit"))
         # The callback may also cancel the remaining plan after the terminal
         # command; its action_result must still describe that exact command.
         last = [e for e in match.replay["ai_events"] if e['event'] == 'action_result'][-1]

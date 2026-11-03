@@ -138,13 +138,16 @@ class ReplayStore:
                 status = "updated" if (checked.get("replay_verified") is True
                     and checked.get("run_signature") == target.get("run_signature")
                     and passport.get("run_signature") == target.get("run_signature")) else "pending"
+        if checked.get("continuation") is True:
+            status = "continuation"
         stamp = path.stat()
         result = path.with_name("result.json")
         revision = digest({"replay": [stamp.st_mtime_ns, stamp.st_size],
             "result": result.stat().st_mtime_ns if result.exists() else None,
             "run": checked.get("run_signature"), "port": passport.get("port")})
         return {"port": passport.get("port"), "run_signature": checked.get("run_signature"),
-                "refresh_status": status, "revision": revision}
+                "refresh_status": status, "revision": revision,
+                "resume_after": checked.get("prefix_verified") if status == "continuation" else None}
 
     def paths(self):
         paths = [self.root] if self.root.is_file() else self.root.rglob("replay.json")

@@ -5,6 +5,7 @@ Normal Agent.act observations never acquire a PlanningState implicitly.
 """
 
 import ctypes as C
+import json
 import os
 from dataclasses import dataclass, field, fields
 from enum import IntEnum, StrEnum
@@ -511,7 +512,51 @@ class Planner:
     def attack_candidates(self, request: SearchRequest) -> tuple[int, ...]:
         return self._plan(request, candidates_only=True)
 
+    def set_trace(self, enabled, max_bytes=64 * 1024 * 1024):
+        if not hasattr(self._lib, "cai_trace_enable"):
+            if enabled:
+                raise RuntimeError("Rebuild combat AI for decision tracing")
+            return
+        self._lib.cai_trace_enable.argtypes = [C.c_void_p, C.c_int32, C.c_int32]
+        self._lib.cai_trace_enable.restype = C.c_int32
+        self._lib.cai_trace_data.argtypes = [C.c_void_p]
+        self._lib.cai_trace_data.restype = C.c_char_p
+        self._lib.cai_trace_status.argtypes = [C.c_void_p]
+        self._lib.cai_trace_status.restype = C.c_int32
+        if self._lib.cai_trace_enable(self._handle, int(enabled), max_bytes):
+            raise ValueError("Invalid diagnostic trace settings")
+
+    def read_trace(self):
+        if not hasattr(self._lib, "cai_trace_data"):
+            return {"available": False, "events": []}
+        self._lib.cai_trace_data.argtypes = [C.c_void_p]
+        self._lib.cai_trace_data.restype = C.c_char_p
+        self._lib.cai_trace_status.argtypes = [C.c_void_p]
+        self._lib.cai_trace_status.restype = C.c_int32
+        data = self._lib.cai_trace_data(self._handle) or b""
+        return {"available": True, "truncated": bool(self._lib.cai_trace_status(self._handle)),
+                "events": [json.loads(row) for row in data.splitlines()]}
+
     def _plan(self, request: SearchRequest, mode=None, *, candidates_only=False):
+        recorder = getattr(self, "_decision_recorder", None)
+        if recorder is not None:
+            try:
+                self.set_trace(recorder.mode == "full")
+            except Exception as exc:  # noqa: BLE001 -- diagnostics must not change decisions
+                recorder.errors.append(f"trace setup: {exc}")
+        result = self._execute_plan(request, mode, candidates_only=candidates_only)
+        if recorder is not None:
+            trace = None
+            if recorder.mode == "full":
+                try:
+                    trace = self.read_trace()
+                except Exception as exc:  # noqa: BLE001 -- preserve planner result
+                    recorder.errors.append(f"trace read: {exc}")
+            recorder.result(request, self.config, "candidates" if candidates_only else
+                            "search" if mode is None else int(mode), result, trace, self.version)
+        return result
+
+    def _execute_plan(self, request: SearchRequest, mode=None, *, candidates_only=False):
         if not self._handle:
             raise RuntimeError("Planner is closed")
         s = request.state

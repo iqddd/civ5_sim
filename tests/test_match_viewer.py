@@ -196,6 +196,19 @@ class MatchViewerTests(unittest.TestCase):
         self.assertEqual(len(prepared["frames"]), 1)
         self.assertEqual(prepared["result"]["status"], "error")
 
+    def test_continuation_has_separate_catalog_status_and_boundary(self):
+        path, _, _ = self.write_replay(self.root / "continuation" / "0")
+        replay = json.loads(path.read_text())
+        replay["experiment"] = {"kind": "continuation", "resume_after": 1,
+                                "description": "New coordinator after command 1"}
+        path.write_text(json.dumps(replay))
+        path.with_name("checked.json").write_text(json.dumps(
+            {"replay_verified": True, "continuation": True, "prefix_verified": 1}))
+        row = ReplayStore(self.root).catalog()[0]
+        self.assertEqual(row["refresh_status"], "continuation")
+        self.assertEqual(row["resume_after"], 1)
+        self.assertEqual(prepare_replay(path)["experiment"], replay["experiment"])
+
     def test_http_catalog_verified_frames_and_not_found(self):
         self.write_replay(self.root / "match")
         server = create_server(self.root, 0)

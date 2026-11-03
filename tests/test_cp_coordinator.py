@@ -399,11 +399,15 @@ class ContactRequirementTests(unittest.TestCase):
             return plan(reason=SearchReason.NO_PLAN)
         planning.support = support
         action = self.act(agent, battle, planning)
-        self.assertEqual(len(planning.calls), 2)
         events = agent.drain_diagnostics()
+        searches = [e for e in events if e["event"] == "search"]
+        self.assertEqual(sum(not e.get("probe", False) for e in searches), 2)
+        self.assertLessEqual(sum(e.get("probe", False) for e in searches), 2)
+        self.assertEqual(len(planning.calls), len(searches))
         self.execute(agent, battle, action)
         self.finish_turn(agent, battle, planning)
-        self.assertLessEqual(len(planning.calls), agent._search_limit)
+        self.assertLessEqual(agent._searches, agent._search_limit)
+        self.assertLessEqual(agent._probe_searches, agent._searches)
         return action, events
 
     def test_contact_scenario_reveals_enemy_and_leaves_unused_unit_mobile(self):
@@ -422,7 +426,9 @@ class ContactRequirementTests(unittest.TestCase):
         self.assertFalse(any(e["event"] == "waiting" and e.get("reason") == "call_search_limit"
                              for e in events), "Computational limit became a wait order")
         self.assertNotEqual(action, Action("skip", 0))
-        self.assertEqual(action.kind, "ranged")
+        # CP may prefer retreat when firing would spend the movement needed
+        # to escape. The budget itself must not turn either option into wait.
+        self.assertIn(action.kind, ("ranged", "move"))
 
     def test_problematic_unit_is_removed_before_retry(self):
         with Battle(scenario([unit("warrior", 0, 17), unit("archer", 0, 25),
@@ -513,6 +519,99 @@ class ContactRequirementTests(unittest.TestCase):
                 self.assertIn(0, planning.calls[1][1])
                 self.assertIn(1, planning.calls[1][1])
 
+    def test_new_combat_contact_restarts_same_target_roster_and_aggression(self):
+        with Battle(scenario([unit("horseman", 0, 16), unit("warrior", 0, 17),
+                              unit("warrior", 1, 21), unit("warrior", 1, 0)], fog=True)) as battle:
+            agent = self.agent(battle)
+            agent._turn = 0
+            agent._search_limit = agent._support_limit = agent._recovery_limit = 30
+            agent._phase = 1
+            agent._task = {"kind": "combat", "target": 0, "selected": (0,),
+                           "aggression": Aggression.HIGH}
+            agent._group = (0,)
+            agent._replan = True
+            planning = ScriptedPlanning(
+                plan(assignment(K.MOVE, 0, 16, 19, 60), assignment(K.FINISH, 0, 19, 19, 60)),
+                plan(assignment(K.FINISH, 0, 19, 19, 60)))
+            aggressions = []
+            search = planning.search
+            def record(target, selected, **kwargs):
+                aggressions.append(kwargs["aggression"])
+                return search(target, selected, **kwargs)
+            planning.search = record
+            first = self.act(agent, battle, planning)
+            self.execute(agent, battle, first)
+            self.assertIn(2, {u["id"] for u in battle.observe(0)["units"]})
+            self.assertTrue(any(a.unit == 1 and a.kind == "move" for a in battle.available_actions()))
+            self.assertEqual(agent._task["target"], 0)
+            self.assertEqual(agent._task["selected"], (0,))
+            self.assertTrue(agent._replan)
+            second = self.act(agent, battle, planning)
+            self.assertEqual(second, Action("skip", 0))
+            self.assertEqual([(t, s) for t, s, _ in planning.calls], [(0, (0,)), (0, (0,))])
+            self.assertEqual(aggressions, [Aggression.HIGH, Aggression.HIGH])
+            self.assertEqual(agent._task["attempts"], 2)
+
+    def test_opportunity_search_uses_ordinary_budget_and_low_aggression(self):
+        with Battle(scenario([unit("chariot_archer", 0, 17), unit("warrior", 1, 19)])) as battle:
+            agent = self.agent(battle)
+            agent._search_limit = agent._recovery_limit = 1
+            planning = ScriptedPlanning(plan())
+            values = []
+            search = planning.search
+            def record(target, selected, **kwargs):
+                values.append(kwargs["aggression"])
+                return search(target, selected, **kwargs)
+            planning.search = record
+            own = [u for u in battle.observe(0)["units"] if u["side"] == 0]
+            before = battle.snapshot()
+            agent._recover(own, battle.observe(0), planning)
+            agent._recover(own, battle.observe(0), planning)
+            self.assertEqual(agent._searches, 1)
+            self.assertEqual(values, [Aggression.LOW])
+            self.assertEqual(before, battle.snapshot())
+            agent._search_limit = 3
+            agent._call_searches = 2
+            agent._recovery_search_attempts.clear()
+            agent._recover(own, battle.observe(0), planning)
+            self.assertEqual(values, [Aggression.LOW], "Recovery bypassed the per-call search ceiling")
+
+    def test_contact_and_group_reduction_share_four_attempt_ceiling(self):
+        with Battle(scenario([unit("horseman", 0, 16), unit("warrior", 0, 17),
+                              unit("warrior", 1, 21), unit("warrior", 1, 0)], fog=True)) as battle:
+            agent = self.agent(battle)
+            agent._turn = 0
+            agent._search_limit = agent._support_limit = agent._recovery_limit = 30
+            agent._task = {"kind": "combat", "target": 0, "selected": (0,),
+                           "aggression": Aggression.LOW, "attempts": 3}
+            agent._replan = True
+            planning = ScriptedPlanning(plan(assignment(K.MOVE, 0, 16, 19, 60)))
+            self.execute(agent, battle, self.act(agent, battle, planning))
+            self.assertEqual(agent._task["attempts"], 4)
+            agent._next_task = lambda *args: None
+            self.act(agent, battle, planning)
+            self.assertEqual(len(planning.calls), 1)
+            self.assertTrue(any(e["event"] == "task_finished" and e["reason"] == "task_attempt_limit"
+                                for e in agent.drain_diagnostics()))
+
+    def test_real_retreat_enables_low_search_for_slow_shooter(self):
+        with Battle(scenario([unit("archer", 0, 17), unit("warrior", 1, 19)])) as battle:
+            agent = self.agent(battle)
+            agent._search_limit = agent._recovery_limit = 2
+            planning = ScriptedPlanning(plan())
+            own = [u for u in battle.observe(0)["units"] if u["side"] == 0]
+            agent._recover(own, battle.observe(0), planning)
+            self.assertFalse(planning.calls)
+            agent._turn = 0
+            agent._task = {"kind": "recovery", "target": 17, "selected": (0,)}
+            agent._queue.append(assignment(K.MOVE, 0, 17, 16, 60))
+            self.execute(agent, battle, self.act(agent, battle, planning))
+            self.assertIn(0, agent._recovery_moved)
+            own = [u for u in battle.observe(0)["units"] if u["side"] == 0]
+            self.assertGreater(own[0]["moves"], 0)
+            agent._recover(own, battle.observe(0), planning)
+            self.assertEqual(len(planning.calls), 1)
+
 
 @unittest.skipUnless(LIBRARY_PATH.exists(), "Build combat and AI libraries first")
 class RecoveryTests(unittest.TestCase):
@@ -536,21 +635,52 @@ class RecoveryTests(unittest.TestCase):
             self.assertTrue(step.ok)
             self.assertEqual((step.damage, step.retaliation), (record.damage, record.self_damage))
 
-    def test_immediate_attack_even_when_exchange_is_fatal(self):
+    def test_fatal_melee_is_rejected_even_when_legal(self):
         for side in (0, 1):
             for fog in (False, True):
                 with self.subTest(side=side, fog=fog), Battle(scenario([
                         unit("warrior", side, 17, hp=1), unit("warrior", 1-side, 18)], fog=fog)) as battle:
                     if side: self.assertTrue(battle.step(Action("end_turn")).ok)
                     result = self.recover(battle, side)
-                    self.assertEqual(result.diagnostics.recovery_kind, "attack")
-                    self.assertEqual([a.kind for a in result.assignments], [K.MELEE])
+                    self.assertFalse(any(a.kind == K.MELEE for a in result.assignments))
                     self.execute(battle, result)
+                    self.assertGreater(battle.snapshot()["units"][0]["hp"], 0)
 
     def test_approach_then_attack_and_quiet_wait(self):
         with Battle(scenario([unit("warrior", 0, 17), unit("warrior", 1, 19)])) as battle:
             result = self.recover(battle, 0)
             self.assertEqual([a.kind for a in result.assignments], [K.MOVE, K.MELEE])
+            self.execute(battle, result)
+
+    def test_stationary_shot_before_wait_and_half_hp_condition(self):
+        for hp in (100, 50):
+            with self.subTest(hp=hp), Battle(scenario([
+                    unit("archer", 0, 0, hp=hp), unit("warrior", 0, 1, waiting=True),
+                    unit("warrior", 1, 2)], width=3, height=1)) as battle:
+                self.assertIn(Action("ranged", 0, 2), battle.available_actions())
+                result = self.recover(battle, 0)
+                self.assertEqual(result.assignments[0].kind, K.RANGED if hp > 50 else K.FINISH)
+                self.execute(battle, result)
+
+    def test_opportunity_kill_but_not_enemy_cluster_or_bad_exchange(self):
+        for extra in ([], [unit("warrior", 1, 19)]):
+            with self.subTest(cluster=bool(extra)), Battle(scenario([
+                    unit("warrior", 0, 17), unit("warrior", 1, 18, hp=1), *extra])) as battle:
+                result = self.recover(battle, 0)
+                self.assertEqual(any(a.kind == K.MELEE for a in result.assignments), not extra)
+                self.execute(battle, result)
+        with Battle(scenario([unit("warrior", 0, 17, hp=30),
+                              unit("warrior", 1, 18)])) as battle:
+            result = self.recover(battle, 0)
+            self.assertFalse(any(a.kind == K.MELEE for a in result.assignments))
+            self.execute(battle, result)
+
+    def test_firing_does_not_take_movement_needed_for_retreat(self):
+        with Battle(scenario([unit("archer", 0, 17), unit("warrior", 1, 18),
+                              unit("warrior", 1, 19), unit("warrior", 1, 20)])) as battle:
+            self.assertIn(Action("ranged", 0, 18), battle.available_actions())
+            result = self.recover(battle, 0)
+            self.assertEqual(result.assignments[0].kind, K.MOVE)
             self.execute(battle, result)
         with Battle(scenario([unit("warrior", 0, 0), unit("warrior", 1, 39)], fog=True)) as battle:
             result = self.recover(battle, 0)

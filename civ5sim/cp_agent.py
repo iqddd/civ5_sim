@@ -3,6 +3,8 @@
 from collections import deque
 from copy import deepcopy
 from dataclasses import asdict
+from fractions import Fraction
+from itertools import combinations
 
 from civ5map.maps import adjacent, passable
 
@@ -42,6 +44,7 @@ class CPAgent:
             self.planner.close()
 
     def reset(self, context):
+        self._decision_recorder = None
         self.close()
         self.planner = Planner(self.config)
         self.side = context["side"]
@@ -79,6 +82,10 @@ class CPAgent:
         self._replan = False
         self._cancelled_plan = False
         self._searches = 0
+        self._call_searches = 0
+        self._probe_searches = 0
+        self._search_cache = {}
+        self._cache_observation = None
         self._search_limit = 0
         self._support_calls = 0
         self._support_limit = 0
@@ -93,6 +100,8 @@ class CPAgent:
         self._recovery_calls = 0
         self._recovery_limit = 0
         self._recovery_attempts = set()
+        self._recovery_search_attempts = set()
+        self._recovery_moved = set()
         self._retry_count = 0
 
     def _observe(self, observation):
@@ -161,7 +170,23 @@ class CPAgent:
         self._reservations.append(target)
         return target
 
-    def _next_task(self, available, enemies, observation, eligibility=None):
+    def _group_rank(self, task, own, actions):
+        """Coordinator shortlist only; this is not a CP tactical score."""
+        group = [own[uid] for uid in task["selected"]]
+        ready = {a.unit for a in actions if a.kind in ("melee", "ranged")
+                 and a.target == task["target"] and a.unit in task["selected"]}
+        pairs = list(combinations(group, 2))
+        pair_distance = sum(self._distance(a["tile"], b["tile"]) for a, b in pairs)
+        target_distance = sum(self._distance(u["tile"], task["target"]) for u in group)
+        rank = (len(group), len(ready), sum(u["hp"] for u in group),
+                -Fraction(pair_distance, max(1, len(pairs))),
+                -Fraction(target_distance, len(group)), -task["enemy_id"])
+        task["ranking"] = {"participants": len(group), "immediate_attackers": len(ready),
+                           "hp": rank[2], "pair_distance_sum": pair_distance,
+                           "pair_count": len(pairs), "target_distance_sum": target_distance}
+        return rank
+
+    def _next_task(self, available, enemies, observation, eligibility=None, actions=()):
         while self._phase < 4:
             phase = self._phase
             if phase == 1:
@@ -179,23 +204,40 @@ class CPAgent:
                             self._combat_targets.pop(u["id"], None)
                         else:
                             self._combat_targets[u["id"]] = (eid, distance, stalled, now)
+                recorder = getattr(self, "_decision_recorder", None)
+                if recorder is not None:
+                    for enemy in enemies:
+                        recorder.event({"event": "coordinator_eligibility", "enemy": enemy["id"],
+                                        "target": enemy["tile"], "participants": [
+                                            {"unit": u["id"],
+                                             "already_attempted": (u["id"], enemy["id"]) in self._combat_attempts,
+                                             "native_admitted": eligibility is None or u["id"] in eligibility.get(enemy["id"], ()),
+                                             "temporarily_blocked": self._target_blocked.get((u["id"], enemy["id"]), -1) >= now}
+                                            for u in available]}, self._task)
                 pairs = [(self._distance(u["tile"], e["tile"]), e["id"], u["id"], e)
                          for e in enemies for u in available
                          if (u["id"], e["id"]) not in self._combat_attempts
                          and (eligibility is None or u["id"] in eligibility.get(e["id"], ()))
                          and self._target_blocked.get((u["id"], e["id"]), -1) < now]
                 if pairs and self._searches < self._search_limit:
-                    _, eid, _, enemy = min(pairs, key=lambda p: (
+                    _, eid, _, _enemy = min(pairs, key=lambda p: (
                         p[0], self._combat_targets.get(p[2], (None,))[0] != p[1], *p[1:3]))
-                    candidates = [u for u in available if (u["id"], eid) not in self._combat_attempts
-                                  and (eligibility is None or u["id"] in eligibility.get(eid, ()))
-                                  and self._target_blocked.get((u["id"], eid), -1) < now]
-                    selected = self._select(candidates, enemy["tile"])
-                    for u in candidates:
-                        if u["id"] in selected and self._combat_targets.get(u["id"], (None,))[0] != eid:
-                            self._combat_targets[u["id"]] = (
-                                eid, self._distance(u["tile"], enemy["tile"]), 0, now)
-                    return {"kind": "combat", "target": enemy["tile"], "selected": selected}
+                    options = []
+                    own = {u["id"]: u for u in available}
+                    for enemy_id in sorted({p[1] for p in pairs}):
+                        candidate_enemy = by_id[enemy_id]
+                        candidates = [u for u in available if (u["id"], enemy_id) not in self._combat_attempts
+                                      and (eligibility is None or u["id"] in eligibility.get(enemy_id, ()))
+                                      and self._target_blocked.get((u["id"], enemy_id), -1) < now]
+                        options.append({"kind": "combat", "target": candidate_enemy["tile"],
+                                        "enemy_id": enemy_id,
+                                        "selected": self._select(candidates, candidate_enemy["tile"])})
+                    primary = next(t for t in options if t["enemy_id"] == eid)
+                    alternatives = [t for t in options if t is not primary]
+                    self._group_rank(primary, own, actions)
+                    if alternatives:
+                        primary["alternative"] = max(alternatives, key=lambda t: self._group_rank(t, own, actions))
+                    return primary
             else:
                 candidates = [u for u in available if u["id"] not in self._phase_seen[phase]]
                 if candidates:
@@ -249,8 +291,22 @@ class CPAgent:
         self._group = None
         self._replan = False
 
+    def diagnostic_state(self):
+        """Read-only dispatch evidence; never used as an input to decisions."""
+        return {"phase": self._phase, "finished": sorted(self._finished),
+                "task": deepcopy(self._task), "queued_assignments": [asdict(a) for a in self._queue],
+                "searches": self._searches, "search_limit": self._search_limit,
+                "support_calls": self._support_calls, "support_limit": self._support_limit,
+                "recovery_calls": self._recovery_calls, "recovery_limit": self._recovery_limit,
+                "combat_attempts": sorted(self._combat_attempts),
+                "recovery_moved": sorted(self._recovery_moved), "replan": self._replan}
+
     def _event(self, kind, **values):
-        self._events.append({"event": kind, "turn": self._turn, **values})
+        event = {"event": kind, "turn": self._turn, **values}
+        self._events.append(event)
+        recorder = getattr(self, "_decision_recorder", None)
+        if recorder is not None:
+            recorder.event(event, self._task)
 
     def drain_diagnostics(self):
         events, self._events = self._events, []
@@ -275,6 +331,9 @@ class CPAgent:
         return self._issue(Action("end_turn"))
 
     def _issue(self, action):
+        recorder = getattr(self, "_decision_recorder", None)
+        if recorder is not None:
+            recorder.action(action, self._pending[1] if self._pending else None)
         self._event("action", action=asdict(action))
         return action
 
@@ -291,9 +350,38 @@ class CPAgent:
         """One bounded tactical decision, outside normal search/support budgets."""
         state = digest(observation)
         for unit in sorted(available, key=lambda value: value["id"]):
+            # CP PerformRangedOpportunityAttack(true): a normal LOW search,
+            # before fleeing with fast ranged units or after an actual retreat.
+            # Keep it in the ordinary search ceiling; support never nests searches.
+            identity = (state, unit["id"])
+            ranged = unit["type"] in ("archer", "chariot_archer")
+            moving_shot = (unit["type"] == "chariot_archer" and unit["moves"] > 60
+                           or unit["id"] in self._recovery_moved)
+            if (ranged and moving_shot and not unit["attacked"] and self._searches < self._search_limit
+                    and self._call_searches < 2
+                    and identity not in self._recovery_search_attempts):
+                self._recovery_search_attempts.add(identity)
+                self._searches += 1
+                self._call_searches += 1
+                result = planning.search(unit["tile"], (unit["id"],), contacts=self.memory,
+                                         aggression=Aggression.LOW)
+                self._event("search", task_kind="recovery", target=unit["tile"],
+                            selected_units=[unit["id"]], probe=False,
+                            reason=result.reason.value, stats=asdict(result.stats),
+                            assignments=len(result.assignments), replanning=self._cancelled_plan,
+                            diagnostics=asdict(result.diagnostics))
+                if result.reason in (SearchReason.INVALID_REQUEST, SearchReason.NOT_IMPLEMENTED,
+                                     SearchReason.TURN_CHANGED):
+                    raise RuntimeError(f"CP opportunity search failed: {result.reason}")
+                if any(a.kind in (K.MOVE, K.MELEE, K.RANGED, K.SWAP) for a in result.assignments):
+                    self._task = {"kind": "recovery", "target": unit["tile"],
+                                  "selected": (unit["id"],)}
+                    self._group = self._task["selected"]
+                    self._replan = False
+                    self._queue.extend(result.assignments)
+                    return True
             if self._recovery_calls >= self._recovery_limit:
                 return False
-            identity = (state, unit["id"])
             if identity in self._recovery_attempts:
                 continue
             self._recovery_attempts.add(identity)
@@ -316,6 +404,113 @@ class CPAgent:
                 return True
         return False
 
+    @staticmethod
+    def _prefix_value(result, observation):
+        """Compare physical HP changes, never scores from different CP groups.
+
+        RESTART follows the command that exposed an enemy. Later hypothetical
+        commands cannot be relied upon by the real coordinator.
+        """
+        hp = {u["id"]: u["hp"] for u in observation["units"]}
+        occupants = {u["tile"]: u["id"] for u in observation["units"]}
+        enemy_damage = own_damage = enemy_kills = own_kills = 0
+        commands = 0
+        for a in result.assignments:
+            if a.kind == K.RESTART:
+                break
+            if a.kind not in (K.MOVE, K.MELEE, K.RANGED, K.SWAP):
+                continue
+            commands += 1
+            before = hp[a.unit]
+            lost = min(before, a.self_damage)
+            hp[a.unit] -= lost
+            own_damage += lost
+            own_kills += before > 0 and hp[a.unit] == 0
+            if a.kind in (K.MELEE, K.RANGED):
+                victim = occupants[a.command_target]
+                before = hp[victim]
+                lost = min(before, a.damage)
+                hp[victim] -= lost
+                enemy_damage += lost
+                enemy_kills += before > 0 and hp[victim] == 0
+        return {"net_hp": enemy_damage - own_damage, "net_kills": enemy_kills - own_kills,
+                "own_damage": own_damage, "enemy_damage": enemy_damage,
+                "commands": commands}
+
+    def _combat_search(self, task, observation, own, enemies, planning, *, probe=False):
+        target, selected = task["target"], task["selected"]
+        local = [e for e in enemies if hex_distance(self.map, target, e["tile"]) <= 5
+                 or any(hex_distance(self.map, own[uid]["tile"], e["tile"]) <= 4 for uid in selected)]
+        aggression = task.get("aggression")
+        if aggression is None:
+            aggression = self.config.aggression
+            if sum(own[uid]["hp"] for uid in selected) < sum(e["hp"] for e in local):
+                aggression = min(aggression, Aggression.LOW)
+            task["aggression"] = aggression
+        identity = digest({"observation": observation, "target": target, "selected": selected,
+                           "aggression": int(aggression), "config": asdict(self.config),
+                           "contacts": asdict(self.memory)})
+        reused = identity in self._search_cache
+        if reused:
+            result = self._search_cache[identity]
+        else:
+            if probe:
+                self._probe_searches += 1
+            else:
+                self._searches += 1
+                self._call_searches += 1
+            self._event("posture", aggression=Aggression(aggression).name.lower(), target=target)
+            result = planning.search(target, selected, contacts=self.memory, aggression=Aggression(aggression))
+            self._search_cache[identity] = result
+        task["attempts"] = task.get("attempts", 0) + 1
+        if task.get("enemy_id") is not None:
+            self._combat_attempts.update((uid, task["enemy_id"]) for uid in selected)
+        self._event("search_reused" if reused else "search", target=target,
+                    task_kind="combat", selected_units=list(selected), probe=probe,
+                    reason=result.reason.value, stats=asdict(result.stats),
+                    assignments=len(result.assignments), replanning=self._cancelled_plan,
+                    diagnostics=asdict(result.diagnostics))
+        if result.reason in (SearchReason.INVALID_REQUEST, SearchReason.NOT_IMPLEMENTED):
+            raise RuntimeError(f"CP search failed: {result.reason}")
+        return result, reused
+
+    def _choose_combat_plan(self, task, observation, own, enemies, planning):
+        # At most one extra full search per ordinary attempt. Reduced-group
+        # retries do not recursively generate another target comparison.
+        alternative = task.pop("alternative", None)
+        primary_result, primary_reused = self._combat_search(task, observation, own, enemies, planning)
+        choices = [(task, primary_result, primary_reused)]
+        if (alternative is not None and primary_result.reason != SearchReason.TURN_CHANGED
+                and self._probe_searches < self._searches):
+            result, reused = self._combat_search(alternative, observation, own, enemies, planning, probe=True)
+            choices.append((alternative, result, reused))
+        winner = 0
+        rows = []
+        best = None
+        for index, (option, result, reused) in enumerate(choices):
+            value = self._prefix_value(result, observation)
+            key = (bool(result.assignments), value["net_hp"], value["net_kills"], -value["own_damage"])
+            if best is None or key > best:
+                winner, best = index, key
+            rows.append({"target": option["target"], "selected_units": list(option["selected"]),
+                         "ranking": option.get("ranking"), "prefix": value,
+                         "reason": result.reason.value, "stats": asdict(result.stats),
+                         "assignments": len(result.assignments), "reused": reused})
+        chosen, result, _ = choices[winner]
+        # If both are empty, preserve the original diagnostics/reduction path.
+        self._task = chosen
+        self._group = chosen["selected"]
+        for uid in chosen["selected"]:
+            if chosen.get("enemy_id") is not None and self._combat_targets.get(uid, (None,))[0] != chosen["enemy_id"]:
+                self._combat_targets[uid] = (chosen["enemy_id"], self._distance(own[uid]["tile"], chosen["target"]),
+                                             0, own_turn(observation["turn"], observation["active_side"], self.side))
+        self._event("target_comparison", candidates=rows, chosen_target=chosen["target"],
+                    chosen_index=winner, reason="physical_prefix" if winner else "nearest_or_tie")
+        if winner:
+            self._event("task_assigned", task_kind="combat", target=chosen["target"],
+                        selected_units=list(chosen["selected"]))
+        return result
+
     def act_with_planning(self, observation, actions, planning):
         if observation["side"] != self.side or observation["active_side"] != self.side:
             raise ValueError("CP agent called for an inactive side")
@@ -325,6 +520,10 @@ class CPAgent:
             self._new_turn()
             self._turn = observation["turn"]
         self._observe(observation)
+        cache_observation = digest(observation)
+        if self._cache_observation != cache_observation:
+            self._search_cache.clear()
+            self._cache_observation = cache_observation
         if self._pending is not None:
             self._cancel("missing_action_result")
         if self._last_observation is not None and observation != self._last_observation:
@@ -346,7 +545,7 @@ class CPAgent:
             # most 5N physical commands and N distinct unit probes per state.
             # This is a structural ceiling, not a reason to terminate a unit.
             self._recovery_limit = n * (5*n + 1)
-        searches_this_call = 0
+        self._call_searches = 0
         eligibility = None
         while True:
             if self._queue:
@@ -384,7 +583,7 @@ class CPAgent:
                 return self._end("army_exhausted")
             if self._task is not None and not self._replan:
                 self._finish_task("plan_completed", retry_approach=bool(enemies or self._last_seen))
-            if (self._task is None and searches_this_call >= 2
+            if (self._task is None and self._call_searches >= 2
                     and any(action.kind in ("melee", "ranged") for action in actions)
                     and self._recover(available, observation, planning)):
                 continue
@@ -398,12 +597,12 @@ class CPAgent:
                             eligibility[enemy["id"]] = frozenset(recruited)
                             self._event("attack_candidates", target=enemy["tile"],
                                         available_units=list(roster), selected_units=list(recruited))
-                if (self._phase >= 4 and searches_this_call < 2 and self._searches < self._search_limit
+                if (self._phase >= 4 and self._call_searches < 2 and self._searches < self._search_limit
                         and any((unit["id"], enemy["id"]) not in self._combat_attempts
                                 and unit["id"] in eligibility.get(enemy["id"], ())
                                 for unit in available for enemy in enemies)):
                     self._phase = 1
-                self._task = self._next_task(available, enemies, observation, eligibility)
+                self._task = self._next_task(available, enemies, observation, eligibility, actions)
                 if self._task is None:
                     if self._recover(available, observation, planning):
                         continue
@@ -431,7 +630,10 @@ class CPAgent:
             if not selected:
                 self._finish_task("group_exhausted")
                 continue
-            if task["kind"] == "combat" and searches_this_call >= 2 and self._searches < self._search_limit:
+            if task["kind"] == "combat" and task.get("attempts", 0) >= 4:
+                self._finish_task("task_attempt_limit")
+                continue
+            if task["kind"] == "combat" and self._call_searches >= 2 and self._searches < self._search_limit:
                 self._finish_task("call_search_limit")
                 self._phase = 2
                 continue
@@ -451,37 +653,29 @@ class CPAgent:
                 continue
             self._visited.add(identity)
             if task["kind"] == "combat":
-                self._searches += 1
-                searches_this_call += 1
-                enemy_id = next((enemy["id"] for enemy in enemies if enemy["tile"] == target), None)
-                if enemy_id is not None:
-                    self._combat_attempts.update((uid, enemy_id) for uid in selected)
-                local = [e for e in enemies if hex_distance(self.map, target, e["tile"]) <= 5
-                         or any(hex_distance(self.map, own[uid]["tile"], e["tile"]) <= 4 for uid in selected)]
-                aggression = self.config.aggression
-                if sum(own[uid]["hp"] for uid in selected) < sum(e["hp"] for e in local):
-                    aggression = min(aggression, Aggression.LOW)
-                self._event("posture", aggression=Aggression(aggression).name.lower(), target=target)
-                result = planning.search(target, selected, contacts=self.memory,
-                                         aggression=Aggression(aggression))
+                task["selected"] = selected
+                result = self._choose_combat_plan(task, observation, own, enemies, planning)
+                task = self._task
+                target, selected = task["target"], task["selected"]
             else:
                 self._support_calls += 1
                 mode = {"heal_before": SupportMode.HEAL_BEFORE,
                         "heal_after": SupportMode.HEAL_AFTER,
                         "approach": SupportMode.APPROACH}[task["kind"]]
                 result = planning.support(target, selected, contacts=self.memory, mode=mode)
-            self._event("search" if task["kind"] == "combat" else "support", target=target,
-                        task_kind=task["kind"], selected_units=list(selected),
-                        reason=result.reason.value, stats=asdict(result.stats),
-                        assignments=len(result.assignments), replanning=self._cancelled_plan,
-                        diagnostics=asdict(result.diagnostics))
+            if task["kind"] != "combat":
+                self._event("support", target=target, task_kind=task["kind"], selected_units=list(selected),
+                            reason=result.reason.value, stats=asdict(result.stats),
+                            assignments=len(result.assignments), replanning=self._cancelled_plan,
+                            diagnostics=asdict(result.diagnostics))
             self._cancelled_plan = False
             if result.reason in (SearchReason.INVALID_REQUEST, SearchReason.NOT_IMPLEMENTED):
                 raise RuntimeError(f"CP search failed: {result.reason}")
             if result.reason == SearchReason.TURN_CHANGED:
                 return self._end("turn_changed")
             if not result.assignments:
-                if task["kind"] == "combat" and result.diagnostics.bad_units and self._retry_count < 3:
+                if (task["kind"] == "combat" and result.diagnostics.bad_units
+                        and task.get("attempts", 0) < 4):
                     reduced = tuple(uid for uid in selected if uid not in result.diagnostics.bad_units)
                     if reduced and len(reduced) < len(selected):
                         self._event("group_reduced", original_units=list(selected), selected_units=list(reduced),
@@ -498,6 +692,7 @@ class CPAgent:
     def on_action_result(self, action, result, observation):
         """Validate immediately, including the action that ends a battle."""
         self._observe(observation)
+        self._search_cache.clear()  # Even a failed command expires the detached planning snapshot.
         if self._pending is None:
             self._event("action_result", action=asdict(action), reason="turn_ended")
             self._last_observation = deepcopy(observation)
@@ -556,6 +751,8 @@ class CPAgent:
             if reason is None and a.kind == K.MOVE and a.to_tile != a.command_target:
                 reason = "movement_interrupted"
         self._event("action_result", action=asdict(action), reason=reason or "matched")
+        if result.ok and a.kind == K.MOVE and self._task is not None and self._task["kind"] == "recovery":
+            self._recovery_moved.add(a.unit)
         if result.ok and result.damage > 0 and self._task is not None:
             victim = next((u for u in old.values() if u["side"] != self.side and u["tile"] == action.target), None)
             if victim is not None:
@@ -576,7 +773,14 @@ class CPAgent:
             if not result.ok:
                 self._finished.discard(a.unit)
             self._cancel(reason)
-            if reason in ("new_contact", "combat_reconsideration"):
+            if reason == "new_contact" and self._task is not None and self._task["kind"] == "combat":
+                # CP FindAndExecuteBestUnitAssignments retries the same target
+                # and input roster. Availability is filtered on the next call.
+                self._task.pop("alternative", None)
+                self._event("task_restarted", target=self._task["target"],
+                            selected_units=list(self._task["selected"]),
+                            attempts=self._task.get("attempts", 0))
+            elif reason in ("new_contact", "combat_reconsideration"):
                 self._finish_task(reason, retry_approach=True)
                 self._phase = min(self._phase, 1)
                 self._combat_attempts.clear()

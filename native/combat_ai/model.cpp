@@ -1,4 +1,5 @@
 #include "model.h"
+#include "trace.h"
 #include "storage_metrics.h"
 #include "../combat_state.h"
 #include <algorithm>
@@ -613,7 +614,7 @@ class Adapter final : public RulesAdapter {
     enemy_out = export_unit(id, enemy);
     return true;
   }
-  int32_t incoming(const Branch& base, int32_t defender, int32_t target) const {
+  int32_t incoming(const Branch& base, int32_t defender, int32_t target, DecisionTrace* trace) const {
     const auto& position = branch(base);
     unit(position, defender);
     tile(target);
@@ -623,8 +624,10 @@ class Adapter final : public RulesAdapter {
     require(geo->passable(target), "impassable danger tile");
     auto key = std::make_pair(defender, target);
     auto cached = position.danger_cache.find(key);
-    if (cached != position.danger_cache.end())
+    if (cached != position.danger_cache.end()) {
+      if (trace) trace->event("physical_danger_cached", {{"unit",defender},{"tile",target},{"total",cached->second}});
       return cached->second;
+    }
 
     // Only admitted contacts may affect prediction. Never-seen units are
     // removed even from occupancy, support and visibility calculations.
@@ -668,6 +671,7 @@ class Adapter final : public RulesAdapter {
               geo->distance(hidden_origin, target) <= kFogRadius)
             total += kFogDefaultDanger;
 
+    if (trace) trace->event("physical_danger_fog", {{"unit",defender},{"tile",target},{"fog",total}});
     if (projected.units[defender].tile != target) {
       projected.relocate(projected.units[defender], target);
       projected.units[defender].fortified = 0;
@@ -721,10 +725,15 @@ class Adapter final : public RulesAdapter {
           contribution = contribution * kUnseenTargetDamagePercent / kPercent;
         if (attack_result.retaliation >= attacker_at_origin.hp)
           contribution /= kSuicideDamageDivisor;
+        if (trace) trace->event("physical_danger_attack", {{"unit",defender},{"tile",target},{"enemy",id},
+            {"from",from},{"damage",attack_result.damage},{"retaliation",attack_result.retaliation},
+            {"enemy_hp",attacker_at_origin.hp},{"visible",enemy_can_see_target},{"contribution",contribution}});
         max_damage = std::max(max_damage, contribution);
       }
+      if (trace) trace->event("physical_danger_attacker", {{"unit",defender},{"tile",target},{"enemy",id},{"contribution",max_damage}});
       total += max_damage;
     }
+    if (trace) trace->event("physical_danger_total", {{"unit",defender},{"tile",target},{"total",total}});
     position.danger_cache.emplace(key, total);
     return total;
   }
@@ -732,20 +741,21 @@ class Adapter final : public RulesAdapter {
 class Danger final : public DangerModel {
   // Non-owning by contract: make_danger_model requires the adapter to outlive us.
   const Adapter& adapter;
+  DecisionTrace* trace;
 
  public:
-  explicit Danger(const Adapter& value) : adapter(value) {}
+  explicit Danger(const Adapter& value, DecisionTrace* sink) : adapter(value), trace(sink) {}
   int32_t incoming(const Branch& position, int32_t defender, int32_t tile) override {
-    return adapter.incoming(position, defender, tile);
+    return adapter.incoming(position, defender, tile, trace);
   }
 };
 }  // namespace
 std::unique_ptr<RulesAdapter> make_rules_adapter(const CaiBattleState& state, int32_t observer) {
   return std::make_unique<Adapter>(state, observer);
 }
-std::unique_ptr<DangerModel> make_danger_model(const RulesAdapter& adapter) {
+std::unique_ptr<DangerModel> make_danger_model(const RulesAdapter& adapter, DecisionTrace* trace) {
   auto* concrete = dynamic_cast<const Adapter*>(&adapter);
   require(concrete != nullptr, "unsupported danger adapter");
-  return std::make_unique<Danger>(*concrete);
+  return std::make_unique<Danger>(*concrete, trace);
 }
 }  // namespace combat_ai

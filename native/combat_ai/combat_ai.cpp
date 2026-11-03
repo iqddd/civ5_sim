@@ -92,8 +92,22 @@ bool valid_request(const CaiSearchRequest& r, int32_t max_selected = CAI_MAX_SEL
 }
 }  // namespace
 
+int32_t cai_trace_enable(CaiContext* context, int32_t enabled, int32_t max_bytes) {
+  if (!context || !bit(enabled) || max_bytes < 0) return CAI_BAD_ARGUMENT;
+  auto& trace = context->workspace.trace;
+  trace.enabled = enabled != 0;
+  trace.limit = size_t(max_bytes);
+  trace.reset();
+  return CAI_OK;
+}
+const char* cai_trace_data(const CaiContext* context) {
+  return context ? context->workspace.trace.data.c_str() : nullptr;
+}
+int32_t cai_trace_status(const CaiContext* context) {
+  return context ? int32_t(context->workspace.trace.truncated) : -1;
+}
 int32_t cai_abi(void) { return CAI_ABI; }
-const char* cai_version(void) { return "civ5sim.combat_ai/0.9.3 CP-07"; }
+const char* cai_version(void) { return "civ5sim.combat_ai/0.9.6 CP-07"; }
 CaiConfig cai_default_config(void) { return {6000, 2560, 5, 5, CAI_MEDIUM, 1, 0, 1}; }
 CaiContext* cai_new(const CaiConfig* config) {
   if (!config || !valid_config(*config)) return nullptr;
@@ -103,6 +117,7 @@ void cai_free(CaiContext* context) { delete context; }
 static int32_t run_plan(CaiContext* context, const CaiSearchRequest* request, int mode,
                    CaiAssignment* assignments, int32_t capacity,
                    CaiSearchResult* result) {
+  if (context) context->workspace.trace.reset();
   if (result) *result = {CAI_INVALID_REQUEST, 0, {0, 0, 0, 0, 0}};
   if (context) context->workspace.diagnostics = {};
   if (!context || !request || !result || capacity < 0 ||
@@ -118,8 +133,8 @@ static int32_t run_plan(CaiContext* context, const CaiSearchRequest* request, in
       auto config = context->config;
       if (request->aggression_override) config.aggression = request->aggression_override - 1;
       auto plan = mode < 0 ? combat_ai::find_assignments(context->workspace, config, *request)
-                 : mode == CAI_RECOVERY ? combat_ai::recovery_assignments(*request,context->workspace.diagnostics)
-                 : combat_ai::support_assignments(*request, mode);
+                 : mode == CAI_RECOVERY ? combat_ai::recovery_assignments(*request,context->workspace.diagnostics,context->workspace.trace.enabled ? &context->workspace.trace : nullptr)
+                 : combat_ai::support_assignments(*request, mode, context->workspace.trace.enabled ? &context->workspace.trace : nullptr);
       *result = plan.result;
       if (capacity < result->assignment_count) return CAI_BUFFER_TOO_SMALL;
       std::copy(plan.assignments.begin(), plan.assignments.end(), assignments);
@@ -150,13 +165,14 @@ int32_t cai_search_diagnostics(const CaiContext* context, CaiSearchDiagnostics* 
 }
 int32_t cai_attack_candidates(const CaiContext* context, const CaiSearchRequest* request,
                               int32_t* units, int32_t capacity, int32_t* count) {
+  if (context) const_cast<CaiContext*>(context)->workspace.trace.reset();
   if (count) *count = 0;
   if (!context || !request || !count || capacity < 0 || (capacity && !units))
     return CAI_BAD_ARGUMENT;
   try {
     if (!valid_request(*request,512) || request->expected_turn != request->state->turn ||
         request->side != request->state->active_side) return CAI_BAD_ARGUMENT;
-    auto selected = combat_ai::attack_candidates(*request);
+    auto selected = combat_ai::attack_candidates(*request, context->workspace.trace.enabled ? &const_cast<CaiContext*>(context)->workspace.trace : nullptr);
     *count = int32_t(selected.size());
     if (capacity < *count) return CAI_BUFFER_TOO_SMALL;
     std::copy(selected.begin(),selected.end(),units);

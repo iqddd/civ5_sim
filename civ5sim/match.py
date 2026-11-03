@@ -123,6 +123,7 @@ class MatchOutcome:
     result: dict
     replay: dict
     final: dict
+    diagnostic_recorder: object = None
 
     def save(self, directory):
         """Write replay and snapshot first, result last as the completion record."""
@@ -134,9 +135,11 @@ class MatchOutcome:
                 json.dumps(getattr(self, name), ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+        if self.diagnostic_recorder is not None:
+            self.diagnostic_recorder.save(directory, self.replay)
 
 
-def run_match(config, agents, *, metrics=None):
+def run_match(config, agents, *, metrics=None, diagnostics="off"):
     """Run two agent objects/specifications and return privileged match artifacts.
 
     Invalid configuration raises before invoking agents. Agent failures instead
@@ -144,6 +147,8 @@ def run_match(config, agents, *, metrics=None):
     metrics, when supplied, receives wall-clock sample dictionaries separately
     from the deterministic result/replay. Collectors must not raise exceptions.
     """
+    from .decision_diagnostics import recorder
+    recording = recorder(diagnostics)
     scenario = create_scenario(config)
     config = deepcopy(config)
     agents = list(agents)
@@ -208,6 +213,8 @@ def run_match(config, agents, *, metrics=None):
                     if not agents[side].planner._handle:
                         raise ValueError("PlanningAgent Planner is closed")
             except Exception as exc:  # noqa: BLE001 -- agent boundary saves failed matches
+                if recording is not None:
+                    recording.failure("reset", exc)
                 status, reason = "error", "agent_error"
                 error = {
                     "side": side,
@@ -243,6 +250,8 @@ def run_match(config, agents, *, metrics=None):
             try:
                 with measure(metrics, "prepare_observation", side=side, turn=completed_turns):
                     observation = battle.observe(side)
+                if recording is not None:
+                    recording.begin(commands + 1, side, observation, agents[side])
                 if callable(getattr(agents[side], "act_with_planning", None)):
                     from .combat_ai import CallPlanningServices, PlanningState
 
@@ -259,8 +268,12 @@ def run_match(config, agents, *, metrics=None):
                 else:
                     with measure(metrics, "act", side=side, turn=completed_turns):
                         selected = agents[side].act(observation, actions)
+                if recording is not None:
+                    recording.end(selected)
                 collect_events(side)
             except Exception as exc:  # noqa: BLE001 -- agent boundary saves failed matches
+                if recording is not None:
+                    recording.failure("act", exc)
                 status, reason = "error", "agent_error"
                 error = {
                     "side": side,
@@ -276,6 +289,8 @@ def run_match(config, agents, *, metrics=None):
                         "Agent returned an action outside available_actions"
                     )
             except (TypeError, ValueError) as exc:
+                if recording is not None:
+                    recording.failure("action_validation", exc)
                 status, reason = "error", "invalid_action"
                 error = {
                     "side": side,
@@ -297,6 +312,8 @@ def run_match(config, agents, *, metrics=None):
                         callback(action, step, battle.observe(side))
                 collect_events(side)
             except Exception as exc:  # noqa: BLE001 -- preserve the executed prefix
+                if recording is not None:
+                    recording.failure("on_action_result", exc)
                 status, reason = "error", "agent_error"
                 error = {"side": side, "phase": "on_action_result",
                          "message": f"{type(exc).__name__}: {exc}"}
@@ -328,4 +345,4 @@ def run_match(config, agents, *, metrics=None):
             "initial_state_sha256": digest(replay["initial"]),
             "final_state_sha256": digest(final),
         }
-    return MatchOutcome(result, replay, final)
+    return MatchOutcome(result, replay, final, recording)

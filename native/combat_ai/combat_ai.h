@@ -90,6 +90,11 @@ typedef struct CaiSearchDiagnostics {
 } CaiSearchDiagnostics;
 typedef struct CaiContext CaiContext;
 
+/* Optional context-local JSONL trace. Pointer valid until next native call.
+   No layout/ABI change. status: 0 complete, 1 truncated, -1 invalid context. */
+CAI_API int32_t cai_trace_enable(CaiContext*, int32_t enabled, int32_t max_bytes);
+CAI_API const char* cai_trace_data(const CaiContext*);
+CAI_API int32_t cai_trace_status(const CaiContext*);
 CAI_API int32_t cai_abi(void);
 CAI_API const char* cai_version(void); /* Library-owned static UTF-8 string. */
 CAI_API CaiConfig cai_default_config(void);
@@ -112,7 +117,8 @@ CAI_API int32_t cai_search_diagnostics(const CaiContext*, CaiSearchDiagnostics*)
    Up to 512 distinct own living candidate IDs. Returns an ordered subset.
    Invalid/stale requests return BAD_ARGUMENT; insufficient output capacity
    returns BUFFER_TOO_SMALL with the required count and no partial output.
-   Does not mutate the snapshot, workspace, or last search diagnostics. */
+   Does not mutate the snapshot, search workspace, or last search diagnostics.
+   If tracing is enabled, replaces the trace with recruitment events. */
 CAI_API int32_t cai_attack_candidates(const CaiContext*, const CaiSearchRequest*,
                                       int32_t* units, int32_t capacity, int32_t* count);
 

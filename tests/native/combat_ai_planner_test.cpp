@@ -17,6 +17,8 @@ using namespace combat_rules;
 #define CHECK(x) do { if (!(x)) throw std::runtime_error( \
   std::string(__func__) + ":" + std::to_string(__LINE__) + ": " #x); } while (false)
 
+bool diagnostic_parity = false;
+
 struct Fixture {
   int w = 7, h = 5, fog = 0, parity = 0, wrap = 0, turn = 0;
   std::vector<CaiTile> tiles = std::vector<CaiTile>(35, CaiTile{});
@@ -53,7 +55,19 @@ struct Fixture {
   Plan search(int target) {
     SearchWorkspace work;
     CaiSearchRequest request{&state,0,turn,target,selected.data(),int32_t(selected.size()),{0,-1,nullptr,0}};
-    return find_assignments(work,config,request);
+    auto plan = find_assignments(work,config,request);
+    if (diagnostic_parity) {
+      SearchWorkspace traced;
+      traced.trace.enabled = true;
+      auto repeated = find_assignments(traced,config,request);
+      CHECK(std::memcmp(&plan.result,&repeated.result,sizeof(plan.result)) == 0);
+      CHECK(plan.assignments.size() == repeated.assignments.size());
+      for (size_t i = 0; i < plan.assignments.size(); ++i)
+        CHECK(std::memcmp(&plan.assignments[i],&repeated.assignments[i],sizeof(CaiAssignment)) == 0);
+      CHECK(traced.trace.data.find("search_result") != std::string::npos);
+      CHECK(!traced.trace.truncated);
+    }
+    return plan;
   }
   Plan support(int target, int mode) {
     CaiSearchRequest request{&state,0,turn,target,selected.data(),int32_t(selected.size()),{0,-1,nullptr,0}};
@@ -357,6 +371,71 @@ void cp_blocker_combinations() {
   f.position.slot_states[SlotIdx{1}]=SlotState::Finished;
   auto ended=f.tactics->board(f.position);
   CHECK(ended.plots[16].end && ended.plots[15].friends_end==1);
+}
+void cp_predicted_kill_end_danger() {
+  // A wounded shooter can remove the only source of danger. The victim must
+  // not reject its own killing shot before candidate execution (338 report).
+  Fixture f; f.config.risk_budget_per_kill=0;
+  f.add(1,0,16,22); f.add(3,1,17,4); f.start();
+  TacticalFixture context(f,17); SlotIdx slot{0};
+  CHECK(context.tactics->safe[slot]>0);
+  CHECK(context.tactics->danger(0,16,0,{})>22);
+  CHECK(context.tactics->danger(0,16,0,{1})==0);
+  CHECK(context.position.slot_states[slot]==SlotState::Pending);
+  auto board=context.tactics->board(context.position);
+  auto choices=context.tactics->preferred(context.position,board,slot,40);
+  CHECK(std::any_of(choices.begin(),choices.end(),[](CpMove move) {
+    return move.kind==CP_RANGED && move.tile==17 && move.kill && move.near_kill==1;
+  }));
+  CHECK(std::any_of(choices.begin(),choices.end(),[&](CpMove move) {
+    return move.kind==CP_MOVE && move.remaining>0 && move.near_kill==1 &&
+           context.tactics->danger(0,move.tile,0,{})>22;
+  })); // Move+kill must use the restored CP potential-victim output too.
+  auto plan=f.search(17);
+  auto killed=f.replay(plan);
+  CHECK(killed->state().units[0].hp==22 && killed->state().units[1].hp==0);
+  CHECK(std::any_of(plan.assignments.begin(),plan.assignments.end(),[](CaiAssignment a) {
+    return a.kind==CAI_RANGED && a.killed_unit==1;
+  }));
+  CHECK(f.root->state().units[1].hp==4 && f.root->state().units[0].moves==120);
+
+  // Removing the proposed victim must retain threats from other enemies.
+  Fixture remaining; remaining.config.risk_budget_per_kill=0;
+  remaining.add(1,0,16,22); remaining.add(3,1,17,4); remaining.add(3,1,10);
+  remaining.start(); TacticalFixture unsafe(remaining,17);
+  CHECK(unsafe.tactics->safe[slot]>0);
+  CHECK(unsafe.tactics->danger(0,16,0,{1})>22);
+  // Admission may already exclude a unit with no acceptable attack. Inspect
+  // its preferences separately from that root pruning.
+  unsafe.position.slot_states[slot]=SlotState::Pending;
+  auto dangerous=unsafe.tactics->preferred(unsafe.position,unsafe.tactics->board(unsafe.position),slot,40);
+  CHECK(std::none_of(dangerous.begin(),dangerous.end(),[](CpMove move) {
+    return move.kind==CP_RANGED && move.tile==17;
+  }));
+
+  // An ordinary nonlethal shot does not remove its target from danger.
+  Fixture nonlethal; nonlethal.config.risk_budget_per_kill=0;
+  nonlethal.add(1,0,16,22); nonlethal.add(3,1,17); nonlethal.start();
+  TacticalFixture ordinary(nonlethal,17);
+  ordinary.position.slot_states[slot]=SlotState::Pending;
+  auto no_kill=ordinary.tactics->preferred(ordinary.position,ordinary.tactics->board(ordinary.position),slot,40);
+  CHECK(std::none_of(no_kill.begin(),no_kill.end(),[](CpMove move) { return move.kind==CP_RANGED; }));
+
+  // CP's near-kill assumption is preliminary only. An actual survivor must
+  // still participate in the final check of an executed search branch.
+  Fixture near; near.config.risk_budget_per_kill=0;
+  near.add(1,0,16,22); near.add(3,1,17,28); near.start();
+  TacticalFixture almost(near,17);
+  CHECK(almost.tactics->danger(0,16,0,{})>22);
+  auto near_choices=almost.tactics->preferred(almost.position,almost.tactics->board(almost.position),slot,40);
+  CHECK(std::any_of(near_choices.begin(),near_choices.end(),[](CpMove move) {
+    return move.kind==CP_RANGED && !move.kill && move.near_kill==1;
+  }));
+  auto near_plan=near.search(17);
+  CHECK(std::none_of(near_plan.assignments.begin(),near_plan.assignments.end(),[](CaiAssignment a) {
+    return a.kind==CAI_RANGED && a.from_tile==16;
+  }));
+  near.replay(near_plan);
 }
 void cp_forecast_and_danger() {
   // Cross-check the pure strength query against the unchanged physical
@@ -1254,10 +1333,34 @@ void cp_context_invariants() {
   CHECK(cai_attack_candidates(nullptr,&request,&output,1,&count)==CAI_BAD_ARGUMENT && count==0);
 }
 
+void diagnostic_trace() {
+  diagnostic_parity = true;
+  attacks();
+  swaps_and_freeing();
+  risk();
+  contact();
+  planner_root_exclusion();
+  planner_blocked_handoff();
+  planner_combo_contacts();
+  budgets_and_determinism();
+  random_replay();
+  diagnostic_parity = false;
+  DecisionTrace trace;
+  trace.enabled = true;
+  trace.limit = 1;
+  trace.event("test");
+  CHECK(trace.truncated && trace.data.empty());
+  trace.reset();
+  CHECK(!trace.truncated && trace.data.empty());
+  CHECK(cai_trace_enable(nullptr,1,100) == CAI_BAD_ARGUMENT);
+  CHECK(cai_trace_data(nullptr) == nullptr && cai_trace_status(nullptr) == -1);
+}
+
 int main(int argc,char** argv) {
   try {
     std::string name=argc>1?argv[1]:"";
-    if(name=="attacks") attacks();
+    if(name=="diagnostic_trace") diagnostic_trace();
+    else if(name=="attacks") attacks();
     else if(name=="swaps_and_freeing") swaps_and_freeing();
     else if(name=="risk") risk();
     else if(name=="cover_and_retreat") cover_and_retreat();
@@ -1270,6 +1373,7 @@ int main(int argc,char** argv) {
     else if(name=="cp_area_and_preferences") cp_area_and_preferences();
     else if(name=="cp_blocker_combinations") cp_blocker_combinations();
     else if(name=="cp_forecast_and_danger") cp_forecast_and_danger();
+    else if(name=="cp_predicted_kill_end_danger") cp_predicted_kill_end_danger();
     else if(name=="cp_history_and_admission") cp_history_and_admission();
     else if(name=="cp_area_capacity") cp_area_capacity();
     else if(name=="planner_invariants") planner_invariants();

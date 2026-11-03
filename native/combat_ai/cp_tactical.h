@@ -96,10 +96,16 @@ class CpTactics {
   };
   EndScore turn_end(const CpBoard &, SlotIdx slot, int tile, EndQuery) const;
   CpMove attack(const TacticalPosition &, const CpBoard &, SlotIdx slot, int from, int enemy);
-  int potential(const TacticalPosition &, const CpBoard &, SlotIdx slot, int tile, int num_attacks);
+  struct PotentialAttackScore {
+    int score = 0;
+    int assumed_victim = -1;
+  };
+  PotentialAttackScore potential(const TacticalPosition &, const CpBoard &, SlotIdx slot,
+                                 int tile, int num_attacks);
   bool can_end(const TacticalPosition &, const CpBoard &, SlotIdx slot, const CpMove &, int tile);
 
 public:
+  DecisionTrace* trace = nullptr;
   const TacticalView initial;
   SlotValues<int32_t> roles, safe, initial_distance;
   std::vector<int> initial_enemies;

@@ -210,7 +210,9 @@ def diagnostics(replay, config):
             turn_events = [e for e in events if e["turn"] == turn]
             # Initial army size is a safe upper bound on available units each turn.
             n = sum(u["side"] == side for u in replay["initial"]["units"])
-            if (sum(e["event"] == "search" for e in turn_events) > 2*n + (n+12)//13 or
+            ordinary = sum(e["event"] == "search" and not e.get("probe", False) for e in turn_events)
+            probes = sum(e["event"] == "search" and e.get("probe", False) for e in turn_events)
+            if (ordinary > 2*n + (n+12)//13 or probes > ordinary or
                 sum(e["event"] == "support" for e in turn_events) > 3*n + (n+12)//13):
                 raise AssertionError("Coordinator request budget exceeded")
             if sum(e["event"] == "recovery" for e in turn_events) > n * (5*n + 1):

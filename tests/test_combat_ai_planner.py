@@ -17,6 +17,9 @@ class LocalPlannerTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_diagnostic_trace_preserves_search_and_assignments(self):
+        self.check_native("diagnostic_trace")
+
     def test_focus_fire_and_finishing(self):
         self.check_native("attacks")
 
@@ -64,6 +67,9 @@ class LocalPlannerTests(unittest.TestCase):
 
     def test_cp_pinned_forecast_parameters_and_root_danger_index(self):
         self.check_native("cp_forecast_and_danger")
+
+    def test_predicted_kill_removes_only_its_victim_from_preliminary_danger(self):
+        self.check_native("cp_predicted_kill_end_danger")
 
     def test_cp_damage_history_predicate_and_admission_before_neighborhoods(self):
         self.check_native("cp_history_and_admission")

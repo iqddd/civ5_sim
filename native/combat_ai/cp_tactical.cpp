@@ -136,9 +136,18 @@ int CpTactics::danger(int unit, int tile, int self_damage, const std::vector<int
   ignored.erase(std::unique(ignored.begin(), ignored.end()), ignored.end());
   std::vector<int> key{unit, tile, self_damage};
   key.insert(key.end(), ignored.begin(), ignored.end());
+  if (trace) {
+    trace->event("danger_query", {{"unit",unit},{"tile",tile},{"self_damage",self_damage}});
+    for (int id : ignored) trace->event("danger_ignored", {{"unit",unit},{"tile",tile},{"enemy",id}});
+  }
   auto cached = danger_cache.find(key);
-  if (cached != danger_cache.end())
+  if (cached != danger_cache.end()) {
+    if (trace) trace->event("danger_cached", {{"unit",unit},{"tile",tile},{"self_damage",self_damage},{"total",cached->second}});
     return cached->second;
+  }
+  if (trace) {
+    trace->event("danger_begin", {{"unit",unit},{"tile",tile},{"self_damage",self_damage},{"fog",fog_danger[tile]}});
+  }
   int total = fog_danger[tile];
   bool visible = enemy_can_see(tile);
   for (int enemy : attackers[tile]) {
@@ -152,8 +161,12 @@ int CpTactics::danger(int unit, int tile, int self_damage, const std::vector<int
       contribution = contribution * 80 / 100;
     if (forecast.retaliation >= enemy_unit.hp)
       contribution /= 2;
+    if (trace) trace->event("danger_attacker", {{"unit",unit},{"tile",tile},{"enemy",enemy},
+        {"damage",forecast.damage},{"retaliation",forecast.retaliation},{"enemy_hp",enemy_unit.hp},
+        {"visible",visible},{"unknown_origin",unknown},{"contribution",contribution}});
     total += contribution;
   }
+  if (trace) trace->event("danger_total", {{"unit",unit},{"tile",tile},{"total",total}});
   danger_cache.emplace(std::move(key), total);
   return total;
 }
@@ -299,10 +312,13 @@ EndScore CpTactics::turn_end(const CpBoard &board, SlotIdx slot, int tile, EndQu
                 int(query.assume_extra_friend);
   bool acceptable = !(plot.enemies > 3 || (plot.enemies == 3 && bias < 1.f));
   int incoming_damage = query.incoming_damage;
-  if (cover(board, tile))
+  bool covered = cover(board, tile);
+  if (covered)
     incoming_damage /= 2;
   if (plot.edge)
     incoming_damage = std::max(50, incoming_damage);
+  int adjusted_danger = incoming_damage;
+  int threshold_factor = 0;
   int score = 0;
   int remaining_hp = std::max(1, now.hp - query.extra_self_damage);
   if (incoming_damage > 0) {
@@ -313,6 +329,7 @@ EndScore CpTactics::turn_end(const CpBoard &board, SlotIdx slot, int tile, EndQu
       int minimum_hp_factor = query.killed_enemy || safe[slot] == 0 ? 23 : 42;
       if (board.enemies.size() == 1 && query.killed_enemy)
         minimum_hp_factor = 12;
+      threshold_factor = minimum_hp_factor;
       if (remaining_hp * (friends + 1) < minimum_hp_factor * incoming_damage / remaining_hp)
         acceptable = false;
     }
@@ -337,6 +354,13 @@ EndScore CpTactics::turn_end(const CpBoard &board, SlotIdx slot, int tile, EndQu
   if (!enemy_can_see(tile))
     ++score;
   score += adapter.defense(tile) / 5;
+  if (trace) trace->event("turn_end", {{"unit",now.id},{"tile",tile},{"hp",remaining_hp},
+      {"danger",query.incoming_damage},{"adjusted_danger",adjusted_danger},{"friends",friends},
+      {"finished_friends",query.friend_count == FriendCount::Finished},{"enemies",plot.enemies},
+      {"edge",plot.edge},{"covered",covered},{"assume_extra_friend",query.assume_extra_friend},
+      {"root_hp",original.hp},{"safe_plots",safe[slot]},{"killed_enemy",query.killed_enemy},
+      {"threshold_factor",threshold_factor},{"hp_support",remaining_hp*(friends+1)},
+      {"threshold",threshold_factor*adjusted_danger/remaining_hp},{"acceptable",acceptable},{"score",score}});
   return {score, acceptable};
 }
 MoveScore CpTactics::move_score(const TacticalPosition &position, const CpBoard &board, SlotIdx slot,
@@ -377,6 +401,8 @@ MoveScore CpTactics::move_score(const TacticalPosition &position, const CpBoard 
     situational_score += visibility_score[tile];
   result.move.score = base_score + situational_score + remaining_moves / kMoveDenominator;
   result.acceptable = true;
+  if (trace) trace->event("move_score", {{"unit",now.id},{"tile",tile},{"mode",int(mode)},
+      {"formation",base_score},{"situational",situational_score},{"remaining",remaining_moves},{"score",result.move.score}});
   return result;
 }
 CpMove CpTactics::attack(const TacticalPosition &position, const CpBoard &board, SlotIdx slot, int from,
@@ -388,8 +414,10 @@ CpMove CpTactics::attack(const TacticalPosition &position, const CpBoard &board,
   result.tile = enemy_unit.tile;
   result.kind = ranged(now.type) ? CP_RANGED : CP_MELEE;
   auto forecast = damage(now.id, from, enemy, enemy_unit.tile, root_unit(UnitId{enemy}).hp - enemy_unit.hp);
-  if (forecast.code)
+  if (forecast.code) {
+    if (trace) trace->event("attack_forecast_invalid", {{"unit",now.id},{"from",from},{"enemy",enemy},{"error",forecast.code}});
     return result;
+  }
   int dealt = forecast.damage, received = forecast.retaliation;
   if (!ranged(now.type)) {
     // Contract: docs/combat-ai-contract.md#hypothetical-flanking.
@@ -423,16 +451,24 @@ CpMove CpTactics::attack(const TacticalPosition &position, const CpBoard &board,
     if (config.aggression == CAI_NONE ||
         ((incoming > 100 || root_unit(UnitId{now.id}).hp - received < hp_limit[config.aggression]) &&
          damage_delta < 0 && !result.kill) ||
-        (root_unit(UnitId{now.id}).hp - received < 3 && config.aggression != CAI_BRAVEHEART))
+        (root_unit(UnitId{now.id}).hp - received < 3 && config.aggression != CAI_BRAVEHEART)) {
+      if (trace) trace->event("attack_exchange_rejected", {{"unit",now.id},{"from",from},{"enemy",enemy},
+          {"incoming",incoming},{"damage_delta",damage_delta},{"hp",root_unit(UnitId{now.id}).hp},
+          {"received",received},{"hp_limit",hp_limit[config.aggression]},{"aggression",config.aggression}});
       return result;
+    }
   }
+  if (trace) trace->event("attack_score", {{"unit",now.id},{"from",from},{"enemy",enemy},
+      {"forecast_damage",forecast.damage},{"forecast_received",forecast.retaliation},
+      {"score",dealt},{"received",received},{"kill",result.kill},{"near_kill",result.near_kill}});
   result.score = dealt;
   result.self_damage = received;
   return result;
 }
-int CpTactics::potential(const TacticalPosition &position, const CpBoard &board, SlotIdx slot, int tile,
-                         int num_attacks) {
+CpTactics::PotentialAttackScore CpTactics::potential(const TacticalPosition &position,
+    const CpBoard &board, SlotIdx slot, int tile, int num_attacks) {
   const auto &now = current_unit(board, slot);
+  PotentialAttackScore result;
   int best_score = 0;
   for (int enemy_id : board.enemies) {
     int destination = board.view.units[enemy_id].tile, distance = adapter.distance(tile, destination);
@@ -446,23 +482,35 @@ int CpTactics::potential(const TacticalPosition &position, const CpBoard &board,
     auto value = attack(position, board, slot, tile, enemy_id);
     if (value.kill && num_attacks > 0 && value.score > 0) {
       value.score += 100;
+      // CP:7052-7057 records the last qualifying victim, not necessarily
+      // the highest-scoring attack. A move can anticipate one kill this turn.
+      result.assumed_victim = value.near_kill;
     }
     best_score = std::max(best_score, value.score);
   }
-  // CP:7052-7057 also returns the last predicted victim, but turn-end only
-  // writes that ID to an unused list (7092-7094). Remove that dead output;
-  // attack() still uses near-kill in its effective danger calculation.
-  return num_attacks > 0 ? num_attacks * best_score / 2 : best_score / 4;
+  result.score = num_attacks > 0 ? num_attacks * best_score / 2 : best_score / 4;
+  return result;
 }
 bool CpTactics::can_end(const TacticalPosition &position, const CpBoard &board, SlotIdx slot,
                         const CpMove &move, int tile) {
-  if (!board.plots[tile].valid)
+  if (!board.plots[tile].valid) {
+    if (trace) trace->event("end_precheck_invalid_plot", {{"unit",move.unit},{"tile",tile}});
     return false;
-  if (safe[slot] == 0)
+  }
+  if (safe[slot] == 0) {
+    if (trace) trace->event("end_precheck_no_safe_plot", {{"unit",move.unit},{"tile",tile}});
     return true;
+  }
   const auto &now = current_unit(board, slot);
   EndQuery query;
-  query.incoming_damage = danger(move.unit, tile, root_unit(slot).hp - now.hp, position.killed);
+  // CP:10121 passes the assumed victim to ScoreCombatUnitTurnEnd, but that
+  // function only fills an unused gEnemiesToIgnore (7092-7094). Recompute
+  // danger with the same near-kill assumption used by ScoreAttackDamage;
+  // otherwise the proposed victim can veto the attack that would remove it.
+  auto ignored = position.killed;
+  if (move.near_kill >= 0)
+    ignored.push_back(move.near_kill);
+  query.incoming_damage = danger(move.unit, tile, root_unit(slot).hp - now.hp, ignored);
   query.killed_enemy = move.kill;
   query.extra_self_damage = move.self_damage;
   query.friend_count = FriendCount::Finished;
@@ -516,20 +564,29 @@ std::vector<CpMove> CpTactics::preferred(const TacticalPosition &position, const
     return moves;
   for (auto reach : move_plots(position, board, slot)) {
     int tile = reach.tile;
+    if (trace) trace->event("consider_destination", {{"unit",now.id},{"tile",tile},{"remaining",reach.remaining_moves}});
     if ((CAI_CP_AREA && adapter.distance(target, tile) > kMaxDestinationDistance) ||
-        !board.plots[tile].valid || board.plots[tile].blocked)
+        !board.plots[tile].valid || board.plots[tile].blocked) {
+      if (trace) trace->event("destination_area_rejected", {{"unit",now.id},{"tile",tile},
+          {"valid",board.plots[tile].valid},{"blocked",board.plots[tile].blocked}});
       continue;
+    }
     if (board.plots[tile].enemy >= 0) {
       if (config.aggression == CAI_NONE || ranged(now.type) || now.attacked ||
-          adapter.distance(now.tile, tile) > 1)
+          adapter.distance(now.tile, tile) > 1) {
+        if (trace) trace->event("melee_intent_rejected", {{"unit",now.id},{"tile",tile},
+            {"aggression",config.aggression},{"ranged",ranged(now.type)},{"attacked",now.attacked}});
         continue;
+      }
       auto attack_move = attack(position, board, slot, now.tile, board.plots[tile].enemy);
       if (attack_move.score < 0)
         continue;
       attack_move.remaining = adapter.attack_moves(*position.branch, {combat_rules::MELEE, now.id, tile});
       int after = attack_move.kill ? tile : now.tile;
-      if (attack_move.kill && board.plots[tile].enemies > 3)
+      if (attack_move.kill && board.plots[tile].enemies > 3) {
+        if (trace) trace->event("kill_destination_surrounded", {{"unit",now.id},{"tile",tile},{"enemies",board.plots[tile].enemies}});
         continue;
+      }
       if (attack_move.remaining == 0 && !can_end(position, board, slot, attack_move, after))
         continue;
       attack_move.score =
@@ -571,30 +628,38 @@ std::vector<CpMove> CpTactics::preferred(const TacticalPosition &position, const
           if (can_fortify(now.type))
             move.score += 23;
         }
-        move.score += potential(position, board, slot, tile, 1) * 10;
+        // CP's stay/FINISH branch intentionally discards the potential victim.
+        move.score += potential(position, board, slot, tile, 1).score * 10;
         move.kind = CP_FINISH_TEMP;
         moves.push_back(move);
       }
     } else {
       // Contract: docs/combat-ai-contract.md#continuation.
-      if (position.move_flags[slot] != MoveFlag::None || board.plots[tile].end)
+      if (position.move_flags[slot] != MoveFlag::None || board.plots[tile].end) {
+        if (trace) trace->event("continuation_rejected", {{"unit",now.id},{"tile",tile},
+            {"move_flag",int(position.move_flags[slot])},{"plot_end",board.plots[tile].end}});
         continue;
+      }
       int num_attacks =
           now.attacked ? 0 : std::min(1, (reach.remaining_moves + kMoveDenominator - 1) / kMoveDenominator);
       // Preserve CP's arithmetic with kCpImpossibleScore and attack bonuses.
-      move.score += potential(position, board, slot, tile, num_attacks) * 10;
+      auto potential_attack = potential(position, board, slot, tile, num_attacks);
+      move.score += potential_attack.score * 10;
+      move.near_kill = potential_attack.assumed_victim;
       if ((move.remaining > kMoveDenominator && can_move_after_attacking(now.type)) ||
           can_end(position, board, slot, move, tile)) {
         moves.push_back(move);
       }
     }
   }
+  if (trace) for (const auto& move : shots) trace->event("shot_before_limit", {{"unit",move.unit},{"tile",move.tile},{"score",move.score}});
   if (int(shots.size()) >= limit && limit > 1) {
     std::stable_sort(shots.begin(), shots.end(), better);
     shots.resize(limit - 1);
   }
   moves.insert(moves.end(), shots.begin(), shots.end());
   std::stable_sort(moves.begin(), moves.end(), better);
+  if (trace) for (const auto& move : moves) trace->event("preferred_before_limit", {{"unit",move.unit},{"tile",move.tile},{"kind",move.kind},{"score",move.score}});
   if (int(moves.size()) > limit) {
     int count = limit;
     while (count < int(moves.size()) && moves[count].score == moves[count - 1].score)
@@ -608,6 +673,8 @@ std::vector<CpMove> CpTactics::preferred(const TacticalPosition &position, const
   blocked.score = -10;
   blocked.remaining = now.moves;
   moves.push_back(blocked);
+  if (trace) for (const auto& move : moves) trace->event("preferred", {{"unit",move.unit},{"tile",move.tile},
+      {"kind",move.kind},{"score",move.score},{"remaining",move.remaining},{"assumed_victim",move.near_kill}});
   return moves;
 }
 void CpTactics::initialize(TacticalPosition &position) {
@@ -647,6 +714,9 @@ void CpTactics::initialize(TacticalPosition &position) {
     roles[slot] = movement_role(original, original.damage_taken_last_turn);
     bool projected_to_die = original.damage_taken_last_turn > original.hp;
     if (!admitted_at_setup[UnitId{original.id}] || (!have_target_enemies && projected_to_die)) {
+      if (trace) trace->event("root_admission_rejected", {{"unit",original.id},
+          {"admitted",admitted_at_setup[UnitId{original.id}]},{"projected_to_die",projected_to_die},
+          {"target_enemies",have_target_enemies},{"moves",original.moves},{"waiting",original.waiting}});
       position.slot_states[slot] = SlotState::ExcludedAtRoot;
       admitted_at_setup[UnitId{original.id}] = 0;
     }
@@ -712,6 +782,7 @@ void CpTactics::initialize(TacticalPosition &position) {
     if (original.hp < kMinHpForTacticalSearch) {
       if (!choices.empty() && choices.front().kind == CP_MOVE && original.moves < 3 * kMoveDenominator) {
         importance[slot] = kCpImpossibleScore;
+        if (trace) trace->event("drop_wounded_mover", {{"unit",original.id},{"hp",original.hp},{"moves",original.moves}});
         --keep;
       } else
         importance[slot] /= 2;
@@ -723,6 +794,11 @@ void CpTactics::initialize(TacticalPosition &position) {
   for (int j = keep; j < int(active_order.size()); ++j)
     position.slot_states[active_order[j]] = SlotState::ExcludedAtRoot;
   active_order.resize(keep);
+  if (trace) for (int i = 0; i < int(selected.size()); ++i) {
+    SlotIdx slot{i};
+    trace->event("root_participant", {{"unit",selected.unit_at(slot).value},{"state",int(position.slot_states[slot])},
+        {"role",roles[slot]},{"safe",safe[slot]},{"importance",importance[slot]}});
+  }
 }
 void CpTactics::extend_plots(TacticalPosition &position, const std::vector<int32_t> &added) const {
   int count = std::accumulate(position.plots.begin(), position.plots.end(), 0);
@@ -756,6 +832,7 @@ std::vector<CpCombo> CpTactics::candidates(const TacticalPosition &position, boo
   };
   size_t max_candidates =
       std::max(size_t((depth_first ? 1 : config.max_branches) * kCandidateOversampling), overall.size() / 2);
+  if (trace) trace->event("candidate_shortlist", {{"available",int64_t(overall.size())},{"limit",int64_t(max_candidates)}});
   for (size_t candidate_index = 0; candidate_index < std::min(overall.size(), max_candidates);
        ++candidate_index) {
     auto primary = overall[candidate_index];
@@ -785,12 +862,17 @@ std::vector<CpCombo> CpTactics::candidates(const TacticalPosition &position, boo
     if constexpr (CAI_CP_COMBOS == 0)
       continue;
     auto blocker_slot = selected.find_slot(UnitId{blocker});
-    if (!blocker_slot || position.slot_states[*blocker_slot] != SlotState::Pending)
+    if (!blocker_slot || position.slot_states[*blocker_slot] != SlotState::Pending) {
+      if (trace) trace->event("combo_blocker_unavailable", {{"unit",primary.unit},{"tile",primary.tile},{"blocker",blocker}});
       continue;
+    }
     for (auto freeing : overall)
       if (freeing.unit == blocker && freeing.kind == CP_MOVE) {
-        if (primary.score + freeing.score < kMinBlockerComboScore)
+        if (primary.score + freeing.score < kMinBlockerComboScore) {
+          if (trace) trace->event("combo_score_rejected", {{"unit",primary.unit},{"blocker",blocker},
+              {"score",primary.score + freeing.score},{"minimum",kMinBlockerComboScore}});
           continue;
+        }
         if (freeing.tile == current.view.units[primary.unit].tile) {
           // Pinned CvTacticalAI.cpp:8318,8566. preferred() already filters the
           // primary (and blocker) by move_flags; retain CP's explicit blocker guard.
@@ -816,6 +898,14 @@ std::vector<CpCombo> CpTactics::candidates(const TacticalPosition &position, boo
   // while the executor's caller accumulates rank excluding finish/block records.
   std::stable_sort(result.begin(), result.end(),
                    [](const CpCombo &left, const CpCombo &right) { return left.score > right.score; });
+  if (trace) {
+    int index = 0;
+    for (const auto& combo : result) {
+      for (const auto& move : combo.moves) trace->event("combo", {{"index",index},{"unit",move.unit},
+          {"tile",move.tile},{"kind",move.kind},{"score",move.score},{"combo_score",combo.score}});
+      ++index;
+    }
+  }
   return result;
 }
 FinalEvaluation CpTactics::evaluate_final_position(const TacticalPosition &position) {
@@ -835,19 +925,24 @@ FinalEvaluation CpTactics::evaluate_final_position(const TacticalPosition &posit
     const auto &unit = current_unit(current, slot);
     const auto &original = root_unit(slot);
     // Contract: docs/combat-ai-contract.md#slot-states.
-    if (position.slot_states[slot] == SlotState::ExcludedAtRoot || original.moves <= 0 || original.waiting)
+    if (position.slot_states[slot] == SlotState::ExcludedAtRoot || original.moves <= 0 || original.waiting) {
+      if (trace) trace->event("end_skip_root", {{"unit",unit.id}});
       continue;
+    }
     // Pinned CP 029e5988, CvTacticalAI.cpp:8761-8763, addFinishMovesIfAcceptable:
     // A_BLOCKED with movement left is handed back without checking its end
     // position, even after acting. Safe continuation is assumed, not verified.
     // Keep that CP policy separate from root exclusion; neither emits FINISH.
-    if (position.slot_states[slot] == SlotState::Blocked)
+    if (position.slot_states[slot] == SlotState::Blocked) {
+      if (trace) trace->event("end_skip_blocked", {{"unit",unit.id},{"hp",unit.hp},{"tile",unit.tile}});
       continue;
+    }
     if (unit.hp <= 0) {
       evaluation.score -= original.hp;
       continue;
     }
     if (position.slot_states[slot] == SlotState::Pending) {
+      if (trace) trace->event("end_skip_pending", {{"unit",unit.id},{"touched",position.touched[slot]}});
       // Contract: docs/combat-ai-contract.md#early-finish. Acted Pending units
       // are also handed back without end-position evaluation, but earn no bonus.
       if (!position.touched[slot])
@@ -890,6 +985,11 @@ FinalEvaluation CpTactics::evaluate_final_position(const TacticalPosition &posit
   evaluation.accepted = unsafe_positions <= loss_limit && improved;
   evaluation.risk_rejected = unsafe_positions > loss_limit;
   evaluation.improvement_rejected = !improved;
+  if (trace) trace->event("final_evaluation", {{"accepted",evaluation.accepted},{"score",evaluation.score},
+      {"unsafe",unsafe_positions},{"loss_limit",loss_limit},{"positive",positive_changes},{"negative",negative_changes},
+      {"attacked",attacked},{"discovered",position.discovered},{"kills",int(position.killed.size())},
+      {"distance_before",target_distance_before},{"distance_after",target_distance_after},
+      {"risk_rejected",evaluation.risk_rejected},{"improvement_rejected",evaluation.improvement_rejected}});
   return evaluation;
 }
 } // namespace combat_ai

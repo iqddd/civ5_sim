@@ -2,11 +2,14 @@
 
 import argparse
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright
 
 
 def check(url, screenshot):
+    location = urlsplit(url)
+    base_url = f"{location.scheme}://{location.netloc}"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(channel="msedge", headless=True)
         page = browser.new_page(viewport={"width": 1500, "height": 1050}, device_scale_factor=1)
@@ -14,6 +17,9 @@ def check(url, screenshot):
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.goto(url)
         page.locator("#verified").wait_for(state="visible")
+        if page.evaluate("data.experiment?.kind==='continuation'"):
+            assert int(page.locator("#timeline").input_value()) == page.evaluate("data.experiment.resume_after")
+            page.click("#first")
         assert page.locator(".match").count() > 0
         assert page.locator(".unit").count() > 0
         page.locator(".unit").first.click()
@@ -33,7 +39,7 @@ def check(url, screenshot):
         assert page.locator("#timeline").input_value() == paused
         page.click("#last")
         label = page.locator("#turnLabel").inner_text()
-        if page.evaluate("Boolean(data.experiment)"):
+        if page.evaluate("Boolean(data.experiment)&&data.experiment.kind!=='continuation'"):
             assert "Конец найденного плана" in label
         else:
             assert "Матч завершён" in label
@@ -49,7 +55,7 @@ def check(url, screenshot):
         assert page.locator("#map").get_attribute("viewBox") == viewbox
         page.check("#coords")
         assert page.locator("#map text").count() >= page.evaluate("data.map.width*data.map.height")
-        catalog = page.request.get(url.rstrip("/") + "/api/matches").json()
+        catalog = page.request.get(base_url + "/api/matches").json()
         fog_match = next((m for m in catalog if m["fog"]), None)
         if fog_match:
             page.get_by_title(fog_match["name"], exact=True).click()

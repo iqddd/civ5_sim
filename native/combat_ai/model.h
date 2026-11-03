@@ -103,6 +103,7 @@ class RulesAdapter {
 // std::invalid_argument. Invalid commands return the core result code.
 std::unique_ptr<RulesAdapter> make_rules_adapter(const CaiBattleState&, int32_t observer);
 
+struct DecisionTrace;
 class DangerModel {
  public:
   virtual ~DangerModel() = default;
@@ -112,5 +113,5 @@ class DangerModel {
   virtual int32_t incoming(const Branch&, int32_t defender, int32_t tile) = 0;
 };
 // Adapter must outlive the model. Foreign branches/unsupported adapters throw.
-std::unique_ptr<DangerModel> make_danger_model(const RulesAdapter&);
+std::unique_ptr<DangerModel> make_danger_model(const RulesAdapter&, DecisionTrace* = nullptr);
 }  // namespace combat_ai

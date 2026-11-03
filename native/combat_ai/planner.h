@@ -1,5 +1,6 @@
 #pragma once
 #include "tactical.h"
+#include "trace.h"
 #include "planner_types.h"
 #include "cp_position.h"
 #include <map>
@@ -18,6 +19,7 @@ struct TacticalPosition {
   // Copied with the CP position. board() synchronizes changed occupancy/end
   // fields lazily; enemy/visibility changes refresh volatile properties.
   mutable std::optional<CpBoard> tactical_board;
+  int64_t trace_id = 0;
   int32_t generation = 0, attack_score = 0, rank = 0;
   bool discovered = false;
   // Transient: first actual contact source in this atomic candidate. Flushed
@@ -57,6 +59,7 @@ class CandidateExecutor {
   bool apply(TacticalPosition&, const CpCombo&);
 };
 struct SearchWorkspace {
+  DecisionTrace trace;
   CaiSearchDiagnostics diagnostics{};
   // CvTactPosStorage: fixed addresses, peek at the next slot and consume only
   // after accepting a child. Rejected children reuse the unconsumed slot.
@@ -71,7 +74,7 @@ struct SearchWorkspace {
 };
 struct Plan { std::vector<CaiAssignment> assignments; CaiSearchResult result; };
 Plan find_assignments(SearchWorkspace&, const CaiConfig&, const CaiSearchRequest&);
-Plan support_assignments(const CaiSearchRequest&, int32_t mode);
-Plan recovery_assignments(const CaiSearchRequest&, CaiSearchDiagnostics&);
-std::vector<int32_t> attack_candidates(const CaiSearchRequest&);
+Plan support_assignments(const CaiSearchRequest&, int32_t mode, DecisionTrace* = nullptr);
+Plan recovery_assignments(const CaiSearchRequest&, CaiSearchDiagnostics&, DecisionTrace* = nullptr);
+std::vector<int32_t> attack_candidates(const CaiSearchRequest&, DecisionTrace* = nullptr);
 }  // namespace combat_ai

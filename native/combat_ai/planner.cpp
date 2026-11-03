@@ -293,6 +293,7 @@ class Search {
   UnitValues<CaiUnit> initial_units;
   std::vector<int32_t> initial_enemy_ids;
   CaiSearchStats stats{};
+  int64_t next_trace_id = 1;
   bool depth_first = false;
   bool exhausted = false;
   int32_t best_position = -1;
@@ -302,6 +303,9 @@ class Search {
     require_invariant(!parent.restart_source,"queued parent has an unflushed contact");
     CAI_STORAGE_COUNT(PositionCopy);
     auto* child = &work.positions.at(work.used_positions);
+    child->trace_id = next_trace_id++;
+    work.trace.position = child->trace_id;
+    work.trace.event("child", {{"parent",parent.trace_id}});
     child->branch = parent.branch->clone_into(std::move(child->branch));
     child->assignments = parent.assignments;
     child->plots = parent.plots;
@@ -331,6 +335,7 @@ class Search {
   }
   void record_completion(int32_t position_index, int32_t score) {
     // Contract: docs/combat-ai-contract.md#search-budgets.
+    work.trace.event("completion", {{"score",score},{"previous_best",best_score}});
     ++stats.completed;
     if (best_position < 0 || score > best_score) {
       best_position = position_index;
@@ -344,6 +349,8 @@ class Search {
     Plan plan{};
     plan.result.reason = exhausted ? CAI_BUDGET_EXHAUSTED : best_position < 0 ? CAI_NO_PLAN : CAI_COMPLETED;
     plan.result.stats = stats;
+    work.trace.event("search_result", {{"reason",plan.result.reason},{"best_score",best_score},
+        {"best_position",best_position < 0 ? -1 : work.positions[best_position].trace_id}});
     if (best_position >= 0) plan.assignments = work.positions[best_position].assignments;
     plan.result.assignment_count = int32_t(plan.assignments.size());
     return plan;
@@ -385,6 +392,8 @@ class Search {
       memory.known_enemies.push_back({request.contacts.known_enemies[contact_index].id,
                                      request.contacts.known_enemies[contact_index].last_seen_own_turn});
     auto* root = &work.positions.front();
+    root->trace_id = 0;
+    work.trace.position = 0;
     root->assignments.clear();
     root->plots.clear();
     root->tactical_board.reset();
@@ -409,6 +418,7 @@ class Search {
       root->touched.push_back(0);
     }
     tactics = std::make_unique<CpTactics>(*adapter,*root->branch,config,request);
+    tactics->trace = work.trace.enabled ? &work.trace : nullptr;
     tactics->initialize(*root);
     roles = tactics->roles;
     initial_enemy_ids = tactics->initial_enemies;
@@ -451,10 +461,14 @@ class Search {
       int32_t current_index = work.open.back();
       work.open.pop_back();
       const auto& parent = work.positions[current_index];
+      work.trace.position = parent.trace_id;
+      work.trace.candidate = -1;
+      work.trace.event("expand");
       assert(!terminal_position(parent,initial_enemy_ids));
       auto current_view = TacticalView(*parent.branch,request.side);
       auto equivalent = work.equivalent.find(key(parent,current_view));
       if (equivalent != work.equivalent.end() && equivalent->second.second != current_index) {
+        work.trace.event("superseded");
         ++stats.pruned;
         continue;
       }
@@ -465,14 +479,20 @@ class Search {
       }
       auto choices = tactics->candidates(parent,depth_first);
       int32_t children = 0;
+      int64_t candidate_id = 0;
       for (const auto& candidate : choices) {
-        if (children >= (depth_first ? 1 : config.max_branches)) break;
+        work.trace.position = parent.trace_id;
+        work.trace.candidate = candidate_id++;
+        if (children >= (depth_first ? 1 : config.max_branches)) {
+          work.trace.event("branch_limit"); break;
+        }
         if (stats.generated >= config.position_capacity) {
           exhausted = true;
           break;
         }
         auto* child = &copy(parent);
         if (!executor.apply(*child,candidate)) {
+          work.trace.event("physical_rejection");
           ++stats.pruned;
           continue;
         }
@@ -484,6 +504,7 @@ class Search {
         auto identity = key(*child,next);
         auto found = work.equivalent.find(identity);
         if (found != work.equivalent.end() && found->second.first >= child->attack_score) {
+          work.trace.event("equivalent_rejection");
           ++stats.pruned;
           continue;
         }

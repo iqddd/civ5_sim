@@ -17,6 +17,7 @@ def main():
     match.add_argument(
         "--out", type=Path, required=True, help="Match artifact directory"
     )
+    match.add_argument("--diagnostics", choices=("off", "compact", "full"), default="off")
     run = commands.add_parser("run")
     run.add_argument("scenario", type=Path)
     run.add_argument(
@@ -33,7 +34,7 @@ def main():
     try:
         if args.command == "match":
             config, agents = load_match_config(args.config)
-            match = run_match(config, agents)
+            match = run_match(config, agents, diagnostics=args.diagnostics)
             match.save(args.out)
             print(
                 json.dumps(
