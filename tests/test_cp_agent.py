@@ -246,7 +246,7 @@ class ExecutorTests(unittest.TestCase):
                 self.execute(a, b, command)
             self.assert_turn_ends(a, b, p)
             self.assertEqual(len(p.calls), 3)
-            self.assertTrue(any(e.get("reason") == "search_limit" for e in a.drain_diagnostics()))
+            self.assertTrue(any(e.get("reason") == "search_budget_exhausted" for e in a.drain_diagnostics()))
 
     def test_turn_change_discards_old_queue_and_integration_error_is_not_hidden(self):
         with Battle(scenario([unit("warrior", 0, 17), unit("warrior", 1, 19)])) as b:

@@ -165,11 +165,12 @@ def markdown(report):
                 lines += [
                     (f"Состояние координатора: фаза {coordinator['phase']}; "
                      f"задача `{coordinator['task']}`; в очереди {len(coordinator['queued_assignments'])}; "
-                     f"поисков {coordinator['searches']} из {coordinator['search_limit']}."),
+                     f"поисков {coordinator['searches']} из {coordinator['search_limit']}; "
+                     f"участники RECOVERY: {coordinator.get('recovery_units', [])}."),
                     "",
                 ]
             for event in call["events"]:
-                if event["event"] in ("task_assigned", "task_restarted", "task_finished", "plan_cancelled", "waiting", "target_comparison"):
+                if event["event"] in ("task_assigned", "task_restarted", "task_finished", "plan_cancelled", "waiting", "target_comparison", "group_recovery"):
                     lines += [f"- `{event['event']}`: `{json.dumps(event, ensure_ascii=False)}`"]
             lines.append("")
     for query_id, item in report["queries"].items():

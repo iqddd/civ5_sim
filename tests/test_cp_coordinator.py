@@ -214,6 +214,8 @@ class CoordinatorTests(unittest.TestCase):
             a.close()
             a.config = replace(SMALL, position_capacity=1)
             a.reset({"map": b._map, "side": 0})
+            a._turn = 0
+            a._phase = 3
             a._target_blocked[0, 2] = 1
             calls = []
             command = self.act(a, b, calls)
@@ -227,6 +229,8 @@ class CoordinatorTests(unittest.TestCase):
             a.close()
             a.config = replace(SMALL, position_capacity=1)
             a.reset({"map": b._map, "side": 0})
+            a._turn = 0
+            a._phase = 3
             calls = []
             command = self.act(a, b, calls)
             self.assertEqual(command, Action("move", 0, 6))
@@ -240,6 +244,9 @@ class CoordinatorTests(unittest.TestCase):
             a.close()
             a.config = replace(SMALL, position_capacity=1)
             a.reset({"map": b._map, "side": 0})
+            a._turn = 0
+            a._phase = 3
+            a.planner.attack_candidates = lambda request: ()
             calls = []
             first = self.act(a, b, calls)
             self.assertEqual(first, Action("move", 2, 12))
@@ -355,6 +362,9 @@ class ContactRequirementTests(unittest.TestCase):
             moved = next(u for u in witness.observe(0)["units"] if u["id"] == 0)
 
         planning = ScriptedPlanning(*(plan(reason=SearchReason.NO_PLAN) for _ in range(8)))
+        # This episode covers explorers outside combat recruitment. A failed
+        # admitted combat roster now correctly transfers together to RECOVERY.
+        planning.attack_candidates = lambda *args, **kwargs: ()
         approaches = []
 
         def support(target, selected, *, contacts, mode):
@@ -401,7 +411,8 @@ class ContactRequirementTests(unittest.TestCase):
         action = self.act(agent, battle, planning)
         events = agent.drain_diagnostics()
         searches = [e for e in events if e["event"] == "search"]
-        self.assertEqual(sum(not e.get("probe", False) for e in searches), 2)
+        self.assertEqual(sum(not e.get("probe", False) for e in searches), 1)
+        self.assertEqual(sum(e.get("probe", False) for e in searches), 1)
         self.assertLessEqual(sum(e.get("probe", False) for e in searches), 2)
         self.assertEqual(len(planning.calls), len(searches))
         self.execute(agent, battle, action)
@@ -430,25 +441,18 @@ class ContactRequirementTests(unittest.TestCase):
         # to escape. The budget itself must not turn either option into wait.
         self.assertIn(action.kind, ("ranged", "move"))
 
-    def test_problematic_unit_is_removed_before_retry(self):
+    def test_problematic_unit_diagnostics_do_not_split_the_group(self):
         with Battle(scenario([unit("warrior", 0, 17), unit("archer", 0, 25),
                               unit("warrior", 1, 18)])) as battle:
             agent = self.agent(battle)
             planning = ScriptedPlanning(SearchResult((), SearchReason.NO_PLAN, SearchStats(),
                 SearchDiagnostics(risk_rejections=1, bad_units=(1,))))
-            original_search = planning.search
-            def search(target, selected, **kwargs):
-                result = original_search(target, selected, **kwargs)
-                if len(planning.calls) == 2:
-                    request = SearchRequest(PlanningState.from_battle(battle, 0), 0, 0,
-                                            target, selected, kwargs["contacts"])
-                    return agent.planner.search(request)
-                return result
-            planning.search = search
             action = self.act(agent, battle, planning)
             self.assertEqual(set(planning.calls[0][1]), {0, 1})
-            self.assertEqual(planning.calls[1][1], (0,))
-            self.assertEqual(action.kind, "melee")
+            self.assertEqual(len(planning.calls), 1)
+            self.assertEqual(agent._recovery_units, {0, 1})
+            self.assertEqual(action, Action("skip", 0))
+            self.assertFalse(any(e["event"] == "group_reduced" for e in agent.drain_diagnostics()))
 
     def test_old_target_does_not_outrank_closer_enemy(self):
         with Battle(scenario([unit("warrior", 0, 17), unit("warrior", 1, 18),
@@ -576,7 +580,7 @@ class ContactRequirementTests(unittest.TestCase):
             agent._recover(own, battle.observe(0), planning)
             self.assertEqual(values, [Aggression.LOW], "Recovery bypassed the per-call search ceiling")
 
-    def test_contact_and_group_reduction_share_four_attempt_ceiling(self):
+    def test_contact_restarts_respect_four_attempt_ceiling(self):
         with Battle(scenario([unit("horseman", 0, 16), unit("warrior", 0, 17),
                               unit("warrior", 1, 21), unit("warrior", 1, 0)], fog=True)) as battle:
             agent = self.agent(battle)

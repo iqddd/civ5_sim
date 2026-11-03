@@ -30,7 +30,7 @@ const terrainColors={grass:'#6c805c',plains:'#92906b',desert:'#ad986d',tundra:'#
 const names={grass:'Луга',plains:'Равнины',desert:'Пустыня',tundra:'Тундра',snow:'Снег',coast:'Побережье',ocean:'Океан',flat:'Ровная местность',hills:'Холмы',mountain:'Горы',water:'Вода',forest:'Лес',jungle:'Джунгли',marsh:'Болото',oasis:'Оазис',flood_plains:'Пойма',ice:'Лёд',atoll:'Атолл',fallout:'Радиация'};
 const types={warrior:['W','Воин'],archer:['A','Лучник'],chariot_archer:['C','Лучник на колеснице'],spearman:['S','Копейщик'],horseman:['H','Всадник']};
 const kinds={move:'Перемещение',melee:'Ближняя атака',ranged:'Обстрел',swap:'Обмен',skip:'Ожидание',fortify:'Укрепление',end_turn:'Конец хода'};
-const eventNames={search:'Боевой поиск',search_reused:'Сохранённый поиск',target_comparison:'Выбор цели',attack_candidates:'Допуск участников',group_reduced:'Сокращение группы',recovery:'Тактическое продолжение',support:'Поддержка',plan_cancelled:'Отмена плана',task_restarted:'Повтор прежней задачи',continuation_started:'Начало нового продолжения',task_assigned:'Новая задача',task_finished:'Задача завершена',waiting:'Ожидание',posture:'Боевая установка'};
+const eventNames={search:'Боевой поиск',search_reused:'Сохранённый поиск',target_comparison:'Выбор цели',attack_candidates:'Допуск участников',group_reduced:'Сокращение группы',group_recovery:'Группа переведена в RECOVERY',recovery:'Тактическое продолжение',support:'Поддержка',plan_cancelled:'Отмена плана',task_restarted:'Повтор прежней задачи',continuation_started:'Начало нового продолжения',task_assigned:'Новая задача',task_finished:'Задача завершена',waiting:'Ожидание',posture:'Боевая установка'};
 const reasons={task_attempt_limit:'достигнут предел попыток задачи',new_contact:'новый контакт',damage_changed:'изменился урон',state_changed:'изменилась позиция',movement_interrupted:'движение прервано',budget_exhausted:'исчерпан бюджет',no_plan:'нет плана',completed:'план найден',matched:'прогноз совпал',plan_completed:'план исполнен',army_exhausted:'армия завершила действия'};
 const teamColors=['#85b5fa','#f39b7e'];
 let catalog=[],currentId='',data=null,index=0,selectedUnit=null,selectedTile=null,timer=null,requestVersion=0,viewBox=null,baseBox=null,drag=null,dragMoved=false;
@@ -118,6 +118,7 @@ function renderDiagnostics(){
     if(e.probe)text+=' · проверка альтернативы';
     if(e.reason)text+=`: ${reasons[e.reason]||e.reason}`;
     if(e.selected_units)text+=` · группа ${e.selected_units.length}`;
+    if(e.event==='group_recovery')text+=` · юниты ${e.selected_units.join(', ')} · попыток ${e.attempts}`;
     if(e.stats)text+=` · позиций ${e.stats.generated}, проверено ${e.stats.checked}`;
     if(e.target>=0)text+=` · цель (${xyText(e.target)})`;
     p.textContent=text;panel.append(p);

@@ -46,10 +46,9 @@ class TargetSelectionTests(unittest.TestCase):
     def test_shortlist_prefers_larger_group_even_without_immediate_attackers(self):
         task = self.shortlist({3: {0}, 4: {1, 2}, 5: {0}})
         self.assertEqual(task["target"], 13)
-        self.assertEqual(task["alternative"]["target"], 18)
+        self.assertNotIn("alternative", task)
         self.assertEqual(set(task["selected"]), {1, 2})
         self.assertEqual(task["ranking"]["immediate_attackers"], 0)
-        self.assertEqual(task["alternative"]["ranking"]["immediate_attackers"], 1)
         self.assertEqual(len(task["ranked_candidates"]), 3)
         self.assertFalse(self.agent._combat_attempts)
 
@@ -80,7 +79,7 @@ class TargetSelectionTests(unittest.TestCase):
         self.assertEqual(task["target"], 18)
         self.assertEqual(task["selected"], tuple(range(13)))
         self.assertEqual(task["ranking"]["participants"], 13)
-        self.assertEqual(task["alternative"]["selected"], (15,))
+        self.assertNotIn("alternative", task)
 
     def test_excluded_and_attempted_pairs_cannot_enter_alternative(self):
         self.agent._combat_attempts.update({(1, 4), (2, 4)})
@@ -109,11 +108,12 @@ class TargetSelectionTests(unittest.TestCase):
         self.assertEqual(len(service.calls), 1)
 
     def test_empty_primary_tries_next_ranked_target_once(self):
-        task = self.shortlist({3: {0}, 4: {1, 2}, 5: {0}})
-        second = plan(assignment(K.RANGED, 0, 17, 18, damage=20))
+        task = self.shortlist({3: {0}, 4: {1, 2}, 5: {1, 2}})
+        second = plan(assignment(K.MELEE, 2, 11, 29, damage=20))
         service = ScriptedPlanning(plan(reason=SearchReason.NO_PLAN), second)
         self.assertIs(self.choose(task, service), second)
-        self.assertEqual(self.agent._task["target"], 18)
+        self.assertEqual(self.agent._task["target"], 29)
+        self.assertEqual(set(service.calls[0][1]), set(service.calls[1][1]))
         self.assertEqual(len(service.calls), 2)
         self.choose(self.agent._task, service)
         self.assertEqual(len(service.calls), 2)
@@ -122,7 +122,7 @@ class TargetSelectionTests(unittest.TestCase):
         for first_empty in (True, False):
             with self.subTest(first_empty=first_empty):
                 task = self.task()
-                task["alternative"] = self.task(13, (1, 2))
+                task["alternative"] = self.task(13)
                 empty = plan(reason=SearchReason.BUDGET_EXHAUSTED)
                 usable = plan(assignment(K.RANGED, 0, 17, 18, damage=1, retaliation=2),
                               reason=SearchReason.BUDGET_EXHAUSTED)
@@ -134,7 +134,7 @@ class TargetSelectionTests(unittest.TestCase):
         from civ5sim.combat_ai import SearchDiagnostics
 
         task = self.task()
-        task["alternative"] = self.task(13, (1, 2))
+        task["alternative"] = self.task(13)
         first = replace(plan(reason=SearchReason.NO_PLAN), diagnostics=SearchDiagnostics(bad_units=(0,)))
         self.assertIs(self.choose(task, ScriptedPlanning(first, plan())), first)
         self.assertEqual(self.agent._task["target"], 18)
@@ -179,18 +179,18 @@ class TargetSelectionTests(unittest.TestCase):
         service = ScriptedPlanning(*(plan() for _ in range(8)))
         for _ in range(4):
             task = self.task()
-            task["alternative"] = self.task(13, (1, 2))
+            task["alternative"] = self.task(13)
             self.choose(task, service)
         self.assertEqual(len(service.calls), 2)
         self.assertEqual((self.agent._searches, self.agent._probe_searches), (1, 1))
 
     def test_invalid_probe_is_integration_error(self):
         task = self.task()
-        task["alternative"] = self.task(13, (1, 2))
+        task["alternative"] = self.task(13)
         with self.assertRaisesRegex(RuntimeError, "invalid_request"):
             self.choose(task, ScriptedPlanning(plan(), plan(reason=SearchReason.INVALID_REQUEST)))
 
-    def test_aggression_is_computed_separately_for_each_group(self):
+    def test_different_roster_cannot_be_used_as_fallback(self):
         class RecordingPlanning(ScriptedPlanning):
             def search(self, *args, aggression=None, **kwargs):
                 self.aggressions.append(aggression)
@@ -201,7 +201,12 @@ class TargetSelectionTests(unittest.TestCase):
         service = RecordingPlanning(plan(), plan())
         service.aggressions = []
         self.choose(task, service)
-        self.assertEqual(service.aggressions, [Aggression.LOW, self.agent.config.aggression])
+        self.assertEqual(service.aggressions, [Aggression.LOW])
+
+    def test_equal_size_different_members_cannot_be_fallback(self):
+        task = self.shortlist({3: {0, 1}, 4: {1, 2}, 5: {0, 1}})
+        self.assertEqual(set(task["alternative"]["selected"]), set(task["selected"]))
+        self.assertNotEqual(task["alternative"]["target"], 13)
 
 
 if __name__ == "__main__":
