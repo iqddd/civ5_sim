@@ -1,0 +1,9 @@
+# RL module architecture
+
+`civ5rl.core` owns public input contracts, feature schema and encoding, model, agent, and environment. `civ5rl.engine` implements collection, shared slots, PPO, run control, and resource monitoring. `civ5rl.provenance` owns case manifests, common utilities, checkpoints, migration validation, and configuration validation. `civ5rl.protocols` contains experiment datasets, evaluations, memory probes, and diagnostics. Core does not depend on engine or protocols; collector workers import without loading PyTorch.
+
+The lightweight `core.schema` declares named feature layouts and computes their widths. Encoding order and network parameter shapes remain compatible with existing checkpoints. The typed contracts in `core.contracts` describe scenario, worker, and episode dictionary boundaries. PPO uses one update loop with reference and batched rollout backends; the batched backend retains resident data and replay validation, while the reference backend preserves its original checks.
+
+Historical flat imports such as `civ5rl.observation` resolve to the same module objects as their canonical paths. This preserves private imports, patches, and old serialized `Encoded` references. New code should use canonical paths.
+
+Passports recursively capture implementation files, RL configuration and documentation, native sources, tools, and engine build artifacts. Add experiment-specific workspace-relative paths or glob patterns through the optional `passport_artifacts` config list. Snapshot archive entries and source hashes are deduplicated. Resume identity compares the complete source hash mapping and environment (apart from the recorded Git commit); moving or changing source files therefore prevents a strict resume. Named migration policies are versioned in `configs/rl-migration-policies.json` and remain narrowly scoped; changes to disallowed model, simulator, configuration, or policy data are rejected rather than silently accepted.

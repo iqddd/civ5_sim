@@ -55,7 +55,7 @@ def main():
     executed_paths = [
         p
         for package in ("civ5rl", "civ5sim")
-        for p in sorted((SOURCE_ROOT / package).glob("*.py"))
+        for p in sorted((SOURCE_ROOT / package).rglob("*.py"))
     ]
     executed_paths.append(SOURCE_ROOT / "tools/train_rl.py")
     common.write_json(

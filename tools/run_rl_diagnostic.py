@@ -426,11 +426,14 @@ def report(directory):
     import matplotlib.pyplot as plt
 
     directory = Path(directory)
-    from civ5rl.diagnostic_one import is_one, report_one
+    from civ5rl.diagnostic_one import is_one
+    from tools.report_rl_one import report_one
 
-    saved_config = directory / "seed-17/resolved-config.json"
-    if saved_config.exists() and is_one(read_json(saved_config)):
-        return report_one(directory)
+    for saved_config in sorted(directory.glob("seed-*/resolved-config.json")):
+        resolved = read_json(saved_config)
+        if is_one(resolved):
+            seed = int(saved_config.parent.name.removeprefix("seed-"))
+            return report_one(directory, seed=seed)
     lines = [
         "# Диагностический цикл D0 → D1",
         "",

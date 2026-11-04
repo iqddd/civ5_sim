@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "policies": {
+    "audit": {
+      "sources": [
+        "civ5rl/collector.py",
+        "civ5rl/engine/collector.py",
+        "civ5rl/engine/ppo_fast.py",
+        "civ5rl/migration.py",
+        "civ5rl/ppo_fast.py",
+        "civ5rl/provenance/migration.py",
+        "configs/rl-v1.json",
+        "docs/rl-v1-spec.md",
+        "tools/control_rl.py",
+        "tools/migrate_rl_audit.py",
+        "tools/tune_rl.py"
+      ],
+      "config_fields": [
+        [
+          "numerics",
+          "replay_max_total_variation"
+        ],
+        [
+          "numerics",
+          "require_full_behavior_distribution"
+        ],
+        [
+          "spec_version"
+        ]
+      ]
+    },
+    "pipeline": {
+      "sources": [
+        "civ5rl/agent.py",
+        "civ5rl/collector.py",
+        "civ5rl/core/agent.py",
+        "civ5rl/core/env.py",
+        "civ5rl/core/model.py",
+        "civ5rl/engine/collector.py",
+        "civ5rl/engine/ppo.py",
+        "civ5rl/engine/ppo_fast.py",
+        "civ5rl/engine/shared.py",
+        "civ5rl/env.py",
+        "civ5rl/migration.py",
+        "civ5rl/model.py",
+        "civ5rl/ppo.py",
+        "civ5rl/ppo_fast.py",
+        "civ5rl/provenance/migration.py",
+        "civ5rl/shared.py",
+        "civ5sim/greedy_agent.py",
+        "configs/rl-v1.json",
+        "docs/rl-v1-spec.md",
+        "tools/benchmark_rl_pipeline.py",
+        "tools/control_rl.py",
+        "tools/migrate_rl_audit.py",
+        "tools/train_rl.py",
+        "tools/tune_rl.py"
+      ],
+      "config_fields": [
+        [
+          "collection",
+          "cpu_workers"
+        ],
+        [
+          "collection",
+          "deterministic_episode_waves"
+        ],
+        [
+          "collection",
+          "envs_per_worker"
+        ],
+        [
+          "collection",
+          "num_envs"
+        ],
+        [
+          "name"
+        ],
+        [
+          "performance",
+          "collection_scheduler"
+        ],
+        [
+          "performance",
+          "reuse_encoded"
+        ],
+        [
+          "performance",
+          "shared_action_capacity"
+        ],
+        [
+          "performance",
+          "spatial_batch_size"
+        ],
+        [
+          "performance",
+          "worker_encoding"
+        ],
+        [
+          "spec_version"
+        ]
+      ]
+    }
+  }
+}
