@@ -667,6 +667,10 @@ def _run_suite(config, directory, device="cuda", resume=False, prepare_only=Fals
     from civ5rl.validation import validate_config
 
     validate_config(config)
+    if config.get("diagnostic", {}).get("mode") == "D0-multishot":
+        from tools.run_rl_multishot import run_suite as run_multishot
+
+        return run_multishot(config, directory, device, resume, prepare_only)
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     one = is_one(config)
@@ -776,7 +780,9 @@ def main():
     from civ5rl.protocols.diagnostic_d1 import is_d1
 
     out = args.out or (
-        "artifacts/rl/diagnostic-d1"
+        "artifacts/rl/diagnostic-multishot"
+        if config.get("diagnostic", {}).get("mode") == "D0-multishot"
+        else "artifacts/rl/diagnostic-d1"
         if is_d1(config)
         else "artifacts/rl/diagnostic-one-decision"
         if is_one(config)

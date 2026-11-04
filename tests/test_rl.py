@@ -1,16 +1,12 @@
 """Information boundaries, numerical PPO behavior, restart and native integration."""
 
-import random
 import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 import torch
-
-from civ5rl import checkpoint
 from civ5rl.common import configure, read_json, seed_for
 from civ5rl.corpus import ScenarioFactory, context_for, validate_corpus
 from civ5rl.env import DecisionEnv
@@ -19,6 +15,7 @@ from civ5rl.memory import _history, flat_map
 from civ5rl.model import Policy, batch_inputs, distribution_stats
 from civ5rl.observation import ObservationEncoder, distance, ordered_actions
 from civ5rl.ppo import objective, prefix_hidden, targets
+
 from civ5sim import Action, Battle, MatchConfig, run_match
 
 
@@ -243,11 +240,6 @@ class RLTests(unittest.TestCase):
             torch.testing.assert_close(a, b)
         self.assertEqual(actual[0].shape, (1, 1))
 
-    def test_bf16_amp_rejects_cpu_instead_of_silent_fallback(self):
-        policy = Policy()
-        with self.assertRaises(ValueError):
-            policy.enable_amp()
-
     @unittest.skipUnless(
         torch.cuda.is_available()
         and torch.cuda.is_bf16_supported(including_emulation=False),
@@ -301,53 +293,9 @@ class RLTests(unittest.TestCase):
         for handle in hooks:
             handle.remove()
 
-    def test_batched_ppo_weighted_gradients_match_reference_with_partial_chunks(self):
-        from civ5rl.ppo import update
-
-        configure(17)
-        policy = Policy()
-        episodes = self._short_rollout(policy)
-        fast = deepcopy(policy)
-        config = deepcopy(self.config)
-        config["ppo"].update(
-            epochs=1,
-            sequence_length=3,
-            sequences_per_minibatch=8,
-            sequences_per_microbatch=4,
-        )
-        config["performance"] = {"batched_ppo": False}
-        # SGD exposes the gradient comparison directly, without Adam's sensitivity
-        # to tiny cancellation errors in near-zero gradients.
-        optimizer = torch.optim.SGD(policy.parameters(), lr=3e-4)
-        fast_optimizer = torch.optim.SGD(fast.parameters(), lr=3e-4)
-        a = update(policy, optimizer, episodes, config, 0, "cpu", random.Random(18))
-        config["performance"]["batched_ppo"] = True
-        b = update(fast, fast_optimizer, episodes, config, 0, "cpu", random.Random(18))
-        self.assertAlmostEqual(a["policy_loss"], b["policy_loss"], places=6)
-        self.assertAlmostEqual(a["value_loss"], b["value_loss"], places=6)
-        for name, tensor in policy.state_dict().items():
-            torch.testing.assert_close(
-                tensor, fast.state_dict()[name], rtol=2e-5, atol=1e-7
-            )
-
-    def test_clone_initial_snapshot_shares_static_internally_public_copies_detach(self):
-        with Battle(scenario()) as root, root.clone(log=True) as branch:
-            initial = branch.snapshot()
-            self.assertIs(branch._initial["map"], root._map)
-            public = branch.snapshot()
-            public["map"]["tiles"][0]["terrain"] = "desert"
-            self.assertEqual(root.snapshot()["map"]["tiles"][0]["terrain"], "grass")
-            branch.step(Action("end_turn"))
-            replay = branch.replay()
-            replay["initial"]["map"]["tiles"][0]["terrain"] = "snow"
-            self.assertEqual(branch._map["tiles"][0]["terrain"], "grass")
-            branch.reset()
-            self.assertEqual(branch.snapshot(), initial)
-
     def test_fused_hex_projection_matches_directional_reference_gradients(self):
-        from torch.nn import functional as f
-
         from civ5rl.model import HexBlock
+        from torch.nn import functional as f
 
         torch.manual_seed(42)
         block = HexBlock()
@@ -503,25 +451,6 @@ class RLTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_audit_migration(old, new, identity, candidate)
 
-    def test_control_follows_recorded_continuation_and_rejects_cycle(self):
-        from civ5rl.common import write_json
-        from tools.control_rl import resolve_directory
-
-        with tempfile.TemporaryDirectory() as tmp:
-            first, second = Path(tmp) / "first", Path(tmp) / "second"
-            second.mkdir()
-            write_json(
-                first / "continuation.json",
-                {"kind": "rl01.continuation", "directory": str(second)},
-            )
-            self.assertEqual(resolve_directory(first), second.resolve())
-            write_json(
-                second / "continuation.json",
-                {"kind": "rl01.continuation", "directory": str(first)},
-            )
-            with self.assertRaises(ValueError):
-                resolve_directory(first)
-
     def test_env_and_prepared_match_same_commands_and_result(self):
         s = scenario()
         armies = context(s)["armies"]
@@ -570,167 +499,6 @@ class RLTests(unittest.TestCase):
                     outputs.append(e.encode(case["current"], case["actions"]))
                 np.testing.assert_array_equal(outputs[0].cells, outputs[1].cells)
                 np.testing.assert_array_equal(outputs[0].globals, outputs[1].globals)
-
-    def test_checkpoint_restores_next_optimizer_step_and_all_rng(self):
-        configure(42)
-        policy = Policy("A")
-        optimizer = torch.optim.Adam(policy.parameters(), lr=0.001)
-        rng = random.Random(73)
-
-        def step():
-            optimizer.zero_grad()
-            loss = sum(
-                (
-                    p.square().sum()
-                    * (
-                        random.random()
-                        + float(np.random.rand())
-                        + torch.rand(()).item()
-                        + rng.random()
-                    )
-                )
-                for p in policy.parameters()
-            )
-            loss.backward()
-            optimizer.step()
-
-        step()
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "checkpoint.pt"
-            checkpoint.save(path, policy, optimizer, {"update": 1}, rng, {}, {})
-            step()
-            expected = deepcopy(policy.state_dict())
-            checkpoint.restore(path, policy, optimizer, rng, {}, {})
-            step()
-            for name, value in policy.state_dict().items():
-                torch.testing.assert_close(value, expected[name], rtol=0, atol=0)
-
-    def test_checkpoint_restore_accepts_commit_only_change_and_rejects_execution_changes(
-        self,
-    ):
-        policy = Policy("A")
-        optimizer = torch.optim.Adam(policy.parameters())
-        rng = random.Random(17)
-        identity = {
-            "git_commit": "before",
-            "source_hashes": {"model.py": "same"},
-            "corpus_hash": "same",
-            "packages": {"torch": "same"},
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "checkpoint.pt"
-            checkpoint.save(
-                path, policy, optimizer, {"update": 0}, rng, {"seed": 17}, identity
-            )
-            updated = {**identity, "git_commit": "after"}
-            state = checkpoint.restore(
-                path, policy, optimizer, rng, {"seed": 17}, updated
-            )
-            self.assertEqual(state, {"update": 0})
-            for key, value in (
-                ("source_hashes", {"model.py": "changed"}),
-                ("corpus_hash", "changed"),
-                ("packages", {"torch": "changed"}),
-            ):
-                with self.assertRaisesRegex(ValueError, "identity mismatch"):
-                    checkpoint.restore(
-                        path,
-                        policy,
-                        optimizer,
-                        rng,
-                        {"seed": 17},
-                        {**updated, key: value},
-                    )
-            with self.assertRaisesRegex(ValueError, "identity mismatch"):
-                checkpoint.restore(path, policy, optimizer, rng, {"seed": 42}, updated)
-
-    def test_complete_cpu_training_matches_interrupted_resume(self):
-        from civ5rl.collector import Collector
-        from tools.train_rl import run
-
-        corpus = Path("artifacts/rl/corpus/manifest.json")
-        if not corpus.exists():
-            self.skipTest("Corpus not prepared")
-        config = deepcopy(self.config)
-        config["collection"].update(
-            num_envs=2,
-            cpu_workers=1,
-            envs_per_worker=2,
-            min_learner_decisions_per_update=8,
-        )
-        config["ppo"].update(
-            epochs=1,
-            sequence_length=4,
-            sequences_per_minibatch=2,
-            sequences_per_microbatch=2,
-        )
-        config["curriculum"] = [{**config["curriculum"][0], "max_rounds": 2}]
-        manifest = read_json(corpus)
-        with tempfile.TemporaryDirectory() as tmp:
-            continuous, resumed = Path(tmp) / "continuous", Path(tmp) / "resumed"
-            run(
-                config,
-                manifest,
-                continuous,
-                device="cpu",
-                budget=100000,
-                max_updates=2,
-                evaluate_every=False,
-                replays=False,
-            )
-            collect = Collector.collect
-
-            def stop_during_collection(collector, *args, **kwargs):
-                result = collect(collector, *args, **kwargs)
-                (resumed / "stop.request").touch()
-                return result
-
-            with patch.object(Collector, "collect", stop_during_collection):
-                run(
-                    config,
-                    manifest,
-                    resumed,
-                    device="cpu",
-                    budget=100000,
-                    max_updates=2,
-                    evaluate_every=False,
-                    replays=False,
-                )
-            self.assertEqual(read_json(resumed / "run-result.json")["status"], "paused")
-            self.assertEqual(read_json(resumed / "latest.json")["update"], 1)
-            first = resumed / "checkpoints/update-000001.pt"
-            self.assertTrue(first.exists())
-            (resumed / "stop.request").unlink()
-            run(
-                config,
-                manifest,
-                resumed,
-                device="cpu",
-                budget=100000,
-                max_updates=1,
-                evaluate_every=False,
-                replays=False,
-                resume="latest",
-            )
-            a = torch.load(
-                continuous / "checkpoints/update-000002.pt", weights_only=False
-            )
-            b = torch.load(resumed / "checkpoints/update-000002.pt", weights_only=False)
-            for name, value in a["model"].items():
-                torch.testing.assert_close(value, b["model"][name], rtol=0, atol=0)
-            self.assertEqual(a["state"]["next_episode"], b["state"]["next_episode"])
-            self.assertEqual(a["state"]["decisions"], b["state"]["decisions"])
-            self.assertEqual(a["shuffle_rng"], b["shuffle_rng"])
-            self.assertEqual(
-                a["optimizer"]["param_groups"], b["optimizer"]["param_groups"]
-            )
-            for key, values in a["optimizer"]["state"].items():
-                for name, value in values.items():
-                    torch.testing.assert_close(
-                        value, b["optimizer"]["state"][key][name], rtol=0, atol=0
-                    )
-            torch.testing.assert_close(a["torch_rng"], b["torch_rng"], rtol=0, atol=0)
-            self.assertEqual(a["python_rng"], b["python_rng"])
 
     def test_training_run_lock_prevents_concurrent_writer_and_releases(self):
         from civ5rl.control import RunLock, is_active

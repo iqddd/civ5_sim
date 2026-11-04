@@ -82,6 +82,7 @@ class EpisodeResult(TypedDict):
     remaining_hp: list[int]
     damage_dealt: list[int]
     units_lost: list[int]
+    diagnostic_events: NotRequired[list[dict[str, Any]]]
 
 
 class WorkerState(TypedDict):

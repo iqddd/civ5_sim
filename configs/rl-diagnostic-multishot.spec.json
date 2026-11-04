@@ -1,0 +1,336 @@
+{
+  "schema": "rl01.experiment_spec.v1",
+  "status": "specification_requires_runner_implementation",
+  "name": "D0-multishot",
+  "protocol": "docs/rl-multishot-protocol.md",
+  "auto_launch_training": false,
+  "base_config": {
+    "path": "configs/rl-diagnostic-d1.json",
+    "sha256": "ecbb38d72ac4dbc67b52982d02e5027c32ee1124a6906b9996b69301728ad9cb"
+  },
+  "seed": 17,
+  "output": "artifacts/rl/diagnostic-multishot",
+  "source_dataset": {
+    "path": "artifacts/rl/diagnostic-results/manifests/manifest.json",
+    "sha256": "99ddd6a917692f8b610b9cd7aa27d3c50dd25ae7e2d1f0c7cf2be6e80d28b035",
+    "stage": "D0",
+    "allowed_splits": [
+      "train",
+      "dev"
+    ],
+    "train_layouts": 128,
+    "dev_layouts": 64,
+    "paired_sides": true
+  },
+  "scenario": {
+    "width": 6,
+    "height": 6,
+    "terrain": "unchanged_flat_D0",
+    "learner_unit": "archer",
+    "learner_hp": 100,
+    "opponent_unit": "warrior",
+    "opponent_hp": 40,
+    "opponent": "end_turn",
+    "max_rounds": 4,
+    "max_calls_per_turn": 2000,
+    "learner_decision_limit": null,
+    "fog": true,
+    "random_damage": true,
+    "legal_action_filter": null,
+    "forced_end_turn": false,
+    "healing": "native_unchanged",
+    "terminal": "army_destroyed_or_round_limit",
+    "technical_error": "abort_and_save_reproduction"
+  },
+  "initialization": {
+    "checkpoint": "artifacts/rl/diagnostic-one-decision/seed-17/checkpoints/update-000006.pt",
+    "sha256": "2c28ae9bb0f7e3deac9331d3df60da5b69e43f0717d7a1117f5fe54fa7ceecfd",
+    "load": "all_policy_and_value_parameters_bitwise",
+    "optimizer": "fresh",
+    "training_rng_seed": 17,
+    "episode_hidden": "zero_at_start_only",
+    "critic_reset": false,
+    "critic_warmup": false,
+    "freeze_shared_encoder": false,
+    "stage_decisions": 0
+  },
+  "model": {
+    "type": "hex_gru_action_scorer",
+    "tile_projection": [
+      73,
+      128
+    ],
+    "hex_blocks": 4,
+    "hex_width": 128,
+    "hex_directions": 6,
+    "hex_mlp": [
+      128,
+      256,
+      128
+    ],
+    "context_mlp": [
+      309,
+      256,
+      256
+    ],
+    "recurrent": {
+      "type": "GRU",
+      "input_size": 256,
+      "hidden_size": 256,
+      "num_layers": 1,
+      "bidirectional": false,
+      "initial_state": "zero",
+      "prefix_recompute": "full_current_weights_no_grad"
+    },
+    "action_mlp": [
+      529,
+      128,
+      1
+    ],
+    "value_mlp": [
+      256,
+      128,
+      1
+    ],
+    "activation": "gelu",
+    "layer_norm_eps": 1e-05,
+    "dropout": 0,
+    "expected_parameter_count": 1375362,
+    "shared_actor_critic_encoder": true,
+    "critic_privileged": false,
+    "normalization": "fixed_no_running_statistics"
+  },
+  "observation": {
+    "schema": 1,
+    "tile_features": 73,
+    "global_features": 33,
+    "previous_action_features": 20,
+    "history": true,
+    "age_cap_enemy_turns": 32,
+    "roster_count_scale": 8,
+    "enemy_private_fields": false,
+    "privileged_features": false,
+    "raw_reward_input": false,
+    "step_result_input": false,
+    "seed_input": false
+  },
+  "reward": {
+    "win": 1,
+    "loss": -1,
+    "draw": 0,
+    "nonterminal": 0,
+    "shaping": false,
+    "damage_bonus": 0,
+    "exploration_bonus": 0,
+    "command_penalty": 0
+  },
+  "collection": {
+    "num_envs": 128,
+    "cpu_workers": 4,
+    "envs_per_worker": 32,
+    "worker_math_threads": 1,
+    "min_learner_decisions_per_update": 8192,
+    "complete_episodes_only": true,
+    "deterministic_episode_waves": 128,
+    "freeze_policy_per_update": true,
+    "carry_episodes_between_updates": false,
+    "retain_previous_rollouts_for_ppo": false
+  },
+  "ppo": {
+    "epochs": 4,
+    "gamma": 1,
+    "gae_lambda": 1,
+    "return_estimator": "complete_episode_monte_carlo",
+    "advantage_normalization": "rollout_valid_tokens",
+    "advantage_epsilon": 1e-08,
+    "clip_ratio": 0.2,
+    "value_loss": "mean_squared_error_without_half",
+    "value_coefficient": 0.5,
+    "value_clip": false,
+    "entropy": "categorical_divided_by_log_legal_action_count",
+    "entropy_schedule": {
+      "initial": 0.01,
+      "final": 0.002,
+      "linear_decay_decisions": 2000000,
+      "after_decay": 0.002
+    },
+    "target_kl": 0.01,
+    "stop_kl": 0.015,
+    "kl_measurement": "whole_rollout_after_optimizer_step",
+    "sequence_length": 128,
+    "sequences_per_minibatch": 8,
+    "sequences_per_microbatch": 8,
+    "max_gradient_norm": 0.5,
+    "reward_normalization": false,
+    "return_normalization": false,
+    "valid_tokens_per_minibatch": 1024
+  },
+  "optimizer": {
+    "type": "Adam",
+    "lr_schedule": {
+      "initial": 0.0003,
+      "final": 0.0001,
+      "linear_decay_decisions": 2000000,
+      "after_decay": 0.0001
+    },
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-05,
+    "weight_decay": 0
+  },
+  "numerics": {
+    "precision": "mixed_bfloat16",
+    "amp": true,
+    "amp_dtype": "bfloat16",
+    "parameter_precision": "float32",
+    "input_projection_precision": "float32",
+    "hex_dense_precision": "bfloat16",
+    "hex_message_sum_precision": "float32",
+    "context_precision": "float32",
+    "heads_precision": "float32",
+    "gru_precision": "float32",
+    "policy_value_outputs_precision": "float32",
+    "loss_precision": "float32",
+    "grad_scaler": false,
+    "fp32_replay_max_logp_error": 0.001,
+    "bf16_replay_max_logp_error": 0.005,
+    "replay_max_kl": 1e-06,
+    "require_full_behavior_distribution": true,
+    "replay_max_total_variation": 0.005,
+    "tf32": false,
+    "cudnn_benchmark": false,
+    "deterministic_reference": true
+  },
+  "performance": {
+    "batched_ppo": true,
+    "resident_rollout": true,
+    "non_blocking_inputs": true,
+    "compile": true,
+    "compile_dynamic": true,
+    "compile_mode": "default",
+    "compile_recompile_limit": 32,
+    "fused_adam": true,
+    "kl_sequences_per_batch": 8,
+    "reuse_encoded": true,
+    "worker_encoding": true,
+    "collection_scheduler": "ready",
+    "shared_action_capacity": 4096,
+    "spatial_batch_size": 32
+  },
+  "telemetry": {
+    "enabled": true,
+    "interval_seconds": 1,
+    "cpu_ram_backend": "psutil",
+    "gpu_backend": "NVIDIA NVML",
+    "gpu_index": 0,
+    "gpu_utilization_source": "nvmlDeviceGetUtilizationRates.gpu",
+    "gpu_memory_controller_source": "nvmlDeviceGetUtilizationRates.memory",
+    "power_tdp_denominator": "nvmlDeviceGetPowerManagementDefaultLimit",
+    "record_enforced_power_limit": true,
+    "unavailable_value": null,
+    "wddm_d3d_usage": false,
+    "output": "resources.jsonl"
+  },
+  "schedules": {
+    "counter": "new_multishot_training_learner_decisions",
+    "start": 0,
+    "snapshot": "before_collection_fixed_through_update",
+    "evaluation_increments_counter": false,
+    "ppo_reuse_increments_counter": false,
+    "resume": "restore_without_reset"
+  },
+  "controls": {
+    "first_attack_all_damage_rolls": 1200,
+    "first_attack_must_be_nonlethal": true,
+    "initial_target_hp": 40,
+    "reference_policy": "ranged_if_available_else_end_turn",
+    "required_reference_wins": "all_original_case_seeds_and_all_16_probe_seeds",
+    "probe_master_seed": 20261114,
+    "probe_trials": 16,
+    "probe_seed_formula": "seed_for(20261114, layout_id, trial, namespace=\"multishot_spec_probe_\" + split)",
+    "probe_namespaces": [
+      "multishot_spec_probe_train",
+      "multishot_spec_probe_dev"
+    ],
+    "passive_policy": "end_turn",
+    "required_passive_draws": "all_original_case_seeds",
+    "on_failure": "invalid_dataset_no_auto_adjustment"
+  },
+  "evaluation": {
+    "split": "diagnostic_dev",
+    "games": 128,
+    "layouts": 64,
+    "paired_sides": true,
+    "mode": "sample",
+    "temperature": 1,
+    "battle_and_sampling_seeds": "preserve_original_D0_dev_cases",
+    "interval_updates": 1,
+    "baselines": [
+      "original_random_seed17",
+      "transfer_D0_update6",
+      "reference_ranged_end_turn",
+      "passive_end_turn"
+    ],
+    "random_checkpoint": "artifacts/rl/diagnostic-results/seed-17/checkpoints/initial.pt",
+    "gate": {
+      "minimum_wins": 122,
+      "consecutive_post_update_evaluations": 2,
+      "baseline_counts_in_streak": false,
+      "minimum_win_delta": null,
+      "first_attack_gate": false,
+      "speed_gate": false
+    },
+    "bootstrap_descriptive_only": {
+      "samples": 10000,
+      "seed": 20261103,
+      "confidence": 0.95,
+      "method": "paired_percentile",
+      "cluster": "layout_id_preserve_both_sides",
+      "comparisons": [
+        "random",
+        "transfer"
+      ]
+    }
+  },
+  "pre_training_stops": {
+    "transfer_dev_wins_at_least": 122,
+    "transfer_status": "solved_at_transfer",
+    "first_training_rollout_wins_equal": 0,
+    "zero_wins_status": "no_positive_reward_in_initial_rollout",
+    "zero_wins_check": "after_complete_first_rollout_before_any_Adam_step"
+  },
+  "limits": {
+    "max_updates": 8,
+    "max_training_seconds": 1800,
+    "minimum_decisions_per_rollout": 8192,
+    "finish_started_wave": true,
+    "finish_started_update": true,
+    "evaluate_completed_update": true,
+    "hard_total_decision_cap": null,
+    "evaluation_time_separate": true,
+    "automatic_next_stage": false,
+    "automatic_second_seed": false
+  },
+  "forbidden": [
+    "test",
+    "diagnostic_test",
+    "D1_auto_launch",
+    "seed42_auto_launch",
+    "reward_shaping",
+    "demonstration_replay",
+    "automatic_HP_or_horizon_tuning",
+    "automatic_LR_tuning",
+    "automatic_budget_extension"
+  ],
+  "final_statuses": [
+    "solved_at_transfer",
+    "passed",
+    "failed_update_limit",
+    "failed_training_time_limit",
+    "no_positive_reward_in_initial_rollout",
+    "invalid_dataset",
+    "technical_error"
+  ]
+}

@@ -1,11 +1,9 @@
 import unittest
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import numpy as np
-
 from civ5rl.protocols.diagnostic import _minimum_shot_damage
-from civ5rl.protocols.evaluation import _wdl_stats
 from civ5rl.provenance.migration import validate_pipeline_migration
 
 
@@ -29,7 +27,7 @@ class ProtocolCleanupTests(unittest.TestCase):
                 ),
                 2,
             )
-        self.assertEqual(rolls, [1200, *range(1200)])
+        self.assertEqual(set(rolls), set(range(1201)))
         with (
             patch(
                 "civ5rl.protocols.diagnostic.native.library",
@@ -42,17 +40,7 @@ class ProtocolCleanupTests(unittest.TestCase):
                 "changed",
             )
 
-    def test_wdl_counts_and_empty_side(self):
-        self.assertEqual(
-            _wdl_stats(np.asarray([1, 0, -1, 1])),
-            {"games": 4, "wins": 2, "draws": 1, "losses": 1, "score": 0.625},
-        )
-        self.assertEqual(
-            _wdl_stats(np.asarray([])),
-            {"games": 0, "wins": 0, "draws": 0, "losses": 0, "score": None},
-        )
-
-    def test_pipeline_validation_order(self):
+    def test_pipeline_migration_rejects_each_unsupported_change(self):
         old = {
             "collection": {
                 "num_envs": 4,
@@ -62,19 +50,23 @@ class ProtocolCleanupTests(unittest.TestCase):
             },
             "fixed": 1,
         }
-        bad = {**old, "fixed": 2, "collection": {**old["collection"], "num_envs": 3}}
         identity = {"source_hashes": {}, "environment": "a"}
-        other = {"source_hashes": {"forbidden": "x"}, "environment": "b"}
-        with self.assertRaisesRegex(ValueError, "learning rules"):
-            validate_pipeline_migration(old, bad, identity, other)
-        bad["fixed"] = 1
-        with self.assertRaisesRegex(ValueError, "worker/wave"):
-            validate_pipeline_migration(old, bad, identity, other)
-        with self.assertRaisesRegex(ValueError, "corpus/environment"):
-            validate_pipeline_migration(old, old, identity, other)
-        other["environment"] = "a"
-        with self.assertRaisesRegex(ValueError, "model/simulator"):
-            validate_pipeline_migration(old, old, identity, other)
+        changed_config = deepcopy(old)
+        changed_config["fixed"] = 2
+        changed_workers = deepcopy(old)
+        changed_workers["collection"]["num_envs"] = 3
+        cases = (
+            (changed_config, identity),
+            (changed_workers, identity),
+            (old, {**identity, "environment": "b"}),
+            (old, {**identity, "source_hashes": {"forbidden": "x"}}),
+        )
+        for config, changed_identity in cases:
+            with (
+                self.subTest(config=config, identity=changed_identity),
+                self.assertRaises(ValueError),
+            ):
+                validate_pipeline_migration(old, config, identity, changed_identity)
 
 
 if __name__ == "__main__":

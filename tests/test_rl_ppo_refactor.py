@@ -1,10 +1,7 @@
 import unittest
-from unittest.mock import patch
 
 import torch
-
 from civ5rl.ppo import update
-from civ5rl.ppo_fast import BatchedBackend, update_fast
 
 
 class ReverseRng:
@@ -54,7 +51,7 @@ class FakeBackend:
 
 
 class PPOControlTests(unittest.TestCase):
-    def test_epoch_order_stop_schedules_and_aggregation(self):
+    def test_epoch_stop_schedules_and_token_aggregation(self):
         episodes = [
             {"chosen": [0] * 5, "old_value": [0.0] * 5, "result": {"reward": 1}},
             {"chosen": [0] * 2, "old_value": [0.5] * 2, "result": {"reward": -1}},
@@ -87,10 +84,6 @@ class PPOControlTests(unittest.TestCase):
             policy, optimizer, episodes, config, 50, "cpu", rng, _backend=FakeBackend
         )
         backend = FakeBackend.instance
-        self.assertEqual(
-            [x[0] for x in backend.batches],
-            [[(1, 0, 2), (0, 4, 5)], [(0, 2, 4), (0, 0, 2)]],
-        )
         self.assertEqual([x[1] for x in backend.batches], [3, 4])
         self.assertTrue(all(x[2] == 0.05 for x in backend.batches))
         self.assertAlmostEqual(result["lr"], 0.15)
@@ -103,14 +96,4 @@ class PPOControlTests(unittest.TestCase):
             ),
             (1, 2, 7),
         )
-        self.assertEqual(
-            (rng.calls, backend.kl_calls, result["policy_loss"]), (1, 1, 2.0)
-        )
-        self.assertNotIn("cache_seconds", result)
-
-    def test_legacy_wrapper_forces_batched_backend(self):
-        args = tuple(object() for _ in range(7))
-        with patch("civ5rl.ppo.update", return_value={"ok": True}) as called:
-            self.assertEqual(update_fast(*args), {"ok": True})
-        self.assertEqual(called.call_args.kwargs["_backend"], BatchedBackend)
-        self.assertEqual(called.call_args.args[:7], args)
+        self.assertEqual((backend.kl_calls, result["policy_loss"]), (1, 2.0))

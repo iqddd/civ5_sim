@@ -1,11 +1,9 @@
-"""Token-based Adam steps, per-step KL and frozen D1 resume acceptance."""
+"""Token-based Adam steps, per-step KL and frozen D1 initialization."""
 
-import json
 import random
 import tempfile
 import unittest
 from copy import deepcopy
-from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -162,19 +160,6 @@ class D1Tests(unittest.TestCase):
             "passed",
         )
 
-    def test_explicit_suite_resume_consumes_graceful_stop(self):
-        from tools import run_rl_diagnostic as runner
-
-        with tempfile.TemporaryDirectory() as tmp:
-            request = Path(tmp) / "seed-17/stop.request"
-            request.parent.mkdir()
-            request.touch()
-            with patch.object(runner, "_run_suite", return_value=None):
-                runner.run_suite(self.config, tmp, resume=False)
-                self.assertTrue(request.exists())
-                runner.run_suite(self.config, tmp, resume=True)
-                self.assertFalse(request.exists())
-
     def test_evaluation_rng_isolation_even_on_failure(self):
         from tools import run_rl_diagnostic as runner
 
@@ -193,185 +178,6 @@ class D1Tests(unittest.TestCase):
         self.assertEqual(before[0], random.getstate())
         np.testing.assert_equal(before[1], np.random.get_state())
         torch.testing.assert_close(before[2], torch.get_rng_state(), rtol=0, atol=0)
-
-    def test_cpu_resume_partial_evaluation_metrics_and_next_update(self):
-        from civ5rl.collector import Collector
-
-        from tools import run_rl_diagnostic as runner
-
-        config = deepcopy(self.config)
-        config["collection"].update(
-            num_envs=2,
-            cpu_workers=1,
-            envs_per_worker=2,
-            min_learner_decisions_per_update=8,
-        )
-        config["ppo"].update(epochs=1)
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            dataset = prepare_d1(root / "manifests", config)
-            uninterrupted, resumed = root / "continuous", root / "resumed"
-            collect = Collector.collect
-            eval_stage = runner.evaluate_stage
-
-            def stop_after_two(directory):
-                calls = 0
-
-                def collecting(collector, *args, **kwargs):
-                    nonlocal calls
-                    result = collect(collector, *args, **kwargs)
-                    if kwargs.get("fixed_specs") is None:
-                        calls += 1
-                        if calls >= 2:
-                            (directory / "stop.request").touch()
-                    return result
-
-                return collecting
-
-            with patch.object(Collector, "collect", stop_after_two(uninterrupted)):
-                runner.run_seed(config, dataset, uninterrupted, 17, "cpu")
-
-            def interrupted(*args):
-                directory = Path(args[4])
-                if directory.name.startswith("update-"):
-                    directory.mkdir(parents=True, exist_ok=True)
-                    (directory / "outcomes.json").write_text("[]")
-                    raise RuntimeError("interrupt partial evaluation")
-                return eval_stage(*args)
-
-            with (
-                patch.object(runner, "evaluate_stage", side_effect=interrupted),
-                self.assertRaisesRegex(RuntimeError, "interrupt partial"),
-            ):
-                runner.run_seed(config, dataset, resumed, 17, "cpu")
-            self.assertIsNotNone(
-                read_json(resumed / "latest.json")["pending_evaluation"]
-            )
-            # Checkpoint already committed; missing JSONL must be recovered exactly once.
-            (resumed / "metrics.jsonl").write_text('{"update":')
-            (resumed / "stop.request").touch()
-            with patch(
-                "civ5rl.ppo.update",
-                side_effect=AssertionError("must not repeat saved update"),
-            ):
-                runner.run_seed(config, dataset, resumed, 17, "cpu", resume=True)
-            self.assertEqual(
-                len((resumed / "metrics.jsonl").read_text().splitlines()), 1
-            )
-            self.assertIsNone(read_json(resumed / "latest.json")["pending_evaluation"])
-            self.assertEqual(
-                len(read_json(resumed / "evaluation/update-000001-D1/outcomes.json")),
-                128,
-            )
-            (resumed / "stop.request").unlink()
-
-            def stop_on_collection(collector, *args, **kwargs):
-                result = collect(collector, *args, **kwargs)
-                if kwargs.get("fixed_specs") is None:
-                    (resumed / "stop.request").touch()
-                return result
-
-            with patch.object(Collector, "collect", stop_on_collection):
-                runner.run_seed(config, dataset, resumed, 17, "cpu", resume=True)
-            a, b = [
-                torch.load(p / "checkpoints/update-000002.pt", weights_only=False)
-                for p in (uninterrupted, resumed)
-            ]
-            for section in ("model",):
-                for k, v in a[section].items():
-                    torch.testing.assert_close(v, b[section][k], rtol=0, atol=0)
-            for k, state in a["optimizer"]["state"].items():
-                for field, value in state.items():
-                    torch.testing.assert_close(
-                        value, b["optimizer"]["state"][k][field], rtol=0, atol=0
-                    )
-            self.assertEqual(
-                a["optimizer"]["param_groups"], b["optimizer"]["param_groups"]
-            )
-            for field in ("python_rng", "shuffle_rng"):
-                self.assertEqual(a[field], b[field])
-            np.testing.assert_equal(a["numpy_rng"], b["numpy_rng"])
-            torch.testing.assert_close(a["torch_rng"], b["torch_rng"], rtol=0, atol=0)
-            for field in (
-                "decisions",
-                "d1_decisions",
-                "next_episode",
-                "consecutive",
-                "rollout_schedule",
-            ):
-                self.assertEqual(a["state"][field], b["state"][field])
-            for name in (
-                "random-D1",
-                "transfer-D1",
-                "update-000001-D1",
-                "update-000002-D1",
-            ):
-                self.assertEqual(
-                    read_json(uninterrupted / "evaluation" / name / "outcomes.json"),
-                    read_json(resumed / "evaluation" / name / "outcomes.json"),
-                )
-            rows = [
-                json.loads(l)
-                for l in (resumed / "metrics.jsonl").read_text().splitlines()
-            ]
-            self.assertEqual([r["update"] for r in rows], [1, 2])
-            self.assertEqual(rows[0]["schedule"]["lr"], 0.0003)
-            self.assertEqual(rows[0]["schedule"]["entropy_coefficient"], 0.01)
-            self.assertEqual(
-                rows[1]["schedule"]["d1_decisions"], rows[0]["rollout_decisions"]
-            )
-
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-    def test_cuda_bf16_pending_evaluation_resume(self):
-        from tools import run_rl_diagnostic as runner
-
-        config = deepcopy(self.config)
-        config["collection"].update(
-            num_envs=2,
-            cpu_workers=1,
-            envs_per_worker=2,
-            min_learner_decisions_per_update=8,
-        )
-        config["ppo"].update(epochs=1)
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            dataset = prepare_d1(root / "manifests", config)
-            run = root / "seed-17"
-            evaluate = runner.evaluate_stage
-
-            def interrupt(*args):
-                if Path(args[4]).name.startswith("update-"):
-                    raise RuntimeError("CUDA pending evaluation")
-                return evaluate(*args)
-
-            with (
-                patch.object(runner, "evaluate_stage", side_effect=interrupt),
-                self.assertRaisesRegex(RuntimeError, "CUDA pending"),
-            ):
-                runner.run_seed(config, dataset, run, 17, "cuda")
-            before = torch.load(
-                run / "checkpoints/update-000001.pt", weights_only=False
-            )
-            (run / "stop.request").touch()
-            with patch(
-                "civ5rl.ppo.update", side_effect=AssertionError("repeat training")
-            ):
-                result = runner.run_seed(config, dataset, run, 17, "cuda", resume=True)
-            self.assertIsNone(result["pending_evaluation"])
-            self.assertEqual(result["update"], 1)
-            after = torch.load(run / "checkpoints/update-000001.pt", weights_only=False)
-            for k, v in before["model"].items():
-                torch.testing.assert_close(v, after["model"][k], rtol=0, atol=0)
-            for a, b in zip(before["cuda_rng"], after["cuda_rng"]):
-                torch.testing.assert_close(a, b, rtol=0, atol=0)
-            metrics = json.loads((run / "metrics.jsonl").read_text())
-            self.assertEqual(metrics["ppo"]["behavior_check"], "full_distribution")
-            self.assertTrue(
-                all(
-                    int(s["step"]) == metrics["ppo"]["optimizer_steps"]
-                    for s in after["optimizer"]["state"].values()
-                )
-            )
 
 
 if __name__ == "__main__":

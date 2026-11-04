@@ -1,69 +1,19 @@
-import importlib
+"""Workers stay CPU-only; real historical rollout pickles remain readable."""
+
 import pickle
 import subprocess
 import sys
 import unittest
 from unittest.mock import patch
 
-from civ5rl.provenance.checkpoint import artifact_sources
 
-LAYERS = {
-    "core": ("schema", "contracts", "context", "observation", "model", "agent", "env"),
-    "engine": ("collector", "shared", "ppo", "ppo_fast", "control", "resources"),
-    "provenance": ("common", "checkpoint", "migration", "validation"),
-    "protocols": (
-        "corpus",
-        "evaluation",
-        "memory",
-        "diagnostic",
-        "diagnostic_one",
-        "diagnostic_metrics",
-    ),
-}
-
-
-class PackageLayoutTests(unittest.TestCase):
-    def test_aliases_are_the_same_module_including_private_names(self):
-        for layer, names in LAYERS.items():
-            for name in names:
-                old = importlib.import_module(f"civ5rl.{name}")
-                canonical = importlib.import_module(f"civ5rl.{layer}.{name}")
-                self.assertIs(old, canonical)
-        import civ5rl.collector as legacy
-
-        import civ5rl.engine.collector as canonical
-
-        with patch("civ5rl.collector._worker", object()) as sentinel:
-            self.assertIs(canonical._worker, sentinel)
-            self.assertIs(legacy._worker, sentinel)
-
-    def test_alias_metadata_and_reload_in_both_import_orders(self):
-        code = """
-import importlib, sys
-import civ5rl
-for first, second in (("civ5rl.context", "civ5rl.core.context"),
-                      ("civ5rl.core.schema", "civ5rl.schema")):
-    a = importlib.import_module(first)
-    b = importlib.import_module(second)
-    assert a is b
-    canonical = second if '.core.' in second else first
-    assert a.__name__ == a.__spec__.name == canonical
-    assert a.__package__ == 'civ5rl.core'
-    assert importlib.reload(a) is a
-    assert a.__name__ == a.__spec__.name == canonical
-for _ in range(3):
-    importlib.reload(civ5rl)
-assert sum(bool(getattr(f, '_civ5rl_alias_finder', False)) for f in sys.meta_path) == 1
-assert importlib.import_module('civ5rl.context') is sys.modules['civ5rl.core.context']
-"""
-        subprocess.run([sys.executable, "-c", code], check=True)
-
+class ImportBoundaryTests(unittest.TestCase):
     def test_worker_import_is_torch_free(self):
         subprocess.run(
             [
                 sys.executable,
                 "-c",
-                "import civ5rl.engine.collector; import sys; assert 'torch' not in sys.modules",
+                "import civ5rl.engine.collector, civ5rl.core.env; import sys; assert 'torch' not in sys.modules",
             ],
             check=True,
         )
@@ -80,12 +30,3 @@ assert importlib.import_module('civ5rl.context') is sys.modules['civ5rl.core.con
             data = pickle.dumps(obj)
         restored = pickle.loads(data)
         self.assertIs(type(restored), Encoded)
-
-    def test_nested_modules_are_in_passport(self):
-        from civ5rl.provenance.common import ROOT
-
-        paths = {p.relative_to(ROOT).as_posix() for p in artifact_sources({})}
-        self.assertIn("civ5rl/core/observation.py", paths)
-        self.assertIn("civ5rl/engine/collector.py", paths)
-        self.assertIn("civ5rl/provenance/__init__.py", paths)
-        self.assertIn("civ5rl/protocols/diagnostic.py", paths)

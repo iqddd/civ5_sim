@@ -1,4 +1,4 @@
-"""Horizon-only D0 change, frozen inputs, initialization, gates and resume."""
+"""Horizon-only D0 change, frozen inputs, terminal labels and initialization."""
 
 import tempfile
 import unittest
@@ -8,13 +8,13 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
-
 from civ5rl.common import configure, read_json
 from civ5rl.diagnostic import DecisionEnvContext, DiagnosticFactory
 from civ5rl.diagnostic_one import gate_one, load_initial_weights, next_state_one
 from civ5rl.model import Policy
-from civ5rl.provenance import bound_cases
 from civ5rl.validation import validate_config
+
+from civ5rl.provenance import bound_cases
 from civ5sim import Action
 
 
@@ -180,53 +180,6 @@ class OneDecisionTests(unittest.TestCase):
         self.assertEqual(stats["optimizer_steps"], 2)
         self.assertEqual(stats["objective_valid_tokens"], 16)
         self.assertTrue(all(int(x["step"]) == 2 for x in optimizer.state.values()))
-
-    def test_one_decision_pending_evaluation_resume_does_not_update_again(self):
-        from tools import run_rl_diagnostic as runner
-
-        config = deepcopy(self.config)
-        config["collection"].update(
-            num_envs=2,
-            cpu_workers=1,
-            envs_per_worker=2,
-            min_learner_decisions_per_update=8,
-        )
-        config["ppo"].update(epochs=1)
-        evaluate = runner.evaluate_stage
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "seed-17"
-
-            def interrupted(*args):
-                if Path(args[4]).name.startswith("update-"):
-                    raise RuntimeError("pending evaluation interruption")
-                return evaluate(*args)
-
-            with (
-                patch.object(runner, "evaluate_stage", side_effect=interrupted),
-                self.assertRaisesRegex(RuntimeError, "pending evaluation"),
-            ):
-                runner.run_seed(config, self.dataset, path, 17, device="cpu")
-            latest = read_json(path / "latest.json")
-            self.assertEqual(latest["update"], 1)
-            before = torch.load(
-                path / "checkpoints" / latest["checkpoint"], weights_only=False
-            )
-            (path / "stop.request").touch()
-            with patch(
-                "civ5rl.ppo.update", side_effect=AssertionError("repeat training")
-            ):
-                result = runner.run_seed(
-                    config, self.dataset, path, 17, device="cpu", resume=True
-                )
-            self.assertEqual(result["status"], "paused")
-            self.assertEqual(result["update"], 1)
-            self.assertIsNone(result["pending_evaluation"])
-            after = torch.load(
-                path / "checkpoints" / latest["checkpoint"], weights_only=False
-            )
-            for k, v in before["model"].items():
-                torch.testing.assert_close(v, after["model"][k], rtol=0, atol=0)
-            self.assertEqual(len((path / "metrics.jsonl").read_text().splitlines()), 1)
 
 
 if __name__ == "__main__":

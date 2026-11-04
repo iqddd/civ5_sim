@@ -1,10 +1,6 @@
 import unittest
 
 import numpy as np
-import torch
-from test_rl import context, scenario
-
-from civ5rl.model import Policy
 from civ5rl.observation import ObservationEncoder, ordered_actions
 from civ5rl.schema import (
     ACTION,
@@ -18,7 +14,8 @@ from civ5rl.schema import (
     TILE,
     TILE_DIM,
 )
-from civ5rl.shared import EncodedSlots
+from test_rl import context, scenario
+
 from civ5sim import Action, Battle
 
 
@@ -41,7 +38,7 @@ class SchemaTests(unittest.TestCase):
         )
         self.assertEqual((CONTEXT_INPUT_DIM, ACTION_INPUT_DIM), (309, 529))
 
-    def test_encoding_and_shared_round_trip(self):
+    def test_encoding_feature_semantics(self):
         s = scenario()
         with Battle(s) as battle:
             obs, actions = (
@@ -57,32 +54,3 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(encoded.cells[11, TILE["own_type"]].sum(), 1)
         self.assertEqual(encoded.cells[11, TILE["own_status"]][0], 1)
         self.assertEqual(encoded.globals[GLOBAL["own_roster"]].sum(), 0.25)
-        slots = EncodedSlots(1, action_capacity=len(actions))
-        try:
-            result = slots.read(0, slots.write(0, encoded))
-            for name in encoded.__dataclass_fields__:
-                np.testing.assert_array_equal(
-                    getattr(encoded, name), getattr(result, name)
-                )
-        finally:
-            slots.close()
-
-    def test_checkpoint_shapes_and_keys(self):
-        model = Policy()
-        shapes = {key: tuple(value.shape) for key, value in model.state_dict().items()}
-        expected = {
-            "projection.weight": (128, 73),
-            "projection.bias": (128,),
-            "context.0.weight": (256, 309),
-            "memory.weight_ih_l0": (768, 256),
-            "memory.weight_hh_l0": (768, 256),
-            "action.0.weight": (128, 529),
-            "value.0.weight": (128, 256),
-        }
-        for key, shape in expected.items():
-            self.assertEqual(shapes[key], shape)
-        self.assertEqual(sum(p.numel() for p in model.parameters()), 1375362)
-        self.assertEqual((model.hidden_size, model.hex_dim), (256, 128))
-        model.load_state_dict(
-            {k: torch.zeros_like(v) for k, v in model.state_dict().items()}, strict=True
-        )

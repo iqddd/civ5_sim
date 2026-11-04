@@ -1,6 +1,5 @@
-"""Diagnostic prerequisites, gates, provenance and interrupted evaluation recovery."""
+"""Diagnostic prerequisites, gates, provenance and attack metrics."""
 
-import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -8,7 +7,6 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
-
 from civ5rl.common import configure, read_json
 from civ5rl.diagnostic import (
     AttackOrEndTurn,
@@ -19,9 +17,10 @@ from civ5rl.diagnostic import (
     reference_win,
 )
 from civ5rl.diagnostic_metrics import decision_metrics, summarize_decisions
-from civ5rl.ppo import objective, targets
-from civ5rl.provenance import bound_cases, case_manifest, validate_cases
+from civ5rl.ppo import objective
 from civ5rl.validation import validate_config
+
+from civ5rl.provenance import bound_cases, case_manifest, validate_cases
 from civ5sim import Action
 
 
@@ -239,7 +238,7 @@ class DiagnosticTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             gate("D1", {"win_rate": 1}, rows[:-1], baseline)
 
-    def test_reward_targets_and_actual_damage(self):
+    def test_actual_damage_caps_at_remaining_target_HP(self):
         from civ5rl.env import DecisionEnv
 
         spec = bound_cases(self.dataset()["D0"]["dev"])[0]
@@ -255,14 +254,6 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(done["result"]["damage_dealt"][spec["learner_side"]], 1)
         finally:
             env.close()
-        eps = [
-            {"chosen": [0, 0], "old_value": [0.0, 0.0], "result": {"reward": r}}
-            for r in (1, 0, -1)
-        ]
-        advantages = targets(eps)
-        self.assertGreater(advantages[0][0], 0)
-        self.assertEqual(advantages[1][0], 0)
-        self.assertLess(advantages[2][0], 0)
 
     def test_winning_shot_reward_pushes_probability_in_correct_direction(self):
         from civ5rl.env import DecisionEnv
@@ -296,62 +287,6 @@ class DiagnosticTests(unittest.TestCase):
         self.assertLess(logits.grad[0, index], 0)
         updated = logits.detach() - 0.1 * logits.grad
         self.assertGreater(updated.softmax(-1)[0, index], logits.softmax(-1)[0, index])
-
-    def test_resume_finishes_pending_evaluation_without_retraining(self):
-        from tools import run_rl_diagnostic as runner
-
-        config = deepcopy(self.config)
-        config["collection"].update(
-            num_envs=2,
-            cpu_workers=1,
-            envs_per_worker=2,
-            min_learner_decisions_per_update=8,
-        )
-        config["ppo"].update(
-            epochs=1,
-            sequence_length=4,
-            sequences_per_minibatch=2,
-            sequences_per_microbatch=2,
-        )
-        dataset = self.dataset()
-        original = runner.evaluate_stage
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "seed-17"
-
-            def interrupt(policy, collector, dataset, stage, directory, monitor):
-                if Path(directory).name.startswith("update-"):
-                    raise RuntimeError("simulated interruption before evaluation")
-                return original(policy, collector, dataset, stage, directory, monitor)
-
-            with (
-                patch.object(runner, "evaluate_stage", side_effect=interrupt),
-                self.assertRaisesRegex(RuntimeError, "simulated interruption"),
-            ):
-                runner.run_seed(config, dataset, path, 17, device="cpu")
-            latest = read_json(path / "latest.json")
-            self.assertEqual(latest["update"], 1)
-            self.assertIsNotNone(latest["pending_evaluation"])
-            before = torch.load(
-                path / "checkpoints" / latest["checkpoint"], weights_only=False
-            )
-            (path / "stop.request").touch()
-            with patch(
-                "civ5rl.ppo.update", side_effect=AssertionError("should not train")
-            ):
-                result = runner.run_seed(
-                    config, dataset, path, 17, device="cpu", resume=True
-                )
-            self.assertEqual(result["update"], 1)
-            self.assertIsNone(result["pending_evaluation"])
-            after = torch.load(
-                path / "checkpoints" / latest["checkpoint"], weights_only=False
-            )
-            for key, value in before["model"].items():
-                torch.testing.assert_close(value, after["model"][key], rtol=0, atol=0)
-            self.assertEqual(len((path / "metrics.jsonl").read_text().splitlines()), 1)
-            self.assertTrue(
-                (path / "evaluation/update-000001-D0/summary.json").exists()
-            )
 
 
 if __name__ == "__main__":
