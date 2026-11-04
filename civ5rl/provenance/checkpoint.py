@@ -16,10 +16,17 @@ from civ5rl.provenance.common import ROOT, write_json
 
 
 def same_execution_identity(left, right):
-    """Git HEAD records provenance; exact source hashes define executed content."""
-    return {k: v for k, v in left.items() if k != "git_commit"} == {
-        k: v for k, v in right.items() if k != "git_commit"
-    }
+    """Keep Markdown in snapshots, but compare executable experiment identity."""
+    def execution_fields(identity):
+        fields = {k: v for k, v in identity.items() if k != "git_commit"}
+        fields["source_hashes"] = {
+            path: digest
+            for path, digest in fields.get("source_hashes", {}).items()
+            if Path(path).suffix.lower() != ".md"
+        }
+        return fields
+
+    return execution_fields(left) == execution_fields(right)
 
 
 DEFAULT_ARTIFACT_GLOBS = (

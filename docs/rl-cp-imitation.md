@@ -80,3 +80,12 @@ including episode-local encoder history and frozen value weights. Reuse existing
 numeric/memory checks when affected. No full-suite or resume-test runs.
 Replay several benchmark games and compare every recorded public learner input,
 legal list, command result and state hash. Record data hashes and actual costs.
+
+## Идентичность и документация
+
+Markdown сохраняется с хешами в паспорте и `sources.zip` для истории опыта,
+но добавление, удаление или изменение `.md` не блокирует выполнение. Изменения
+исполняемых исходников, ядра, конфигурации, корпуса и окружения по-прежнему
+блокируют запуск. Для данного продолжения исходный паспорт benchmark сохранён
+в `benchmark-passport/`; авторизованное изменение проверки зафиксировано в
+`identity-transition.json`. Начальные веса и обучающие условия не менялись.
