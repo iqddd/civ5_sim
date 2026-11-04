@@ -1,5 +1,7 @@
 # Experiment manifests hash exact file bytes, including archived source endings.
 artifacts/combat-ai/** -text whitespace=cr-at-eol
+artifacts/rl/** -text whitespace=cr-at-eol
+artifacts/rl/**/dirty.diff -whitespace
 # Source snapshots retain upstream/generated whitespace as part of their hash.
 artifacts/combat-ai/cp-transfer-20261102/baseline/** -whitespace
 artifacts/combat-ai/cp-transfer-20261102/frozen/** -whitespace

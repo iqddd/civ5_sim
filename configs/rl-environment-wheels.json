@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "torch": {
+    "version": "2.15.0+cu132",
+    "python_abi": "cp313-cp313-win_amd64",
+    "url": "https://download-r2.pytorch.org/whl/cu132/torch-2.15.0%2Bcu132-cp313-cp313-win_amd64.whl",
+    "sha256": "7b54774dedca2a1147f1ae47451d9a8a7e88b80665fc505bf6a4f1f427d21e97",
+    "source": "https://download.pytorch.org/whl/cu132/torch/",
+    "verification": "Published index hash; installed wheel origin is not recorded by pip. No claim of independently hashing the installed wheel archive."
+  }
+}

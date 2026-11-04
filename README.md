@@ -1,5 +1,57 @@
 # Подготовка карт для тактического симулятора Civ V
 
+## RL-01: обучение агента
+
+Реализация: `civ5rl`, постановка — [RL-01](docs/rl-v1-spec.md),
+параметры — [конфигурация](configs/rl-v1.json). Отдельное окружение обучения
+устанавливается из `requirements-rl.txt`; обычный симулятор не импортирует PyTorch.
+
+```powershell
+.venv\Scripts\python.exe tools\prepare_rl.py
+.venv\Scripts\python.exe tools\control_rl.py status --out artifacts\rl\training-result
+.venv\Scripts\python.exe tools\report_rl.py artifacts\rl\training-result
+```
+
+Текущие артефакты: [описание](artifacts/rl/README.md),
+`corpus/` — корпус, `training-result/` — завершённый пилот,
+`performance-results/` — измерения, `development-history.zip` — история разработки.
+Текущая конфигурация производительного сбора — `configs/rl-v1-throughput.json`.
+Для новых запусков указывайте отдельный `--out`; существующий результат защищён
+от перезаписи без явного resume.
+
+Полная последовательность smoke → benchmark → pilot → memory-dev:
+`tools/run_rl01.py --out artifacts/rl-next-experiment`.
+Продолжение: `train_rl.py --phase pilot --out <тот же каталог> --resume <checkpoint.pt>`.
+Для фонового пилота: `tools/control_rl.py pause --out <каталог>` запрашивает
+остановку после сохранения текущего PPO update; `status` показывает состояние,
+`resume` продолжает из последнего checkpoint в фоне. Для вывода в текущую
+консоль добавьте `--foreground`. Сохраняются model, Adam, RNG и счётчики;
+`run-status.json` содержит PID/фазу, `latest.json` — последний целый checkpoint.
+При аварийном завершении теряется только незавершённое обновление.
+Агент в обычном JSON матча: `"rl:E:/civ5_sim/artifacts/rl/training-result/checkpoints/<checkpoint>.pt"`.
+Реплеи открываются через `tools/view_combat.py`.
+
+Во время обучения и оценки `resources.jsonl` раз в секунду записывает CPU/RAM
+системы и дерева процессов, VRAM, GPU Core Load, Memory Controller Load и мощность
+платы относительно штатного power limit. GPU-источник — NVIDIA NVML;
+WDDM D3D Usage не используется. Определения, единицы, недоступные поля и
+агрегаты сохранены рядом в `resources-schema.json` и `resources-summary.json`.
+GPU-показатели относятся ко всей плате. Test и diagnostic-test заблокированы
+в pilot; используются только validation и memory-dev.
+
+В RL-01 v1.4 включены `torch.compile(dynamic=True)` для энкодера/голов и AMP
+BF16 для GEMM четырёх hex-блоков. Входная projection, context и policy/value
+heads, GRU, её память, loss, веса и Adam остаются FP32 для устойчивого replay.
+PPO по-прежнему обновляется по 8 chunks, теперь в одном
+microbatch; rollout переиспользуется из VRAM. Нужен native BF16 и пакет
+`triton-windows` на Windows; CPU reference исполняется в eager FP32.
+`tools/profile_rl.py` сохраняет фиксированный rollout и cProfile workers;
+`tools/tune_rl.py --mode compiled --amp-bf16 --microbatch 8 --rollout <rollout.pt> --checkpoint <соответствующий-checkpoint.pt> --out <каталог>`
+сравнивает исполнение на тех же данных. Холодная компиляция учитывается отдельно.
+BF16 replay проверяется по полным записанным распределениям команд (KL и total
+variation); исходные old_logp не подменяются. Узкая миграция audit-ревизии
+сохраняет model/Adam/RNG и фиксирует lineage; обычный resume остаётся строгим.
+
 Генерация Пангеи, сохранение ландшафта, отбор участков 16×16 и локальный просмотрщик. Добавлено отдельное нативное ядро боя CP Only для воинов, лучников, лучников на колесницах, копейщиков и всадников: [правила, Python API и сценарии](docs/combat.md).
 
 Сборка боя: `.venv\Scripts\python.exe tools\build_combat.py`. Пример: `.venv\Scripts\python.exe -m civ5sim run scenarios\duel.json --commands scenarios\duel_commands.json --out build\duel-final.json --replay build\duel-replay.json`. Поддерживаются оба режима видимости и оба варианта урона; опыт и приобретаемые повышения отсутствуют.
@@ -7,6 +59,8 @@
 Полный матч двух Python-агентов: `.venv\Scripts\python.exe -m civ5sim match scenarios\match-example.json --out build\match-example`. Организатор расставляет армии на сохранённой карте, останавливает бой при уничтожении армии или по лимиту раундов и сохраняет результат, финальное состояние и реплей. Составы и лимит обязательны в конфигурации. [Настройка матчей и подключение агентов](docs/combat.md#организатор-матча).
 
 Готовый результат: [просмотрщик десяти участков](artifacts/pangaea-42/viewer.html). Открывается обычным браузером, без сервера и интернета. В списке есть исходная карта и каждый участок; доступны координаты, кандидаты стартовых клеток, сведения о клетке и выгрузка JSON.
+
+Спецификация первого обучаемого агента: [RL-01 — модель, обучение и оценка](docs/rl-v1-spec.md), [числовая конфигурация](configs/rl-v1.json). Это план реализации; обучение по нему ещё не запускалось.
 
 ## Запуск
 

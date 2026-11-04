@@ -21,7 +21,7 @@
 <div class="help">← / → — одна команда · Пробел — пауза · Home / End — начало и конец. Обзор меняет карту; журнал содержит полные команды реплея.</div>
 <div class="legend"><span><b>W</b> воин</span><span><b>A</b> лучник</span><span><b>C</b> колесница</span><span><b>S</b> копейщик</span><span><b>H</b> всадник</span><span>Полоска под юнитом — HP</span></div>
 </section>
-<aside class="inspector"><div class="panel detail"><div class="section-title">Выбранный юнит / клетка</div><div id="details" class="details-empty">Нажмите на юнита или клетку.<br>Здесь появятся HP, движение и состояние на текущем шаге.</div></div><div class="panel journal-panel"><div class="section-title">Журнал команд <span id="journalCount" class="count"></span></div><div id="journal" class="journal"></div></div><div class="panel detail"><div class="section-title">Решения CP</div><div id="diagnostics" class="diagnostics">Выберите шаг для просмотра диагностики поиска.</div></div></aside>
+<aside class="inspector"><div class="panel detail"><div class="section-title">Выбранный юнит / клетка</div><div id="details" class="details-empty">Нажмите на юнита или клетку.<br>Здесь появятся HP, движение и состояние на текущем шаге.</div></div><div class="panel journal-panel"><div class="section-title">Журнал команд <span id="journalCount" class="count"></span></div><div id="journal" class="journal"></div></div><div class="panel detail"><div class="section-title">Диагностика агента</div><div id="diagnostics" class="diagnostics">Выберите шаг для просмотра решений и истории контактов.</div></div></aside>
 </main><div id="tooltip" hidden></div>
 <script>
 'use strict';
@@ -45,7 +45,7 @@ function visibleUnit(u,frame=index){return u&&u.hp>0&&($('vision').value==='all'
 function xyText(tile){return Number.isInteger(tile)&&tile>=0?tileXY(tile).join(', '):'—'}
 function describe(step,frame){const a=step.action;if(a.kind==='end_turn')return 'Конец хода';const u=unit(a.unit,Math.max(0,frame-1));const label=`${types[u?.type]?.[1]||'Юнит'} #${a.unit}`;let s=`${label} · ${kinds[a.kind]||a.kind}`;if(a.target>=0)s+=` → №${a.target} (${xyText(a.target)})`;if(step.result.damage)s+=` · −${step.result.damage} HP`;if(step.result.retaliation)s+=` / ответ −${step.result.retaliation}`;return s}
 async function getJSON(url){const r=await fetch(url);const body=await r.json();if(!r.ok)throw new Error(body.error||`HTTP ${r.status}`);return body}
-function agentName(name){if(name?.includes('CPAgent')||name==='cp')return 'CP';if(name?.includes('GreedyAgent')||name==='greedy')return 'Greedy';if(name?.includes('RandomAgent')||name==='random')return 'Random';return name||'—'}
+function agentName(name){if(name?.startsWith('rl:')||name?.includes('civ5rl'))return 'RL · память';if(name?.includes('CPAgent')||name==='cp')return 'CP';if(name?.includes('GreedyAgent')||name==='greedy')return 'Greedy';if(name?.includes('RandomAgent')||name==='random')return 'Random';return name||'—'}
 function outcomeLabel(m){if(m.status==='error')return 'Ошибка агента';if(m.outcome==='draw')return 'Ничья';if(m.winner!==null&&m.winner!==undefined)return `Победа ${m.winner===0?'A':'B'}`;return 'Реплей'}
 function portLabel(port){return port?.match(/\d+\.\d+\.\d+/)?.[0]||'версия неизвестна'}
 function replayStatus(m){const labels={updated:'Переигран',pending:'Ещё старый',old:'Прежняя версия',continuation:'Продолжение'};return `${labels[m.refresh_status]||'Реплей'}${m.resume_after?' с '+(m.resume_after+1):''} · ${portLabel(m.port)}`}
@@ -96,7 +96,20 @@ function renderDetails(){const target=$('details');target.replaceChildren();if(s
 function renderJournal(){const journal=$('journal');journal.replaceChildren();const begin=Math.max(0,index-11),end=Math.min(data.steps.length,index+8);if(index===0){const b=document.createElement('button');b.className='entry active';b.textContent='000 · Начальная расстановка';b.onclick=()=>seek(0);journal.append(b)}for(let i=begin;i<end;i++){const b=document.createElement('button');b.className='entry'+(i+1===index?' active':'');div('n',String(i+1).padStart(3,'0'),b);div(['melee','ranged'].includes(data.steps[i].action.kind)?'attack':'',describe(data.steps[i],i+1),b);b.onclick=()=>{stop();seek(i+1)};journal.append(b)}$('journalCount').textContent=`${data.steps.length}`;const active=journal.querySelector('.active');if(active)journal.scrollTop=Math.max(0,active.offsetTop-journal.offsetTop-100)}
 function renderDiagnostics(){
   const panel=$('diagnostics');panel.replaceChildren();
-  const events=data.ai_events.filter(e=>e.command===index&&!['action','action_result'].includes(e.event));
+  const vision=$('vision').value;
+  const memories=new Map();
+  for(const e of data.ai_events)if(e.kind==='rl_contacts'&&e.command<=index&&(vision==='all'||e.side===+vision))memories.set(e.side,e);
+  for(const [side,e] of memories){
+    div('detail-title',`${side===0?'A':'B'} · Память контактов`,panel);
+    if(!e.contacts.length)div('details-empty','Враг ещё не наблюдался.',panel);
+    for(const c of e.contacts){
+      const p=document.createElement('p'),type=Object.keys(types)[c.type_index];
+      const age=Math.max(0,Math.floor((data.frames[index].turn+side)/2)-c.last_enemy_clock);
+      p.textContent=`${types[type]?.[1]||'Юнит'} #${c.id}: последнее наблюдение (${xyText(c.tile)}), ${c.last_hp} HP · ${age} ходов противника назад`;
+      panel.append(p);
+    }
+  }
+  const events=data.ai_events.filter(e=>e.kind!=='rl_contacts'&&e.command===index&&!['action','action_result'].includes(e.event));
   for(const e of events){
     const p=document.createElement('p');
     if(e.event==='target_comparison'){
@@ -123,7 +136,7 @@ function renderDiagnostics(){
     if(e.target>=0)text+=` · цель (${xyText(e.target)})`;
     p.textContent=text;panel.append(p);
   }
-  if(!events.length)panel.textContent='На этой границе команд диагностических событий нет.';
+  if(!events.length&&!memories.size)panel.textContent='На этой границе команд диагностических событий нет.';
 }
 function render(){if(!data)return;if(selectedUnit!==null&&visibleUnit(unit(selectedUnit)))selectedTile=unit(selectedUnit).tile;const frame=data.frames[index];$('timeline').value=index;$('stepLabel').textContent=`Шаг ${index} / ${data.steps.length}`;$('turnLabel').textContent=index===0?'Расстановка · ход 1':`Ход ${frame.turn+1} · сторона ${frame.side===0?'A':'B'}`;if(index===data.steps.length&&data.result){$('turnLabel').textContent=data.result.status==='error'?'Матч прерван · ошибка агента':data.result.outcome==='draw'?'Матч завершён · ничья':data.result.outcome==='win'?`Матч завершён · победа ${data.result.winner===0?'A':'B'}`:'Реплей завершён'}if(data.experiment&&data.experiment.kind!=='continuation'&&index===data.steps.length)$('turnLabel').textContent='Конец найденного плана · ответный ход не разыгран';$('command').textContent=index?describe(data.steps[index-1],index):'Начальная расстановка армий';$('mapInfo').textContent=`${data.map.width}×${data.map.height} · ${data.map.row_parity?'нечётное':'чётное'} смещение строк · ${data.map.wrap_x?'wrap X':'закрытые границы'}`;for(const side of[0,1]){const own=data.roster.filter(u=>u.side===side).map(u=>unit(u.id));$('alive'+side).textContent=own.filter(u=>u.hp>0).length;$('hp'+side).textContent=`${own.reduce((n,u)=>n+u.hp,0)} / ${own.length*100} HP`}for(const id of['first','prev','prevTurn'])$(id).disabled=index===0;for(const id of['next','nextTurn','last'])$(id).disabled=index>=data.steps.length;$('play').disabled=data.steps.length===0;$('turnSelect').value=[...data.turns].reverse().find(t=>t.frame<=index)?.frame??0;renderMap();renderDetails();renderJournal();renderDiagnostics()}
 function seek(value){if(!data)return;index=Math.min(data.steps.length,Math.max(0,Number(value)));if(index===data.steps.length)stop();render()}

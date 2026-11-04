@@ -1,0 +1,462 @@
+{
+  "schema": 1,
+  "spec_version": "1.4",
+  "status": "implemented_pending_optimized_acceptance",
+  "spec": "../docs/rl-v1-spec.md",
+  "name": "rl01_contacts_gru",
+  "seed": 17,
+  "confirmation_seeds": [
+    17,
+    42,
+    73
+  ],
+  "observation": {
+    "schema": 1,
+    "tile_features": 73,
+    "global_features": 33,
+    "previous_action_features": 20,
+    "history": true,
+    "age_cap_enemy_turns": 32,
+    "roster_count_scale": 8,
+    "enemy_private_fields": false,
+    "privileged_features": false,
+    "raw_reward_input": false,
+    "step_result_input": false,
+    "seed_input": false
+  },
+  "environment": {
+    "fog": true,
+    "random_damage": true,
+    "max_width": 16,
+    "max_height": 16,
+    "wrap_x": false,
+    "max_units_per_side": 8,
+    "max_calls_per_turn": 2000,
+    "learner_side_probability": [
+      0.5,
+      0.5
+    ],
+    "terminal": "army_destroyed_or_round_limit",
+    "round_limit_result": "draw",
+    "technical_error": "abort_update_and_save_reproduction",
+    "log_all_training_steps": false
+  },
+  "model": {
+    "type": "hex_gru_action_scorer",
+    "tile_projection": [
+      73,
+      128
+    ],
+    "hex_blocks": 4,
+    "hex_width": 128,
+    "hex_directions": 6,
+    "hex_mlp": [
+      128,
+      256,
+      128
+    ],
+    "context_mlp": [
+      309,
+      256,
+      256
+    ],
+    "recurrent": {
+      "type": "GRU",
+      "input_size": 256,
+      "hidden_size": 256,
+      "num_layers": 1,
+      "bidirectional": false,
+      "initial_state": "zero",
+      "prefix_recompute": "full_current_weights_no_grad"
+    },
+    "action_mlp": [
+      529,
+      128,
+      1
+    ],
+    "value_mlp": [
+      256,
+      128,
+      1
+    ],
+    "activation": "gelu",
+    "layer_norm_eps": 0.00001,
+    "dropout": 0,
+    "expected_parameter_count": 1375362,
+    "shared_actor_critic_encoder": true,
+    "critic_privileged": false,
+    "normalization": "fixed_no_running_statistics"
+  },
+  "reward": {
+    "win": 1,
+    "loss": -1,
+    "draw": 0,
+    "nonterminal": 0,
+    "shaping": false,
+    "damage_bonus": 0,
+    "exploration_bonus": 0,
+    "command_penalty": 0
+  },
+  "collection": {
+    "num_envs": 32,
+    "cpu_workers": 4,
+    "envs_per_worker": 8,
+    "worker_math_threads": 1,
+    "min_learner_decisions_per_update": 8192,
+    "complete_episodes_only": true,
+    "deterministic_episode_waves": 32,
+    "freeze_policy_per_update": true,
+    "carry_episodes_between_updates": false,
+    "retain_previous_rollouts_for_ppo": false
+  },
+  "ppo": {
+    "epochs": 4,
+    "gamma": 1,
+    "gae_lambda": 1,
+    "return_estimator": "complete_episode_monte_carlo",
+    "advantage_normalization": "rollout_valid_tokens",
+    "advantage_epsilon": 1e-8,
+    "clip_ratio": 0.2,
+    "value_loss": "mean_squared_error_without_half",
+    "value_coefficient": 0.5,
+    "value_clip": false,
+    "entropy": "categorical_divided_by_log_legal_action_count",
+    "entropy_schedule": {
+      "initial": 0.01,
+      "final": 0.002,
+      "linear_decay_decisions": 2000000,
+      "after_decay": 0.002
+    },
+    "target_kl": 0.01,
+    "stop_kl": 0.015,
+    "kl_measurement": "whole_rollout_after_epoch",
+    "sequence_length": 128,
+    "sequences_per_minibatch": 8,
+    "sequences_per_microbatch": 8,
+    "max_gradient_norm": 0.5,
+    "reward_normalization": false,
+    "return_normalization": false
+  },
+  "optimizer": {
+    "type": "Adam",
+    "lr_schedule": {
+      "initial": 0.0003,
+      "final": 0.0001,
+      "linear_decay_decisions": 2000000,
+      "after_decay": 0.0001
+    },
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 0.00001,
+    "weight_decay": 0
+  },
+  "numerics": {
+    "precision": "mixed_bfloat16",
+    "amp": true,
+    "amp_dtype": "bfloat16",
+    "parameter_precision": "float32",
+    "input_projection_precision": "float32",
+    "hex_dense_precision": "bfloat16",
+    "hex_message_sum_precision": "float32",
+    "context_precision": "float32",
+    "heads_precision": "float32",
+    "gru_precision": "float32",
+    "policy_value_outputs_precision": "float32",
+    "loss_precision": "float32",
+    "grad_scaler": false,
+    "fp32_replay_max_logp_error": 0.001,
+    "bf16_replay_max_logp_error": 0.005,
+    "replay_max_kl": 0.000001,
+    "require_full_behavior_distribution": true,
+    "replay_max_total_variation": 0.005,
+    "tf32": false,
+    "cudnn_benchmark": false,
+    "deterministic_reference": true
+  },
+  "corpus": {
+    "parent_worlds": {
+      "train": {
+        "count": 64,
+        "first_seed": 10000
+      },
+      "validation": {
+        "count": 16,
+        "first_seed": 20000
+      },
+      "test": {
+        "count": 32,
+        "first_seed": 30000
+      }
+    },
+    "crops_per_world": 4,
+    "split_by_parent_world": true,
+    "map_script": "Pangaea",
+    "semantic_generation_options": {
+      "world_size": "standard",
+      "world_age": 2,
+      "temperature": 2,
+      "rainfall": 2,
+      "sea_level": 2
+    },
+    "generation_cli_mapping": "verified_in_civ5map/__main__.py",
+    "generation_cli_options": {
+      "--world-size": 3,
+      "--age": 2,
+      "--temperature": 2,
+      "--rainfall": 2,
+      "--sea-level": 2,
+      "--count": 4
+    },
+    "fixed_fifth_lua_option": 2,
+    "symmetric_starting_rosters": true,
+    "start_hp": 100,
+    "unit_type_sampling": "uniform_iid_reject_without_melee_or_ranged",
+    "placement_rejection_limit": 100
+  },
+  "curriculum": [
+    {
+      "start_decisions": 0,
+      "end_decisions": 250000,
+      "map_size": [
+        10,
+        10
+      ],
+      "units_per_side": [
+        2,
+        2
+      ],
+      "max_rounds": 20,
+      "contact_probability": 0.5,
+      "opponents": {
+        "random": 0.5,
+        "greedy": 0.5
+      }
+    },
+    {
+      "start_decisions": 250000,
+      "end_decisions": 1000000,
+      "map_size": [
+        12,
+        12
+      ],
+      "units_per_side": [
+        3,
+        3
+      ],
+      "max_rounds": 30,
+      "contact_probability": 0.3,
+      "opponents": {
+        "random": 0.25,
+        "greedy": 0.75
+      }
+    },
+    {
+      "start_decisions": 1000000,
+      "end_decisions": 2000000,
+      "map_size": [
+        16,
+        16
+      ],
+      "units_per_side": [
+        3,
+        5
+      ],
+      "max_rounds": 40,
+      "contact_probability": 0.2,
+      "opponents": {
+        "random": 0.1,
+        "greedy": 0.9
+      }
+    },
+    {
+      "start_decisions": 2000000,
+      "end_decisions": 10000000,
+      "map_size": [
+        16,
+        16
+      ],
+      "units_per_side": [
+        3,
+        5
+      ],
+      "max_rounds": 60,
+      "contact_probability": 0.2,
+      "opponents": {
+        "random": 0.1,
+        "greedy": 0.9
+      }
+    }
+  ],
+  "budgets": {
+    "smoke_decisions": 32768,
+    "pilot_decisions": 2000000,
+    "confirmation_decisions_per_seed": 10000000,
+    "auto_launch_training": false
+  },
+  "evaluation": {
+    "pilot_allowed_splits": ["validation", "memory_dev"],
+    "pilot_forbidden_splits": ["test", "diagnostic_test"],
+    "pilot_test_request_behavior": "error",
+    "final_test_requires_frozen_evaluation_plan": true,
+    "final_test_planned_variants": ["A", "B", "C"],
+    "test_feedback_for_tuning": false,
+    "manifest_seeds": {
+      "validation": 20261104,
+      "test": 20261105,
+      "diagnostic_test": 20261106
+    },
+    "seed_derivation": "sha256_canonical_json_first_64_bits",
+    "policy_rng_scope": "episode_and_side_independent_of_batch",
+    "interval_decisions": 250000,
+    "map_size": [
+      16,
+      16
+    ],
+    "units_per_side": [
+      3,
+      5
+    ],
+    "max_rounds": 60,
+    "placement": "separated",
+    "fog": true,
+    "random_damage": true,
+    "policy_mode": "sample",
+    "temperature": 1,
+    "opponents": [
+      "random",
+      "greedy"
+    ],
+    "paired_sides": true,
+    "validation_cases": 64,
+    "test_cases": 256,
+    "validation_matches_per_checkpoint": 256,
+    "test_matches_per_training_seed": 1024,
+    "checkpoint_selection": "max_validation_greedy_score_earliest_tie",
+    "bootstrap": {
+      "samples": 10000,
+      "seed": 20261103,
+      "confidence": 0.95,
+      "cluster": "parent_world",
+      "resample_training_seeds_for_aggregate": true
+    },
+    "memory": {
+      "geometries": 32,
+      "history_pairs_per_geometry": 4,
+      "side_pairs": true,
+      "continuations_per_training_seed": 512
+    },
+    "cp_stress": {
+      "enabled_in_primary_metric": false,
+      "cases": 64,
+      "matches_per_training_seed": 128,
+      "privileged_cp_queries": true
+    }
+  },
+  "acceptance": {
+    "greedy_score_mean_min": 0.6,
+    "greedy_score_ci_lower_gt": 0.5,
+    "greedy_each_seed_point_gt": 0.5,
+    "random_score_mean_min": 0.9,
+    "memory_score_delta_min": 0.05,
+    "memory_delta_ci_lower_gt": 0,
+    "technical_errors_allowed": 0
+  },
+  "ablations": {
+    "current_only": {
+      "history": false,
+      "recurrent_replacement": [
+        256,
+        768,
+        256
+      ],
+      "previous_action": "always_start"
+    },
+    "contacts_mlp": {
+      "history": true,
+      "recurrent_replacement": [
+        256,
+        768,
+        256
+      ]
+    },
+    "belief": {
+      "enabled": false,
+      "coefficient": 0.1,
+      "head": [
+        384,
+        128,
+        6
+      ],
+      "labels": "privileged_training_only",
+      "loss": "unweighted_cross_entropy_hidden_passable_cells",
+      "feed_predictions_to_actor": false
+    }
+  },
+  "checkpoints": {
+    "every_updates": 1,
+    "keep_last": 3,
+    "keep_best_validation": true,
+    "milestone_decisions": [
+      250000,
+      1000000,
+      2000000,
+      5000000,
+      10000000
+    ],
+    "resume_boundary": "completed_update",
+    "training_replay_every_episodes": 1000,
+    "save_all_test_replays": true
+  },
+  "resource_targets": {
+    "gpu_memory_gib": 14,
+    "total_process_ram_gib": 24,
+    "benchmark_warmup_updates": 2,
+    "benchmark_measured_updates": 10,
+    "benchmark_repetitions": 3
+  },
+  "telemetry": {
+    "enabled": true,
+    "interval_seconds": 1,
+    "cpu_ram_backend": "psutil",
+    "gpu_backend": "NVIDIA NVML",
+    "gpu_index": 0,
+    "gpu_utilization_source": "nvmlDeviceGetUtilizationRates.gpu",
+    "gpu_memory_controller_source": "nvmlDeviceGetUtilizationRates.memory",
+    "power_tdp_denominator": "nvmlDeviceGetPowerManagementDefaultLimit",
+    "record_enforced_power_limit": true,
+    "unavailable_value": null,
+    "wddm_d3d_usage": false,
+    "output": "resources.jsonl"
+  },
+  "performance": {
+    "batched_ppo": true,
+    "resident_rollout": true,
+    "non_blocking_inputs": true,
+    "compile": true,
+    "compile_dynamic": true,
+    "compile_mode": "default",
+    "compile_recompile_limit": 32,
+    "fused_adam": true,
+    "kl_sequences_per_batch": 8
+  },
+  "observed_environment": {
+    "python": "3.13.9",
+    "torch": "2.15.0+cu132",
+    "numpy": "2.5.4",
+    "cuda_runtime": "13.2",
+    "gpu": "NVIDIA GeForce RTX 4060 Ti",
+    "gpu_memory_mib": 16380,
+    "nvidia_driver": "610.88",
+    "cpu": "Intel Core i5-11600K",
+    "cpu_workers_default": 4
+  },
+  "deferred": [
+    "self_play",
+    "privileged_critic",
+    "imitation_from_cp",
+    "policy_search",
+    "asymmetric_armies"
+  ]
+}

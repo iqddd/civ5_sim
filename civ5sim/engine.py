@@ -170,7 +170,7 @@ class Battle:
             )
         try:
             self._restore_state(scenario, units)
-            self._initial = self.snapshot()
+            self._initial = self._snapshot(copy_static=False)
             self._logging = boolean(log, "log")
             self._journal = []
         except BaseException:
@@ -446,13 +446,17 @@ class Battle:
 
     def snapshot(self):
         """Privileged complete state, not an input for a fog-of-war policy."""
+        return self._snapshot(copy_static=True)
+
+    def _snapshot(self, *, copy_static):
+        """Internal snapshots share owned immutable terrain; public snapshots detach it."""
         info = self._info()
         units = [self._unit_dict(u, i) for i, u in enumerate(self._units())]
         return {
             "schema": 2,
             "kind": "civ5sim.snapshot",
-            "rules": deepcopy(self._rules),
-            "map": deepcopy(self._map),
+            "rules": deepcopy(self._rules) if copy_static else self._rules,
+            "map": deepcopy(self._map) if copy_static else self._map,
             "units": units,
             "state": {
                 "side": info.side,
@@ -503,7 +507,7 @@ class Battle:
         other._handle = self._lib.sim_clone(self._handle)
         if not other._handle:
             raise MemoryError("Cannot clone battle")
-        other._initial = other.snapshot()
+        other._initial = other._snapshot(copy_static=False)
         other._logging = boolean(log, "log")
         other._journal = []
         return other
@@ -524,7 +528,7 @@ class Battle:
         self._restore_state(value, self._encode_units(value["units"], require_history=value["kind"] == "civ5sim.snapshot"))
         self._action_buffer = None
         self._observation_buffers = {}
-        self._initial = self.snapshot()
+        self._initial = self._snapshot(copy_static=False)
         self._journal.clear()
 
     def close(self):

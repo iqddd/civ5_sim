@@ -139,7 +139,7 @@ class MatchOutcome:
             self.diagnostic_recorder.save(directory, self.replay)
 
 
-def run_match(config, agents, *, metrics=None, diagnostics="off"):
+def run_match(config, agents, *, metrics=None, diagnostics="off", scenario=None, agent_seeds=None):
     """Run two agent objects/specifications and return privileged match artifacts.
 
     Invalid configuration raises before invoking agents. Agent failures instead
@@ -149,7 +149,18 @@ def run_match(config, agents, *, metrics=None, diagnostics="off"):
     """
     from .decision_diagnostics import recorder
     recording = recorder(diagnostics)
-    scenario = create_scenario(config)
+    if scenario is None:
+        scenario = create_scenario(config)
+    else:
+        scenario = deepcopy(scenario)
+        if scenario.get("kind") != "civ5sim.scenario" or scenario.get("active_side", 0) != 0:
+            raise ValueError("Prepared match must start at side 0 in a scenario")
+        if scenario.get("fog") != config.fog or scenario.get("random_damage") != config.random_damage:
+            raise ValueError("Prepared scenario flags disagree with MatchConfig")
+        if [[u["type"] for u in scenario["units"] if u["side"] == s] for s in (0, 1)] != config.armies:
+            raise ValueError("Prepared scenario rosters disagree with MatchConfig")
+        integer(config.max_rounds, "max_rounds", 1, (2**31 - 1) // 2)
+        integer(config.max_calls_per_turn, "max_calls_per_turn", 1)
     config = deepcopy(config)
     agents = list(agents)
     if len(agents) != 2:
@@ -161,6 +172,13 @@ def run_match(config, agents, *, metrics=None, diagnostics="off"):
         for a in agents
     ]
     seeds = _seeds(config.seed)
+    if scenario["seed"] != seeds["battle"]:
+        seeds.update(battle=scenario["seed"], placement=None)
+    if agent_seeds is not None:
+        if len(agent_seeds) != 2:
+            raise ValueError("Expected two agent seeds")
+        for side, value in enumerate(agent_seeds):
+            seeds[f"agent{side}"] = integer(value, "agent seed", 0, 2**64 - 1)
     m = scenario["map"]
     public_map = {
         k: m[k] for k in ("schema", "width", "height", "row_parity", "wrap_x")

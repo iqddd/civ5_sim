@@ -37,6 +37,10 @@ class EndTurnAgent:
 
 def load_agent(spec):
     """Create a fresh builtin or a zero-argument module:factory agent."""
+    if spec.startswith("rl:"):
+        from civ5rl.agent import RLAgent
+
+        return RLAgent.from_checkpoint(spec[3:])
     if spec == "random":
         return RandomAgent()
     if spec == "end_turn":
