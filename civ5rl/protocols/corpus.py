@@ -241,7 +241,12 @@ class ScenarioFactory:
             first = candidates.index(
                 options[(case_index // len(worlds)) % len(options)]
             )
-        roster = self._sample_roster(roster_rng, stage["units_per_side"])
+        if "roster" in stage:
+            roster = list(stage["roster"])
+            if not roster or any(kind not in UNIT_TYPES for kind in roster):
+                raise ValueError("Invalid explicit scenario roster")
+        else:
+            roster = self._sample_roster(roster_rng, stage["units_per_side"])
         n = len(roster)
         contact = placement_rng.random() < stage.get("contact_probability", 0)
         rejected = []

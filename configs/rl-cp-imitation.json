@@ -1,0 +1,142 @@
+{
+  "schema": 1,
+  "kind": "rl01.cp_imitation",
+  "seed": 17,
+  "corpus": "artifacts/rl/corpus/manifest.json",
+  "output": "artifacts/rl/cp-imitation",
+  "max_calls_per_turn": 2000,
+  "workers": 4,
+  "training_labels": 20000,
+  "holdout_labels": 2457,
+  "collection_seconds": 3600,
+  "training_seconds": 1800,
+  "epochs": 3,
+  "labels_per_minibatch": 1024,
+  "sequence_length": 128,
+  "microbatch_sequences": 8,
+  "max_gradient_norm": 0.5,
+  "optimizer": {
+    "lr": 0.0001,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-05,
+    "weight_decay": 0
+  },
+  "teacher_search": {
+    "position_capacity": 6000,
+    "max_completed": 2560,
+    "max_branches": 5,
+    "choices_per_unit": 5,
+    "aggression": 2,
+    "privileged_cp_queries": true,
+    "risk_budget_base": 0,
+    "risk_budget_per_kill": 1
+  },
+  "numerics": {
+    "precision": "mixed_bfloat16",
+    "amp": true,
+    "amp_dtype": "bfloat16",
+    "parameter_precision": "float32",
+    "input_projection_precision": "float32",
+    "hex_dense_precision": "bfloat16",
+    "hex_message_sum_precision": "float32",
+    "context_precision": "float32",
+    "heads_precision": "float32",
+    "gru_precision": "float32",
+    "policy_value_outputs_precision": "float32",
+    "loss_precision": "float32",
+    "grad_scaler": false,
+    "fp32_replay_max_logp_error": 0.001,
+    "bf16_replay_max_logp_error": 0.005,
+    "replay_max_kl": 1e-06,
+    "require_full_behavior_distribution": true,
+    "replay_max_total_variation": 0.005,
+    "tf32": false,
+    "cudnn_benchmark": false,
+    "deterministic_reference": true
+  },
+  "performance": {
+    "batched_ppo": true,
+    "resident_rollout": true,
+    "non_blocking_inputs": true,
+    "compile": true,
+    "compile_dynamic": true,
+    "compile_mode": "default",
+    "compile_recompile_limit": 32,
+    "fused_adam": true,
+    "kl_sequences_per_batch": 8,
+    "reuse_encoded": true,
+    "worker_encoding": true,
+    "collection_scheduler": "ready",
+    "shared_action_capacity": 4096,
+    "spatial_batch_size": 32
+  },
+  "model": {
+    "type": "hex_gru_action_scorer",
+    "tile_projection": [
+      73,
+      128
+    ],
+    "hex_blocks": 4,
+    "hex_width": 128,
+    "hex_directions": 6,
+    "hex_mlp": [
+      128,
+      256,
+      128
+    ],
+    "context_mlp": [
+      309,
+      256,
+      256
+    ],
+    "recurrent": {
+      "type": "GRU",
+      "input_size": 256,
+      "hidden_size": 256,
+      "num_layers": 1,
+      "bidirectional": false,
+      "initial_state": "zero",
+      "prefix_recompute": "full_current_weights_no_grad"
+    },
+    "action_mlp": [
+      529,
+      128,
+      1
+    ],
+    "value_mlp": [
+      256,
+      128,
+      1
+    ],
+    "activation": "gelu",
+    "layer_norm_eps": 1e-05,
+    "dropout": 0,
+    "expected_parameter_count": 1375362,
+    "shared_actor_critic_encoder": true,
+    "critic_privileged": false,
+    "normalization": "fixed_no_running_statistics"
+  },
+  "observation": {
+    "schema": 1,
+    "tile_features": 73,
+    "global_features": 33,
+    "previous_action_features": 20,
+    "history": true,
+    "age_cap_enemy_turns": 32,
+    "roster_count_scale": 8,
+    "enemy_private_fields": false,
+    "privileged_features": false,
+    "raw_reward_input": false,
+    "step_result_input": false,
+    "seed_input": false
+  },
+  "checkpoint_rule": "last_completed_epoch",
+  "benchmark_matches": 8,
+  "holdout_worlds": 7,
+  "auto_collect": false,
+  "auto_train": false,
+  "auto_evaluate": false
+}
