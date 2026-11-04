@@ -110,9 +110,11 @@ def report(directory):
         "",
         f"Статус: {result.get('status', 'incomplete')}. Решений: {result.get('decisions', 0):,}.",
         "",
-        "Финальные test и diagnostic-test не использованы. Pilot оценивается по validation и memory-dev; преимущество памяти этим запуском не доказано.",
+        "Преимущество памяти этим запуском не доказано. Выполненные оценки перечислены ниже по фактическим артефактам.",
         "",
     ]
+    memory = list(directory.glob("memory-dev*/summary.json"))
+    text.extend([f"Memory-dev: {'результаты найдены' if memory else 'не выполнена в этом каталоге'}. Существующие пары проверяют историю, но не изолируют GRU.", ""])
     if metrics:
         speed = sum(r["rollout_decisions"] for r in metrics) / sum(
             r["update_seconds"] for r in metrics

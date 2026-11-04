@@ -21,6 +21,8 @@ FAMILIES = (
     "scout_before_army",
 )
 
+MEMORY_SCOPE = "history_sensitivity_only_not_gru_isolation"
+
 
 def flat_map(size=16, parity=0):
     return {
@@ -61,8 +63,8 @@ def _history(geometry, history_index, side, branch, shared_last_contact=False):
         {"type": "archer", "side": 1 - side, "tile": tile(horse_x, row + 2)},
         {"type": "warrior", "side": 1 - side, "tile": tile(horse_x, row + 3)},
     ]
-    # First stage can use a common last contact on the same flank, with a different
-    # earlier approach along the vertical axis, before the shared withdrawal.
+    # Historical name only: these branches do NOT produce equal current Encoded B.
+    # They are history-sensitivity cases, never a test isolating GRU over B.
     if shared_last_contact:
         horse_x = 2
         units[0]["tile"] = tile(4, row - 2 if left else row + 2)
@@ -288,6 +290,8 @@ def evaluate_dev(policy, cases, device, directory, config):
         for a, b in zip(rows[::2], rows[1::2])
     ]
     summary = {
+        "scope": MEMORY_SCOPE,
+        "gru_isolation_valid": False,
         "cases": len(cases),
         "pairs": len(distances),
         "mean_policy_total_variation": float(np.mean(distances)),

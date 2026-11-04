@@ -32,7 +32,9 @@ class RunLock:
                 fcntl.flock(self.stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             self.stream.close()
-            raise RuntimeError(f"Training run already active: {self.path.parent}") from exc
+            raise RuntimeError(
+                f"Training run already active: {self.path.parent}"
+            ) from exc
         return self
 
     def __exit__(self, *exc):

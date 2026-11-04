@@ -45,21 +45,34 @@ def targets(episodes):
 
 
 def objective(
-    logits, values, indices, old_logp, returns, advantages, entropy_coefficient
+    logits,
+    values,
+    indices,
+    old_logp,
+    returns,
+    advantages,
+    entropy_coefficient,
+    *,
+    clip_ratio=0.2,
+    value_coefficient=0.5,
 ):
     logp, entropy, normalized_entropy = distribution_stats(logits, indices)
     ratio = (logp - old_logp).exp()
     policy = -torch.minimum(
-        ratio * advantages, ratio.clamp(0.8, 1.2) * advantages
+        ratio * advantages, ratio.clamp(1 - clip_ratio, 1 + clip_ratio) * advantages
     ).mean()
     value = (values - returns).square().mean()
-    loss = policy + 0.5 * value - entropy_coefficient * normalized_entropy.mean()
+    loss = (
+        policy
+        + value_coefficient * value
+        - entropy_coefficient * normalized_entropy.mean()
+    )
     return loss, {
         "policy_loss": policy.detach(),
         "value_loss": value.detach(),
         "entropy": entropy.mean().detach(),
         "normalized_entropy": normalized_entropy.mean().detach(),
-        "clip_fraction": ((ratio - 1).abs() > 0.2).float().mean().detach(),
+        "clip_fraction": ((ratio - 1).abs() > clip_ratio).float().mean().detach(),
     }
 
 
@@ -153,7 +166,15 @@ def update(
                 )
                 adv = torch.tensor(advantages[ep_index][start:stop], device=device)
                 loss, stats = objective(
-                    logits, value, index, old_logp, returns, adv, entropy_coefficient
+                    logits,
+                    value,
+                    index,
+                    old_logp,
+                    returns,
+                    adv,
+                    entropy_coefficient,
+                    clip_ratio=config["ppo"]["clip_ratio"],
+                    value_coefficient=config["ppo"]["value_coefficient"],
                 )
                 if not torch.isfinite(loss):
                     raise FloatingPointError("Non-finite PPO loss")
@@ -186,6 +207,8 @@ def update(
         "lr": lr,
         "entropy_coefficient": entropy_coefficient,
         "epochs": epoch + 1,
+        "optimizer_steps": len(gradients),
+        "objective_valid_tokens": tokens,
         "kl": kl,
         "pre_update_kl": pre_kl,
         "pre_update_max_logp_error": pre_error,

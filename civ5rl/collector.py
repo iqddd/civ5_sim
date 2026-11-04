@@ -66,6 +66,8 @@ def _worker(connection, profile_path=None, shared_descriptor=None):
                         )
             elif kind == "step":
                 selected = [(envs[i], action) for i, action in payload]
+                for env, action in selected:
+                    env.prepare(action)
                 start = perf_counter()
                 results = step_batch(
                     [e.battle for e, _ in selected], [a for _, a in selected]
@@ -121,6 +123,9 @@ def _worker(connection, profile_path=None, shared_descriptor=None):
 
 class Collector:
     def __init__(self, config, factory, device, error_dir):
+        from .validation import validate_config
+
+        validate_config(config)
         self.config, self.factory, self.device = config, factory, device
         self.error_dir = error_dir
         self.workers = []
@@ -169,10 +174,22 @@ class Collector:
             raise RuntimeError(payload["traceback"])
         return payload
 
-    def collect(self, policy, stage, next_episode, monitor=None, fixed_specs=None):
+    def collect(
+        self,
+        policy,
+        stage,
+        next_episode,
+        monitor=None,
+        fixed_specs=None,
+        trusted_manifest=None,
+    ):
         import torch
 
         from .model import batch_inputs
+        from .provenance import validate_cases
+
+        if fixed_specs is not None:
+            validate_cases(fixed_specs, trusted_manifest)
 
         policy.eval()
         episodes, decisions = [], 0
@@ -212,6 +229,8 @@ class Collector:
             )
             if len(specs) != num_envs:
                 raise ValueError("Evaluation cases must fill a complete wave")
+            if fixed_specs is None:
+                self.factory.validate_specs(specs)
             current = [
                 {
                     "spec": s,
@@ -222,6 +241,7 @@ class Collector:
                     "old_log_probs": [],
                     "old_value": [],
                     "old_hidden": [],
+                    "decision_metrics": [],
                     **(
                         {"encoded": [], "encoded_variant": policy.variant}
                         if reuse_encoded
@@ -356,6 +376,11 @@ class Collector:
                     ep["chosen"].append(chosen)
                     ep["old_logp"].append(float(logp[chosen]))
                     ep["old_log_probs"].append(logp.copy())
+                    from .diagnostic_metrics import decision_metrics
+
+                    ep["decision_metrics"].append(
+                        decision_metrics(state["actions"], chosen, np.exp(logp))
+                    )
                     ep["old_value"].append(float(values[j]))
                     ep["old_hidden"].append(
                         None

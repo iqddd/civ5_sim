@@ -181,6 +181,12 @@ def main():
     factory = ScenarioFactory(config, manifest)
     stage = config["curriculum"][2]
     specs = [factory.make(100000 + i, stage) for i in range(128)]
+    from civ5rl.provenance import bound_cases, case_manifest
+
+    trusted_manifest = case_manifest(
+        specs, source="rl01.collection_benchmark", split="train", namespace="benchmark"
+    )
+    specs = bound_cases(trusted_manifest)
     config["collection"]["min_learner_decisions_per_update"] = 1
     common.write_json(out / "cases.json", specs)
     rows = []
@@ -190,14 +196,18 @@ def main():
     ):
         monitor.mark("warmup")
         collector.collect(
-            policy, stage, 0, fixed_specs=specs[: config["collection"]["num_envs"]]
+            policy,
+            stage,
+            0,
+            fixed_specs=specs[: config["collection"]["num_envs"]],
+            trusted_manifest=trusted_manifest,
         )
         for repeat in range(args.repetitions):
             monitor.mark("collection_measured", repetition=repeat)
             torch.cuda.synchronize()
             start = perf_counter()
             episodes, _, timings = collector.collect(
-                policy, stage, 0, fixed_specs=specs
+                policy, stage, 0, fixed_specs=specs, trusted_manifest=trusted_manifest
             )
             torch.cuda.synchronize()
             seconds = perf_counter() - start

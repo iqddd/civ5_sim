@@ -2,6 +2,17 @@
 
 ## RL-01: обучение агента
 
+Короткий диагностический цикл атак: [протокол D0/D1](docs/rl-diagnostic-protocol.md).
+Отдельная проверка выбора одного решающего действия:
+[D0-one-decision](docs/rl-d0-one-decision-protocol.md), запуск
+`tools/run_rl_diagnostic.py --config configs/rl-diagnostic-one-decision.json`;
+результаты — `artifacts/rl/diagnostic-one-decision/report.md`.
+Запуск: `tools/run_rl_diagnostic.py`; продолжение — та же команда с `--resume`.
+Результаты — `artifacts/rl/diagnostic-results/report.md`. Подготовка без обучения:
+`tools/run_rl_diagnostic.py --prepare-only`. Максимум два seed, 4+8 updates и
+30 минут обучения на seed; переходы только по заранее заданным dev-критериям.
+Команда не продолжает прежний пилот и не открывает финальные test-наборы.
+
 Реализация: `civ5rl`, постановка — [RL-01](docs/rl-v1-spec.md),
 параметры — [конфигурация](configs/rl-v1.json). Отдельное окружение обучения
 устанавливается из `requirements-rl.txt`; обычный симулятор не импортирует PyTorch.

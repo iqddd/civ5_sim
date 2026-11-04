@@ -152,6 +152,13 @@ class ScenarioFactory:
     def __init__(self, config, manifest):
         self.config, self.manifest = config, manifest
         self.maps = {}
+        self._issued = set()
+        self.manifest_hash = digest(manifest)
+
+    def validate_specs(self, specs):
+        for spec in specs:
+            if digest(spec) not in self._issued:
+                raise ValueError("Training case was not issued by this trusted factory")
 
     def get_map(self, entry):
         path = entry["path"]
@@ -169,6 +176,8 @@ class ScenarioFactory:
         split="train",
         case_index=None,
     ):
+        if split not in ("train", "validation"):
+            raise ValueError(f"Closed corpus split: {split}")
         master = self.config["seed"] if master is None else master
         streams = {
             s: seed_for(master, episode_id, s, namespace=namespace)
@@ -266,7 +275,7 @@ class ScenarioFactory:
                         if pick < 0:
                             opponent = name
                             break
-                    return {
+                    spec = {
                         "episode_id": episode_id,
                         "scenario": scenario,
                         "armies": [roster, roster.copy()],
@@ -290,7 +299,16 @@ class ScenarioFactory:
                             )
                             for s in (0, 1)
                         ],
+                        "split": split,
+                        "namespace": namespace,
+                        "source": "rl01.corpus",
+                        "scenario_hash": digest(scenario),
+                        "manifest_hash": self.manifest_hash,
                     }
+                    if split not in ("train", "validation"):
+                        raise ValueError(f"Closed corpus split: {split}")
+                    self._issued.add(digest(spec))
+                    return spec
             rejected.append(
                 {"map": entry["path"], "reason": "placement_rejection_limit"}
             )

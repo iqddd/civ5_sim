@@ -75,6 +75,12 @@ class PipelineTests(unittest.TestCase):
         config = read_json("configs/rl-v1-throughput.json")
         config["collection"].update(num_envs=4, cpu_workers=2, envs_per_worker=2)
         specs = self.specs(8)
+        from civ5rl.provenance import bound_cases, case_manifest
+
+        manifest = case_manifest(
+            specs, source="test", split="train", namespace="unit_test"
+        )
+        specs = bound_cases(manifest)
         with tempfile.TemporaryDirectory() as tmp:
             for variant in ("A", "B", "C"):
                 configure(17)
@@ -84,7 +90,11 @@ class PipelineTests(unittest.TestCase):
                     config["performance"]["collection_scheduler"] = scheduler
                     with Collector(config, None, "cpu", Path(tmp)) as c:
                         episodes, next_episode, _times = c.collect(
-                            policy, None, 0, fixed_specs=specs
+                            policy,
+                            None,
+                            0,
+                            fixed_specs=specs,
+                            trusted_manifest=manifest,
                         )
                     self.assertEqual(next_episode, 8)
                     self.assertEqual(len(episodes), 8)
@@ -215,12 +225,24 @@ class PipelineTests(unittest.TestCase):
         config["collection"].update(num_envs=1, cpu_workers=1, envs_per_worker=1)
         specs = self.specs(1)
         specs[0]["opponent"] = "missing-agent"
+        from civ5rl.provenance import bound_cases, case_manifest
+
+        manifest = case_manifest(
+            specs, source="test", split="train", namespace="unit_test"
+        )
+        specs = bound_cases(manifest)
         with tempfile.TemporaryDirectory() as tmp:
             with (
                 Collector(config, None, "cpu", Path(tmp)) as collector,
                 self.assertRaisesRegex(RuntimeError, "Agent must be"),
             ):
-                collector.collect(Policy().eval(), None, 0, fixed_specs=specs)
+                collector.collect(
+                    Policy().eval(),
+                    None,
+                    0,
+                    fixed_specs=specs,
+                    trusted_manifest=manifest,
+                )
             self.assertTrue((Path(tmp) / "worker-error.json").exists())
 
 

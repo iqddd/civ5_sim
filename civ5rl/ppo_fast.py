@@ -19,8 +19,13 @@ def categorical_distance(behavior_log_probs, logits, mask):
 
 
 def validate_behavior_replay(
-    pre_kl, max_logp_error, *, amp_enabled, numerics,
-    full_kl=None, max_total_variation=None,
+    pre_kl,
+    max_logp_error,
+    *,
+    amp_enabled,
+    numerics,
+    full_kl=None,
+    max_total_variation=None,
 ):
     # old_logp always remains the probability used to select the real command.
     # With complete behavior distributions, BF16 is checked by probability mass,
@@ -33,8 +38,14 @@ def validate_behavior_replay(
     kl_tolerance = numerics.get("replay_max_kl", 1e-6)
     has_distribution = full_kl is not None and max_total_variation is not None
     use_distribution = amp_enabled and has_distribution
-    if amp_enabled and numerics.get("require_full_behavior_distribution", False) and not use_distribution:
-        raise RuntimeError("BF16 replay verification requires complete behavior distributions")
+    if (
+        amp_enabled
+        and numerics.get("require_full_behavior_distribution", False)
+        and not use_distribution
+    ):
+        raise RuntimeError(
+            "BF16 replay verification requires complete behavior distributions"
+        )
     distribution_bad = has_distribution and (
         not np.isfinite([full_kl, max_total_variation]).all()
         or full_kl > kl_tolerance
@@ -96,8 +107,15 @@ class RolloutCache:
             behavior = torch.tensor(behavior, device=device)
             selected = behavior.gather(1, self.labels["indices"][:, None])[:, 0]
             if not torch.equal(selected, self.labels["old_logp"]):
-                raise ValueError("Recorded chosen logp differs from behavior distribution")
-            if not torch.allclose(behavior.exp().sum(-1), torch.ones(len(flat), device=device), atol=1e-5, rtol=0):
+                raise ValueError(
+                    "Recorded chosen logp differs from behavior distribution"
+                )
+            if not torch.allclose(
+                behavior.exp().sum(-1),
+                torch.ones(len(flat), device=device),
+                atol=1e-5,
+                rtol=0,
+            ):
                 raise ValueError("Behavior probabilities do not sum to one")
             self.labels["old_log_probs"] = behavior
         self.resident_bytes = sum(
@@ -200,15 +218,22 @@ def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=Fa
             maximum = torch.maximum(maximum, delta.abs().max())
             if full_distribution and cache.has_behavior_distribution:
                 kl, tv = categorical_distance(
-                    labels["old_log_probs"][:, :logits.shape[1]], logits, batch["action_mask"]
+                    labels["old_log_probs"][:, : logits.shape[1]],
+                    logits,
+                    batch["action_mask"],
                 )
                 full_total += kl.sum()
                 max_tv = torch.maximum(max_tv, tv.max())
             count += len(delta)
     return {
-        "sampled_kl": total.item() / count, "max_logp_error": maximum.item(),
-        "full_kl": full_total.item() / count if full_distribution and cache.has_behavior_distribution else None,
-        "max_total_variation": max_tv.item() if full_distribution and cache.has_behavior_distribution else None,
+        "sampled_kl": total.item() / count,
+        "max_logp_error": maximum.item(),
+        "full_kl": full_total.item() / count
+        if full_distribution and cache.has_behavior_distribution
+        else None,
+        "max_total_variation": max_tv.item()
+        if full_distribution and cache.has_behavior_distribution
+        else None,
     }
 
 
@@ -246,8 +271,12 @@ def update_fast(
     replay = measure_replay(policy, cache, kl_batch, full_distribution=True)
     pre_kl, pre_error = replay["sampled_kl"], replay["max_logp_error"]
     replay_tolerance = validate_behavior_replay(
-        pre_kl, pre_error, amp_enabled=policy.amp_enabled, numerics=config["numerics"],
-        full_kl=replay["full_kl"], max_total_variation=replay["max_total_variation"],
+        pre_kl,
+        pre_error,
+        amp_enabled=policy.amp_enabled,
+        numerics=config["numerics"],
+        full_kl=replay["full_kl"],
+        max_total_variation=replay["max_total_variation"],
     )
     if monitor:
         monitor.mark("ppo", ppo_epoch=0)
@@ -295,6 +324,8 @@ def update_fast(
                     labels["returns"],
                     labels["advantages"],
                     entropy_coefficient,
+                    clip_ratio=config["ppo"]["clip_ratio"],
+                    value_coefficient=config["ppo"]["value_coefficient"],
                 )
                 finite &= torch.isfinite(loss.detach())
                 valid_tokens = sum(lengths)
@@ -332,12 +363,16 @@ def update_fast(
         "lr": lr,
         "entropy_coefficient": entropy_coefficient,
         "epochs": epoch + 1,
+        "optimizer_steps": len(gradients),
+        "objective_valid_tokens": tokens,
         "kl": kl,
         "pre_update_kl": pre_kl,
         "pre_update_max_logp_error": pre_error,
         "pre_update_full_kl": replay["full_kl"],
         "pre_update_max_total_variation": replay["max_total_variation"],
-        "behavior_check": "full_distribution" if replay_tolerance is None else "sampled_logp",
+        "behavior_check": "full_distribution"
+        if replay_tolerance is None
+        else "sampled_logp",
         "behavior_logp_tolerance": replay_tolerance,
         "gradient_norm_mean": float(gradient_values.mean()),
         "gradient_norm_max": float(gradient_values.max()),

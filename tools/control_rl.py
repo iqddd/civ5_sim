@@ -104,6 +104,16 @@ def main():
             return
         execution = read_json(directory / "execution.json")
         (directory / "stop.request").unlink(missing_ok=True)
+        if execution.get("kind") == "diagnostic":
+            from tools.run_rl_diagnostic import run_suite
+
+            run_suite(
+                read_json(directory / "resolved-config.json"),
+                execution["suite_directory"],
+                execution["device"],
+                resume=True,
+            )
+            return
         from tools.train_rl import run
 
         run(

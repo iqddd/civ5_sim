@@ -25,6 +25,20 @@ def terminal_result(battle, completed_turns, max_rounds):
 class DecisionEnv:
     def __init__(self, spec):
         self.spec = spec
+        self.learner_decisions = 0
+        self.learner_decision_limit = spec.get("learner_decision_limit")
+        if self.learner_decision_limit is not None:
+            origin = spec.get("provenance", {})
+            if (
+                type(self.learner_decision_limit) is not int
+                or self.learner_decision_limit != 1
+                or spec.get("diagnostic_protocol") != "D0-one-decision"
+                or origin.get("source") != "rl01.diagnostic.D0-one-decision"
+                or origin.get("split") not in ("diagnostic_train", "diagnostic_dev")
+            ):
+                raise ValueError(
+                    "Learner decision limit requires trusted D0-one-decision provenance"
+                )
         self.battle = Battle(spec["scenario"], log=False)
         self.side = spec["learner_side"]
         self.turns = self.calls = self.commands = 0
@@ -41,17 +55,47 @@ class DecisionEnv:
             )
         )
         self.first_contact_turn = None
+        self.damage = [0, 0]
+        self._pending_attack = None
+
+    def prepare(self, action):
+        self._pending_attack = None
+        if self.spec.get("diagnostics") and action.kind in ("melee", "ranged"):
+            units = self.battle.snapshot()["units"]
+            attacker = units[action.unit]
+            defender = next(
+                u for u in units if u["tile"] == action.target and u["hp"] > 0
+            )
+            self._pending_attack = (
+                attacker["side"],
+                attacker["hp"],
+                defender["side"],
+                defender["hp"],
+            )
 
     def check(self):
         self.terminal = terminal_result(
             self.battle, self.turns, self.spec["max_rounds"]
         )
+        if (
+            self.terminal is None
+            and self.learner_decision_limit is not None
+            and self.learner_decisions >= self.learner_decision_limit
+        ):
+            self.terminal = {"winner": None, "reason": "diagnostic_decision_limit"}
         return self.terminal
 
     def applied(self, action, result):
         self.history.append(asdict(action))
         if not result.ok:
             raise RuntimeError(f"Kernel rejected public legal action: {result.error}")
+        if self.turns % 2 == self.side:
+            self.learner_decisions += 1
+        if self._pending_attack is not None:
+            side, hp, other, other_hp = self._pending_attack
+            self.damage[side] += min(result.damage, other_hp)
+            self.damage[other] += min(result.retaliation, hp)
+            self._pending_attack = None
         self.commands += 1
         self.calls += 1
         if action.kind == "end_turn":
@@ -70,6 +114,7 @@ class DecisionEnv:
             if action not in actions:
                 raise RuntimeError("Illegal opponent action")
             start = perf_counter()
+            self.prepare(action)
             result = self.battle.step(action)
             self.timings["simulation_seconds"] += perf_counter() - start
             self.applied(action, result)
@@ -84,11 +129,17 @@ class DecisionEnv:
                     if self.terminal["winner"] is None
                     else (1 if self.terminal["winner"] == self.side else -1),
                     "commands": self.commands,
+                    "learner_decisions": self.learner_decisions,
                     "rounds": self.turns / 2,
                     "timings": self.timings.copy(),
                     "first_contact_turn": self.first_contact_turn,
                     "remaining_hp": [
                         sum(u["hp"] for u in final["units"] if u["side"] == s)
+                        for s in (0, 1)
+                    ],
+                    "damage_dealt": self.damage.copy(),
+                    "units_lost": [
+                        sum(u["hp"] <= 0 for u in final["units"] if u["side"] == s)
                         for s in (0, 1)
                     ],
                 },

@@ -40,6 +40,10 @@ def passport(directory, config, manifest):
             ROOT / "docs/rl-v1-spec.md",
             ROOT / "requirements-rl.txt",
             ROOT / "configs/rl-environment-wheels.json",
+            ROOT / "configs/rl-diagnostic.json",
+            ROOT / "docs/rl-diagnostic-protocol.md",
+            ROOT / "configs/rl-diagnostic-one-decision.json",
+            ROOT / "docs/rl-d0-one-decision-protocol.md",
         ]
     )
     hashes = {

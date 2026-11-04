@@ -12,6 +12,8 @@ from .common import write_json
 
 
 def require_split(config, split, mode="pilot", frozen_plan=None):
+    if split in ("test", "diagnostic_test"):
+        raise ValueError(f"Closed split: {split}; final evaluation is not implemented")
     if mode == "pilot" and split not in config["evaluation"]["pilot_allowed_splits"]:
         raise ValueError(f"Pilot cannot evaluate closed split {split}")
     if split in ("test", "diagnostic_test") and not frozen_plan:
@@ -37,7 +39,13 @@ def validation_specs(factory, config):
                 specs.append(
                     {**base, "opponent": opponent, "learner_side": side, "case_id": i}
                 )
-    return specs
+    from .provenance import bound_cases, case_manifest
+
+    return bound_cases(
+        case_manifest(
+            specs, source="rl01.validation", split="validation", namespace="validation"
+        )
+    )
 
 
 def summarize(episodes, samples=10000, seed=20261103):
@@ -118,13 +126,38 @@ def summarize(episodes, samples=10000, seed=20261103):
     return output
 
 
-def evaluate(policy, collector, specs, config, directory, monitor=None):
+def evaluate(
+    policy, collector, specs, config, directory, monitor=None, trusted_manifest=None
+):
     directory = Path(directory)
     require_split(config, "validation")
+    from .provenance import case_manifest, validate_cases
+
+    for spec in specs:
+        if spec.get("split") in ("test", "diagnostic_test") or spec.get(
+            "provenance", {}
+        ).get("split") in ("test", "diagnostic_test"):
+            raise ValueError("Closed split in evaluation cases")
+
+    if trusted_manifest is None:
+        trusted_manifest = case_manifest(
+            validation_specs(collector.factory, config),
+            source="rl01.validation",
+            split="validation",
+            namespace="validation",
+        )
+    if trusted_manifest["split"] != "validation":
+        raise ValueError("Validation evaluator requires trusted validation cases")
+    validate_cases(specs, trusted_manifest)
     if monitor:
         monitor.mark("validation")
     episodes, _, times = collector.collect(
-        policy, None, 0, monitor=None, fixed_specs=specs
+        policy,
+        None,
+        0,
+        monitor=None,
+        fixed_specs=specs,
+        trusted_manifest=trusted_manifest,
     )
     summary = summarize(episodes, config["evaluation"]["bootstrap"]["samples"])
     write_json(directory / "summary.json", {"metrics": summary, "timings": times})
@@ -211,7 +244,9 @@ def save_training_replay(episode, directory):
                 "learner" if side == s["learner_side"] else s["opponent"]
                 for side in (0, 1)
             ],
-            "seeds": s["streams"],
+            "seeds": s.get(
+                "streams", {"battle": s["scenario"]["seed"], "agents": s["agent_seeds"]}
+            ),
             "initial_state_sha256": digest(replay["initial"]),
             "final_state_sha256": digest(final),
         }

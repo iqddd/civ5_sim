@@ -53,6 +53,8 @@ def _run(
     from civ5rl.resources import ResourceMonitor
 
     directory = Path(directory).resolve()
+    from civ5rl.validation import validate_config
+    validate_config(config)
     directory.mkdir(parents=True, exist_ok=True)
     if (directory / "checkpoints").exists() and resume is None:
         raise ValueError("Run already exists; use --resume or a new --out")
@@ -99,6 +101,7 @@ def _run(
         lr=config["optimizer"]["lr_schedule"]["initial"],
         betas=tuple(config["optimizer"]["betas"]),
         eps=config["optimizer"]["eps"],
+        weight_decay=config["optimizer"]["weight_decay"],
         fused=performance.get("fused_adam", False) and device.startswith("cuda"),
     )
     shuffle_rng = random.Random(config["seed"] + 1)
@@ -302,6 +305,8 @@ def _run(
                 row["simulation_seconds"] = sum(
                     e["result"]["timings"]["simulation_seconds"] for e in episodes
                 )
+                from civ5rl.diagnostic_metrics import summarize_decisions
+                row["decisions_diagnostics"] = summarize_decisions(episodes)
                 row["opponent_seconds"] = sum(
                     e["result"]["timings"]["opponent_seconds"] for e in episodes
                 )
