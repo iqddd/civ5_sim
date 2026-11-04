@@ -195,7 +195,15 @@ def match_task(task):
         from civ5rl.provenance.common import configure
 
         configure(17, device)
-        agent = RLAgent.from_checkpoint(contender, device=device, mode="sample")
+        checkpoint_path = (
+            contender["checkpoint"] if isinstance(contender, dict) else contender
+        )
+        mode = (
+            contender.get("mode", "sample") if isinstance(contender, dict) else "sample"
+        )
+        if mode not in ("sample", "argmax"):
+            raise ValueError("Unsupported imitation evaluation policy mode")
+        agent = RLAgent.from_checkpoint(checkpoint_path, device=device, mode=mode)
     enemy = CPAgent(search_config(config)) if opponent == "cp" else "greedy"
     side = case["learner_side"]
     agents = [None, None]

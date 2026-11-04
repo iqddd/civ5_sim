@@ -481,6 +481,11 @@ def main():
     workers = args.workers or config["workers"]
     if workers < 1:
         raise ValueError("workers must be positive")
+    if config["kind"] == "rl01.cp_imitation_continuation":
+        from civ5rl.engine.imitation_continuation import run
+
+        run(args.phase, config, out, workers, args.device)
+        return
     if args.phase == "report":
         report(config, out)
         return
