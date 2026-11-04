@@ -13,6 +13,17 @@ from civ5rl.provenance.common import write_json
 
 
 class ResourceMonitor:
+    _GPU_FIELDS = (
+        "gpu_core_load_percent",
+        "gpu_memory_controller_load_percent",
+        "vram_used_bytes",
+        "vram_total_bytes",
+        "gpu_power_watts",
+        "gpu_default_power_limit_watts",
+        "gpu_enforced_power_limit_watts",
+        "gpu_power_percent_tdp",
+    )
+
     def __init__(self, directory, interval=1.0, gpu_index=0):
         self.directory = Path(directory)
         self.interval = interval
@@ -109,18 +120,8 @@ class ResourceMonitor:
             "ram_system_available_bytes": vm.available,
             "ram_system_percent": vm.percent,
             "process_count": len(alive),
+            **dict.fromkeys(self._GPU_FIELDS, None),
         }
-        for key in (
-            "gpu_core_load_percent",
-            "gpu_memory_controller_load_percent",
-            "vram_used_bytes",
-            "vram_total_bytes",
-            "gpu_power_watts",
-            "gpu_default_power_limit_watts",
-            "gpu_enforced_power_limit_watts",
-            "gpu_power_percent_tdp",
-        ):
-            row[key] = None
         if self.gpu:
             n, h = self.nvml, self.gpu
             util = self._query(

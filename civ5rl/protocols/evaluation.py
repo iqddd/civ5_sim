@@ -47,6 +47,16 @@ def validation_specs(factory, config):
     )
 
 
+def _wdl_stats(rewards: np.ndarray):
+    return {
+        "games": len(rewards),
+        "wins": int((rewards == 1).sum()),
+        "draws": int((rewards == 0).sum()),
+        "losses": int((rewards == -1).sum()),
+        "score": float(((rewards + 1) / 2).mean()) if len(rewards) else None,
+    }
+
+
 def summarize(episodes, samples=10000, seed=20261103):
     grouped = defaultdict(list)
     for e in episodes:
@@ -69,36 +79,14 @@ def summarize(episodes, samples=10000, seed=20261103):
             rng.integers(len(worlds), size=(samples, len(worlds)))
         ].mean(1)
         output[opponent] = {
-            "games": len(rows),
-            "wins": int((rewards == 1).sum()),
-            "draws": int((rewards == 0).sum()),
-            "losses": int((rewards == -1).sum()),
-            "score": float(((rewards + 1) / 2).mean()),
+            **_wdl_stats(rewards),
             "ci95": np.quantile(bootstrap, [0.025, 0.975]).tolist(),
             "sides": {
-                str(side): {
-                    "games": sum(s["learner_side"] == side for s, _ in rows),
-                    "wins": sum(
-                        s["learner_side"] == side and r["reward"] == 1 for s, r in rows
-                    ),
-                    "draws": sum(
-                        s["learner_side"] == side and r["reward"] == 0 for s, r in rows
-                    ),
-                    "losses": sum(
-                        s["learner_side"] == side and r["reward"] == -1 for s, r in rows
-                    ),
-                    "score": float(
-                        np.mean(
-                            [
-                                (r["reward"] + 1) / 2
-                                for s, r in rows
-                                if s["learner_side"] == side
-                            ]
-                        )
+                str(side): _wdl_stats(
+                    np.asarray(
+                        [r["reward"] for s, r in rows if s["learner_side"] == side]
                     )
-                    if any(s["learner_side"] == side for s, _ in rows)
-                    else None,
-                }
+                )
                 for side in (0, 1)
             },
             "rounds_mean": float(np.mean([r["rounds"] for _, r in rows])),

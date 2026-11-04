@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 import numpy as np
 import torch
 
-from civ5rl.core.context import context_for
+from civ5rl.core.context import context_from_spec
 from civ5rl.core.model import batch_inputs, distribution_stats
 from civ5rl.core.observation import ObservationEncoder
 
@@ -23,7 +23,7 @@ def encode_episode(episode: "Episode", variant, *, reuse_cached=True):
         return episode["encoded"]
     s = episode["spec"]
     encoder = ObservationEncoder(
-        context_for(s["scenario"], s["armies"], s["learner_side"], s["max_rounds"], 0),
+        context_from_spec(s),
         variant,
     )
     result = []

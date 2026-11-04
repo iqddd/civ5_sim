@@ -126,9 +126,8 @@ def _history(geometry, history_index, side, branch, shared_last_contact=False):
             apply(Action("move", 0, tile(intermediate, row)))
             apply(Action("end_turn"))
             apply(Action("end_turn"))
-        apply(Action("move", 0, tile(8, row))) if battle.observe(side)["units"][0][
-            "tile"
-        ] != tile(8, row) else None
+        if battle.observe(side)["units"][0]["tile"] != tile(8, row):
+            apply(Action("move", 0, tile(8, row)))
         apply(Action("end_turn"))
         if shared_last_contact:
             apply(Action("move", 3, tile(0, row - 2 if left else row + 2)))

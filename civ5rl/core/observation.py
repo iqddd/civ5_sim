@@ -9,16 +9,23 @@ from civ5map.maps import adjacent, passable, validate
 from civ5rl.core.schema import (
     ACTION,
     ACTION_DIM,
+    AGE_CAP,
     GLOBAL,
     GLOBAL_DIM,
     HEX_DIRECTIONS,
     MAX_MAP_AXIS,
     PREV_ACTION_DIM,
     PREVIOUS,
+    ROSTER_SCALE,
     TILE,
     TILE_DIM,
 )
 from civ5sim.engine import ELEVATIONS, FEATURES, KINDS, TERRAINS, UNIT_TYPES
+
+HP_SCALE = 100
+MOVEMENT_SCALE = 240
+MAX_ROUNDS_SCALE = 60
+DISTANCE_SCALE = 32
 
 
 def ordered_actions(actions):
@@ -84,7 +91,7 @@ class ObservationEncoder:
         self.max_rounds = context["max_rounds"]
         self.random_damage = context["random_damage"]
         self.rosters = context["armies"]
-        if any(len(a) > 8 for a in self.rosters):
+        if any(len(a) > ROSTER_SCALE for a in self.rosters):
             raise ValueError("RL-01 roster capacity exceeded")
         self.static = np.zeros((w * h, TILE_DIM), np.float32)
         self.neighbors = np.full((w * h, HEX_DIRECTIONS), -1, np.int64)
@@ -134,7 +141,7 @@ class ObservationEncoder:
         source = own.get(action.unit)
         result[
             PREVIOUS["source_type"].start
-            + (UNIT_TYPES.index(source["type"]) if source else 5)
+            + (UNIT_TYPES.index(source["type"]) if source else len(UNIT_TYPES))
         ] = 1
         if source:
             result[PREVIOUS["source_xy"]] = self.xy(source["tile"])
@@ -157,7 +164,7 @@ class ObservationEncoder:
         self.last_visible[visibility] = clock
         seen = self.last_visible >= 0
         cells[:, TILE["visibility_age"]] = np.where(
-            seen, np.minimum(clock - self.last_visible, 32) / 32, 1
+            seen, np.minimum(clock - self.last_visible, AGE_CAP) / AGE_CAP, 1
         )
         cells[:, TILE["seen"]] = seen
         own, enemy = [], []
@@ -169,21 +176,21 @@ class ObservationEncoder:
                 own.append(u)
                 cells[i, TILE["own_type"].start + kind] = 1
                 cells[i, TILE["own_status"]] = (
-                    u["hp"] / 100,
-                    u["moves"] / 240,
+                    u["hp"] / HP_SCALE,
+                    u["moves"] / MOVEMENT_SCALE,
                     u["attacked"],
                     u["acted"],
                     u["fortified"],
                     u["waiting"],
-                    np.clip(u["damage_taken_this_turn"] / 100, 0, 1),
-                    np.clip(u["damage_taken_last_turn"] / 100, 0, 1),
+                    np.clip(u["damage_taken_this_turn"] / HP_SCALE, 0, 1),
+                    np.clip(u["damage_taken_last_turn"] / HP_SCALE, 0, 1),
                 )
             else:
                 if not visibility[i]:
                     raise ValueError("Hidden enemy in public observation")
                 enemy.append(u)
                 cells[i, TILE["enemy_type"].start + kind] = 1
-                cells[i, TILE["enemy_status"]] = (u["hp"] / 100, u["fortified"])
+                cells[i, TILE["enemy_status"]] = (u["hp"] / HP_SCALE, u["fortified"])
                 self.contacts[u["id"]] = (kind, i, u["hp"], clock)
         visible_ids = {u["id"] for u in enemy}
         historical = {}
@@ -191,12 +198,14 @@ class ObservationEncoder:
             if uid not in visible_ids:
                 historical.setdefault((tile, kind), []).append((hp, when))
         for (tile, kind), records in historical.items():
-            cells[tile, TILE["contact_count"].start + kind] = len(records) / 8
+            cells[tile, TILE["contact_count"].start + kind] = (
+                len(records) / ROSTER_SCALE
+            )
             cells[tile, TILE["contact_age"].start + kind] = (
-                min(clock - max(r[1] for r in records), 32) / 32
+                min(clock - max(r[1] for r in records), AGE_CAP) / AGE_CAP
             )
             cells[tile, TILE["contact_hp"].start + kind] = (
-                np.mean([r[0] for r in records]) / 100
+                np.mean([r[0] for r in records]) / HP_SCALE
             )
         globals_ = np.zeros(GLOBAL_DIM, np.float32)
         for offset, types in (
@@ -206,27 +215,32 @@ class ObservationEncoder:
             (GLOBAL["enemy_visible"].start, [u["type"] for u in enemy]),
         ):
             for kind in types:
-                globals_[offset + UNIT_TYPES.index(kind)] += 1 / 8
+                globals_[offset + UNIT_TYPES.index(kind)] += 1 / ROSTER_SCALE
         for kind, *_ in self.contacts.values():
-            globals_[GLOBAL["contacts"].start + kind] += 1 / 8
+            globals_[GLOBAL["contacts"].start + kind] += 1 / ROSTER_SCALE
         globals_[GLOBAL["turn"] :] = (
             turn / (2 * self.max_rounds),
-            min(clock - self.last_clock, 32) / 32,
+            min(clock - self.last_clock, AGE_CAP) / AGE_CAP,
             self.last_turn != turn,
-            self.map["width"] / 16,
-            self.map["height"] / 16,
+            self.map["width"] / MAX_MAP_AXIS,
+            self.map["height"] / MAX_MAP_AXIS,
             self.side == 0,
             self.random_damage,
-            self.max_rounds / 60,
+            self.max_rounds / MAX_ROUNDS_SCALE,
         )
         self.last_clock, self.last_turn = clock, turn
         previous = self.previous.copy()
         if self.variant == "A":
-            cells[:, TILE["visibility_age"] : TILE["seen"] + 1] = 0
-            cells[:, TILE["contact_count"].start : TILE["contact_hp"].stop] = 0
-            globals_[GLOBAL["contacts"]] = globals_[
-                GLOBAL["elapsed"] : GLOBAL["new_turn"] + 1
-            ] = 0
+            for name in (
+                "visibility_age",
+                "seen",
+                "contact_count",
+                "contact_age",
+                "contact_hp",
+            ):
+                cells[:, TILE[name]] = 0
+            for name in ("contacts", "elapsed", "new_turn"):
+                globals_[GLOBAL[name]] = 0
             previous = self.start_action()
         own_by_id = {u["id"]: u for u in own}
         sources, targets = (
@@ -249,9 +263,10 @@ class ObservationEncoder:
             if sources[j] >= 0 and targets[j] >= 0:
                 w = self.map["width"]
                 features[j, ACTION["displacement"]] = (
-                    (targets[j] % w - sources[j] % w) / 15,
-                    (targets[j] // w - sources[j] // w) / 15,
-                    distance(self.map, int(sources[j]), int(targets[j])) / 32,
+                    (targets[j] % w - sources[j] % w) / (MAX_MAP_AXIS - 1),
+                    (targets[j] // w - sources[j] // w) / (MAX_MAP_AXIS - 1),
+                    distance(self.map, int(sources[j]), int(targets[j]))
+                    / DISTANCE_SCALE,
                 )
         return Encoded(
             cells, globals_, previous, self.neighbors, sources, targets, features

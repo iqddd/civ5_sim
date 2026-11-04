@@ -8,7 +8,7 @@ from time import perf_counter
 
 import numpy as np
 
-from civ5rl.core.context import context_for
+from civ5rl.core.context import context_from_spec
 from civ5rl.core.contracts import Episode, ScenarioSpec, WorkerPayload, WorkerState
 from civ5rl.core.env import DecisionEnv
 from civ5rl.core.observation import ObservationEncoder
@@ -54,13 +54,7 @@ def _worker(connection, profile_path=None, shared_descriptor=None):
                     if shared is not None:
                         encoders.append(
                             ObservationEncoder(
-                                context_for(
-                                    spec["scenario"],
-                                    spec["armies"],
-                                    spec["learner_side"],
-                                    spec["max_rounds"],
-                                    0,
-                                ),
+                                context_from_spec(spec),
                                 payload["variant"],
                             )
                         )
@@ -355,6 +349,49 @@ class Collector:
                 pending.add(w)
         return wave_decisions
 
+    def _start_wave(self, specs, policy, reuse_encoded, worker_encoding):
+        import torch
+
+        builders = [
+            EpisodeBuilder(
+                s,
+                policy.variant,
+                reuse_encoded,
+                policy.hidden_size if policy.variant == "C" else 0,
+            )
+            for s in specs
+        ]
+        encoders = (
+            []
+            if worker_encoding
+            else [
+                ObservationEncoder(
+                    context_from_spec(s),
+                    policy.variant,
+                )
+                for s in specs
+            ]
+        )
+        rngs = [random.Random(s["agent_seeds"][s["learner_side"]]) for s in specs]
+        hidden = (
+            torch.zeros((1, len(specs), policy.hidden_size), device=self.device)
+            if policy.variant == "C"
+            else None
+        )
+        for w, (conn, _) in enumerate(self.workers):
+            conn.send(
+                (
+                    "reset",
+                    {
+                        "specs": specs[
+                            w * self.envs_per_worker : (w + 1) * self.envs_per_worker
+                        ],
+                        "variant": policy.variant,
+                    },
+                )
+            )
+        return builders, encoders, rngs, hidden
+
     def collect(
         self,
         policy,
@@ -364,8 +401,6 @@ class Collector:
         fixed_specs=None,
         trusted_manifest=None,
     ):
-        import torch
-
         from civ5rl.provenance import validate_cases
 
         if fixed_specs is not None:
@@ -411,54 +446,12 @@ class Collector:
                 raise ValueError("Evaluation cases must fill a complete wave")
             if fixed_specs is None:
                 self.factory.validate_specs(specs)
-            builders = [
-                EpisodeBuilder(
-                    s,
-                    policy.variant,
-                    reuse_encoded,
-                    policy.hidden_size if policy.variant == "C" else 0,
-                )
-                for s in specs
-            ]
-            encoders = (
-                []
-                if worker_encoding
-                else [
-                    ObservationEncoder(
-                        context_for(
-                            s["scenario"],
-                            s["armies"],
-                            s["learner_side"],
-                            s["max_rounds"],
-                            0,
-                        ),
-                        policy.variant,
-                    )
-                    for s in specs
-                ]
-            )
-            rngs = [random.Random(s["agent_seeds"][s["learner_side"]]) for s in specs]
-            hidden = (
-                torch.zeros((1, num_envs, policy.hidden_size), device=self.device)
-                if policy.variant == "C"
-                else None
+            builders, encoders, rngs, hidden = self._start_wave(
+                specs, policy, reuse_encoded, worker_encoding
             )
             completed_at = [None] * num_envs
             states = [None] * num_envs
             pending = set(range(len(self.workers)))
-            for w, (conn, _) in enumerate(self.workers):
-                conn.send(
-                    (
-                        "reset",
-                        {
-                            "specs": specs[
-                                w * self.envs_per_worker : (w + 1)
-                                * self.envs_per_worker
-                            ],
-                            "variant": policy.variant,
-                        },
-                    )
-                )
             wave_decisions = 0
             while pending:
                 ready, refreshed = self._poll_workers(

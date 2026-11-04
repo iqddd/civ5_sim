@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from civ5rl.core.context import context_for
+from civ5rl.core.context import context_from_spec
 from civ5rl.core.env import DecisionEnv
 from civ5rl.protocols.diagnostic_metrics import summarize_decisions
 from civ5rl.protocols.memory import flat_map
@@ -79,6 +79,24 @@ def make_spec(scenario, stage, side, index, *, seed=20261108):
     }
 
 
+_SHOT_DAMAGE_ROLLS = 1200
+
+
+def _minimum_shot_damage(preview, range_error):
+    lib = native.library()
+    if (
+        lib.sim_damage(
+            preview.attacker_strength, preview.defender_strength, _SHOT_DAMAGE_ROLLS
+        )
+        != -1
+    ):
+        raise ValueError(range_error)
+    return min(
+        lib.sim_damage(preview.attacker_strength, preview.defender_strength, roll)
+        for roll in range(_SHOT_DAMAGE_ROLLS)
+    )
+
+
 def d0_certificate(spec):
     with DecisionEnv(spec) as env:
         state = env.request()
@@ -88,28 +106,17 @@ def d0_certificate(spec):
         certificates = []
         for action in shots:
             preview = env.battle.preview_attack(action)
-            if (
-                native.library().sim_damage(
-                    preview.attacker_strength, preview.defender_strength, 1200
-                )
-                != -1
-            ):
-                raise ValueError(
-                    "Native roll range changed; D0 exhaustive certificate must be revised"
-                )
-            values = [
-                native.library().sim_damage(
-                    preview.attacker_strength, preview.defender_strength, roll
-                )
-                for roll in range(1200)
-            ]
-            if min(values) < 1:
+            minimum = _minimum_shot_damage(
+                preview,
+                "Native roll range changed; D0 exhaustive certificate must be revised",
+            )
+            if minimum < 1:
                 return None
             certificates.append(
                 {
                     "action": action.__dict__,
-                    "minimum_damage": min(values),
-                    "rolls_checked": 1200,
+                    "minimum_damage": minimum,
+                    "rolls_checked": _SHOT_DAMAGE_ROLLS,
                     "attacker_strength": preview.attacker_strength,
                     "defender_strength": preview.defender_strength,
                 }
@@ -123,15 +130,7 @@ DecisionEnvContext = DecisionEnv
 def reference_win(spec):
     with DecisionEnv(spec) as env:
         agent = GreedyAgent()
-        agent.reset(
-            context_for(
-                spec["scenario"],
-                spec["armies"],
-                spec["learner_side"],
-                spec["max_rounds"],
-                0,
-            )
-        )
+        agent.reset(context_from_spec(spec))
         try:
             first = True
             while True:

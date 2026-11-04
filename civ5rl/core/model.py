@@ -58,6 +58,10 @@ def batch_inputs(items, device, *, non_blocking=False):
     }
 
 
+def _duplicate_singleton(value):
+    return torch.cat((value, value), 0)
+
+
 class HexBlock(nn.Module):
     def __init__(self):
         super().__init__()
@@ -180,7 +184,7 @@ class Policy(nn.Module):
                 torch.cat([output[i] for output in outputs], 0) for i in range(2)
             )
         if self._spatial_runner is not None and len(batch["cells"]) == 1:
-            padded = {k: torch.cat((v, v), 0) for k, v in batch.items()}
+            padded = {k: _duplicate_singleton(v) for k, v in batch.items()}
             x, ctx = self._spatial_runner(padded)
             return x[:1], ctx[:1]
         return (self._spatial_runner or self.spatial)(batch)
@@ -194,8 +198,8 @@ class Policy(nn.Module):
             return self.heads(batch, x, h)
         rows, actions = len(x), batch["sources"].shape[1]
         if rows == 1:
-            batch = {k: torch.cat((v, v), 0) for k, v in batch.items()}
-            x, h = torch.cat((x, x), 0), torch.cat((h, h), 0)
+            batch = {k: _duplicate_singleton(v) for k, v in batch.items()}
+            x, h = _duplicate_singleton(x), _duplicate_singleton(h)
         if actions == 1:
             batch = dict(batch)
             for key in ("sources", "targets", "action_features", "action_mask"):
@@ -304,18 +308,16 @@ class Policy(nn.Module):
         return logits, value
 
     def forward(self, batch, hidden=None, *, sequence=False):
+        if self.variant != "C":
+            return self.forward_sequences(batch, [len(batch["cells"])], hidden)
         x, ctx = self.encode_spatial(batch)
-        if self.variant == "C":
-            # sequence=True: items are consecutive decisions of one episode.
-            recurrent_input = ctx[:, None] if sequence else ctx[None]
-            with torch.autocast(ctx.device.type, enabled=False):
-                output, hidden = self.memory(
-                    recurrent_input.float(), None if hidden is None else hidden.float()
-                )
-            h = output[:, 0] if sequence else output[0]
-        else:
-            with self.autocast(ctx):
-                h, hidden = self.memory(ctx).float(), None
+        # sequence=True: items are consecutive decisions of one episode.
+        recurrent_input = ctx[:, None] if sequence else ctx[None]
+        with torch.autocast(ctx.device.type, enabled=False):
+            output, hidden = self.memory(
+                recurrent_input.float(), None if hidden is None else hidden.float()
+            )
+        h = output[:, 0] if sequence else output[0]
         logits, value = self.score_heads(batch, x, h)
         return logits, value, hidden
 

@@ -30,11 +30,33 @@ class PackageLayoutTests(unittest.TestCase):
                 canonical = importlib.import_module(f"civ5rl.{layer}.{name}")
                 self.assertIs(old, canonical)
         import civ5rl.collector as legacy
+
         import civ5rl.engine.collector as canonical
 
         with patch("civ5rl.collector._worker", object()) as sentinel:
             self.assertIs(canonical._worker, sentinel)
             self.assertIs(legacy._worker, sentinel)
+
+    def test_alias_metadata_and_reload_in_both_import_orders(self):
+        code = """
+import importlib, sys
+import civ5rl
+for first, second in (("civ5rl.context", "civ5rl.core.context"),
+                      ("civ5rl.core.schema", "civ5rl.schema")):
+    a = importlib.import_module(first)
+    b = importlib.import_module(second)
+    assert a is b
+    canonical = second if '.core.' in second else first
+    assert a.__name__ == a.__spec__.name == canonical
+    assert a.__package__ == 'civ5rl.core'
+    assert importlib.reload(a) is a
+    assert a.__name__ == a.__spec__.name == canonical
+for _ in range(3):
+    importlib.reload(civ5rl)
+assert sum(bool(getattr(f, '_civ5rl_alias_finder', False)) for f in sys.meta_path) == 1
+assert importlib.import_module('civ5rl.context') is sys.modules['civ5rl.core.context']
+"""
+        subprocess.run([sys.executable, "-c", code], check=True)
 
     def test_worker_import_is_torch_free(self):
         subprocess.run(

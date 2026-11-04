@@ -6,9 +6,13 @@ from pathlib import Path
 
 import numpy as np
 
-from civ5rl.core.context import context_for
+from civ5rl.core.context import context_from_spec
 from civ5rl.core.observation import ObservationEncoder
-from civ5rl.protocols.diagnostic import DecisionEnvContext
+from civ5rl.protocols.diagnostic import (
+    _SHOT_DAMAGE_ROLLS,
+    DecisionEnvContext,
+    _minimum_shot_damage,
+)
 from civ5rl.provenance import bound_cases, case_manifest
 from civ5rl.provenance.common import ROOT, read_json, write_json
 from civ5sim import Action
@@ -20,8 +24,6 @@ def is_one(config):
 
 
 def prepare_one(directory, config):
-    from civ5sim import _native as native
-
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     source_path = ROOT / config["diagnostic"]["source_dataset"]
@@ -79,13 +81,7 @@ def prepare_one(directory, config):
                     enc = []
                     for spec, state in ((old, x), (new, y)):
                         encoder = ObservationEncoder(
-                            context_for(
-                                spec["scenario"],
-                                spec["armies"],
-                                spec["learner_side"],
-                                3,
-                                0,
-                            ),
+                            context_from_spec({**spec, "max_rounds": 3}),
                             variant,
                         )
                         enc.append(
@@ -106,25 +102,19 @@ def prepare_one(directory, config):
                         if u["tile"] == shot.target
                     )
                     preview = b.battle.preview_attack(shot)
-                    if (
-                        native.library().sim_damage(
-                            preview.attacker_strength, preview.defender_strength, 1200
-                        )
-                        != -1
-                    ):
-                        raise ValueError("Native random roll range changed")
-                    minimum = min(
-                        native.library().sim_damage(
-                            preview.attacker_strength, preview.defender_strength, roll
-                        )
-                        for roll in range(1200)
+                    minimum = _minimum_shot_damage(
+                        preview, "Native random roll range changed"
                     )
                     if minimum < hp:
                         raise ValueError(
                             "Initial ranged attack is not guaranteed lethal"
                         )
                     minima.append(
-                        {"minimum_damage": minimum, "target_hp": hp, "rolls": 1200}
+                        {
+                            "minimum_damage": minimum,
+                            "target_hp": hp,
+                            "rolls": _SHOT_DAMAGE_ROLLS,
+                        }
                     )
                 b.prepare(shots[0])
                 b.applied(shots[0], b.battle.step(shots[0]))

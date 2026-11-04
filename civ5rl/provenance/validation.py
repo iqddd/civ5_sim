@@ -4,6 +4,7 @@ import math
 
 from civ5rl.core.schema import (
     ACTION_INPUT_DIM,
+    AGE_CAP,
     CONTEXT_INPUT_DIM,
     GLOBAL_DIM,
     HEX_BLOCKS,
@@ -12,6 +13,7 @@ from civ5rl.core.schema import (
     HEX_MLP_DIM,
     HIDDEN_SIZE,
     PREV_ACTION_DIM,
+    ROSTER_SCALE,
     TILE_DIM,
 )
 
@@ -22,8 +24,8 @@ SUPPORTED = {
         "global_features": GLOBAL_DIM,
         "previous_action_features": PREV_ACTION_DIM,
         "history": True,
-        "age_cap_enemy_turns": 32,
-        "roster_count_scale": 8,
+        "age_cap_enemy_turns": AGE_CAP,
+        "roster_count_scale": ROSTER_SCALE,
         "enemy_private_fields": False,
         "privileged_features": False,
         "raw_reward_input": False,
