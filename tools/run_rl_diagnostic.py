@@ -8,6 +8,7 @@ import sys
 import tempfile
 import traceback
 from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 
@@ -17,12 +18,37 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 
 def evaluate_stage(policy, collector, dataset, stage, directory, monitor):
+    """Evaluation never advances the training RNG streams, including on failure."""
+    import numpy as np
+    import torch
+
+    rng = (
+        random.getstate(),
+        np.random.get_state(),
+        torch.get_rng_state(),
+        torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+    )
+    try:
+        return _evaluate_stage(policy, collector, dataset, stage, directory, monitor)
+    finally:
+        random.setstate(rng[0])
+        np.random.set_state(rng[1])
+        torch.set_rng_state(rng[2])
+        if rng[3]:
+            torch.cuda.set_rng_state_all(rng[3])
+
+
+def _evaluate_stage(policy, collector, dataset, stage, directory, monitor):
     from civ5rl.common import read_json, write_json
     from civ5rl.diagnostic import episode_rows, outcome_summary
+
     from civ5rl.provenance import bound_cases
 
     directory = Path(directory)
     manifest = dataset[stage]["dev"]
+    from civ5rl.protocols.diagnostic_d1 import model_hash
+
+    policy_hash = model_hash(policy.state_dict())
     if (directory / "summary.json").exists():
         summary, rows = (
             read_json(directory / "summary.json"),
@@ -31,7 +57,9 @@ def evaluate_stage(policy, collector, dataset, stage, directory, monitor):
         if (
             summary.get("manifest_hash") != manifest["hash"]
             or len(rows) != 128
-            or len({(r["layout_id"], r["side"]) for r in rows}) != 128
+            or {(r["layout_id"], r["side"]) for r in rows}
+            != {(r["layout_id"], r["learner_side"]) for r in manifest["cases"]}
+            or summary.get("policy_hash") != policy_hash
         ):
             raise ValueError("Cached evaluation manifest/completeness mismatch")
         return summary, rows
@@ -44,8 +72,16 @@ def evaluate_stage(policy, collector, dataset, stage, directory, monitor):
         raise ValueError("Incomplete diagnostic evaluation")
     summary = outcome_summary(episodes)
     rows = episode_rows(episodes)
+    if dataset.get("kind") == "rl01.D1-transfer":
+        summary["first_ranged_rate"] = summary.pop("first_winning_attack_rate")
+        summary["first_ranged_probability"] = summary.pop(
+            "first_winning_attack_probability"
+        )
     summary.update(
-        seconds=perf_counter() - start, timings=timings, manifest_hash=manifest["hash"]
+        seconds=perf_counter() - start,
+        timings=timings,
+        manifest_hash=manifest["hash"],
+        policy_hash=policy_hash,
     )
     from civ5rl.evaluation import save_training_replay
 
@@ -65,8 +101,6 @@ def evaluate_stage(policy, collector, dataset, stage, directory, monitor):
 
 def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False):
     import torch
-
-    from civ5rl import checkpoint
     from civ5rl.collector import Collector
     from civ5rl.common import configure, read_json, write_json
     from civ5rl.control import TrainingControl
@@ -88,11 +122,16 @@ def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False)
     from civ5rl.resources import ResourceMonitor
     from civ5rl.validation import validate_config
 
+    from civ5rl import checkpoint
+
     directory = Path(directory)
     config = deepcopy(base_config)
     config["seed"] = seed
     validate_config(config)
     one = is_one(config)
+    from civ5rl.protocols.diagnostic_d1 import is_d1, load_weights, next_state_d1
+
+    d1 = is_d1(config)
     if (directory / "latest.json").exists() and not resume:
         raise ValueError("Run exists; use --resume")
     configure(seed, device)
@@ -106,7 +145,13 @@ def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False)
         else:
             identity = checkpoint.passport(directory, config, dataset)
         policy = Policy("C").to(device)
-        initialization = load_initial_weights(policy, config) if one else None
+        initialization = (
+            load_weights(policy, config)
+            if d1
+            else load_initial_weights(policy, config)
+            if one
+            else None
+        )
         policy.enable_amp(device.startswith("cuda"), spatial_batch_size=32)
         if device.startswith("cuda"):
             policy.enable_compile()
@@ -134,7 +179,7 @@ def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False)
             "update": 0,
             "decisions": 0,
             "next_episode": 0,
-            "stage": "D0",
+            "stage": "D1" if d1 else "D0",
             "stage_updates": 0,
             "consecutive": 0,
             "training_seconds": 0.0,
@@ -142,6 +187,12 @@ def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False)
             "status": "running",
             "pending_evaluation": None,
         }
+        if d1:
+            state.update(
+                d1_decisions=0,
+                previous_decisions=initialization["previous_decisions"],
+                pause_seconds=0.0,
+            )
         if (directory / "latest.json").exists():
             state = checkpoint.restore(
                 directory
@@ -153,21 +204,35 @@ def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False)
                 config,
                 identity,
             )
+            if d1 and state.get("paused_at_utc"):
+                paused_at = datetime.fromisoformat(state.pop("paused_at_utc"))
+                state["pause_seconds"] += max(
+                    0, (datetime.now(UTC) - paused_at).total_seconds()
+                )
         if "last_metrics" in state:
             metric_path = directory / "metrics.jsonl"
-            present = (
-                [
-                    json.loads(line)["update"]
-                    for line in metric_path.read_text().splitlines()
-                ]
-                if metric_path.exists()
-                else []
+            lines = metric_path.read_text().splitlines() if metric_path.exists() else []
+            rows = []
+            for i, line in enumerate(lines):
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    if i != len(lines) - 1:
+                        raise ValueError(
+                            "Corrupted metrics before final line"
+                        ) from None
+            present = [r["update"] for r in rows]
+            if len(present) != len(set(present)):
+                raise ValueError("Duplicate metrics updates")
+            last = state["last_metrics"]
+            if last["update"] not in present:
+                rows.append(last)
+            tmp = metric_path.with_suffix(".jsonl.tmp")
+            tmp.write_text(
+                "".join(json.dumps(r, allow_nan=False) + "\n" for r in rows),
+                encoding="utf-8",
             )
-            if state["last_metrics"]["update"] not in present:
-                with metric_path.open("a", encoding="utf-8") as stream:
-                    stream.write(
-                        json.dumps(state["last_metrics"], allow_nan=False) + "\n"
-                    )
+            os.replace(tmp, metric_path)
 
         def save(name):
             checkpoint.save(
@@ -209,7 +274,41 @@ def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False)
                     )["model"]
                 )
                 baselines = {}
-                for stage in ("D0",) if one else ("D0", "D1"):
+                if d1:
+                    load_weights(policy, config, random_baseline=True)
+                    baselines["D1"] = evaluate_stage(
+                        policy,
+                        collector,
+                        dataset,
+                        "D1",
+                        directory / "evaluation/random-D1",
+                        monitor,
+                    )
+                    policy.load_state_dict(
+                        torch.load(
+                            directory / "checkpoints/initial.pt",
+                            map_location=device,
+                            weights_only=False,
+                        )["model"]
+                    )
+                    transfer, transfer_rows = evaluate_stage(
+                        policy,
+                        collector,
+                        dataset,
+                        "D1",
+                        directory / "evaluation/transfer-D1",
+                        monitor,
+                    )
+                    transfer["comparison_to_random"] = gate(
+                        "D1", transfer, transfer_rows, baselines["D1"][1]
+                    )
+                    write_json(
+                        directory / "evaluation/transfer-D1/summary.json", transfer
+                    )
+                    state["baseline_evaluation_seconds"] = (
+                        baselines["D1"][0]["seconds"] + transfer["seconds"]
+                    )
+                for stage in () if d1 else ("D0",) if one else ("D0", "D1"):
                     baselines[stage] = evaluate_stage(
                         policy,
                         collector,
@@ -263,6 +362,8 @@ def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False)
                         state = (
                             next_state_one(state, decision["passed"])
                             if one
+                            else next_state_d1(state, decision["passed"])
+                            if d1
                             else next_state(state, decision["passed"])
                         )
                         state["pending_evaluation"] = None
@@ -274,9 +375,10 @@ def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False)
                                     "update": state["update"],
                                     "evaluated_stage": pending["stage"],
                                     "wins": summary["wins"],
-                                    "first_attack": summary[
-                                        "first_winning_attack_rate"
-                                    ],
+                                    "first_attack": summary.get(
+                                        "first_ranged_rate",
+                                        summary.get("first_winning_attack_rate"),
+                                    ),
                                     "gate": decision,
                                     "status": state["status"],
                                 }
@@ -302,6 +404,19 @@ def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False)
                         diagnostic_stage=state["stage"],
                     )
                     start = perf_counter()
+                    if d1:
+                        from civ5rl.ppo import schedule
+
+                        state["rollout_schedule"] = {
+                            "d1_decisions": state["d1_decisions"],
+                            "lr": schedule(
+                                config["optimizer"]["lr_schedule"],
+                                state["d1_decisions"],
+                            ),
+                            "entropy_coefficient": schedule(
+                                config["ppo"]["entropy_schedule"], state["d1_decisions"]
+                            ),
+                        }
                     episodes, next_episode, timings = collector.collect(
                         policy, state["stage"], state["next_episode"], monitor
                     )
@@ -360,6 +475,11 @@ def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False)
                         training_seconds=state["training_seconds"] + elapsed,
                         pending_evaluation={"stage": stage},
                     )
+                    if d1:
+                        state["d1_decisions"] = state["decisions"]
+                        for key in ("lr", "entropy_coefficient"):
+                            if stats[key] != state["rollout_schedule"][key]:
+                                raise ValueError("D1 schedule changed within rollout")
                     name = f"update-{state['update']:06}.pt"
                     row = {
                         "update": state["update"],
@@ -374,6 +494,7 @@ def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False)
                         "outcomes": outcome_summary(episodes),
                         "timings": timings,
                         "ppo": stats,
+                        "schedule": state.get("rollout_schedule"),
                         "terminal_rewards": {
                             str(reward): sum(
                                 ep["result"]["reward"] == reward for ep in episodes
@@ -393,6 +514,9 @@ def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False)
                         stream.write(json.dumps(row, allow_nan=False) + "\n")
                     del episodes, before
                 paused = state["status"] == "running"
+                if d1 and paused:
+                    state["paused_at_utc"] = datetime.now(UTC).isoformat()
+                    save(read_json(directory / "latest.json")["checkpoint"])
                 result = {
                     **state,
                     "status": "paused" if paused else state["status"],
@@ -418,8 +542,16 @@ def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False)
 
 
 def report(directory):
-    import matplotlib
+    from civ5rl.common import read_json
 
+    from civ5rl.protocols.diagnostic_d1 import is_d1
+
+    config_path = Path(directory) / "seed-17/resolved-config.json"
+    if config_path.exists() and is_d1(read_json(config_path)):
+        from tools.report_rl_d1 import report_d1
+
+        return report_d1(directory)
+    import matplotlib
     from civ5rl.common import read_json
 
     matplotlib.use("Agg")
@@ -427,6 +559,7 @@ def report(directory):
 
     directory = Path(directory)
     from civ5rl.diagnostic_one import is_one
+
     from tools.report_rl_one import report_one
 
     for saved_config in sorted(directory.glob("seed-*/resolved-config.json")):
@@ -537,8 +670,13 @@ def _run_suite(config, directory, device="cuda", resume=False, prepare_only=Fals
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     one = is_one(config)
+    from civ5rl.protocols.diagnostic_d1 import is_d1, prepare_d1
+
+    d1 = is_d1(config)
     dataset = (
-        prepare_one(directory / "manifests", config)
+        prepare_d1(directory / "manifests", config)
+        if d1
+        else prepare_one(directory / "manifests", config)
         if one
         else prepare(directory / "manifests", config)
     )
@@ -547,7 +685,7 @@ def _run_suite(config, directory, device="cuda", resume=False, prepare_only=Fals
     try:
         # Historical model is a frozen control, not a training initialization.
         control_dir = directory / "previous-model-control"
-        if not one and not (control_dir / "D1/summary.json").exists():
+        if not (one or d1) and not (control_dir / "D1/summary.json").exists():
             from civ5rl.agent import RLAgent
             from civ5rl.collector import Collector
             from civ5rl.diagnostic import DiagnosticFactory
@@ -578,7 +716,7 @@ def _run_suite(config, directory, device="cuda", resume=False, prepare_only=Fals
                         monitor,
                     )
         results = []
-        for seed in (17,) if one else (17, 42):
+        for seed in (17,) if one or d1 else (17, 42):
             result = run_seed(
                 config, dataset, directory / f"seed-{seed}", seed, device, resume
             )
@@ -594,7 +732,7 @@ def _run_suite(config, directory, device="cuda", resume=False, prepare_only=Fals
                 directory / "suite-result.json",
                 {
                     "status": "passed"
-                    if len(results) == (1 if one else 2)
+                    if len(results) == (1 if one or d1 else 2)
                     and all(r["status"] == "passed" for r in results)
                     else result["status"],
                     "seeds": results,
@@ -613,7 +751,12 @@ def _run_suite(config, directory, device="cuda", resume=False, prepare_only=Fals
 def run_suite(config, directory, device="cuda", resume=False, prepare_only=False):
     from civ5rl.control import RunLock
 
+    from civ5rl.protocols.diagnostic_d1 import is_d1
+
     with RunLock(directory):
+        if resume and is_d1(config):
+            # Explicit CLI resume consumes a previous graceful stop request.
+            (Path(directory) / "seed-17/stop.request").unlink(missing_ok=True)
         return _run_suite(config, directory, device, resume, prepare_only)
 
 
@@ -630,8 +773,12 @@ def main():
     from civ5rl.diagnostic_one import is_one
 
     config = read_json(args.config)
+    from civ5rl.protocols.diagnostic_d1 import is_d1
+
     out = args.out or (
-        "artifacts/rl/diagnostic-one-decision"
+        "artifacts/rl/diagnostic-d1"
+        if is_d1(config)
+        else "artifacts/rl/diagnostic-one-decision"
         if is_one(config)
         else "artifacts/rl/diagnostic-results"
     )

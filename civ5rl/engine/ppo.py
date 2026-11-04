@@ -208,6 +208,22 @@ class ReferenceBackend:
         return {}
 
 
+def token_minibatches(order, valid_tokens):
+    """Partition shuffled recurrent spans without losing or joining decisions."""
+    batch, used = [], 0
+    for episode, start, stop in order:
+        while start < stop:
+            end = min(stop, start + valid_tokens - used)
+            batch.append((episode, start, end))
+            used += end - start
+            start = end
+            if used == valid_tokens:
+                yield batch
+                batch, used = [], 0
+    if batch:
+        yield batch
+
+
 def update(
     policy,
     optimizer,
@@ -248,14 +264,33 @@ def update(
     kl_seconds = optimizer_seconds = 0.0
     kl = pre_kl
     batch_chunks = config["ppo"]["sequences_per_minibatch"]
+    token_count = config["ppo"].get("valid_tokens_per_minibatch")
+    per_step_kl = (
+        config["ppo"].get("kl_measurement", "whole_rollout_after_epoch")
+        == "whole_rollout_after_optimizer_step"
+    )
+    step_records = []
+    completed_epochs = 0
+    stop_reason = "epochs_completed"
     for epoch in range(config["ppo"]["epochs"]):
         order = list(chunks)
         shuffle_rng.shuffle(order)
-        for first in range(0, len(order), batch_chunks):
-            minibatch = order[first : first + batch_chunks]
+        batches = (
+            list(token_minibatches(order, token_count))
+            if token_count
+            else [
+                order[first : first + batch_chunks]
+                for first in range(0, len(order), batch_chunks)
+            ]
+        )
+        for batch_index, minibatch in enumerate(batches):
+            step_start = perf_counter()
             count = sum(stop - start for _, start, stop in minibatch)
             optimizer.zero_grad(set_to_none=True)
-            tokens += backend.backward(minibatch, count, entropy_coefficient)
+            processed = backend.backward(minibatch, count, entropy_coefficient)
+            if processed != count:
+                raise ValueError("PPO backend valid-token count mismatch")
+            tokens += processed
             tick = perf_counter()
             norm = torch.nn.utils.clip_grad_norm_(
                 policy.parameters(),
@@ -266,14 +301,40 @@ def update(
             optimizer.step()
             optimizer_seconds += perf_counter() - tick
             steps += 1
-        tick = perf_counter()
-        kl = backend.kl()
-        kl_seconds += perf_counter() - tick
+            if per_step_kl:
+                tick = perf_counter()
+                kl = backend.kl()
+                kl_seconds += perf_counter() - tick
+                if not np.isfinite(kl):
+                    raise FloatingPointError("Non-finite post-step KL")
+                step_records.append(
+                    {
+                        "step": steps,
+                        "epoch": epoch + 1,
+                        "valid_tokens": count,
+                        "kl": kl,
+                        "gradient_norm_pre_clip": float(norm),
+                        "seconds": perf_counter() - step_start,
+                    }
+                )
+                if kl > config["ppo"]["stop_kl"]:
+                    stop_reason = "stop_kl"
+                    if batch_index == len(batches) - 1:
+                        completed_epochs += 1
+                    break
+        else:
+            completed_epochs += 1
+        if not per_step_kl:
+            tick = perf_counter()
+            kl = backend.kl()
+            kl_seconds += perf_counter() - tick
+            if kl > config["ppo"]["stop_kl"]:
+                stop_reason = "stop_kl"
         if monitor:
-            monitor.mark("ppo", ppo_epoch=epoch + 1)
-        if kl > config["ppo"]["stop_kl"]:
+            monitor.mark("ppo", ppo_epoch=epoch + 1, optimizer_steps=steps)
+        if stop_reason == "stop_kl":
             break
-    return _summarize_ppo_update(
+    summary = _summarize_ppo_update(
         backend,
         episodes,
         tokens,
@@ -288,6 +349,15 @@ def update(
         optimizer_seconds,
         start_update,
     )
+    summary.update(
+        epochs_started=epoch + 1,
+        epochs_completed=completed_epochs,
+        optimizer_step_records=step_records,
+        stop_reason=stop_reason,
+        max_kl=max([pre_kl, kl, *[r["kl"] for r in step_records]]),
+        valid_tokens_per_minibatch=token_count,
+    )
+    return summary
 
 
 def _summarize_ppo_update(

@@ -382,6 +382,19 @@ def gate(stage, summary, rows, baseline_rows=None):
             "passed": summary["win_rate"] >= 0.95
             and summary["first_winning_attack_rate"] >= 0.90
         }
+    keys = [(r["layout_id"], r["side"]) for r in rows]
+    base_keys = [(r["layout_id"], r["side"]) for r in baseline_rows]
+    if (
+        len(keys) != 128
+        or len(set(keys)) != 128
+        or len(base_keys) != 128
+        or len(set(base_keys)) != 128
+        or set(keys) != set(base_keys)
+        or any(side not in (0, 1) for _, side in keys)
+    ):
+        raise ValueError(
+            "D1 bootstrap requires 64 complete paired layouts for both models"
+        )
     initial = {(r["layout_id"], r["side"]): int(r["win"]) for r in baseline_rows}
     paired = {}
     for r in rows:

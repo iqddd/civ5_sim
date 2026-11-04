@@ -7,6 +7,9 @@
 [D0-one-decision](docs/rl-d0-one-decision-protocol.md), запуск
 `tools/run_rl_diagnostic.py --config configs/rl-diagnostic-one-decision.json`;
 результаты — `artifacts/rl/diagnostic-one-decision/report.md`.
+Отдельный [D1 с контролем PPO после каждого шага Adam](docs/rl-d1-transfer-protocol.md):
+`tools/run_rl_diagnostic.py --config configs/rl-diagnostic-d1.json`;
+продолжение — та же команда с `--resume`, результаты — `artifacts/rl/diagnostic-d1/report.md`.
 Запуск: `tools/run_rl_diagnostic.py`; продолжение — та же команда с `--resume`.
 Результаты — `artifacts/rl/diagnostic-results/report.md`. Подготовка без обучения:
 `tools/run_rl_diagnostic.py --prepare-only`. Максимум два seed, 4+8 updates и

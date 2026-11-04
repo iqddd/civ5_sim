@@ -180,7 +180,6 @@ def validate_config(config):
             "value_loss",
             "value_clip",
             "entropy",
-            "kl_measurement",
             "reward_normalization",
             "return_normalization",
             "target_kl",
@@ -212,6 +211,12 @@ def validate_config(config):
             or (key == "clip_ratio" and value == 0)
         ):
             raise ValueError(f"Invalid configuration: {section}.{key}")
+    mode = config["ppo"].get("kl_measurement")
+    if mode not in ("whole_rollout_after_epoch", "whole_rollout_after_optimizer_step"):
+        raise ValueError("Unsupported configuration: ppo.kl_measurement")
+    tokens = config["ppo"].get("valid_tokens_per_minibatch")
+    if tokens is not None and (type(tokens) is not int or tokens < 1):
+        raise ValueError("Invalid configuration: ppo.valid_tokens_per_minibatch")
     c = config["collection"]
     if c["num_envs"] != c["cpu_workers"] * c["envs_per_worker"]:
         raise ValueError("Invalid configuration: collection.num_envs")
@@ -245,7 +250,7 @@ def validate_config(config):
         raise ValueError("Invalid configuration: ppo.sequences_per_microbatch")
     if "diagnostic" in config:
         mode = config["diagnostic"].get("mode", "D0-D1")
-        if mode not in ("D0-D1", "D0-one-decision"):
+        if mode not in ("D0-D1", "D0-one-decision", "D1-transfer"):
             raise ValueError("Unsupported configuration: diagnostic.mode")
         expected = {
             "train_layouts": 128,
@@ -266,6 +271,22 @@ def validate_config(config):
                 initial_checkpoint="artifacts/rl/diagnostic-results/seed-17/checkpoints/initial.pt",
                 source_dataset="artifacts/rl/diagnostic-results/manifests/manifest.json",
             )
+        if mode == "D1-transfer":
+            expected.update(
+                seeds=[17],
+                D0_updates=0,
+                D1_updates=8,
+                protocol="docs/rl-d1-transfer-protocol.md",
+                initial_checkpoint="artifacts/rl/diagnostic-one-decision/seed-17/checkpoints/update-000006.pt",
+                random_checkpoint="artifacts/rl/diagnostic-results/seed-17/checkpoints/initial.pt",
+                source_dataset="artifacts/rl/diagnostic-results/manifests/manifest.json",
+            )
+            if config["ppo"].get("valid_tokens_per_minibatch") != 1024:
+                raise ValueError(
+                    "Unsupported configuration: ppo.valid_tokens_per_minibatch"
+                )
+            if config["ppo"]["kl_measurement"] != "whole_rollout_after_optimizer_step":
+                raise ValueError("Unsupported configuration: ppo.kl_measurement")
         for key, value in expected.items():
             if config["diagnostic"].get(key) != value:
                 raise ValueError(f"Unsupported configuration: diagnostic.{key}")
