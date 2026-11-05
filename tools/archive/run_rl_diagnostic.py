@@ -46,9 +46,9 @@ def _evaluate_stage(policy, collector, dataset, stage, directory, monitor):
 
     directory = Path(directory)
     manifest = dataset[stage]["dev"]
-    from civ5rl.protocols.diagnostic_d1 import model_hash
+    from civ5rl.provenance.common import model_tensor_sha256
 
-    policy_hash = model_hash(policy.state_dict())
+    policy_hash = model_tensor_sha256(policy.state_dict())
     if (directory / "summary.json").exists():
         summary, rows = (
             read_json(directory / "summary.json"),

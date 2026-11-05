@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
+from civ5rl.protocols.common import bootstrap_ci95
 from civ5rl.protocols.imitation import load_episode
 from civ5rl.provenance.common import ROOT, read_json
 from civ5sim import Battle
@@ -88,11 +89,10 @@ def paired_world_bootstrap(before, after, *, samples, seed, clusters=16, cases=N
             for world in worlds
         ]
     )
-    rng = np.random.default_rng(seed)
-    draws = differences[rng.integers(0, clusters, (samples, clusters))].mean(1)
+    ci = bootstrap_ci95(differences, samples=samples, seed=seed)
     return {
         "delta": float(differences.mean()),
-        "CI95": [float(v) for v in np.quantile(draws, [0.025, 0.975])],
+        "CI95": [float(v) for v in ci],
         "bootstrap_clusters": clusters,
         "bootstrap_samples": samples,
         "bootstrap_seed": seed,

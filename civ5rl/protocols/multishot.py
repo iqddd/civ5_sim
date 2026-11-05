@@ -1,6 +1,5 @@
 """Frozen multishot corpus construction and native scenario certificates."""
 
-import hashlib
 from copy import deepcopy
 from pathlib import Path
 from time import perf_counter
@@ -12,7 +11,14 @@ from civ5rl.protocols.diagnostic import DiagnosticFactory, physical_hash
 from civ5rl.protocols.diagnostic_metrics import decision_metrics
 from civ5rl.protocols.multishot_metrics import summarize
 from civ5rl.provenance import bound_cases, case_manifest, validate_cases
-from civ5rl.provenance.common import ROOT, read_json, seed_for, write_json
+from civ5rl.provenance.common import (
+    ROOT,
+    file_sha256,
+    read_json,
+    seed_for,
+    verify_self_digest,
+    write_json,
+)
 from civ5sim import Action, _native
 from civ5sim.engine import digest
 
@@ -23,22 +29,18 @@ class InvalidDataset(ValueError):
     pass
 
 
-def sha(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-
-
 def specification(config, *, full_config=False):
     item = config["diagnostic"]
     path = ROOT / item["specification"]
-    if sha(path) != item["specification_sha256"]:
+    if file_sha256(path) != item["specification_sha256"]:
         raise InvalidDataset("Multishot specification hash mismatch")
     spec = read_json(path)
     for field in ("base_config", "source_dataset"):
         ref = spec[field]
-        if sha(ROOT / ref["path"]) != ref["sha256"]:
+        if file_sha256(ROOT / ref["path"]) != ref["sha256"]:
             raise InvalidDataset(field + " SHA256 mismatch")
     if (
-        sha(ROOT / spec["initialization"]["checkpoint"])
+        file_sha256(ROOT / spec["initialization"]["checkpoint"])
         != spec["initialization"]["sha256"]
     ):
         raise InvalidDataset("Initialization checkpoint SHA256 mismatch")
@@ -129,8 +131,9 @@ def prepare(directory, config):
     start = perf_counter()
     spec = specification(config)
     source = read_json(ROOT / spec["source_dataset"]["path"])
-    if source["hash"] != digest({k: v for k, v in source.items() if k != "hash"}):
-        raise InvalidDataset("Original corpus hash mismatch")
+    verify_self_digest(
+        source, error_msg="Original corpus hash mismatch", exception_type=InvalidDataset
+    )
     dataset = {
         "schema": 1,
         "kind": "rl01.D0-multishot",
@@ -146,7 +149,10 @@ def prepare(directory, config):
             raise InvalidDataset("Multishot source case count differs")
         for case in cases:
             case.update(
-                max_rounds=4, diagnostic_protocol="D0-multishot", diagnostic_stage=STAGE
+                max_rounds=4,
+                diagnostic_protocol="D0-multishot",
+                diagnostic_stage=STAGE,
+                record_step_events=True,
             )
             case.pop("learner_decision_limit", None)
             for unit in case["scenario"]["units"]:
@@ -170,97 +176,21 @@ def prepare(directory, config):
         proof = read_json(directory / "construction-verification.json")
         if proof["dataset_hash"] != dataset["hash"] or proof["verified_cases"] != 384:
             raise InvalidDataset("Missing or incomplete multishot certificate")
-        if proof.get("native_sha256") != sha(ROOT / "build/combat.dll"):
+        if proof.get("native_sha256") != file_sha256(ROOT / "build/combat.dll"):
             raise InvalidDataset("Multishot certificate native version mismatch")
-        if sha(directory / "controls.json") != proof["controls_sha256"]:
+        if file_sha256(directory / "controls.json") != proof["controls_sha256"]:
             raise InvalidDataset("Multishot controls certificate hash mismatch")
         return dataset
-    lib = _native.library()
-    records, controls = [], []
-    for split in ("train", "dev"):
-        for case in bound_cases(dataset[STAGE][split]):
-            bounds = []
-            with DecisionEnv(case) as env:
-                state = env.request()
-                shots = [a for a in state["actions"] if a.kind == "ranged"]
-                if not shots:
-                    raise InvalidDataset("No initial ranged attack")
-                for action in shots:
-                    hp = next(
-                        u["hp"]
-                        for u in state["observation"]["units"]
-                        if u["tile"] == action.target
-                    )
-                    preview = env.battle.preview_attack(action)
-                    values = [
-                        lib.sim_damage(
-                            preview.attacker_strength, preview.defender_strength, r
-                        )
-                        for r in range(1200)
-                    ]
-                    if (
-                        hp != 40
-                        or min(values) < 0
-                        or max(values) >= hp
-                        or lib.sim_damage(
-                            preview.attacker_strength, preview.defender_strength, 1200
-                        )
-                        != -1
-                    ):
-                        raise InvalidDataset(
-                            "Initial shot non-lethality certificate failed"
-                        )
-                    bounds.append(
-                        {
-                            "target_hp": hp,
-                            "min": min(values),
-                            "max": max(values),
-                            "rolls": 1200,
-                            "attacker_strength": preview.attacker_strength,
-                            "defender_strength": preview.defender_strength,
-                        }
-                    )
-            for trial in range(-1, 16):
-                probe = deepcopy(case)
-                if trial >= 0:
-                    probe["scenario"]["seed"] = seed_for(
-                        20261114,
-                        case["layout_id"],
-                        trial,
-                        namespace="multishot_spec_probe_" + split,
-                    )
-                episode = control_episode(probe)
-                _metrics, rows = summarize([episode])
-                controls.append(
-                    {
-                        "split": split,
-                        "episode_id": case["episode_id"],
-                        "trial": trial,
-                        "seed": probe["scenario"]["seed"],
-                        "outcome": rows[0],
-                        "hp_events": episode["result"]["diagnostic_events"],
-                    }
-                )
-            control_episode(case, passive=True)
-            records.append(
-                {
-                    "split": split,
-                    "layout_id": case["layout_id"],
-                    "side": case["learner_side"],
-                    "initial_shots": bounds,
-                    "reference_wins": 17,
-                    "passive_draw": True,
-                }
-            )
+    records, controls = _certify_multishot_cases(dataset)
     write_json(directory / "controls.json", controls)
     write_json(
         directory / "construction-verification.json",
         {
             "dataset_hash": dataset["hash"],
-            "native_sha256": sha(ROOT / "build/combat.dll"),
+            "native_sha256": file_sha256(ROOT / "build/combat.dll"),
             "verified_cases": len(records),
             "cases": records,
-            "controls_sha256": sha(directory / "controls.json"),
+            "controls_sha256": file_sha256(directory / "controls.json"),
             "seconds": perf_counter() - start,
             "control_games": len(controls),
             "passive_games": 384,
@@ -268,6 +198,89 @@ def prepare(directory, config):
     )
     write_json(path, dataset)  # Commit only after all certificates passed.
     return dataset
+
+
+def _certify_multishot_cases(dataset):
+    lib = _native.library()
+    records, controls = [], []
+    for split in ("train", "dev"):
+        for case in bound_cases(dataset[STAGE][split]):
+            record, case_controls = _certify_multishot_case(case, lib)
+            records.append(record)
+            controls.extend(case_controls)
+    return records, controls
+
+
+def _certify_multishot_case(case, lib):
+    split = case["provenance"]["split"].removeprefix("diagnostic_")
+    controls = []
+    bounds = []
+    with DecisionEnv(case) as env:
+        state = env.request()
+        shots = [a for a in state["actions"] if a.kind == "ranged"]
+        if not shots:
+            raise InvalidDataset("No initial ranged attack")
+        for action in shots:
+            hp = next(
+                u["hp"]
+                for u in state["observation"]["units"]
+                if u["tile"] == action.target
+            )
+            preview = env.battle.preview_attack(action)
+            values = [
+                lib.sim_damage(preview.attacker_strength, preview.defender_strength, r)
+                for r in range(1200)
+            ]
+            if (
+                hp != 40
+                or min(values) < 0
+                or max(values) >= hp
+                or lib.sim_damage(
+                    preview.attacker_strength, preview.defender_strength, 1200
+                )
+                != -1
+            ):
+                raise InvalidDataset("Initial shot non-lethality certificate failed")
+            bounds.append(
+                {
+                    "target_hp": hp,
+                    "min": min(values),
+                    "max": max(values),
+                    "rolls": 1200,
+                    "attacker_strength": preview.attacker_strength,
+                    "defender_strength": preview.defender_strength,
+                }
+            )
+    for trial in range(-1, 16):
+        probe = deepcopy(case)
+        if trial >= 0:
+            probe["scenario"]["seed"] = seed_for(
+                20261114,
+                case["layout_id"],
+                trial,
+                namespace="multishot_spec_probe_" + split,
+            )
+        episode = control_episode(probe)
+        _metrics, rows = summarize([episode])
+        controls.append(
+            {
+                "split": split,
+                "episode_id": case["episode_id"],
+                "trial": trial,
+                "seed": probe["scenario"]["seed"],
+                "outcome": rows[0],
+                "hp_events": episode["result"]["diagnostic_events"],
+            }
+        )
+    control_episode(case, passive=True)
+    return {
+        "split": split,
+        "layout_id": case["layout_id"],
+        "side": case["learner_side"],
+        "initial_shots": bounds,
+        "reference_wins": 17,
+        "passive_draw": True,
+    }, controls
 
 
 class MultishotFactory(DiagnosticFactory):

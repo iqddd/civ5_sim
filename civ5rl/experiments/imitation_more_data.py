@@ -34,7 +34,6 @@ from civ5rl.experiments.imitation_helpers import (
     update_selection,
 )
 from civ5rl.protocols.imitation import (
-    file_hash,
     load_episode,
     match_task,
     prepare_manifest,
@@ -48,7 +47,7 @@ from civ5rl.protocols.imitation_invariants import (
     require_values,
 )
 from civ5rl.provenance import checkpoint
-from civ5rl.provenance.common import ROOT, configure, read_json, write_json
+from civ5rl.provenance.common import ROOT, configure, file_sha256, read_json, write_json
 from civ5rl.provenance.lineage import current_parent_lineage, verify_existing_run
 from civ5sim.engine import digest
 
@@ -65,8 +64,8 @@ def initialize(config, out):
     )
     source = parent / settings["parent_checkpoint"]
     if (
-        file_hash(source) != settings["parent_checkpoint_sha256"]
-        or file_hash(data / "training-inputs.json") != settings["old_inputs_sha256"]
+        file_sha256(source) != settings["parent_checkpoint_sha256"]
+        or file_sha256(data / "training-inputs.json") != settings["old_inputs_sha256"]
     ):
         raise ValueError("Parent checkpoint/data hashes differ")
     base = prepare_manifest(config)
@@ -81,11 +80,11 @@ def initialize(config, out):
         "base": base,
         "parent_checkpoint": {
             "path": source.relative_to(ROOT).as_posix(),
-            "sha256": file_hash(source),
+            "sha256": file_sha256(source),
         },
         "old_inputs": {
             "path": (data / "training-inputs.json").relative_to(ROOT).as_posix(),
-            "sha256": file_hash(data / "training-inputs.json"),
+            "sha256": file_sha256(data / "training-inputs.json"),
         },
         "config_sha256": digest(config),
         "first_new_case_id": 860,
@@ -130,10 +129,10 @@ def initialize(config, out):
             out / "lineage.json",
             {
                 "parent_run": settings["parent_run"],
-                "parent_checkpoint_sha256": file_hash(source),
+                "parent_checkpoint_sha256": file_sha256(source),
                 "parent_Adam_steps": 600,
                 "changed_execution_sources": changes,
-                "old_inputs_sha256": file_hash(data / "training-inputs.json"),
+                "old_inputs_sha256": file_sha256(data / "training-inputs.json"),
                 "new_shuffle_seed": 17,
             },
         )
@@ -166,7 +165,7 @@ def collect(config, out, parent, data, manifest, workers):
         )
     old_files = read_json(data / "training-inputs.json")["training"]
     for name, sha in old_files.items():
-        if file_hash(data / name) != sha:
+        if file_sha256(data / name) != sha:
             raise ValueError("Old demonstration changed before collection")
     old_rows = [read_json((data / name).parent / "metrics.json") for name in old_files]
     labels = sum(r["labels"] for r in old_rows)
@@ -229,7 +228,7 @@ def load_data(manifest, split, config):
     episodes = []
     for name, sha in manifest["inputs"][split].items():
         path = ROOT / name
-        if file_hash(path) != sha:
+        if file_sha256(path) != sha:
             raise ValueError(f"Demonstration hash mismatch: {name}")
         episode = load_episode(path)
         case = read_json(path.parent / "case.json")
@@ -713,7 +712,7 @@ def train(config, out, parent, data, manifest, identity):
             reason = "epoch_limit"
         persist()
         result = read_json(out / "training.json")
-        result["best_checkpoint_sha256"] = file_hash(out / "checkpoints/best.pt")
+        result["best_checkpoint_sha256"] = file_sha256(out / "checkpoints/best.pt")
         write_json(out / "training.json", result)
 
 
@@ -722,7 +721,8 @@ def evaluate(config, out, parent, data, manifest, workers):
     training = read_json(out / "training.json")
     if (
         training["status"] != "complete"
-        or file_hash(out / "checkpoints/best.pt") != training["best_checkpoint_sha256"]
+        or file_sha256(out / "checkpoints/best.pt")
+        != training["best_checkpoint_sha256"]
     ):
         raise ValueError("Final selection not frozen")
     inherited = read_json(parent / "evaluations.json")
@@ -747,7 +747,7 @@ def evaluate(config, out, parent, data, manifest, workers):
         runs[mode] = {
             "new_matches": new_matches,
             "mode": mode,
-            "checkpoint_sha256": file_hash(out / "checkpoints/best.pt"),
+            "checkpoint_sha256": file_sha256(out / "checkpoints/best.pt"),
             "directories": {
                 k: v.relative_to(ROOT).as_posix() for k, v in directories.items()
             },
@@ -824,7 +824,7 @@ def report(config, out, parent, data, manifest):
         labels = forced = 0
         for name, sha in files.items():
             path = ROOT / name
-            if file_hash(path) != sha:
+            if file_sha256(path) != sha:
                 raise ValueError("Demonstration hash changed before report")
             case, m = (
                 read_json(path.parent / "case.json"),

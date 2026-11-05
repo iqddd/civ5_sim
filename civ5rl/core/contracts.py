@@ -32,7 +32,7 @@ class Provenance(TypedDict):
     manifest_hash: str
 
 
-class ScenarioSpec(TypedDict):
+class BaseScenarioSpec(TypedDict):
     scenario: Scenario
     armies: list[list[str]]
     learner_side: int
@@ -40,24 +40,31 @@ class ScenarioSpec(TypedDict):
     max_calls_per_turn: int
     opponent: str
     agent_seeds: list[int]
-    episode_id: NotRequired[int]
-    case_id: NotRequired[int]
-    layout_id: NotRequired[int]
-    diagnostic_stage: NotRequired[str]
-    physical_hash: NotRequired[str]
-    streams: NotRequired[dict[str, int]]
-    parent_world: NotRequired[int]
-    placement: NotRequired[str]
-    rejected: NotRequired[list[dict[str, str]]]
-    split: NotRequired[str]
-    namespace: NotRequired[str]
-    source: NotRequired[str]
-    scenario_hash: NotRequired[str]
-    manifest_hash: NotRequired[str]
-    provenance: NotRequired[Provenance]
     diagnostics: NotRequired[bool]
-    diagnostic_protocol: NotRequired[str]
     learner_decision_limit: NotRequired[int]
+    record_step_events: NotRequired[bool]
+
+
+class ProvenanceFields(TypedDict, total=False):
+    episode_id: int
+    case_id: int
+    layout_id: int
+    physical_hash: str
+    streams: dict[str, int]
+    parent_world: int
+    placement: str
+    rejected: list[dict[str, str]]
+    split: str
+    namespace: str
+    source: str
+    scenario_hash: str
+    manifest_hash: str
+    provenance: Provenance
+
+
+class ScenarioSpec(BaseScenarioSpec, ProvenanceFields):
+    diagnostic_stage: NotRequired[str]
+    diagnostic_protocol: NotRequired[str]
 
 
 class AgentContext(TypedDict):

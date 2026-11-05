@@ -4,11 +4,12 @@ This module intentionally avoids torch so CP-only workers never initialize CUDA.
 """
 
 import gzip
-import hashlib
 import json
 import os
 import random
+import sys
 from collections import Counter, defaultdict
+from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
@@ -16,16 +17,12 @@ from time import perf_counter
 
 from civ5rl.core.observation import ordered_actions
 from civ5rl.protocols.corpus import ScenarioFactory, validate_corpus
-from civ5rl.provenance.common import ROOT, read_json, write_json
+from civ5rl.provenance.common import ROOT, file_sha256, read_json, write_json
 from civ5sim import MatchConfig
 from civ5sim.combat_ai import Aggression, SearchConfig
 from civ5sim.cp_agent import CPAgent
 from civ5sim.engine import digest
 from civ5sim.match import run_match
-
-
-def file_hash(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def dump_episode(path, episode):
@@ -74,6 +71,69 @@ class RecordingCP(CPAgent):
         return action
 
 
+def imitation_scenario_factory(config, maps):
+    sampling = {
+        "seed": 17,
+        "corpus": {"placement_rejection_limit": 100},
+        "environment": {"max_calls_per_turn": config["max_calls_per_turn"]},
+    }
+    return ScenarioFactory(sampling, {"schema": 1, "maps": maps})
+
+
+def imitation_stage(contact):
+    return {
+        "map_size": [10, 10],
+        "units_per_side": [2, 2],
+        "roster": ["warrior", "archer"],
+        "max_rounds": 30,
+        "contact_probability": contact,
+        "opponents": {"greedy": 1},
+    }
+
+
+def _close_match_agent(close):
+    pending = sys.exception()
+    try:
+        close()
+    except Exception as error:
+        if pending is None:
+            raise
+        pending.add_note(f"Agent cleanup failed: {error!r}")
+
+
+def run_imitation_match(config, case, agents, directory):
+    """Run and save one match, closing caller-owned agents on every exit."""
+    timings = []
+    started = perf_counter()
+    with ExitStack() as stack:
+        for agent in agents:
+            close = getattr(agent, "close", None)
+            if close is not None:
+                stack.callback(_close_match_agent, close)
+        outcome = run_match(
+            MatchConfig(
+                case["scenario"]["map"],
+                case["armies"],
+                30,
+                max_calls_per_turn=config["max_calls_per_turn"],
+            ),
+            agents,
+            scenario=case["scenario"],
+            agent_seeds=case["agent_seeds"],
+            metrics=timings.append,
+        )
+        outcome.save(directory)
+    return outcome, timings, started
+
+
+def summarize_match_timings(timings, *, by_side=False):
+    totals = defaultdict(float)
+    for row in timings:
+        key = f"{row['kind']}_side_{row.get('side', -1)}" if by_side else row["kind"]
+        totals[key] += row["ns"] / 1e9
+    return dict(totals)
+
+
 def make_case(config, manifest, split, index):
     if split not in ("training", "holdout", "validation"):
         raise ValueError("Closed or unsupported imitation split")
@@ -90,21 +150,8 @@ def make_case(config, manifest, split, index):
         for m in manifest["maps"]
         if m["parent_seed"] == world and m["split"] == corpus_split
     ]
-    local = {"schema": 1, "maps": maps}
-    sampling = {
-        "seed": 17,
-        "corpus": {"placement_rejection_limit": 100},
-        "environment": {"max_calls_per_turn": config["max_calls_per_turn"]},
-    }
-    generator = ScenarioFactory(sampling, local)
-    stage = {
-        "map_size": [10, 10],
-        "units_per_side": [2, 2],
-        "roster": ["warrior", "archer"],
-        "max_rounds": 30,
-        "contact_probability": int(contact),
-        "opponents": {"greedy": 1},
-    }
+    generator = imitation_scenario_factory(config, maps)
+    stage = imitation_stage(int(contact))
     case = generator.make(
         index,
         stage,
@@ -157,7 +204,7 @@ def prepare_manifest(config):
     result = {
         "schema": 1,
         "kind": "rl01.cp_imitation",
-        "source_corpus_sha256": file_hash(source_path),
+        "source_corpus_sha256": file_sha256(source_path),
         "worlds": worlds,
         "worlds_hash": digest(worlds),
         "maps": open_maps,
@@ -208,30 +255,14 @@ def match_task(task):
     side = case["learner_side"]
     agents = [None, None]
     agents[side], agents[1 - side] = agent, enemy
-    timings = []
-    start = perf_counter()
-    outcome = run_match(
-        MatchConfig(
-            case["scenario"]["map"],
-            case["armies"],
-            30,
-            max_calls_per_turn=config["max_calls_per_turn"],
-        ),
-        agents,
-        scenario=case["scenario"],
-        agent_seeds=case["agent_seeds"],
-        metrics=timings.append,
-    )
-    outcome.save(directory)
+    outcome, timings, start = run_imitation_match(config, case, agents, directory)
     seconds = perf_counter() - start
-    by_kind = defaultdict(float)
-    for row in timings:
-        by_kind[row["kind"]] += row["ns"] / 1e9
+    by_kind = summarize_match_timings(timings)
     result = {
         "case_id": case["case_id"],
         "side": side,
         "seconds": seconds,
-        "timings": dict(by_kind),
+        "timings": by_kind,
         "agent_act_seconds": [
             sum(r["ns"] / 1e9 for r in timings if r["kind"] == "act" and r["side"] == s)
             for s in (0, 1)
@@ -269,7 +300,7 @@ def match_task(task):
             actions_by_kind=dict(
                 Counter(d["actions"][d["chosen"]]["kind"] for d in rows)
             ),
-            demonstration_sha256=file_hash(directory / "demonstration.json.gz"),
+            demonstration_sha256=file_sha256(directory / "demonstration.json.gz"),
         )
     else:
         turn_side = 0

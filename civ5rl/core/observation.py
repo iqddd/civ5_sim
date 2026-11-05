@@ -108,21 +108,28 @@ class ObservationEncoder:
                     n = xy[1] * w + xy[0]
                     self.neighbors[i, d] = n
                     self.static[i, TILE["neighbors"].start + d] = 1
-                if d in (1, 2, 3):
-                    river = tile["rivers"][d - 1] >= 0
-                elif xy is not None:
-                    river = m["tiles"][n]["rivers"][(d + 3) % 6 - 1] >= 0
-                else:
-                    river = any(
-                        e["x"] == i % w and e["y"] == i // w and e["direction"] == d
-                        for e in m.get("boundary_rivers", [])
-                    )
+                river = self._has_river(i, d, xy)
                 self.static[i, TILE["rivers"].start + d] = river
         self.contacts = {}
         self.last_visible = np.full(w * h, -1, np.int64)
         self.last_clock = 0
         self.last_turn = None
         self.previous = self.start_action()
+
+    def _has_river(self, tile_index, direction, adjacent_xy):
+        m = self.map
+        w = m["width"]
+        if direction in (1, 2, 3):
+            return m["tiles"][tile_index]["rivers"][direction - 1] >= 0
+        if adjacent_xy is not None:
+            neighbor = adjacent_xy[1] * w + adjacent_xy[0]
+            return m["tiles"][neighbor]["rivers"][(direction + 3) % 6 - 1] >= 0
+        return any(
+            edge["x"] == tile_index % w
+            and edge["y"] == tile_index // w
+            and edge["direction"] == direction
+            for edge in m.get("boundary_rivers", [])
+        )
 
     @staticmethod
     def start_action():
@@ -158,6 +165,27 @@ class ObservationEncoder:
         clock = (turn + self.side) // 2
         if clock < self.last_clock:
             raise ValueError("Observation history moved backwards")
+        cells, own, enemy = self._encode_cells(observation, clock)
+        globals_ = self._encode_globals(own, enemy, turn, clock)
+        previous = self.previous.copy()
+        if self.variant == "A":
+            for name in (
+                "visibility_age",
+                "seen",
+                "contact_count",
+                "contact_age",
+                "contact_hp",
+            ):
+                cells[:, TILE[name]] = 0
+            for name in ("contacts", "elapsed", "new_turn"):
+                globals_[GLOBAL[name]] = 0
+            previous = self.start_action()
+        sources, targets, features = self._encode_actions(actions, own)
+        return Encoded(
+            cells, globals_, previous, self.neighbors, sources, targets, features
+        )
+
+    def _encode_cells(self, observation, clock):
         visibility = np.asarray(observation["visibility"], dtype=bool)
         cells = self.static.copy()
         cells[:, TILE["visible"]] = visibility
@@ -207,6 +235,9 @@ class ObservationEncoder:
             cells[tile, TILE["contact_hp"].start + kind] = (
                 np.mean([r[0] for r in records]) / HP_SCALE
             )
+        return cells, own, enemy
+
+    def _encode_globals(self, own, enemy, turn, clock):
         globals_ = np.zeros(GLOBAL_DIM, np.float32)
         for offset, types in (
             (GLOBAL["own_roster"].start, self.rosters[self.side]),
@@ -229,19 +260,9 @@ class ObservationEncoder:
             self.max_rounds / MAX_ROUNDS_SCALE,
         )
         self.last_clock, self.last_turn = clock, turn
-        previous = self.previous.copy()
-        if self.variant == "A":
-            for name in (
-                "visibility_age",
-                "seen",
-                "contact_count",
-                "contact_age",
-                "contact_hp",
-            ):
-                cells[:, TILE[name]] = 0
-            for name in ("contacts", "elapsed", "new_turn"):
-                globals_[GLOBAL[name]] = 0
-            previous = self.start_action()
+        return globals_
+
+    def _encode_actions(self, actions, own):
         own_by_id = {u["id"]: u for u in own}
         sources, targets = (
             np.full(len(actions), -1, np.int64),
@@ -268,6 +289,4 @@ class ObservationEncoder:
                     distance(self.map, int(sources[j]), int(targets[j]))
                     / DISTANCE_SCALE,
                 )
-        return Encoded(
-            cells, globals_, previous, self.neighbors, sources, targets, features
-        )
+        return sources, targets, features

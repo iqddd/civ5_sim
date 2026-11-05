@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from civ5rl.core.agent import RLAgent
+from civ5rl.protocols.common import bootstrap_ci95
 from civ5rl.provenance import bound_cases, case_manifest, validate_cases
 from civ5rl.provenance.common import write_json
 from civ5sim.engine import Battle, digest
@@ -74,13 +75,10 @@ def summarize(episodes, samples=10000, seed=20261103):
                 for w in worlds
             ]
         )
-        rng = np.random.default_rng(seed)
-        bootstrap = world_scores[
-            rng.integers(len(worlds), size=(samples, len(worlds)))
-        ].mean(1)
+        ci = bootstrap_ci95(world_scores, samples=samples, seed=seed)
         output[opponent] = {
             **_wdl_stats(rewards),
-            "ci95": np.quantile(bootstrap, [0.025, 0.975]).tolist(),
+            "ci95": ci.tolist(),
             "sides": {
                 str(side): _wdl_stats(
                     np.asarray(

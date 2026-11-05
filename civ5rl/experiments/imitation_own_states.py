@@ -31,7 +31,6 @@ from civ5rl.experiments.imitation_helpers import (
 )
 from civ5rl.protocols import imitation_own_states as own
 from civ5rl.protocols.imitation import (
-    file_hash,
     load_episode,
     prepare_manifest,
 )
@@ -42,7 +41,14 @@ from civ5rl.protocols.imitation_invariants import (
     require_values,
 )
 from civ5rl.provenance import checkpoint
-from civ5rl.provenance.common import ROOT, configure, read_json, seed_for, write_json
+from civ5rl.provenance.common import (
+    ROOT,
+    configure,
+    file_sha256,
+    read_json,
+    seed_for,
+    write_json,
+)
 from civ5rl.provenance.lineage import current_parent_lineage, verify_existing_run
 from civ5sim.engine import digest
 
@@ -72,7 +78,7 @@ def validate_config(config, parent_config):
 
 def verify_files(files):
     for name, expected in files.items():
-        if file_hash(ROOT / name) != expected:
+        if file_sha256(ROOT / name) != expected:
             raise ValueError(f"Input hash mismatch: {name}")
 
 
@@ -82,7 +88,7 @@ def initialize(config, out):
     parent_config = read_json(parent / "resolved-config.json")
     validate_config(config, parent_config)
     source = parent / "checkpoints/best.pt"
-    if file_hash(source) != settings["parent_checkpoint_sha256"]:
+    if file_sha256(source) != settings["parent_checkpoint_sha256"]:
         raise ValueError("Parent checkpoint hash differs")
     parent_manifest = read_json(parent / "manifest.json")
     base = prepare_manifest(config)
@@ -94,8 +100,8 @@ def initialize(config, out):
         "schema": 1,
         "kind": config["kind"],
         "base": base,
-        "parent_manifest_sha256": file_hash(parent / "manifest.json"),
-        "parent_checkpoint_sha256": file_hash(source),
+        "parent_manifest_sha256": file_sha256(parent / "manifest.json"),
+        "parent_checkpoint_sha256": file_sha256(source),
         "config_hash": digest(config),
         "old_inputs": parent_manifest["inputs"],
     }
@@ -125,7 +131,7 @@ def initialize(config, out):
             {
                 "parent": relative(parent),
                 "parent_Adam_steps": 1580,
-                "parent_checkpoint_sha256": file_hash(source),
+                "parent_checkpoint_sha256": file_sha256(source),
                 "changed_execution_sources": changes,
                 "advisor_reset": settings["advisor_reset"],
                 "GPU_target_policy": "For iterative GPU phases >=10 minutes, 60-second NVML core load target is 80%; investigate and explain lower utilization.",
@@ -137,7 +143,7 @@ def initialize(config, out):
         )
     for path in sorted(out.glob("*/collection.json")):
         collection = read_json(path)
-        if collection["manifest_sha256"] != file_hash(path.parent / "inputs.json"):
+        if collection["manifest_sha256"] != file_sha256(path.parent / "inputs.json"):
             raise ValueError(f"Frozen collection manifest differs: {path}")
         verify_files(read_json(path.parent / "inputs.json")["files"])
     return parent, plan, read_json(out / "passport.json")
@@ -228,7 +234,7 @@ def collect_split(config, plan, out, split, behavior):
     for files in plan["old_inputs"].values():
         for name in files:
             case = read_json((ROOT / name).parent / "case.json")
-            seen.add(own.physical_hash(case["scenario"]))
+            seen.add(own.own_state_physical_hash(case["scenario"]))
     for path in out.glob("*/inputs.json"):
         seen.update(c["physical_hash"] for c in read_json(path)["cases"])
     rows, waves, cases, files = [], [], [], {}
@@ -315,12 +321,12 @@ def collect_split(config, plan, out, split, behavior):
         "files": files,
         "cases": cases,
         "behavior": behavior,
-        "behavior_sha256": file_hash(ROOT / behavior),
+        "behavior_sha256": file_sha256(ROOT / behavior),
         "plan_hash": digest(plan),
     }
     write_json(directory / "inputs.json", frozen)
     result = collection_summary(rows, perf_counter() - started, status, target, waves)
-    result["manifest_sha256"] = file_hash(directory / "inputs.json")
+    result["manifest_sha256"] = file_sha256(directory / "inputs.json")
     write_json(directory / "collection.json", result)
     return result
 
@@ -383,7 +389,7 @@ def dataset_files(out, split):
     if info["status"] != "complete":
         raise ValueError(f"Incomplete own-state dataset: {split}")
     path = out / split / "inputs.json"
-    if info["manifest_sha256"] != file_hash(path):
+    if info["manifest_sha256"] != file_sha256(path):
         raise ValueError("Collection manifest hash changed")
     return read_json(path)["files"]
 
@@ -558,7 +564,7 @@ def train_cycle(config, plan, identity, out, cycle):
                     "training_seconds": state["training_seconds"],
                     "sampler": streams(),
                     "input_manifest_hashes": {
-                        split: file_hash(out / split / "inputs.json")
+                        split: file_sha256(out / split / "inputs.json")
                         for split in [
                             "dev",
                             *[f"cycle-{c:02}" for c in range(1, cycle + 1)],
@@ -1065,7 +1071,7 @@ def report(config, out, parent):
         },
     )
     hashes = {
-        relative(p): file_hash(p)
+        relative(p): file_sha256(p)
         for p in sorted(out.rglob("*"))
         if p.is_file()
         and p.name != "artifact-hashes.json"

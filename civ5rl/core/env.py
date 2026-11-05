@@ -27,18 +27,11 @@ class DecisionEnv:
         self.spec = spec
         self.learner_decisions = 0
         self.learner_decision_limit = spec.get("learner_decision_limit")
-        if self.learner_decision_limit is not None:
-            origin = spec.get("provenance", {})
-            if (
-                type(self.learner_decision_limit) is not int
-                or self.learner_decision_limit != 1
-                or spec.get("diagnostic_protocol") != "D0-one-decision"
-                or origin.get("source") != "rl01.diagnostic.D0-one-decision"
-                or origin.get("split") not in ("diagnostic_train", "diagnostic_dev")
-            ):
-                raise ValueError(
-                    "Learner decision limit requires trusted D0-one-decision provenance"
-                )
+        if self.learner_decision_limit is not None and (
+            type(self.learner_decision_limit) is not int
+            or self.learner_decision_limit < 1
+        ):
+            raise ValueError("Learner decision limit must be a positive integer")
         self.battle = Battle(spec["scenario"], log=False)
         self.side = spec["learner_side"]
         self.turns = self.calls = self.commands = 0
@@ -58,12 +51,12 @@ class DecisionEnv:
         self.damage = [0, 0]
         self._pending_attack = None
         self.diagnostic_events = []
-        self._multishot_before = None
+        self._step_before = None
 
     def prepare(self, action):
         self._pending_attack = None
-        if self.spec.get("diagnostic_protocol") == "D0-multishot":
-            self._multishot_before = self.battle.snapshot()["units"]
+        if self.spec.get("record_step_events", False):
+            self._step_before = self.battle.snapshot()["units"]
         if self.spec.get("diagnostics") and action.kind in ("melee", "ranged"):
             units = self.battle.snapshot()["units"]
             attacker = units[action.unit]
@@ -93,22 +86,22 @@ class DecisionEnv:
         self.history.append(asdict(action))
         if not result.ok:
             raise RuntimeError(f"Kernel rejected public legal action: {result.error}")
-        if self._multishot_before is not None:
+        if self._step_before is not None:
             after = self.battle.snapshot()["units"]
             self.diagnostic_events.append(
                 {
                     "side": self.turns % 2,
                     "turn": self.turns,
                     "action": asdict(action),
-                    "hp_before": [u["hp"] for u in self._multishot_before],
+                    "hp_before": [u["hp"] for u in self._step_before],
                     "hp_after": [u["hp"] for u in after],
                     "healing": [
                         max(0, b["hp"] - a["hp"])
-                        for a, b in zip(self._multishot_before, after)
+                        for a, b in zip(self._step_before, after)
                     ],
                 }
             )
-            self._multishot_before = None
+            self._step_before = None
         if self.turns % 2 == self.side:
             self.learner_decisions += 1
         if self._pending_attack is not None:
@@ -164,7 +157,7 @@ class DecisionEnv:
                     ],
                     **(
                         {"diagnostic_events": self.diagnostic_events}
-                        if self.spec.get("diagnostic_protocol") == "D0-multishot"
+                        if self.spec.get("record_step_events", False)
                         else {}
                     ),
                 },

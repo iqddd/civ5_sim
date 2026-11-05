@@ -26,7 +26,7 @@ from civ5rl.experiments.imitation_helpers import (
     restore_rng,
     update_selection,
 )
-from civ5rl.protocols.imitation import file_hash, prepare_manifest
+from civ5rl.protocols.imitation import prepare_manifest
 from civ5rl.protocols.imitation_invariants import (
     CONTINUATION_BUDGET,
     CONTINUATION_CHANGES,
@@ -34,7 +34,7 @@ from civ5rl.protocols.imitation_invariants import (
     require_values,
 )
 from civ5rl.provenance import checkpoint
-from civ5rl.provenance.common import ROOT, read_json, write_json
+from civ5rl.provenance.common import ROOT, file_sha256, read_json, write_json
 from civ5rl.provenance.lineage import current_parent_lineage, verify_existing_run
 
 
@@ -45,10 +45,10 @@ def initialize(config, out):
     require_changes(config, parent_config, CONTINUATION_CHANGES)
     require_values(config, CONTINUATION_BUDGET, "continuation")
     path = parent / settings["parent_checkpoint"]
-    if file_hash(path) != settings["parent_checkpoint_sha256"]:
+    if file_sha256(path) != settings["parent_checkpoint_sha256"]:
         raise ValueError("Parent checkpoint hash mismatch")
     if (
-        file_hash(parent / "training-inputs.json")
+        file_sha256(parent / "training-inputs.json")
         != settings["parent_training_inputs_sha256"]
     ):
         raise ValueError("Parent training-inputs hash mismatch")
@@ -73,11 +73,11 @@ def initialize(config, out):
             out / "lineage.json",
             {
                 "parent_checkpoint": str(path.relative_to(ROOT)),
-                "parent_checkpoint_sha256": file_hash(path),
-                "parent_training_inputs_sha256": file_hash(
+                "parent_checkpoint_sha256": file_sha256(path),
+                "parent_training_inputs_sha256": file_sha256(
                     parent / "training-inputs.json"
                 ),
-                "parent_passport_sha256": file_hash(parent / "passport.json"),
+                "parent_passport_sha256": file_sha256(parent / "passport.json"),
                 "changed_execution_sources": changes,
                 "parent_epochs": 3,
                 "parent_Adam_steps": 60,
@@ -90,7 +90,7 @@ def initialize(config, out):
 
 def evaluate_candidate(config, manifest, out, parent, candidate, workers, mode, label):
     path = Path(candidate["path"])
-    key = file_hash(path) + ":" + mode
+    key = file_sha256(path) + ":" + mode
     recorded = (
         read_json(out / "evaluations.json")
         if (out / "evaluations.json").exists()
@@ -115,7 +115,7 @@ def evaluate_candidate(config, manifest, out, parent, candidate, workers, mode, 
         )
     result = {
         "epoch": candidate["epoch"],
-        "checkpoint_sha256": file_hash(path),
+        "checkpoint_sha256": file_sha256(path),
         "mode": mode,
         "new_matches": new_matches,
         "wall_seconds": perf_counter() - started,
@@ -219,7 +219,7 @@ def train(config, out, parent, manifest, identity, workers, device):
                 "all_RNG_and_shuffle_equal": True,
                 "Adam_steps_before": 60,
                 "warmup_Adam_steps": 0,
-                "parent_checkpoint_sha256": file_hash(source),
+                "parent_checkpoint_sha256": file_sha256(source),
                 "parent_metrics": parent_metrics,
             },
         )
@@ -455,7 +455,7 @@ def train(config, out, parent, manifest, identity, workers, device):
             measure(last_complete, candidate_path)
         # Freeze final selection before any final battle results are available.
         best["path"] = str((checkpoint_dir / "best.pt").resolve())
-        best["checkpoint_sha256"] = file_hash(checkpoint_dir / "best.pt")
+        best["checkpoint_sha256"] = file_sha256(checkpoint_dir / "best.pt")
         persist()
 
 
@@ -464,7 +464,7 @@ def evaluate(config, out, parent, manifest, workers):
     if training["status"] != "complete":
         raise ValueError("Cannot evaluate an unfinished continuation")
     best = training["best"]
-    if file_hash(best["path"]) != best["checkpoint_sha256"]:
+    if file_sha256(best["path"]) != best["checkpoint_sha256"]:
         raise ValueError("Selected checkpoint changed after selection")
     evaluate_candidate(
         config, manifest, out, parent, best, workers, "sample", "final_sample"

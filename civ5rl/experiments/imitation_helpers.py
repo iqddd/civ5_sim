@@ -11,8 +11,8 @@ from time import perf_counter
 import numpy as np
 import torch
 
-from civ5rl.protocols.imitation import file_hash, load_episode, make_case, worker_setup
-from civ5rl.provenance.common import read_json
+from civ5rl.protocols.imitation import load_episode, make_case, worker_setup
+from civ5rl.provenance.common import file_sha256, read_json
 
 
 def adam(policy, config, device):
@@ -79,7 +79,7 @@ def demonstrations(config, manifest, out, split):
             raise ValueError("Untrusted demonstration case")
         if (
             metrics["status"] != "completed"
-            or file_hash(path) != metrics["demonstration_sha256"]
+            or file_sha256(path) != metrics["demonstration_sha256"]
         ):
             raise ValueError("Unfinished/corrupted demonstration")
         episode = load_episode(path)

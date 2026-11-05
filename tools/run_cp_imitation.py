@@ -16,14 +16,13 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 from civ5rl.engine.training import FrozenParamsCheck, bc_optimizer_step
 from civ5rl.experiments.imitation_helpers import adam, demonstrations, load_policy, pool
 from civ5rl.protocols.imitation import (
-    file_hash,
     load_episode,
     make_case,
     match_task,
     prepare_manifest,
     task_for,
 )
-from civ5rl.provenance.common import read_json, write_json
+from civ5rl.provenance.common import file_sha256, read_json, write_json
 from civ5sim.engine import digest
 
 
@@ -193,7 +192,7 @@ def collect(config, manifest, out, workers):
                 row = read_json(path)
                 if row["status"] != "completed" or row[
                     "demonstration_sha256"
-                ] != file_hash(path.parent / "demonstration.json.gz"):
+                ] != file_sha256(path.parent / "demonstration.json.gz"):
                     raise ValueError("Existing demonstration hash/completion mismatch")
                 labels += row["labels"]
             index = max([read_json(p)["case_id"] for p in existing], default=-1) + 1

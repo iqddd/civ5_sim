@@ -11,10 +11,15 @@ import numpy as np
 
 from civ5rl.core.context import context_from_spec
 from civ5rl.core.env import DecisionEnv
+from civ5rl.protocols.common import (
+    advance_stage_state,
+    bootstrap_ci95,
+    paired_layout_deltas,
+)
 from civ5rl.protocols.diagnostic_metrics import summarize_decisions
 from civ5rl.protocols.memory import flat_map
 from civ5rl.provenance import bound_cases, case_manifest, validate_cases
-from civ5rl.provenance.common import seed_for, write_json
+from civ5rl.provenance.common import seed_for, verify_self_digest, write_json
 from civ5sim import Action
 from civ5sim import _native as native
 from civ5sim.engine import digest
@@ -209,11 +214,9 @@ def prepare(directory, config):
     path = directory / "manifest.json"
     if path.exists():
         value = json.loads(path.read_text())
-        if (
-            value.get("hash") != digest({k: v for k, v in value.items() if k != "hash"})
-            or value["preparation"] != config["diagnostic"]
-        ):
+        if value["preparation"] != config["diagnostic"]:
             raise ValueError("Diagnostic dataset hash/config mismatch")
+        verify_self_digest(value, error_msg="Diagnostic dataset identity mismatch")
         for stage in ("D0", "D1"):
             for split in ("train", "dev"):
                 bound_cases(value[stage][split])
@@ -382,32 +385,8 @@ def gate(stage, summary, rows, baseline_rows=None):
             "passed": summary["win_rate"] >= 0.95
             and summary["first_winning_attack_rate"] >= 0.90
         }
-    keys = [(r["layout_id"], r["side"]) for r in rows]
-    base_keys = [(r["layout_id"], r["side"]) for r in baseline_rows]
-    if (
-        len(keys) != 128
-        or len(set(keys)) != 128
-        or len(base_keys) != 128
-        or len(set(base_keys)) != 128
-        or set(keys) != set(base_keys)
-        or any(side not in (0, 1) for _, side in keys)
-    ):
-        raise ValueError(
-            "D1 bootstrap requires 64 complete paired layouts for both models"
-        )
-    initial = {(r["layout_id"], r["side"]): int(r["win"]) for r in baseline_rows}
-    paired = {}
-    for r in rows:
-        paired.setdefault(r["layout_id"], []).append(
-            int(r["win"]) - initial[(r["layout_id"], r["side"])]
-        )
-    if len(paired) != 64 or any(len(v) != 2 for v in paired.values()):
-        raise ValueError("D1 bootstrap requires 64 complete paired layouts")
-    d = np.asarray([np.mean(paired[k]) for k in sorted(paired)])
-    rng = np.random.default_rng(20261103)
-    lower, upper = np.quantile(
-        d[rng.integers(64, size=(10000, 64))].mean(1), [0.025, 0.975]
-    )
+    d = paired_layout_deltas(rows, baseline_rows)
+    lower, upper = bootstrap_ci95(d)
     delta = float(d.mean())
     return {
         "passed": bool(summary["win_rate"] >= 0.8 and delta >= 0.2 and lower > 0),
@@ -419,16 +398,20 @@ def gate(stage, summary, rows, baseline_rows=None):
 
 def next_state(state, passed):
     """Pure checkpointed state transition; no policy-dependent hidden decisions."""
-    value = deepcopy(state)
-    value["consecutive"] = value.get("consecutive", 0) + 1 if passed else 0
-    if value["consecutive"] >= 2:
-        if value["stage"] == "D0":
-            value.update(stage="D1", stage_updates=0, consecutive=0)
-        else:
-            value.update(status="passed", reason="both_stages_passed")
-    elif value["stage_updates"] >= (4 if value["stage"] == "D0" else 8):
-        value.update(status="failed", reason=value["stage"] + "_update_limit")
-    return value
+    stage = state["stage"]
+    success = (
+        {"stage": "D1", "stage_updates": 0, "consecutive": 0}
+        if stage == "D0"
+        else {"status": "passed", "reason": "both_stages_passed"}
+    )
+    return advance_stage_state(
+        state,
+        passed,
+        update_field="stage_updates",
+        update_limit=4 if stage == "D0" else 8,
+        success=success,
+        failure={"status": "failed", "reason": stage + "_update_limit"},
+    )
 
 
 def may_start_update(state, stopping=False):

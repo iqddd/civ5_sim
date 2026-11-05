@@ -17,6 +17,7 @@ from civ5rl.provenance.common import ROOT, write_json
 
 def same_execution_identity(left, right):
     """Keep Markdown in snapshots, but compare executable experiment identity."""
+
     def execution_fields(identity):
         fields = {k: v for k, v in identity.items() if k != "git_commit"}
         fields["source_hashes"] = {

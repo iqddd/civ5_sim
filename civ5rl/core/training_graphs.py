@@ -6,32 +6,30 @@ from collections import OrderedDict
 import torch
 from torch.autograd.function import once_differentiable
 
+from civ5rl.core.spatial import SPATIAL_KEYS, iter_spatial_blocks
+
 
 class CoalescedSpatial(torch.autograd.Function):
     """Run the usual block graphs; sum their parameter gradients with foreach."""
 
     @staticmethod
     def forward(ctx, policy, batch, *parameters):
-        keys = ("cells", "cell_mask", "neighbors", "globals", "previous")
-        if any(batch[key].requires_grad for key in keys):
-            raise ValueError("Coalesced spatial training expects constant observation inputs")
+        if any(batch[key].requires_grad for key in SPATIAL_KEYS):
+            raise ValueError(
+                "Coalesced spatial training expects constant observation inputs"
+            )
         size = policy.spatial_batch_size
         outputs, counts = [], []
         runner = policy._spatial_runner or policy.spatial
         with torch.enable_grad():
-            for start in range(0, len(batch["cells"]), size):
-                part = {key: batch[key][start : start + size] for key in keys}
-                count = len(part["cells"])
-                if count < size:
-                    part = {
-                        key: torch.cat((value, value[:1].expand(size - count, *value.shape[1:])), 0)
-                        for key, value in part.items()
-                    }
+            for part, count in iter_spatial_blocks(batch, size):
                 outputs.append(runner(part))
                 counts.append(count)
         ctx.parameter_count = len(parameters)
         ctx.counts = counts
-        ctx.save_for_backward(*parameters, *(value for pair in outputs for value in pair))
+        ctx.save_for_backward(
+            *parameters, *(value for pair in outputs for value in pair)
+        )
         return tuple(
             torch.cat([pair[j][:count] for pair, count in zip(outputs, counts)], 0)
             for j in range(2)
@@ -97,7 +95,9 @@ class _GRUReplay(torch.autograd.Function):
     @staticmethod
     def forward(ctx, entry, x, hidden, *parameters):
         if entry.active:
-            raise RuntimeError("GRU graph replay requires backward before reusing the same shape")
+            raise RuntimeError(
+                "GRU graph replay requires backward before reusing the same shape"
+            )
         entry.active = True
         entry.x.copy_(x)
         entry.hidden.copy_(hidden)
@@ -132,9 +132,14 @@ class RecurrentGraphs:
             or module.dropout != 0
             or module.batch_first
             or module.input_size != module.hidden_size
-            or any(p.device.type != "cuda" or p.dtype != torch.float32 for p in module.parameters())
+            or any(
+                p.device.type != "cuda" or p.dtype != torch.float32
+                for p in module.parameters()
+            )
         ):
-            raise ValueError("GRU graphs require the single-layer FP32 CUDA model C GRU")
+            raise ValueError(
+                "GRU graphs require the single-layer FP32 CUDA model C GRU"
+            )
         if type(max_shapes) is not int or max_shapes < 1:
             raise ValueError("GRU graph max_shapes must be a positive integer")
         self.module, self.max_shapes = module, max_shapes
@@ -147,7 +152,9 @@ class RecurrentGraphs:
         if x.dtype != torch.float32:
             raise ValueError("GRU graphs require FP32 recurrent inputs")
         if hidden is None:
-            hidden = torch.zeros((1, x.shape[1], self.module.hidden_size), device=x.device, dtype=x.dtype)
+            hidden = torch.zeros(
+                (1, x.shape[1], self.module.hidden_size), device=x.device, dtype=x.dtype
+            )
         key = (tuple(x.shape), tuple(hidden.shape), x.device)
         if key not in self.entries:
             if len(self.entries) >= self.max_shapes:

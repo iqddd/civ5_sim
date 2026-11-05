@@ -1,11 +1,18 @@
 """D1 transfer experiment: frozen original cases, fresh optimizer and schedules."""
 
-import hashlib
 from copy import deepcopy
 from pathlib import Path
 
+from civ5rl.protocols.common import advance_stage_state
 from civ5rl.provenance import bound_cases, validate_cases
-from civ5rl.provenance.common import ROOT, read_json, write_json
+from civ5rl.provenance.common import (
+    ROOT,
+    file_sha256,
+    load_verified_checkpoint,
+    read_json,
+    verify_self_digest,
+    write_json,
+)
 from civ5sim.engine import digest
 
 
@@ -13,50 +20,29 @@ def is_d1(config):
     return config.get("diagnostic", {}).get("mode") == "D1-transfer"
 
 
-def model_hash(model):
-    value = hashlib.sha256()
-    for name, tensor in sorted(model.items()):
-        value.update(name.encode())
-        value.update(tensor.detach().cpu().contiguous().numpy().tobytes())
-    return value.hexdigest()
-
-
 def load_weights(policy, config, *, random_baseline=False):
-    import torch
-
     field = "random_checkpoint" if random_baseline else "initial_checkpoint"
     path = ROOT / config["diagnostic"][field]
-    value = torch.load(path, map_location="cpu", weights_only=False)
-    if value["variant"] != "C" or value["state"]["update"] != (
-        0 if random_baseline else 6
-    ):
-        raise ValueError("Unexpected D1 source checkpoint")
-    policy.load_state_dict(value["model"])
-    if not all(
-        torch.equal(v.cpu(), value["model"][k]) for k, v in policy.state_dict().items()
-    ):
-        raise ValueError("D1 initialization parameters differ")
-    return {
-        "source_checkpoint": str(path),
-        "source_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "model_tensors_sha256": model_hash(value["model"]),
-        "all_model_parameters_bitwise_equal": True,
-        "source_optimizer_loaded": False,
-        "source_training_rng_loaded": False,
-        "previous_decisions": value["state"]["decisions"],
-    }
+    value, metadata = load_verified_checkpoint(
+        policy,
+        path,
+        expected_update=0 if random_baseline else 6,
+        source_error="Unexpected D1 source checkpoint",
+        equality_error="D1 initialization parameters differ",
+    )
+    metadata["previous_decisions"] = value["state"]["decisions"]
+    return metadata
 
 
 def prepare_d1(directory, config):
     directory = Path(directory)
     source_path = ROOT / config["diagnostic"]["source_dataset"]
     source = read_json(source_path)
-    if source["hash"] != digest({k: v for k, v in source.items() if k != "hash"}):
-        raise ValueError("Original D1 dataset hash mismatch")
+    verify_self_digest(source, error_msg="Original D1 dataset hash mismatch")
     dataset = {
         "schema": 1,
         "kind": "rl01.D1-transfer",
-        "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "source_sha256": file_sha256(source_path),
         "preparation": deepcopy(config["diagnostic"]),
         "D1": deepcopy(source["D1"]),
     }
@@ -102,10 +88,11 @@ def prepare_d1(directory, config):
 
 
 def next_state_d1(state, passed):
-    value = deepcopy(state)
-    value["consecutive"] = value.get("consecutive", 0) + 1 if passed else 0
-    if value["consecutive"] >= 2:
-        value.update(status="passed", reason="D1_two_successive_evaluations")
-    elif value["stage_updates"] >= 8:
-        value.update(status="failed", reason="D1_update_limit")
-    return value
+    return advance_stage_state(
+        state,
+        passed,
+        update_field="stage_updates",
+        update_limit=8,
+        success={"status": "passed", "reason": "D1_two_successive_evaluations"},
+        failure={"status": "failed", "reason": "D1_update_limit"},
+    )

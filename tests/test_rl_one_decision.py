@@ -14,7 +14,7 @@ from civ5rl.diagnostic_one import gate_one, load_initial_weights, next_state_one
 from civ5rl.model import Policy
 from civ5rl.validation import validate_config
 
-from civ5rl.provenance import bound_cases
+from civ5rl.provenance import bound_cases, validate_cases
 from civ5sim import Action
 
 
@@ -65,7 +65,7 @@ class OneDecisionTests(unittest.TestCase):
         bad = deepcopy(spec)
         bad.pop("diagnostic_protocol")
         with self.assertRaises(ValueError):
-            DecisionEnvContext(bad)
+            validate_cases([bad], self.dataset["D0"]["dev"])
         with DecisionEnvContext(spec) as env:
             env.request()
             action = Action("ranged", 999, 999)

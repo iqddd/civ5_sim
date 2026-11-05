@@ -23,8 +23,8 @@ from civ5rl.engine.imitation_performance import (
 from civ5rl.engine.ppo_fast import prefixes
 from civ5rl.engine.resources import ResourceMonitor
 from civ5rl.experiments.imitation_helpers import adam
-from civ5rl.protocols.imitation import file_hash, load_episode
-from civ5rl.provenance.common import configure, read_json, write_json
+from civ5rl.protocols.imitation import load_episode
+from civ5rl.provenance.common import configure, file_sha256, read_json, write_json
 
 OUT = ROOT / "artifacts/rl/gru-ablation-20261105"
 
@@ -106,7 +106,7 @@ def run(args):
     )
     fixture_path = ROOT / "artifacts/rl/bc-throughput-20261105/benchmark-inputs.json"
     fixture = read_json(fixture_path)
-    assert file_hash(source) == fixture["checkpoint_sha256"]
+    assert file_sha256(source) == fixture["checkpoint_sha256"]
     saved = torch.load(source, map_location="cpu", weights_only=False)
     episode_paths = [
         ROOT
@@ -120,14 +120,16 @@ def run(args):
     write_json(
         destination / "inputs.json",
         {
-            "checkpoint_sha256": file_hash(source),
-            "fixture_sha256": file_hash(fixture_path),
-            "episodes": {str(p.relative_to(ROOT)): file_hash(p) for p in episode_paths},
+            "checkpoint_sha256": file_sha256(source),
+            "fixture_sha256": file_sha256(fixture_path),
+            "episodes": {
+                str(p.relative_to(ROOT)): file_sha256(p) for p in episode_paths
+            },
             "batches": fixture["batches"],
             "variant": args.variant,
             "seconds": args.seconds,
             "source_hashes": {
-                p: file_hash(ROOT / p)
+                p: file_sha256(ROOT / p)
                 for p in (
                     "tools/archive/benchmark_gru_ablation.py",
                     "civ5rl/core/model.py",
@@ -301,7 +303,7 @@ def run(args):
         r["gpu_core_load_percent"] for r in active
     )
     write_json(destination / "results.json", result)
-    assert file_hash(source) == fixture["checkpoint_sha256"]
+    assert file_sha256(source) == fixture["checkpoint_sha256"]
     print(
         json.dumps(
             {k: v for k, v in result.items() if k != "eight_step_block_mean_seconds"},

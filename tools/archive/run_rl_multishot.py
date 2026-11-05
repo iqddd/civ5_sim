@@ -25,18 +25,18 @@ from civ5rl.resources import ResourceMonitor
 from civ5rl.validation import validate_config
 
 from civ5rl import checkpoint
-from civ5rl.protocols.diagnostic_d1 import load_weights, model_hash
+from civ5rl.protocols.diagnostic_d1 import load_weights
 from civ5rl.protocols.multishot import (
     STAGE,
     InvalidDataset,
     control_episode,
     factory,
     prepare,
-    sha,
     specification,
 )
 from civ5rl.protocols.multishot_metrics import comparison, gate, summarize, transition
 from civ5rl.provenance import bound_cases, validate_cases
+from civ5rl.provenance.common import file_sha256, model_tensor_sha256
 
 
 @contextmanager
@@ -64,11 +64,11 @@ def save_rollout(path, episodes):
     with gzip.open(tmp, "wb", compresslevel=1) as stream:
         torch.save(episodes, stream)
     os.replace(tmp, path)
-    return sha(path)
+    return file_sha256(path)
 
 
 def load_rollout(path, expected_hash):
-    if sha(path) != expected_hash:
+    if file_sha256(path) != expected_hash:
         raise ValueError("Saved multishot rollout hash mismatch")
     with gzip.open(path, "rb") as stream:
         return torch.load(stream, weights_only=False, map_location="cpu")
@@ -112,7 +112,9 @@ def persist_evaluation(directory, episodes, **metadata):
 def evaluate(policy, collector, dataset, directory, monitor, control=None):
     directory = Path(directory)
     manifest = dataset[STAGE]["dev"]
-    identity = "control:" + control if control else model_hash(policy.state_dict())
+    identity = (
+        "control:" + control if control else model_tensor_sha256(policy.state_dict())
+    )
     if (directory / "summary.json").exists():
         summary, rows = (
             read_json(directory / "summary.json"),
@@ -124,7 +126,7 @@ def evaluate(policy, collector, dataset, directory, monitor, control=None):
             or summary["policy_hash"] != identity
             or len(rows) != 128
             or {(r["layout_id"], r["side"]) for r in rows} != keys
-            or sha(directory / "episodes.pt.gz") != summary["episodes_sha256"]
+            or file_sha256(directory / "episodes.pt.gz") != summary["episodes_sha256"]
         ):
             raise ValueError(
                 "Cached multishot evaluation identity/completeness mismatch"

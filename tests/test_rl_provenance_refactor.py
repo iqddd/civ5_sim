@@ -9,7 +9,38 @@ from civ5rl import checkpoint
 
 
 class ProvenanceRefactorTests(unittest.TestCase):
-    def test_execution_identity_ignores_documentation_but_rejects_experiment_changes(self):
+    def test_diagnostic_limit_cannot_cross_trusted_provenance(self):
+        # A signed case with the wrong source must not silently alter the horizon.
+        from civ5rl.protocols.diagnostic import DiagnosticFactory
+        from civ5rl.provenance import bound_cases, case_manifest
+        from civ5sim.engine import digest
+
+        spec = {"scenario": {"seed": 1}, "learner_decision_limit": 1}
+        generic = case_manifest([spec], source="other", split="train", namespace="test")
+        self.assertEqual(bound_cases(generic)[0]["learner_decision_limit"], 1)
+        forged = {
+            **generic,
+            "source": "rl01.diagnostic.D0",
+            "split": "diagnostic_train",
+        }
+        forged["hash"] = digest({k: v for k, v in forged.items() if k != "hash"})
+        with self.assertRaises(ValueError):
+            bound_cases(forged)
+        factory = DiagnosticFactory({"D0": {"train": forged}}, 17)
+        with self.assertRaises(ValueError):
+            factory.make(0, "D0")
+        valid = {**spec, "diagnostic_protocol": "D0-one-decision"}
+        manifest = case_manifest(
+            [valid],
+            source="rl01.diagnostic.D0-one-decision",
+            split="diagnostic_train",
+            namespace="test",
+        )
+        self.assertEqual(bound_cases(manifest)[0]["learner_decision_limit"], 1)
+
+    def test_execution_identity_ignores_documentation_but_rejects_experiment_changes(
+        self,
+    ):
         before = {
             "git_commit": "old",
             "source_hashes": {"civ5rl/model.py": "code", "docs/rl-plan.md": "old"},
@@ -28,7 +59,9 @@ class ProvenanceRefactorTests(unittest.TestCase):
             {"corpus_hash": "changed"},
             {"packages": {"torch": "changed"}},
         ):
-            self.assertFalse(checkpoint.same_execution_identity(before, {**after, **change}))
+            self.assertFalse(
+                checkpoint.same_execution_identity(before, {**after, **change})
+            )
 
     def test_discovery_and_passport_archive_match(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -17,6 +17,7 @@ from civ5rl.core.schema import (
     MEMORY_MLP_DIM,
     TILE_DIM,
 )
+from civ5rl.core.spatial import iter_spatial_blocks
 
 
 def batch_inputs(items, device, *, non_blocking=False):
@@ -205,26 +206,61 @@ class Policy(nn.Module):
             or not torch.cuda.is_bf16_supported(including_emulation=False)
         ):
             raise ValueError("BF16 AMP requires a CUDA device with native BF16 support")
-        self.amp_enabled = enabled
         if type(spatial_batch_size) is not int or spatial_batch_size < 0:
             raise ValueError("Spatial batch size must be a nonnegative integer")
+        if self.coalesced_spatial and (not enabled or not spatial_batch_size):
+            raise ValueError(
+                "Coalesced spatial training requires a fixed spatial block"
+            )
+        self.amp_enabled = enabled
         self.spatial_batch_size = spatial_batch_size if enabled else 0
 
+    def configure_execution(
+        self,
+        *,
+        inverse_routing=None,
+        action_routing=None,
+        maximum_routing=None,
+        coalesced_spatial=None,
+        activation_checkpointing=None,
+    ):
+        """Set optional execution paths without changing model parameters."""
+        options = (
+            inverse_routing,
+            action_routing,
+            maximum_routing,
+            coalesced_spatial,
+            activation_checkpointing,
+        )
+        if any(value is not None and type(value) is not bool for value in options):
+            raise ValueError("Execution options must be boolean")
+        if coalesced_spatial and not self.spatial_batch_size:
+            raise ValueError(
+                "Coalesced spatial training requires a fixed spatial block"
+            )
+        if inverse_routing is not None:
+            for block in self.blocks:
+                block.inverse_routing = inverse_routing
+        for name, value in (
+            ("action_routing", action_routing),
+            ("maximum_routing", maximum_routing),
+            ("coalesced_spatial", coalesced_spatial),
+            ("activation_checkpointing", activation_checkpointing),
+        ):
+            if value is not None:
+                setattr(self, name, value)
+
     def enable_inverse_routing(self):
-        """Opt-in equivalent hex backward; no change to parameters or precision."""
-        for block in self.blocks:
-            block.inverse_routing = True
+        self.configure_execution(inverse_routing=True)
 
     def enable_action_routing(self):
-        self.action_routing = True
+        self.configure_execution(action_routing=True)
 
     def enable_maximum_routing(self):
-        self.maximum_routing = True
+        self.configure_execution(maximum_routing=True)
 
     def enable_coalesced_spatial(self):
-        if not self.spatial_batch_size:
-            raise ValueError("Coalesced spatial training requires a fixed spatial block")
-        self.coalesced_spatial = True
+        self.configure_execution(coalesced_spatial=True)
 
     def enable_recurrent_graphs(self, *, max_shapes=64):
         from civ5rl.core.training_graphs import RecurrentGraphs
@@ -260,8 +296,10 @@ class Policy(nn.Module):
             from civ5rl.core.training_graphs import CoalescedSpatial
 
             parameters = tuple(
-                p for name, p in self.named_parameters()
-                if name.startswith(("projection.", "blocks.", "context.")) and p.requires_grad
+                p
+                for name, p in self.named_parameters()
+                if name.startswith(("projection.", "blocks.", "context."))
+                and p.requires_grad
             )
             return CoalescedSpatial.apply(self, batch, *parameters)
         if self.spatial_batch_size:
@@ -269,17 +307,9 @@ class Policy(nn.Module):
             # same GEMM shapes during action selection, replay and gradients.
             # Padding rows are independent and discarded before memory/loss.
             size = self.spatial_batch_size
-            keys = ("cells", "cell_mask", "neighbors", "globals", "previous")
             outputs = []
             runner = self._spatial_runner or self.spatial
-            for start in range(0, len(batch["cells"]), size):
-                part = {k: batch[k][start : start + size] for k in keys}
-                count = len(part["cells"])
-                if count < size:
-                    part = {
-                        k: torch.cat((v, v[:1].expand(size - count, *v.shape[1:])), 0)
-                        for k, v in part.items()
-                    }
+            for part, count in iter_spatial_blocks(batch, size):
                 x, ctx = runner(part)
                 outputs.append((x[:count], ctx[:count]))
             return tuple(

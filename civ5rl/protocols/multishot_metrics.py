@@ -4,6 +4,11 @@ from collections import Counter
 
 import numpy as np
 
+from civ5rl.protocols.common import (
+    advance_stage_state,
+    bootstrap_ci95,
+    paired_layout_deltas,
+)
 from civ5rl.protocols.diagnostic_metrics import summarize_decisions
 
 
@@ -197,25 +202,8 @@ def summarize(episodes):
 
 
 def comparison(rows, baseline):
-    def paired(values):
-        result = {(r["layout_id"], r["side"]): int(r["win"]) for r in values}
-        if len(values) != 128 or len(result) != 128:
-            raise ValueError("Bootstrap requires 128 unique paired games")
-        return result
-
-    a, b = paired(rows), paired(baseline)
-    if a.keys() != b.keys():
-        raise ValueError("Bootstrap cases differ")
-    layouts = sorted({k[0] for k in a})
-    if len(layouts) != 64 or any(
-        (i, side) not in a for i in layouts for side in (0, 1)
-    ):
-        raise ValueError("Bootstrap requires 64 complete layouts")
-    delta = np.asarray(
-        [sum(a[i, side] - b[i, side] for side in (0, 1)) / 2 for i in layouts]
-    )
-    rng = np.random.default_rng(20261103)
-    ci = np.quantile(delta[rng.integers(64, size=(10000, 64))].mean(1), [0.025, 0.975])
+    delta = paired_layout_deltas(rows, baseline)
+    ci = bootstrap_ci95(delta)
     return {"delta": float(delta.mean()), "ci95": ci.tolist(), "descriptive_only": True}
 
 
@@ -226,12 +214,15 @@ def gate(summary):
 
 
 def transition(state, passed):
-    value = dict(state)
-    value["consecutive"] = state["consecutive"] + 1 if passed else 0
-    if value["consecutive"] >= 2:
-        value.update(status="passed", reason="two_successive_evaluations")
-    elif value["update"] >= 8:
-        value.update(status="failed_update_limit", reason="eight_updates_completed")
-    elif value["training_seconds"] >= 1800:
-        value.update(status="failed_training_time_limit", reason="training_time_limit")
-    return value
+    return advance_stage_state(
+        state,
+        passed,
+        update_field="update",
+        update_limit=8,
+        success={"status": "passed", "reason": "two_successive_evaluations"},
+        failure={"status": "failed_update_limit", "reason": "eight_updates_completed"},
+        time_limit=(
+            1800,
+            {"status": "failed_training_time_limit", "reason": "training_time_limit"},
+        ),
+    )

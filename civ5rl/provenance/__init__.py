@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 
+from civ5rl.provenance.common import verify_self_digest
 from civ5sim.engine import digest
 
 ALLOWED = {"train", "validation", "diagnostic_train", "diagnostic_dev"}
@@ -17,6 +18,8 @@ def case_manifest(specs, *, source, split, namespace):
     cases = [
         {k: deepcopy(v) for k, v in spec.items() if k != "provenance"} for spec in specs
     ]
+    for spec in cases:
+        _validate_protocol_case(spec, source, split)
     manifest = {
         "schema": 1,
         "kind": "rl01.cases",
@@ -48,13 +51,20 @@ def bound_cases(manifest):
     ]
 
 
+def _validate_protocol_case(spec, source, split):
+    # Protocol validation remains with the protocol; provenance invokes it for
+    # both newly constructed and previously serialized manifests.
+    from civ5rl.protocols.case_validation import validate_one_case
+
+    validate_one_case(spec, source=source, split=split)
+
+
 def validate_manifest(manifest):
     if manifest.get("kind") != "rl01.cases" or manifest.get("split") not in ALLOWED:
         raise ValueError("Untrusted/closed case manifest split")
-    if manifest.get("hash") != digest(
-        {k: v for k, v in manifest.items() if k != "hash"}
-    ):
-        raise ValueError("Case manifest hash mismatch")
+    verify_self_digest(manifest, error_msg="Case manifest hash mismatch")
+    for spec in manifest["cases"]:
+        _validate_protocol_case(spec, manifest["source"], manifest["split"])
 
 
 def validate_cases(specs, trusted_manifest):

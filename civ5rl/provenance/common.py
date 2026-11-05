@@ -69,3 +69,58 @@ def choose(probabilities, rng):
         int(np.searchsorted(cumulative, rng.random() * cumulative[-1], side="right")),
         len(cumulative) - 1,
     )
+
+
+def file_sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def verify_self_digest(
+    value, *, error_msg="Self digest mismatch", exception_type=ValueError
+):
+    from civ5sim.engine import digest
+
+    if value.get("hash") != digest({k: v for k, v in value.items() if k != "hash"}):
+        raise exception_type(error_msg)
+    return value
+
+
+def model_tensor_sha256(model):
+    value = hashlib.sha256()
+    for name, tensor in sorted(model.items()):
+        value.update(name.encode())
+        value.update(tensor.detach().cpu().contiguous().numpy().tobytes())
+    return value.hexdigest()
+
+
+def load_verified_checkpoint(
+    policy,
+    path,
+    *,
+    expected_update,
+    expected_variant="C",
+    source_error="Unexpected source checkpoint",
+    equality_error="Model parameters differ",
+):
+    import torch
+
+    value = torch.load(path, map_location="cpu", weights_only=False)
+    if (
+        value["variant"] != expected_variant
+        or value["state"]["update"] != expected_update
+    ):
+        raise ValueError(source_error)
+    policy.load_state_dict(value["model"], strict=True)
+    if not all(
+        torch.equal(v.detach().cpu(), value["model"][k])
+        for k, v in policy.state_dict().items()
+    ):
+        raise ValueError(equality_error)
+    return value, {
+        "source_checkpoint": str(path),
+        "source_sha256": file_sha256(path),
+        "model_tensors_sha256": model_tensor_sha256(value["model"]),
+        "all_model_parameters_bitwise_equal": True,
+        "source_optimizer_loaded": False,
+        "source_training_rng_loaded": False,
+    }
