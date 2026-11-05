@@ -241,6 +241,7 @@ def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=Fa
     maximum = torch.zeros((), device=device)
     free_count = count = 0
     full_total = torch.zeros((), device=device, dtype=torch.float64)
+    full_free_total = torch.zeros_like(full_total)
     max_tv = torch.zeros_like(full_total)
     runner = getattr(cache, "_replay_sums_runner", None) or _replay_sums
     for group_size, parts in _replay_groups(cache, sequences_per_batch):
@@ -278,11 +279,12 @@ def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=Fa
                     batch["action_mask"],
                 )
                 full_total += kl.sum()
+                full_free_total += kl.masked_fill(batch["action_mask"].sum(-1) < 2, 0).sum()
                 max_tv = torch.maximum(max_tv, tv.max())
     # One host transfer for all diagnostics; full-distribution sums stay FP64.
     values = (
         torch.cat(
-            (totals.double(), maximum[None].double(), full_total[None], max_tv[None])
+            (totals.double(), maximum[None].double(), full_total[None], max_tv[None], full_free_total[None])
         )
         .cpu()
         .tolist()
@@ -298,6 +300,7 @@ def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=Fa
         maximum,
         full_total,
         max_tv,
+        full_free_total,
     ) = values
     variance = return_square / count - (return_sum / count) ** 2
     return {
@@ -315,6 +318,9 @@ def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=Fa
         "max_logp_error": maximum,
         "full_kl": full_total / count
         if full_distribution and cache.has_behavior_distribution
+        else None,
+        "full_kl_free": full_free_total / free_count
+        if full_distribution and cache.has_behavior_distribution and free_count
         else None,
         "max_total_variation": max_tv
         if full_distribution and cache.has_behavior_distribution
@@ -447,7 +453,13 @@ class BatchedBackend:
         return tokens
 
     def kl(self):
-        self.last_replay = measure_replay(self.policy, self.cache, self.kl_batch)
+        exact = self.config["ppo"].get("step_acceptance") == "full_categorical_kl_rollback"
+        if exact and not self.cache.has_behavior_distribution:
+            raise ValueError("Controlled PPO requires behavior distributions")
+        self.last_replay = measure_replay(self.policy, self.cache, self.kl_batch,
+                                          full_distribution=exact)
+        if exact:
+            return self.last_replay["full_kl_free"]
         return (
             self.last_replay["sampled_kl_free"]
             if self.config["ppo"].get("kl_population") == "free"
@@ -477,6 +489,8 @@ class BatchedBackend:
                 in (
                     "sampled_kl_free",
                     "sampled_kl",
+                    "full_kl",
+                    "full_kl_free",
                     "free_decisions",
                     "all_decisions",
                     "critic_mean",

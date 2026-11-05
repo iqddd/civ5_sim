@@ -1,6 +1,8 @@
 """Frozen P(win) PPO protocol, deterministic training and open confirmation cases."""
 
 import random
+import hashlib
+import json
 from copy import deepcopy
 
 from civ5rl.protocols.corpus import ScenarioFactory, validate_corpus
@@ -13,6 +15,11 @@ from civ5sim.engine import digest
 
 
 KIND = "rl01.ppo_after_imitation"
+CONTROLLED_KIND = "rl01.ppo_controlled_updates"
+
+
+def controlled(config):
+    return config.get("kind") == CONTROLLED_KIND
 
 
 def validate_profile(config):
@@ -34,7 +41,7 @@ def validate_profile(config):
         "ppo.entropy_coefficient": 0,
         "ppo.kl_population": "free",
         "ppo.kl_measurement": "whole_rollout_after_optimizer_step",
-        "optimizer.lr": 1e-4,
+        "optimizer.lr": 1e-5 if controlled(config) else 1e-4,
         "optimizer.betas": [0.9, 0.999],
         "optimizer.eps": 1e-5,
         "optimizer.weight_decay": 0,
@@ -52,6 +59,17 @@ def validate_profile(config):
         "experiment.initial_value": "zero_last_layer",
         "experiment.parent_sha256": "035581230481bb5cc5cbd02f6a947549dc2ccb30d3797c7acbad25d5268ba7a1",
     }
+    if controlled(config):
+        fixed.update({
+            "ppo.step_acceptance": "full_categorical_kl_rollback",
+            "experiment.parent": "artifacts/rl/ppo-after-imitation/checkpoints/initial.pt",
+            "experiment.parent_run": "artifacts/rl/ppo-after-imitation",
+            "experiment.parent_sha256": "ad1ec38bd730822c5a1328fddb8437cce641141251340ce45c8b64686bf4413e",
+            "experiment.protocol": "docs/rl-ppo-controlled-updates.md",
+            "experiment.max_zero_accepted_rollouts": 3,
+        })
+    elif config["ppo"].get("step_acceptance") is not None:
+        raise ValueError("Unsupported configuration: ppo.step_acceptance")
     for field, expected in fixed.items():
         value = config
         for key in field.split("."):
@@ -68,6 +86,21 @@ def validate_profile(config):
     parent = read_json(ROOT / "configs/rl-cp-imitation-own-states.json")
     if config["teacher_search"] != parent["teacher_search"]:
         raise ValueError("Unsupported configuration: teacher_search")
+
+
+def advance_controlled_rollout(state, metrics, number):
+    """Collected work is never rolled back with rejected optimization attempts."""
+    state["updates"] = number
+    state["attempted_steps"] += metrics.get("attempted_optimizer_steps", 0)
+    state["rejected_steps"] += metrics.get("rejected_optimizer_steps", 0)
+    first = False
+    if metrics["optimizer_steps"]:
+        state["accepted_updates"] += 1
+        state["zero_accepted_streak"] = 0
+        first = not state["first_accepted_evaluated"]
+    else:
+        state["zero_accepted_streak"] += 1
+    return first
 
 
 def stage(contact):
@@ -129,6 +162,25 @@ class TrainingFactory:
 
 def prepare_cases(config):
     parent = ROOT / config["experiment"]["parent_run"]
+    if controlled(config):
+        previous = read_json(parent / "manifest.json")
+        if digest({k: v for k, v in previous.items() if k != "hash"}) != previous["hash"]:
+            raise ValueError("Previous PPO manifest changed")
+        if previous["kind"] != KIND:
+            raise ValueError("Unexpected previous PPO manifest")
+        recorded = read_json(parent / "passport.json")
+        if hashlib.sha256(json.dumps(previous, sort_keys=True).encode()).hexdigest() != recorded["corpus_hash"]:
+            raise ValueError("Previous PPO manifest differs from frozen passport")
+        validate_corpus({"maps": previous["base"]["maps"]})
+        if file_hash(ROOT / config["experiment"]["corpus"]) != previous["base"]["source_corpus_sha256"]:
+            raise ValueError("Corpus manifest changed")
+        plan = deepcopy(previous)
+        plan.update(kind=CONTROLLED_KIND, parent_sha256=config["experiment"]["parent_sha256"],
+                    reused_manifest_sha256=file_hash(parent / "manifest.json"),
+                    reused_training_streams=True)
+        plan.pop("hash")
+        plan["hash"] = digest(plan)
+        return plan
     base = read_json(parent / "manifest.json")["base"]
     corpus = read_json(ROOT / config["experiment"]["corpus"])
     if file_hash(ROOT / config["experiment"]["corpus"]) != base["source_corpus_sha256"]:

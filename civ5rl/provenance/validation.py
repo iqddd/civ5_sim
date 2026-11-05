@@ -197,7 +197,7 @@ def validate_config(config):
         for key in keys:
             expected = reference[section][key]
             if (
-                config.get("kind") == "rl01.ppo_after_imitation"
+                config.get("kind") in ("rl01.ppo_after_imitation", "rl01.ppo_controlled_updates")
                 and section == "reward"
                 and key == "loss"
             ):
@@ -218,6 +218,9 @@ def validate_config(config):
             or (key == "clip_ratio" and value == 0)
         ):
             raise ValueError(f"Invalid configuration: {section}.{key}")
+    acceptance = config["ppo"].get("step_acceptance")
+    if acceptance is not None and config.get("kind") != "rl01.ppo_controlled_updates":
+        raise ValueError("Unsupported configuration: ppo.step_acceptance")
     mode = config["ppo"].get("kl_measurement")
     if mode not in ("whole_rollout_after_epoch", "whole_rollout_after_optimizer_step"):
         raise ValueError("Unsupported configuration: ppo.kl_measurement")
@@ -227,7 +230,7 @@ def validate_config(config):
     c = config["collection"]
     if c["num_envs"] != c["cpu_workers"] * c["envs_per_worker"]:
         raise ValueError("Invalid configuration: collection.num_envs")
-    if config.get("kind") == "rl01.ppo_after_imitation":
+    if config.get("kind") in ("rl01.ppo_after_imitation", "rl01.ppo_controlled_updates"):
         from civ5rl.protocols.ppo_after_imitation import validate_profile
 
         validate_profile(config)

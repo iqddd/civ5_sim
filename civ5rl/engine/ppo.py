@@ -107,7 +107,7 @@ class RolloutBackend(Protocol):
 
     def precheck(self) -> tuple[float, float]: ...
     def backward(self, minibatch, count, entropy_coefficient) -> int: ...
-    def kl(self) -> float: ...
+    def kl(self) -> float | None: ...
     def record_gradient(self, norm) -> None: ...
     def statistics(self, tokens) -> tuple[dict, float, float]: ...
     def extras(self, optimizer_seconds) -> dict: ...
@@ -154,9 +154,13 @@ def update(
     for group in optimizer.param_groups:
         group["lr"] = lr
     pre_kl, pre_error = backend.precheck()
-    tokens = steps = 0
+    controlled = config["ppo"].get("step_acceptance") == "full_categorical_kl_rollback"
+    if controlled:
+        from civ5rl.engine.optimizer_transaction import AdamSnapshot, require_finite_state
+    tokens = steps = attempts = rejected = 0
+    transaction_seconds = 0.0
     kl_seconds = optimizer_seconds = 0.0
-    kl = pre_kl
+    kl = backend.replay["full_kl_free"] if controlled else pre_kl
     batch_chunks = config["ppo"]["sequences_per_minibatch"]
     token_count = config["ppo"].get("valid_tokens_per_minibatch")
     per_step_kl = (
@@ -197,30 +201,75 @@ def update(
                 error_if_nonfinite=True,
             )
             backend.record_gradient(norm)
+            snapshot = None
+            if controlled:
+                transaction_start = perf_counter()
+                snapshot = AdamSnapshot(policy, optimizer)
+                transaction_seconds += perf_counter() - transaction_start
             optimizer.step()
+            attempts += 1
+            if controlled:
+                require_finite_state(policy, optimizer)
             optimizer_seconds += perf_counter() - tick
-            steps += 1
+            accepted = True
+            attempted_kl = None
+            if not controlled:
+                steps += 1
             if per_step_kl:
                 tick = perf_counter()
-                kl = backend.kl()
+                attempted_kl = backend.kl()
+                attempted_replay = dict(getattr(backend, "last_replay", {}))
+                if attempted_kl is not None and not np.isfinite(attempted_kl):
+                    raise FloatingPointError("Non-finite post-step KL")
+                if controlled:
+                    values = [v for k, v in attempted_replay.items()
+                              if k in ("full_kl", "full_kl_free", "sampled_kl", "sampled_kl_free")
+                              and v is not None]
+                    if not np.isfinite(values).all():
+                        raise FloatingPointError("Non-finite post-step distribution diagnostics")
+                    accepted = attempted_kl is None or attempted_kl <= config["ppo"]["stop_kl"]
+                    if accepted:
+                        steps += 1
+                        kl = attempted_kl
+                    else:
+                        transaction_start = perf_counter()
+                        snapshot.restore()
+                        transaction_seconds += perf_counter() - transaction_start
+                        rejected += 1
+                        restored_kl = backend.kl()
+                        if kl is None:
+                            if restored_kl is not None:
+                                raise RuntimeError("Rollback changed KL population")
+                        elif restored_kl is None or not np.isclose(restored_kl, kl, rtol=1e-5, atol=1e-7):
+                            raise RuntimeError(f"Rollback replay mismatch: {restored_kl} != {kl}")
+                        optimizer.zero_grad(set_to_none=True)
+                    del snapshot
+                else:
+                    kl = attempted_kl
                 kl_seconds += perf_counter() - tick
                 if kl is not None and not np.isfinite(kl):
                     raise FloatingPointError("Non-finite post-step KL")
                 step_records.append(
                     {
-                        "step": steps,
+                        "step": attempts,
+                        "accepted": accepted,
+                        "accepted_step": steps,
+                        "attempted_kl": attempted_kl,
                         "epoch": epoch + 1,
                         "valid_tokens": count,
-                        "kl": kl,
+                        "kl": attempted_kl,
+                        "final_accepted_kl": kl if controlled else None,
                         "gradient_norm_pre_clip": float(norm),
                         "seconds": perf_counter() - step_start,
                         **{
                             k: v
-                            for k, v in getattr(backend, "last_replay", {}).items()
+                            for k, v in attempted_replay.items()
                             if k
                             in (
                                 "sampled_kl",
                                 "sampled_kl_free",
+                                "full_kl",
+                                "full_kl_free",
                                 "free_decisions",
                                 "all_decisions",
                             )
@@ -228,9 +277,9 @@ def update(
                     }
                 )
                 timed_out = deadline is not None and perf_counter() >= deadline
-                if timed_out or (kl is not None and kl > config["ppo"]["stop_kl"]):
-                    stop_reason = "active_time_limit" if timed_out else "stop_kl"
-                    if batch_index == len(batches) - 1:
+                if timed_out or not accepted or (not controlled and kl is not None and kl > config["ppo"]["stop_kl"]):
+                    stop_reason = "active_time_limit" if timed_out else ("rejected_full_kl" if controlled else "stop_kl")
+                    if batch_index == len(batches) - 1 and (not controlled or accepted):
                         completed_epochs += 1
                     break
         else:
@@ -243,7 +292,7 @@ def update(
                 stop_reason = "stop_kl"
         if monitor:
             monitor.mark("ppo", ppo_epoch=epoch + 1, optimizer_steps=steps)
-        if stop_reason in ("stop_kl", "active_time_limit"):
+        if stop_reason in ("stop_kl", "rejected_full_kl", "active_time_limit"):
             break
     summary = _summarize_ppo_update(
         backend,
@@ -261,6 +310,12 @@ def update(
         start_update,
     )
     summary.update(
+        attempted_optimizer_steps=attempts,
+        accepted_optimizer_steps=steps,
+        rejected_optimizer_steps=rejected,
+        final_accepted_kl=kl if controlled else None,
+        max_attempted_kl=max((r["attempted_kl"] for r in step_records if r["attempted_kl"] is not None), default=None),
+        transaction_seconds=transaction_seconds,
         epochs_started=started_epochs,
         epochs_completed=completed_epochs,
         optimizer_step_records=step_records,
