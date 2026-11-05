@@ -121,6 +121,22 @@ class RolloutCache(SequenceBuffer):
         self.resident_bytes = sum(
             v.numel() * v.element_size() for v in (self.data or {}).values()
         ) + sum(v.numel() * v.element_size() for v in self.labels.values())
+        self.replay_inputs = False
+        self._replay_plan = None
+        self._replay_sums_runner = None
+
+    def enable_cached_replay(self):
+        """Cache inputs only; GRU state and logits always use current weights."""
+        if self.data is None:
+            return
+        if str(self.device).startswith("cuda"):
+            free, _ = torch.cuda.mem_get_info(self.device)
+            if free < self.resident_bytes + 2 * 1024**3:
+                return
+            self._replay_sums_runner = torch.compile(
+                _replay_sums, dynamic=True, fullgraph=True
+            )
+        self.replay_inputs = True
 
     def batch(self, spans):
         indices = self.indices(spans)
@@ -143,6 +159,8 @@ def prefixes(policy, cache, spans, block_size=128):
         ]
         batch, _, lengths = cache.batch(subspans)
         slots = torch.tensor([j for j, _, _ in active], device=cache.device)
+        if policy.spatial_cuda_graphs:
+            torch.compiler.cudagraph_mark_step_begin()
         last = policy.forward_sequences(
             batch, lengths, hidden.index_select(1, slots), memory_only=True
         )
@@ -150,22 +168,40 @@ def prefixes(policy, cache, spans, block_size=128):
     return hidden
 
 
-@torch.no_grad()
-def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=False):
-    device = cache.device
-    total, maximum = torch.zeros((), device=device), torch.zeros((), device=device)
-    count = 0
-    full_total = torch.zeros((), device=device, dtype=torch.float64)
-    max_tv = torch.zeros_like(full_total)
+def _replay_sums(logits, value, indices, old_logp, returns, action_mask):
+    logp = logits.log_softmax(-1).gather(1, indices[:, None])[:, 0]
+    delta = logp - old_logp
+    sampled = delta.exp() - 1 - delta
+    free = action_mask.sum(-1) >= 2
+    residual = returns - value
+    return (
+        torch.stack(
+            (
+                sampled.sum(),
+                sampled.masked_fill(~free, 0).sum(),
+                value.sum(),
+                residual.square().sum(),
+                residual.sum(),
+                returns.sum(),
+                returns.square().sum(),
+            )
+        ),
+        delta.abs().max(),
+    )
+
+
+def _replay_groups(cache, sequences_per_batch):
+    # Immutable inputs only: no prefix states or outputs from previous weights.
+    previous = getattr(cache, "_replay_plan", None)
+    if previous is not None and previous[0] == sequences_per_batch:
+        yield from previous[1]
+        return
+    plan = []
     for first in range(0, len(cache.episodes), sequences_per_batch):
         episodes = list(
             range(first, min(first + sequences_per_batch, len(cache.episodes)))
         )
-        hidden = (
-            torch.zeros((1, len(episodes), policy.hidden_size), device=device)
-            if policy.variant == "C"
-            else None
-        )
+        parts = []
         for offset in range(0, max(len(cache.encoded[ep]) for ep in episodes), 128):
             active = [
                 (j, ep)
@@ -177,18 +213,64 @@ def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=Fa
                 for _, ep in active
             ]
             batch, labels, lengths = cache.batch(spans)
-            slots = torch.tensor([j for j, _ in active], device=device)
-            logits, _, last = policy.forward_sequences(
+            slots = torch.tensor([j for j, _ in active], device=cache.device)
+            free_count = sum(
+                int(
+                    (
+                        cache.action_counts[
+                            int(cache.offsets[ep]) + a : int(cache.offsets[ep]) + b
+                        ]
+                        >= 2
+                    ).sum()
+                )
+                for ep, a, b in spans
+            )
+            parts.append((batch, labels, lengths, slots, free_count))
+        group = len(episodes), parts
+        if getattr(cache, "replay_inputs", False):
+            plan.append(group)
+        yield group
+    if getattr(cache, "replay_inputs", False):
+        cache._replay_plan = sequences_per_batch, plan
+
+
+@torch.no_grad()
+def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=False):
+    device = cache.device
+    totals = torch.zeros(7, device=device)
+    maximum = torch.zeros((), device=device)
+    free_count = count = 0
+    full_total = torch.zeros((), device=device, dtype=torch.float64)
+    max_tv = torch.zeros_like(full_total)
+    runner = getattr(cache, "_replay_sums_runner", None) or _replay_sums
+    for group_size, parts in _replay_groups(cache, sequences_per_batch):
+        hidden = (
+            torch.zeros((1, group_size, policy.hidden_size), device=device)
+            if policy.variant == "C"
+            else None
+        )
+        for batch, labels, lengths, slots, part_free in parts:
+            if policy.spatial_cuda_graphs:
+                torch.compiler.cudagraph_mark_step_begin()
+            logits, value, last = policy.forward_sequences(
                 batch,
                 lengths,
                 None if hidden is None else hidden.index_select(1, slots),
             )
             if hidden is not None:
                 hidden.index_copy_(1, slots, last)
-            logp, _, _ = distribution_stats(logits, labels["indices"])
-            delta = logp - labels["old_logp"]
-            total += (delta.exp() - 1 - delta).sum()
-            maximum = torch.maximum(maximum, delta.abs().max())
+            sums, max_error = runner(
+                logits,
+                value,
+                labels["indices"],
+                labels["old_logp"],
+                labels["returns"],
+                batch["action_mask"],
+            )
+            totals += sums
+            maximum = torch.maximum(maximum, max_error)
+            free_count += part_free
+            count += sum(lengths)
             if full_distribution and cache.has_behavior_distribution:
                 kl, tv = categorical_distance(
                     labels["old_log_probs"][:, : logits.shape[1]],
@@ -197,14 +279,44 @@ def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=Fa
                 )
                 full_total += kl.sum()
                 max_tv = torch.maximum(max_tv, tv.max())
-            count += len(delta)
+    # One host transfer for all diagnostics; full-distribution sums stay FP64.
+    values = (
+        torch.cat(
+            (totals.double(), maximum[None].double(), full_total[None], max_tv[None])
+        )
+        .cpu()
+        .tolist()
+    )
+    (
+        total,
+        free_total,
+        value_sum,
+        value_error,
+        value_residual,
+        return_sum,
+        return_square,
+        maximum,
+        full_total,
+        max_tv,
+    ) = values
+    variance = return_square / count - (return_sum / count) ** 2
     return {
-        "sampled_kl": total.item() / count,
-        "max_logp_error": maximum.item(),
-        "full_kl": full_total.item() / count
+        "sampled_kl": total / count,
+        "sampled_kl_free": free_total / free_count if free_count else None,
+        "free_decisions": free_count,
+        "all_decisions": count,
+        "critic_mean": value_sum / count,
+        "critic_mse": value_error / count,
+        "critic_explained_variance": (
+            1 - (value_error / count - (value_residual / count) ** 2) / variance
+            if variance > 1e-12
+            else None
+        ),
+        "max_logp_error": maximum,
+        "full_kl": full_total / count
         if full_distribution and cache.has_behavior_distribution
         else None,
-        "max_total_variation": max_tv.item()
+        "max_total_variation": max_tv
         if full_distribution and cache.has_behavior_distribution
         else None,
     }
@@ -237,6 +349,13 @@ class BatchedBackend:
         if str(device).startswith("cuda"):
             torch.cuda.synchronize()
         self.cache_seconds = perf_counter() - tick
+        if str(device).startswith("cuda") and options.get(
+            "ppo_optimized_inputs", False
+        ):
+            self.cache.enable_compiled_gather()
+            self.cache.enable_async_transfers()
+        if options.get("ppo_cached_replay", False):
+            self.cache.enable_cached_replay()
         self.kl_batch = options.get("kl_sequences_per_batch", 8)
         self.names = (
             "policy_loss",
@@ -274,11 +393,15 @@ class BatchedBackend:
         return pre_kl, pre_error
 
     def backward(self, minibatch, count, entropy_coefficient):
+        if self.policy.spatial_cuda_graphs:
+            torch.compiler.cudagraph_mark_step_begin()
         tick = perf_counter()
         hidden = prefixes(self.policy, self.cache, minibatch)
         self.prefix_seconds += perf_counter() - tick
         finite = torch.ones((), dtype=torch.bool, device=self.device)
         tokens = 0
+        parameters = tuple(p for p in self.policy.parameters() if p.requires_grad)
+        accumulated = None
         for micro_start in range(0, len(minibatch), self.micro_chunks):
             spans = minibatch[micro_start : micro_start + self.micro_chunks]
             tick = perf_counter()
@@ -303,7 +426,17 @@ class BatchedBackend:
             )
             finite &= torch.isfinite(loss.detach())
             valid_tokens = sum(lengths)
-            (loss * (valid_tokens / count)).backward()
+            weighted_loss = loss * (valid_tokens / count)
+            if self.policy.coalesced_accumulation:
+                gradients = torch.autograd.grad(weighted_loss, parameters)
+                if accumulated is None:
+                    accumulated = list(gradients)
+                    for p, g in zip(parameters, accumulated):
+                        p.grad = g
+                else:
+                    torch._foreach_add_(accumulated, gradients)
+            else:
+                weighted_loss.backward()
             self.backward_seconds += perf_counter() - tick
             self.totals += (
                 torch.stack([stats[key] for key in self.names]) * valid_tokens
@@ -314,12 +447,19 @@ class BatchedBackend:
         return tokens
 
     def kl(self):
-        return measure_kl(self.policy, self.cache, self.kl_batch)[0]
+        self.last_replay = measure_replay(self.policy, self.cache, self.kl_batch)
+        return (
+            self.last_replay["sampled_kl_free"]
+            if self.config["ppo"].get("kl_population") == "free"
+            else self.last_replay["sampled_kl"]
+        )
 
     def record_gradient(self, norm):
         self.gradients.append(norm.detach())
 
     def statistics(self, tokens):
+        if not tokens:
+            return dict.fromkeys(self.names, None), None, None
         stats = (self.totals / tokens).cpu().tolist()
         gradient_values = torch.stack(self.gradients).cpu().numpy()
         return (
@@ -330,6 +470,20 @@ class BatchedBackend:
 
     def extras(self, optimizer_seconds):
         return {
+            **{
+                k: v
+                for k, v in getattr(self, "last_replay", self.replay).items()
+                if k
+                in (
+                    "sampled_kl_free",
+                    "sampled_kl",
+                    "free_decisions",
+                    "all_decisions",
+                    "critic_mean",
+                    "critic_mse",
+                    "critic_explained_variance",
+                )
+            },
             "pre_update_full_kl": self.replay["full_kl"],
             "pre_update_max_total_variation": self.replay["max_total_variation"],
             "behavior_check": "full_distribution"
@@ -339,6 +493,17 @@ class BatchedBackend:
             "optimizer_seconds": optimizer_seconds,
             "cache_seconds": self.cache_seconds,
             "rollout_device_bytes": self.cache.resident_bytes,
+            "cached_replay_inputs": self.cache.replay_inputs,
+            "cached_replay_input_bytes": sum(
+                tensor.numel() * tensor.element_size()
+                for _, parts in (
+                    self.cache._replay_plan[1]
+                    if self.cache._replay_plan is not None
+                    else []
+                )
+                for data, labels, _, slots, _ in parts
+                for tensor in (*data.values(), *labels.values(), slots)
+            ),
             "microbatch_sequences": self.micro_chunks,
         }
 

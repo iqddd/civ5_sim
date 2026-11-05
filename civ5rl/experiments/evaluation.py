@@ -59,15 +59,20 @@ def run_validation_cases(
     return len(jobs)
 
 
-def paired_world_bootstrap(before, after, *, samples, seed, clusters=16, cases=None):
+def paired_world_bootstrap(
+    before, after, *, samples, seed, clusters=16, cases=None, cases_per_world=4
+):
     """Bootstrap matched outcomes by parent world, preserving case order."""
     if before.keys() != after.keys():
         raise ValueError("Unpaired evaluation cases")
     worlds = sorted({key[0] for key in before})
     if len(worlds) != clusters:
         raise ValueError("Wrong bootstrap cluster count")
-    if any(len([key for key in before if key[0] == world]) != 4 for world in worlds):
-        raise ValueError("Expected four paired cases per parent world")
+    if any(
+        len([key for key in before if key[0] == world]) != cases_per_world
+        for world in worlds
+    ):
+        raise ValueError("Wrong paired case count per parent world")
     if cases is not None:
         if cases.keys() != before.keys():
             raise ValueError("Missing paired case metadata")
@@ -81,6 +86,12 @@ def paired_world_bootstrap(before, after, *, samples, seed, clusters=16, cases=N
                 for side in (0, 1)
             }:
                 raise ValueError("Expected both placements and sides per parent world")
+            if any(
+                combinations.count((placement, side)) != cases_per_world // 4
+                for placement in ("contact", "separated")
+                for side in (0, 1)
+            ):
+                raise ValueError("Unbalanced placements/sides per parent world")
     differences = np.asarray(
         [
             np.mean(

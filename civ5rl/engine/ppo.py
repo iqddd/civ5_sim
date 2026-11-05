@@ -130,6 +130,7 @@ def update(
     monitor=None,
     *,
     _backend=None,
+    deadline=None,
 ):
     policy.train()
     start_update = perf_counter()
@@ -144,8 +145,12 @@ def update(
         for i, e in enumerate(episodes)
         for start in range(0, len(e["chosen"]), length)
     ]
-    lr = schedule(config["optimizer"]["lr_schedule"], decisions)
-    entropy_coefficient = schedule(config["ppo"]["entropy_schedule"], decisions)
+    lr = config["optimizer"].get("lr")
+    if lr is None:
+        lr = schedule(config["optimizer"]["lr_schedule"], decisions)
+    entropy_coefficient = config["ppo"].get("entropy_coefficient")
+    if entropy_coefficient is None:
+        entropy_coefficient = schedule(config["ppo"]["entropy_schedule"], decisions)
     for group in optimizer.param_groups:
         group["lr"] = lr
     pre_kl, pre_error = backend.precheck()
@@ -160,6 +165,7 @@ def update(
     )
     step_records = []
     completed_epochs = 0
+    started_epochs = 0
     stop_reason = "epochs_completed"
     for epoch in range(config["ppo"]["epochs"]):
         order = list(chunks)
@@ -173,6 +179,10 @@ def update(
             ]
         )
         for batch_index, minibatch in enumerate(batches):
+            if deadline is not None and perf_counter() >= deadline:
+                stop_reason = "active_time_limit"
+                break
+            started_epochs = epoch + 1
             step_start = perf_counter()
             count = sum(stop - start for _, start, stop in minibatch)
             optimizer.zero_grad(set_to_none=True)
@@ -194,7 +204,7 @@ def update(
                 tick = perf_counter()
                 kl = backend.kl()
                 kl_seconds += perf_counter() - tick
-                if not np.isfinite(kl):
+                if kl is not None and not np.isfinite(kl):
                     raise FloatingPointError("Non-finite post-step KL")
                 step_records.append(
                     {
@@ -204,10 +214,22 @@ def update(
                         "kl": kl,
                         "gradient_norm_pre_clip": float(norm),
                         "seconds": perf_counter() - step_start,
+                        **{
+                            k: v
+                            for k, v in getattr(backend, "last_replay", {}).items()
+                            if k
+                            in (
+                                "sampled_kl",
+                                "sampled_kl_free",
+                                "free_decisions",
+                                "all_decisions",
+                            )
+                        },
                     }
                 )
-                if kl > config["ppo"]["stop_kl"]:
-                    stop_reason = "stop_kl"
+                timed_out = deadline is not None and perf_counter() >= deadline
+                if timed_out or (kl is not None and kl > config["ppo"]["stop_kl"]):
+                    stop_reason = "active_time_limit" if timed_out else "stop_kl"
                     if batch_index == len(batches) - 1:
                         completed_epochs += 1
                     break
@@ -217,18 +239,18 @@ def update(
             tick = perf_counter()
             kl = backend.kl()
             kl_seconds += perf_counter() - tick
-            if kl > config["ppo"]["stop_kl"]:
+            if kl is not None and kl > config["ppo"]["stop_kl"]:
                 stop_reason = "stop_kl"
         if monitor:
             monitor.mark("ppo", ppo_epoch=epoch + 1, optimizer_steps=steps)
-        if stop_reason == "stop_kl":
+        if stop_reason in ("stop_kl", "active_time_limit"):
             break
     summary = _summarize_ppo_update(
         backend,
         episodes,
         tokens,
         steps,
-        epoch + 1,
+        started_epochs,
         lr,
         entropy_coefficient,
         kl,
@@ -239,12 +261,15 @@ def update(
         start_update,
     )
     summary.update(
-        epochs_started=epoch + 1,
+        epochs_started=started_epochs,
         epochs_completed=completed_epochs,
         optimizer_step_records=step_records,
         stop_reason=stop_reason,
-        max_kl=max([pre_kl, kl, *[r["kl"] for r in step_records]]),
+        max_kl=max(
+            v for v in [pre_kl, kl, *[r["kl"] for r in step_records]] if v is not None
+        ),
         valid_tokens_per_minibatch=token_count,
+        update_complete=stop_reason != "active_time_limit",
     )
     return summary
 

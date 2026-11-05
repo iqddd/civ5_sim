@@ -13,7 +13,7 @@ class ImportBoundaryTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "import civ5rl.engine.collector, civ5rl.core.env; import sys; assert 'torch' not in sys.modules",
+                "import civ5rl.engine.collector, civ5rl.engine.stream_worker, civ5rl.core.env; import sys; assert 'torch' not in sys.modules",
             ],
             check=True,
         )

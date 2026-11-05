@@ -1,0 +1,265 @@
+{
+  "schema": 1,
+  "observation": {
+    "schema": 1,
+    "tile_features": 73,
+    "global_features": 33,
+    "previous_action_features": 20,
+    "history": true,
+    "age_cap_enemy_turns": 32,
+    "roster_count_scale": 8,
+    "enemy_private_fields": false,
+    "privileged_features": false,
+    "raw_reward_input": false,
+    "step_result_input": false,
+    "seed_input": false
+  },
+  "environment": {
+    "fog": true,
+    "random_damage": true,
+    "max_width": 16,
+    "max_height": 16,
+    "wrap_x": false,
+    "max_units_per_side": 8,
+    "max_calls_per_turn": 2000,
+    "learner_side_probability": [
+      0.5,
+      0.5
+    ],
+    "terminal": "army_destroyed_or_round_limit",
+    "round_limit_result": "draw",
+    "technical_error": "abort_update_and_save_reproduction",
+    "log_all_training_steps": false
+  },
+  "model": {
+    "type": "hex_gru_action_scorer",
+    "tile_projection": [
+      73,
+      128
+    ],
+    "hex_blocks": 4,
+    "hex_width": 128,
+    "hex_directions": 6,
+    "hex_mlp": [
+      128,
+      256,
+      128
+    ],
+    "context_mlp": [
+      309,
+      256,
+      256
+    ],
+    "recurrent": {
+      "type": "GRU",
+      "input_size": 256,
+      "hidden_size": 256,
+      "num_layers": 1,
+      "bidirectional": false,
+      "initial_state": "zero",
+      "prefix_recompute": "full_current_weights_no_grad"
+    },
+    "action_mlp": [
+      529,
+      128,
+      1
+    ],
+    "value_mlp": [
+      256,
+      128,
+      1
+    ],
+    "activation": "gelu",
+    "layer_norm_eps": 1e-05,
+    "dropout": 0,
+    "expected_parameter_count": 1375362,
+    "shared_actor_critic_encoder": true,
+    "critic_privileged": false,
+    "normalization": "fixed_no_running_statistics"
+  },
+  "reward": {
+    "win": 1,
+    "loss": 0,
+    "draw": 0,
+    "nonterminal": 0,
+    "shaping": false,
+    "damage_bonus": 0,
+    "exploration_bonus": 0,
+    "command_penalty": 0
+  },
+  "collection": {
+    "num_envs": 128,
+    "cpu_workers": 4,
+    "envs_per_worker": 32,
+    "worker_math_threads": 1,
+    "min_learner_decisions_per_update": 8192,
+    "complete_episodes_only": true,
+    "deterministic_episode_waves": 128,
+    "freeze_policy_per_update": true,
+    "carry_episodes_between_updates": false,
+    "retain_previous_rollouts_for_ppo": false
+  },
+  "ppo": {
+    "epochs": 4,
+    "gamma": 1,
+    "gae_lambda": 1,
+    "return_estimator": "complete_episode_monte_carlo",
+    "advantage_normalization": "rollout_valid_tokens",
+    "advantage_epsilon": 1e-08,
+    "clip_ratio": 0.2,
+    "value_loss": "mean_squared_error_without_half",
+    "value_coefficient": 0.5,
+    "value_clip": false,
+    "entropy": "categorical_divided_by_log_legal_action_count",
+    "target_kl": 0.01,
+    "stop_kl": 0.015,
+    "kl_measurement": "whole_rollout_after_optimizer_step",
+    "sequence_length": 128,
+    "sequences_per_minibatch": 8,
+    "sequences_per_microbatch": 8,
+    "max_gradient_norm": 0.5,
+    "reward_normalization": false,
+    "return_normalization": false,
+    "entropy_coefficient": 0,
+    "valid_tokens_per_minibatch": 1024,
+    "kl_population": "free"
+  },
+  "optimizer": {
+    "type": "Adam",
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": 1e-05,
+    "weight_decay": 0,
+    "lr": 0.0001
+  },
+  "numerics": {
+    "precision": "mixed_bfloat16",
+    "amp": true,
+    "amp_dtype": "bfloat16",
+    "parameter_precision": "float32",
+    "input_projection_precision": "float32",
+    "hex_dense_precision": "bfloat16",
+    "hex_message_sum_precision": "float32",
+    "context_precision": "float32",
+    "heads_precision": "float32",
+    "gru_precision": "float32",
+    "policy_value_outputs_precision": "float32",
+    "loss_precision": "float32",
+    "grad_scaler": false,
+    "fp32_replay_max_logp_error": 0.001,
+    "bf16_replay_max_logp_error": 0.005,
+    "replay_max_kl": 1e-06,
+    "require_full_behavior_distribution": true,
+    "replay_max_total_variation": 0.005,
+    "tf32": false,
+    "cudnn_benchmark": false,
+    "deterministic_reference": true
+  },
+  "corpus": {
+    "parent_worlds": {
+      "train": {
+        "count": 64,
+        "first_seed": 10000
+      },
+      "validation": {
+        "count": 16,
+        "first_seed": 20000
+      },
+      "test": {
+        "count": 32,
+        "first_seed": 30000
+      }
+    },
+    "crops_per_world": 4,
+    "split_by_parent_world": true,
+    "map_script": "Pangaea",
+    "semantic_generation_options": {
+      "world_size": "standard",
+      "world_age": 2,
+      "temperature": 2,
+      "rainfall": 2,
+      "sea_level": 2
+    },
+    "generation_cli_mapping": "verified_in_civ5map/__main__.py",
+    "generation_cli_options": {
+      "--world-size": 3,
+      "--age": 2,
+      "--temperature": 2,
+      "--rainfall": 2,
+      "--sea-level": 2,
+      "--count": 4
+    },
+    "fixed_fifth_lua_option": 2,
+    "symmetric_starting_rosters": true,
+    "start_hp": 100,
+    "unit_type_sampling": "uniform_iid_reject_without_melee_or_ranged",
+    "placement_rejection_limit": 100
+  },
+  "performance": {
+    "batched_ppo": true,
+    "resident_rollout": true,
+    "non_blocking_inputs": true,
+    "compile": true,
+    "compile_dynamic": true,
+    "compile_mode": "default",
+    "compile_recompile_limit": 32,
+    "fused_adam": true,
+    "kl_sequences_per_batch": 8,
+    "reuse_encoded": true,
+    "worker_encoding": true,
+    "collection_scheduler": "ready",
+    "shared_action_capacity": 4096,
+    "spatial_batch_size": 32,
+    "optimized_routing": true,
+    "spatial_compile_mode": "reduce-overhead",
+    "coalesced_spatial": true,
+    "coalesced_accumulation": true,
+    "recurrent_cuda_graphs": true,
+    "recurrent_graph_max_shapes": 64,
+    "ppo_optimized_inputs": true,
+    "ppo_cached_replay": true,
+    "worker_reply_size": 8
+  },
+  "kind": "rl01.ppo_after_imitation",
+  "seed": 17,
+  "output": "artifacts/rl/ppo-after-imitation",
+  "workers": 4,
+  "teacher_search": {
+    "position_capacity": 6000,
+    "max_completed": 2560,
+    "max_branches": 5,
+    "choices_per_unit": 5,
+    "aggression": 2,
+    "privileged_cp_queries": true,
+    "risk_budget_base": 0,
+    "risk_budget_per_kill": 1
+  },
+  "experiment": {
+    "parent": "artifacts/rl/cp-imitation-own-states/cycle-02/checkpoints/step-0500.pt",
+    "parent_sha256": "035581230481bb5cc5cbd02f6a947549dc2ccb30d3797c7acbad25d5268ba7a1",
+    "parent_run": "artifacts/rl/cp-imitation-own-states",
+    "corpus": "artifacts/rl/corpus/manifest.json",
+    "decisions": 1048576,
+    "active_seconds": 7200,
+    "milestones": [
+      131072,
+      262144,
+      524288,
+      1048576
+    ],
+    "bootstrap_samples": 10000,
+    "bootstrap_seed": 20261103,
+    "confirmation_layouts_per_world": 8,
+    "initial_value": "zero_last_layer",
+    "protocol": "docs/rl-ppo-after-imitation.md"
+  },
+  "passport_artifacts": [
+    "build/combat_ai.dll",
+    "build/combat_rules.h",
+    "build/cp_geometry.inc",
+    "tests/test_rl_ppo_after_imitation.py",
+    "configs/rl-ppo-after-imitation.json"
+  ]
+}

@@ -98,6 +98,32 @@ class PlannerTests(unittest.TestCase):
         for r in (request(expected_turn=1), request(side=1, selected_units=(1,))):
             self.assertEqual(p.search(r).reason, SearchReason.TURN_CHANGED)
 
+    def test_repeated_roots_refresh_units_and_changed_terrain(self):
+        # A stale root can still return a plausible plan in a normal match.
+        # Compare one reused planner with fresh planners as each input changes.
+        root = replace(
+            state(),
+            units=(PlanningUnit(0, 0, 0, 17), PlanningUnit(1, 0, 1, 18)),
+        )
+        injured = replace(root, units=(root.units[0], replace(root.units[1], hp=1)))
+        blocked = replace(
+            root,
+            tiles=(*root.tiles[:18], PlanningTile(0, 2, 0, 0), *root.tiles[19:]),
+        )
+        reused = self.planner()
+        results = []
+        for current in (root, injured, blocked, root):
+            query = SearchRequest(current, 0, 0, 18, (0,))
+            with Planner() as fresh:
+                expected = fresh.search(query)
+            actual = reused.search(query)
+            self.assertEqual(actual, expected)
+            results.append(actual)
+        self.assertTrue(results[0].assignments)
+        self.assertNotEqual(results[0].assignments, results[1].assignments)
+        self.assertEqual(results[2].reason, SearchReason.INVALID_REQUEST)
+        self.assertEqual(results[0], results[3])
+
     def test_contact_memory_crosses_abi_and_rejects_invalid_history(self):
         p = self.planner()
         for memory in (ContactMemory(0, 0, (Contact(1, 0),)), ContactMemory()):

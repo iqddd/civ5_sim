@@ -1,7 +1,7 @@
 # Инструменты проекта
 
-Инвентаризация: 2026-11-05. В корне `tools/` оставлены 24 повторно используемых
-Python-инструмента и `combat_viewer.html`, ресурс просмотрщика.
+Инвентаризация: 2026-11-05. В корне `tools/` находятся 26 повторно используемых
+Python-инструментов и `combat_viewer.html`, ресурс просмотрщика.
 14 скриптов завершённых опытов и разовых переносов находятся в
 [archive/](archive/README.md).
 
@@ -50,6 +50,7 @@ Python-инструмента и `combat_viewer.html`, ресурс просмо
 | [evaluate_rl.py](evaluate_rl.py) | Оценка checkpoint на разрешённых открытых split. |
 | [report_rl.py](report_rl.py) | Отчёт и графики для переданного каталога RL-запуска. |
 | [run_cp_imitation.py](run_cp_imitation.py) | Общий CLI фаз prepare/collect/train/evaluate/report и диспетчер настроенных BC-экспериментов. |
+| [run_ppo_after_imitation.py](run_ppo_after_imitation.py) | Отдельный ограниченный PPO-опыт от BC: prepare/train/evaluate/report/run, с фиксированным бюджетом и закрытым test. |
 
 `run_cp_imitation.py` оставлен как действующий вход BC: реализации отдельных
 опытов находятся в `civ5rl/experiments/`. Перенос старых утилит не ослабляет
@@ -65,6 +66,7 @@ Python-инструмента и `combat_viewer.html`, ресурс просмо
 | [benchmark_decision_diagnostics.py](benchmark_decision_diagnostics.py) | Накладные расходы off/compact/full на переданных сохранённых запросах. |
 | [benchmark_rl.py](benchmark_rl.py) | Повторные полные циклы PPO по конфигурации. |
 | [benchmark_rl_pipeline.py](benchmark_rl_pipeline.py) | Сравнение frozen-policy сбора или полного цикла, включая отдельный source root. |
+| [benchmark_ppo_replay.py](benchmark_ppo_replay.py) | Замер полного прохода PPO replay/KL с неизменными весами, сравнением кеширования входов и NVML. |
 | [profile_rl.py](profile_rl.py) | Сбор фиксированного rollout и CPU-профилей workers для указанной модели. |
 | [tune_rl.py](tune_rl.py) | Сравнение реализаций PPO на одинаковом переданном rollout с опциональной трассой. |
 

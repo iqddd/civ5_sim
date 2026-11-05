@@ -195,7 +195,14 @@ def validate_config(config):
     }
     for section, keys in fixed.items():
         for key in keys:
-            if config.get(section, {}).get(key) != reference[section][key]:
+            expected = reference[section][key]
+            if (
+                config.get("kind") == "rl01.ppo_after_imitation"
+                and section == "reward"
+                and key == "loss"
+            ):
+                expected = 0
+            if config.get(section, {}).get(key) != expected:
                 raise ValueError(f"Unsupported configuration: {section}.{key}")
     for section, key, low, high in (
         ("ppo", "clip_ratio", 0, 1),
@@ -220,6 +227,10 @@ def validate_config(config):
     c = config["collection"]
     if c["num_envs"] != c["cpu_workers"] * c["envs_per_worker"]:
         raise ValueError("Invalid configuration: collection.num_envs")
+    if config.get("kind") == "rl01.ppo_after_imitation":
+        from civ5rl.protocols.ppo_after_imitation import validate_profile
+
+        validate_profile(config)
     for section, keys in (
         (
             "collection",

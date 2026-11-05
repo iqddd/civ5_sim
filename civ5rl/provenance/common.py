@@ -72,7 +72,11 @@ def choose(probabilities, rng):
 
 
 def file_sha256(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    value = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024**2), b""):
+            value.update(block)
+    return value.hexdigest()
 
 
 def verify_self_digest(

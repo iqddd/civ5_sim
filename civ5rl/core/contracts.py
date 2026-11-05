@@ -39,6 +39,8 @@ class BaseScenarioSpec(TypedDict):
     max_rounds: int
     max_calls_per_turn: int
     opponent: str
+    opponent_search: NotRequired[dict[str, Any]]
+    reward_profile: NotRequired[str]
     agent_seeds: list[int]
     diagnostics: NotRequired[bool]
     learner_decision_limit: NotRequired[int]
@@ -103,8 +105,12 @@ class WorkerState(TypedDict):
 
 
 class WorkerPayload(TypedDict):
-    states: list[WorkerState]
+    states: NotRequired[list[WorkerState]]
     worker_encoding_seconds: float
+    wave: NotRequired[int]
+    items: NotRequired[list[tuple[int, int, WorkerState, float]]]
+    published_at: NotRequired[float]
+    worker_request_seconds: NotRequired[float]
 
 
 class Episode(TypedDict):
@@ -115,7 +121,7 @@ class Episode(TypedDict):
     old_logp: list[float]
     old_log_probs: list[np.ndarray]
     old_value: list[float]
-    old_hidden: list[np.ndarray | None]
+    old_hidden: NotRequired[list[np.ndarray | None]]
     decision_metrics: list[dict[str, str | bool | float]]
     encoded: NotRequired[list[Encoded]]
     encoded_variant: NotRequired[str]

@@ -119,16 +119,21 @@ class PlanningState:
         """Organizer-only copy for privileged CP v1; never stores RNG."""
         integer(side, "side", 0, 1)
         observed = battle.observe(side)
+        # Battle owns immutable terrain; unit/visibility state is always fresh.
+        tiles = getattr(battle, "_planning_tiles", None)
+        if tiles is None:
+            tiles = tuple(
+                PlanningTile(*(getattr(t, name) for name in _field_names(PlanningTile)))
+                for t in battle._encode_tiles()
+            )
+            battle._planning_tiles = tiles
         return cls(
             width=battle._map["width"],
             height=battle._map["height"],
-            tiles=tuple(
-                PlanningTile(*(getattr(t, f.name) for f in fields(PlanningTile)))
-                for t in battle._encode_tiles()
-            ),
+            tiles=tiles,
             units=tuple(
-                PlanningUnit(i, *(0 if f.name == "damage_taken_last_turn" and u.side != side else getattr(u, f.name)
-                                  for f in fields(PlanningUnit)[1:]))
+                PlanningUnit(i, *(0 if name == "damage_taken_last_turn" and u.side != side else getattr(u, name)
+                                  for name in _field_names(PlanningUnit)[1:]))
                 for i, u in enumerate(battle._units())
             ),
             visibility=tuple(int(v) for v in observed["visibility"]),
@@ -450,8 +455,13 @@ def _i32(value):
     return integer(value, "ABI value", -(2**31), 2**31 - 1)
 
 
+@lru_cache(maxsize=None)
+def _field_names(value_type):
+    return tuple(field.name for field in fields(value_type))
+
+
 def _pack(structure, value):
-    return structure(*(_i32(getattr(value, f.name)) for f in fields(value)))
+    return structure(*(_i32(getattr(value, name)) for name in _field_names(type(value))))
 
 
 class Planner:
@@ -480,6 +490,7 @@ class Planner:
             raise ValueError("Invalid search configuration or native allocation failed")
         self.config = config
         self._assignment_buffer = (_Assignment * 256)()
+        self._tile_cache = None
 
     @property
     def version(self):
@@ -489,6 +500,7 @@ class Planner:
         if self._handle:
             self._lib.cai_free(self._handle)
             self._handle = None
+        self._tile_cache = None
 
     def __enter__(self):
         if not self._handle:
@@ -574,7 +586,18 @@ class Planner:
             if candidates_only:
                 raise ValueError("Invalid attack candidate query")
             return SearchResult((), SearchReason.INVALID_REQUEST, SearchStats())
-        tiles = (_Tile * len(s.tiles))(*(_pack(_Tile, t) for t in s.tiles))
+        cached = self._tile_cache
+        if cached is not None and cached[0] is s.tiles:
+            tiles = cached[1]
+        else:
+            tiles = (_Tile * len(s.tiles))(*(_pack(_Tile, t) for t in s.tiles))
+            # Immutable public terrain only; never cache units, visibility or RNG.
+            self._tile_cache = (
+                (s.tiles, tiles)
+                if isinstance(s.tiles, tuple)
+                and all(type(tile) is PlanningTile for tile in s.tiles)
+                else None
+            )
         units = (_Unit * len(s.units))(*(_pack(_Unit, u) for u in s.units))
         visibility = (C.c_int32 * len(s.visibility))(*map(_i32, s.visibility))
         if s.visibility_history and (len(s.visibility_history) != 2 or any(

@@ -37,16 +37,32 @@ class DecisionEnv:
         self.turns = self.calls = self.commands = 0
         self.history = []
         self.timings = {"simulation_seconds": 0, "opponent_seconds": 0}
-        self.opponent = load_agent(spec["opponent"])
-        self.opponent.reset(
-            context_for(
-                spec["scenario"],
-                spec["armies"],
-                1 - self.side,
-                spec["max_rounds"],
-                spec["agent_seeds"][1 - self.side],
+        self.reward_profile = spec.get("reward_profile", "symmetric")
+        if self.reward_profile not in ("symmetric", "win_probability"):
+            self.battle.close()
+            raise ValueError("Unknown terminal reward profile")
+        if spec["opponent"] == "cp" and "opponent_search" in spec:
+            from civ5sim.combat_ai import Aggression, SearchConfig
+            from civ5sim.cp_agent import CPAgent
+
+            options = dict(spec["opponent_search"])
+            options["aggression"] = Aggression(options["aggression"])
+            self.opponent = CPAgent(SearchConfig(**options))
+        else:
+            self.opponent = load_agent(spec["opponent"])
+        try:
+            self.opponent.reset(
+                context_for(
+                    spec["scenario"],
+                    spec["armies"],
+                    1 - self.side,
+                    spec["max_rounds"],
+                    spec["agent_seeds"][1 - self.side],
+                )
             )
-        )
+        except BaseException:
+            self.close()
+            raise
         self.first_contact_turn = None
         self.damage = [0, 0]
         self._pending_attack = None
@@ -122,7 +138,22 @@ class DecisionEnv:
             obs = self.battle.observe(1 - self.side)
             actions = tuple(self.battle.available_actions())
             start = perf_counter()
-            action = self.opponent.act(obs, actions)
+            if callable(getattr(self.opponent, "act_with_planning", None)):
+                from civ5sim.combat_ai import CallPlanningServices, PlanningState
+
+                planning = CallPlanningServices(
+                    self.opponent.planner,
+                    PlanningState.from_battle(self.battle, 1 - self.side),
+                    1 - self.side,
+                    obs["turn"],
+                )
+                try:
+                    action = self.opponent.act_with_planning(obs, actions, planning)
+                finally:
+                    planning.expire()
+            else:
+                action = self.opponent.act(obs, actions)
+            self._drain_opponent()
             self.timings["opponent_seconds"] += perf_counter() - start
             if action not in actions:
                 raise RuntimeError("Illegal opponent action")
@@ -131,6 +162,12 @@ class DecisionEnv:
             result = self.battle.step(action)
             self.timings["simulation_seconds"] += perf_counter() - start
             self.applied(action, result)
+            callback = getattr(self.opponent, "on_action_result", None)
+            if callable(getattr(self.opponent, "act_with_planning", None)) and callback:
+                start = perf_counter()
+                callback(action, result, self.battle.observe(1 - self.side))
+                self.timings["opponent_seconds"] += perf_counter() - start
+                self._drain_opponent()
         if self.terminal:
             final = self.battle.snapshot()
             return {
@@ -140,7 +177,13 @@ class DecisionEnv:
                     **self.terminal,
                     "reward": 0
                     if self.terminal["winner"] is None
-                    else (1 if self.terminal["winner"] == self.side else -1),
+                    else (
+                        1
+                        if self.terminal["winner"] == self.side
+                        else 0
+                        if self.reward_profile == "win_probability"
+                        else -1
+                    ),
                     "commands": self.commands,
                     "learner_decisions": self.learner_decisions,
                     "rounds": self.turns / 2,
@@ -177,6 +220,11 @@ class DecisionEnv:
 
     def reproduction(self):
         return {"spec": self.spec, "commands": self.history}
+
+    def _drain_opponent(self):
+        drain = getattr(self.opponent, "drain_diagnostics", None)
+        if drain:
+            drain()
 
     def close(self):
         close = getattr(self.opponent, "close", None)
