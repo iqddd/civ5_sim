@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "seed": 17,
+  "output": "artifacts/rl/cp-reset-study",
+  "corpus": "artifacts/rl/corpus/manifest.json",
+  "imitation_manifest": "artifacts/rl/cp-imitation/manifest.json",
+  "workers": 4,
+  "max_rounds": 30,
+  "max_calls_per_turn": 2000,
+  "small_layouts_per_world": 2,
+  "large_layouts_per_size": 8,
+  "large_sizes": [5, 6, 7, 8, 9, 10, 11, 12, 13],
+  "teacher_search": {
+    "position_capacity": 6000,
+    "max_completed": 2560,
+    "max_branches": 5,
+    "choices_per_unit": 5,
+    "aggression": 2,
+    "privileged_cp_queries": true,
+    "risk_budget_base": 0,
+    "risk_budget_per_kill": 1
+  },
+  "bootstrap_samples": 10000,
+  "bootstrap_seed": 20261103
+}

@@ -11,16 +11,28 @@ from civ5rl.engine.ppo_fast import prefixes
 from civ5sim import Action
 
 
+def decision_indices(row):
+    """CE follows advice; recurrent history follows the actual command."""
+    if "teacher_action" in row or "executed_action" in row:
+        teacher, executed = row["teacher_action"], row["executed_action"]
+    else:
+        teacher = executed = row["chosen"]
+    if (
+        any(type(i) is not int or not 0 <= i < len(row["actions"]) for i in (teacher, executed))
+        or row["supervised"] != (len(row["actions"]) >= 2)
+    ):
+        raise ValueError("Invalid demonstration indices or CE mask")
+    return teacher, executed
+
+
 def encode_demonstration(episode):
     encoder = ObservationEncoder(episode["context"], "C")
     encoded = []
     for row in episode["decisions"]:
         legal = tuple(Action(**a) for a in row["actions"])
-        index = row["chosen"]
-        if not 0 <= index < len(legal) or row["supervised"] != (len(legal) >= 2):
-            raise ValueError("Invalid demonstration label or CE mask")
+        _, executed = decision_indices(row)
         encoded.append(encoder.encode(row["observation"], legal))
-        encoder.remember_action(legal[index], row["observation"])
+        encoder.remember_action(legal[executed], row["observation"])
     return encoded
 
 
@@ -34,7 +46,7 @@ class DemonstrationCache:
         encoded = [x for ep, a, b in spans for x in self.encoded[ep][a:b]]
         rows = [r for ep, a, b in spans for r in self.episodes[ep]["decisions"][a:b]]
         labels = {
-            "indices": torch.tensor([r["chosen"] for r in rows], device=self.device),
+            "indices": torch.tensor([decision_indices(r)[0] for r in rows], device=self.device),
             "mask": torch.tensor(
                 [r["supervised"] for r in rows], device=self.device, dtype=torch.bool
             ),
@@ -76,6 +88,12 @@ def ce_sum(logits, labels):
 
 
 def backward_minibatch(policy, cache, spans, count, micro_size=8):
+    if policy.coalesced_accumulation:
+        from civ5rl.engine.imitation_performance import backward_minibatch_async
+
+        return float(backward_minibatch_async(policy, cache, spans, count, micro_size))
+    if policy.spatial_cuda_graphs:
+        torch.compiler.cudagraph_mark_step_begin()
     hidden = prefixes(policy, cache, spans)
     total = 0.0
     for first in range(0, len(spans), micro_size):
@@ -95,9 +113,12 @@ def backward_minibatch(policy, cache, spans, count, micro_size=8):
 
 
 @torch.no_grad()
-def teacher_metrics(policy, cache):
+def teacher_metrics(policy, cache, *, move_details=False):
     losses, correct, counts = defaultdict(float), Counter(), Counter()
+    movement = Counter()
     for spans, _ in label_minibatches(cache.chunks(), cache.masks):
+        if policy.spatial_cuda_graphs:
+            torch.compiler.cudagraph_mark_step_begin()
         hidden = prefixes(policy, cache, spans)
         for first in range(0, len(spans), 8):
             part = spans[first : first + 8]
@@ -112,12 +133,23 @@ def teacher_metrics(policy, cache):
             ]
             for j, row in enumerate(rows):
                 if row["supervised"]:
-                    kind = row["actions"][row["chosen"]]["kind"]
+                    target, _ = decision_indices(row)
+                    kind = row["actions"][target]["kind"]
                     counts[kind] += 1
                     losses[kind] += loss[j].item()
-                    correct[kind] += int(predicted[j].item() == row["chosen"])
+                    correct[kind] += int(predicted[j].item() == target)
+                    if move_details and kind == "move":
+                        actual = row["actions"][target]
+                        selected = row["actions"][int(predicted[j].item())]
+                        movement["count"] += 1
+                        movement["type"] += selected["kind"] == "move"
+                        movement["type_unit"] += (
+                            selected["kind"] == "move"
+                            and selected["unit"] == actual["unit"]
+                        )
+                        movement["exact"] += selected == actual
     n = sum(counts.values())
-    return {
+    result = {
         "labels": n,
         "ce": sum(losses.values()) / n if n else None,
         "accuracy": sum(correct.values()) / n if n else None,
@@ -130,3 +162,12 @@ def teacher_metrics(policy, cache):
             for kind in counts
         },
     }
+    if move_details:
+        result["move"] = {
+            "denominator": movement["count"],
+            **{
+                name: movement[name] / movement["count"] if movement["count"] else None
+                for name in ("type", "type_unit", "exact")
+            },
+        }
+    return result

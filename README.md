@@ -26,9 +26,9 @@
 .venv\Scripts\python.exe tools\report_rl.py artifacts\rl\training-result
 ```
 
-Текущие артефакты: [описание](artifacts/rl/README.md),
-`corpus/` — корпус, `training-result/` — завершённый пилот,
-`performance-results/` — измерения, `development-history.zip` — история разработки.
+Артефакты и сборки локальные: `artifacts/` и `build/` полностью исключены из Git.
+[Восстановленный минимум и расположение архивов](docs/local-artifacts.md);
+[локальный индекс результатов](artifacts/rl/README.md).
 Текущая конфигурация производительного сбора — `configs/rl-v1-throughput.json`.
 Для новых запусков указывайте отдельный `--out`; существующий результат защищён
 от перезаписи без явного resume.

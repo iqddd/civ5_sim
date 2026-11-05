@@ -95,10 +95,26 @@ def load_policy(config, path, device):
     policy = Policy("C").to(device)
     policy.load_state_dict(saved["model"])
     policy.enable_amp(str(device).startswith("cuda"), spatial_batch_size=32)
+    if config["performance"].get("inverse_routing", False):
+        policy.enable_inverse_routing()
+    if config["performance"].get("optimized_routing", False):
+        policy.enable_inverse_routing()
+        policy.enable_action_routing()
+        policy.enable_maximum_routing()
     if str(device).startswith("cuda") and config["performance"]["compile"]:
-        policy.enable_compile()
+        policy.enable_compile(
+            spatial_mode=config["performance"].get("spatial_compile_mode")
+        )
     for parameter in policy.value.parameters():
         parameter.requires_grad_(False)
+    if str(device).startswith("cuda"):
+        if config["performance"].get("coalesced_spatial", False):
+            policy.enable_coalesced_spatial()
+        policy.coalesced_accumulation = config["performance"].get("coalesced_accumulation", False)
+        if config["performance"].get("recurrent_cuda_graphs", False):
+            policy.enable_recurrent_graphs(
+                max_shapes=config["performance"].get("recurrent_graph_max_shapes", 64)
+            )
     return policy
 
 
@@ -469,18 +485,31 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "phase",
-        choices=("prepare", "benchmark", "collect", "train", "evaluate", "report"),
+        choices=("prepare", "benchmark", "collect", "train", "evaluate", "report", "run"),
     )
     parser.add_argument("--config", default="configs/rl-cp-imitation.json")
     parser.add_argument("--out")
     parser.add_argument("--workers", type=int)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--cycle", type=int, choices=(1, 2))
     args = parser.parse_args()
     config = read_json(args.config)
     out = Path(args.out or config["output"]).resolve()
     workers = args.workers or config["workers"]
     if workers < 1:
         raise ValueError("workers must be positive")
+    if config["kind"] == "rl01.cp_imitation_own_states":
+        from civ5rl.engine.imitation_own_states import run
+
+        run(args.phase, config, out, workers, args.device, args.cycle)
+        return
+    if args.phase == "run" or args.cycle is not None:
+        raise ValueError("run/--cycle are supported only for the own-state protocol")
+    if config["kind"] == "rl01.cp_imitation_more_data":
+        from civ5rl.engine.imitation_more_data import run
+
+        run(args.phase, config, out, workers, args.device)
+        return
     if config["kind"] == "rl01.cp_imitation_continuation":
         from civ5rl.engine.imitation_continuation import run
 

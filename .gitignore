@@ -1,13 +1,5 @@
 .venv/
 __pycache__/
 build/
-# Prepared text headers belong to the immutable experiment source snapshot.
-!artifacts/combat-ai/cp-transfer-20261102/baseline/build/
-!artifacts/combat-ai/cp-transfer-20261102/baseline/build/combat_rules.h
-!artifacts/combat-ai/cp-transfer-20261102/baseline/build/cp_geometry.inc
+/artifacts/
 .ruff_cache/
-
-# Local development history and disposable benchmark model states.
-artifacts/rl/development-history.zip
-artifacts/rl/performance-results/**/checkpoints/
-artifacts/rl/**/run.lock

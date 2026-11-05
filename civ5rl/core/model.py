@@ -62,11 +62,71 @@ def _duplicate_singleton(value):
     return torch.cat((value, value), 0)
 
 
+class HexNeighborGather(torch.autograd.Function):
+    """Each direction is injective; reverse routing needs no sorted scatter."""
+
+    @staticmethod
+    def forward(ctx, projected, neighbors):
+        ctx.save_for_backward(neighbors)
+        b, n, _, width = projected.shape
+        return projected[:, :, 1:].gather(
+            1, neighbors.clamp_min(0).unsqueeze(-1).expand(b, n, HEX_DIRECTIONS, width)
+        ) * (neighbors >= 0).unsqueeze(-1)
+
+    @staticmethod
+    def backward(ctx, gradient):
+        (neighbors,) = ctx.saved_tensors
+        inverse = torch.cat((neighbors[:, :, 3:], neighbors[:, :, :3]), 2)
+        routed = gradient.gather(
+            1, inverse.clamp_min(0).unsqueeze(-1).expand_as(gradient)
+        ) * (inverse >= 0).unsqueeze(-1)
+        return torch.cat((torch.zeros_like(routed[:, :, :1]), routed), 2), None
+
+
+class ActionEmbeddingGather(torch.autograd.Function):
+    """Small deterministic dense reduction replaces general sorted index backward."""
+
+    @staticmethod
+    def forward(ctx, embeddings, indices):
+        ctx.save_for_backward(indices)
+        ctx.cells = embeddings.shape[1]
+        return embeddings.gather(
+            1, indices.clamp_min(0).unsqueeze(-1).expand(-1, -1, embeddings.shape[2])
+        ) * (indices >= 0).unsqueeze(-1)
+
+    @staticmethod
+    def backward(ctx, gradient):
+        (indices,) = ctx.saved_tensors
+        routing = (
+            indices.unsqueeze(-1) == torch.arange(ctx.cells, device=indices.device)
+        ).to(gradient.dtype)
+        with torch.autocast(gradient.device.type, enabled=False):
+            return torch.bmm(routing.transpose(1, 2), gradient), None
+
+
+class MapMaximum(torch.autograd.Function):
+    """One winner per channel: broadcast its gradient instead of scatter/sort."""
+
+    @staticmethod
+    def forward(ctx, values):
+        maximum, indices = values.max(1)
+        ctx.save_for_backward(indices)
+        ctx.cells = values.shape[1]
+        return maximum
+
+    @staticmethod
+    def backward(ctx, gradient):
+        (indices,) = ctx.saved_tensors
+        cells = torch.arange(ctx.cells, device=indices.device)[None, :, None]
+        return (cells == indices[:, None, :]) * gradient[:, None, :]
+
+
 class HexBlock(nn.Module):
     def __init__(self):
         super().__init__()
         self.weight = nn.Parameter(torch.empty(HEX_DIRECTIONS + 1, HEX_DIM, HEX_DIM))
         self.bias = nn.Parameter(torch.zeros(HEX_DIM))
+        self.inverse_routing = False
         self.norm1 = nn.LayerNorm(HEX_DIM, eps=1e-5)
         self.norm2 = nn.LayerNorm(HEX_DIM, eps=1e-5)
         self.mlp = nn.Sequential(
@@ -82,7 +142,11 @@ class HexBlock(nn.Module):
         ).reshape(b, n, HEX_DIRECTIONS + 1, HEX_DIM)
         batch_index = torch.arange(b, device=x.device)[:, None, None]
         directions = torch.arange(1, HEX_DIRECTIONS + 1, device=x.device)[None, None, :]
-        messages = projected[batch_index, neighbors.clamp_min(0), directions]
+        messages = (
+            HexNeighborGather.apply(projected, neighbors)
+            if self.inverse_routing
+            else projected[batch_index, neighbors.clamp_min(0), directions]
+        )
         message = (
             projected[:, :, 0].float()
             + (messages.float() * (neighbors >= 0).unsqueeze(-1)).sum(2)
@@ -127,6 +191,12 @@ class Policy(nn.Module):
         self._heads_runner = None
         self.amp_enabled = False
         self.spatial_batch_size = 0
+        self.action_routing = False
+        self.maximum_routing = False
+        self.spatial_cuda_graphs = False
+        self.coalesced_spatial = False
+        self.coalesced_accumulation = False
+        self._memory_runner = None
         self._initialize()
 
     def enable_amp(self, enabled=True, *, spatial_batch_size=0):
@@ -140,18 +210,42 @@ class Policy(nn.Module):
             raise ValueError("Spatial batch size must be a nonnegative integer")
         self.spatial_batch_size = spatial_batch_size if enabled else 0
 
+    def enable_inverse_routing(self):
+        """Opt-in equivalent hex backward; no change to parameters or precision."""
+        for block in self.blocks:
+            block.inverse_routing = True
+
+    def enable_action_routing(self):
+        self.action_routing = True
+
+    def enable_maximum_routing(self):
+        self.maximum_routing = True
+
+    def enable_coalesced_spatial(self):
+        if not self.spatial_batch_size:
+            raise ValueError("Coalesced spatial training requires a fixed spatial block")
+        self.coalesced_spatial = True
+
+    def enable_recurrent_graphs(self, *, max_shapes=64):
+        from civ5rl.core.training_graphs import RecurrentGraphs
+
+        self._memory_runner = RecurrentGraphs(self.memory, max_shapes=max_shapes)
+
     def autocast(self, tensor):
         return torch.autocast(
             tensor.device.type, dtype=torch.bfloat16, enabled=self.amp_enabled
         )
 
-    def enable_compile(self, *, dynamic=True, mode="default", recompile_limit=32):
+    def enable_compile(
+        self, *, dynamic=True, mode="default", recompile_limit=32, spatial_mode=None
+    ):
         """Compile tensor-heavy regions; cuDNN GRU stays eager, weights stay portable."""
         # Inference/no-grad replay/training have separate autograd specializations.
         # Keep a bounded cache, and retain fullgraph=True so fallback is never silent.
         torch._dynamo.config.recompile_limit = recompile_limit
+        self.spatial_cuda_graphs = spatial_mode == "reduce-overhead"
         self._spatial_runner = torch.compile(
-            self.spatial, dynamic=dynamic, mode=mode, fullgraph=True
+            self.spatial, dynamic=dynamic, mode=spatial_mode or mode, fullgraph=True
         )
         self._heads_runner = torch.compile(
             self.heads, dynamic=dynamic, mode=mode, fullgraph=True
@@ -162,6 +256,14 @@ class Policy(nn.Module):
             return self._encode_spatial(batch)
 
     def _encode_spatial(self, batch):
+        if self.coalesced_spatial and torch.is_grad_enabled():
+            from civ5rl.core.training_graphs import CoalescedSpatial
+
+            parameters = tuple(
+                p for name, p in self.named_parameters()
+                if name.startswith(("projection.", "blocks.", "context.")) and p.requires_grad
+            )
+            return CoalescedSpatial.apply(self, batch, *parameters)
         if self.spatial_batch_size:
             # BF16 GEMM output rounding can vary with the row count. Use the
             # same GEMM shapes during action selection, replay and gradients.
@@ -218,7 +320,9 @@ class Policy(nn.Module):
         with torch.autocast(ctx.device.type, enabled=False):
             sequences = ctx.float().split(lengths)
             padded = nn.utils.rnn.pad_sequence(sequences)
-            output, _ = self.memory(padded, None if hidden is None else hidden.float())
+            output, _ = (self._memory_runner or self.memory)(
+                padded, None if hidden is None else hidden.float()
+            )
         valid = torch.cat([output[:length, i] for i, length in enumerate(lengths)])
         last = torch.stack([output[length - 1, i] for i, length in enumerate(lengths)])[
             None
@@ -265,7 +369,10 @@ class Policy(nn.Module):
             else:
                 x = block(x, batch["neighbors"], mask)
         mean = x.sum(1) / mask.sum(1, keepdim=True)
-        maximum = x.masked_fill(~mask.unsqueeze(-1), -torch.inf).max(1).values
+        masked = x.masked_fill(~mask.unsqueeze(-1), -torch.inf)
+        maximum = (
+            MapMaximum.apply(masked) if self.maximum_routing else masked.max(1).values
+        )
         with torch.autocast(x.device.type, enabled=False):
             ctx = self.context(
                 torch.cat(
@@ -281,6 +388,9 @@ class Policy(nn.Module):
         embeddings = []
         for key in ("sources", "targets"):
             idx = batch[key]
+            if self.action_routing:
+                embeddings.append(ActionEmbeddingGather.apply(x, idx))
+                continue
             embeddings.append(
                 flat[(idx.clamp_min(0) + offsets).reshape(-1)].reshape(
                     b, -1, self.hex_dim
