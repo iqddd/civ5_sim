@@ -12,6 +12,7 @@ import torch
 from civ5rl.core.context import context_from_spec
 from civ5rl.core.model import batch_inputs, distribution_stats
 from civ5rl.core.observation import ObservationEncoder
+from civ5rl.engine.sequence import pack_minibatches
 
 
 def encode_episode(episode: "Episode", variant, *, reuse_cached=True):
@@ -98,25 +99,6 @@ def prefix_hidden(policy, encoded, end, device, block_size=128):
     return hidden
 
 
-@torch.no_grad()
-def rollout_kl(policy, episodes, encoded, device):
-    total, count, max_logp_error = 0.0, 0, 0.0
-    for ep, inputs in zip(episodes, encoded):
-        hidden = None
-        for start in range(0, len(inputs), 128):
-            stop = min(start + 128, len(inputs))
-            logits, _, hidden = policy(
-                batch_inputs(inputs[start:stop], device), hidden, sequence=True
-            )
-            indices = torch.tensor(ep["chosen"][start:stop], device=device)
-            logp, _, _ = distribution_stats(logits, indices)
-            delta = logp - torch.tensor(ep["old_logp"][start:stop], device=device)
-            total += (delta.exp() - 1 - delta).sum().item()
-            max_logp_error = max(max_logp_error, delta.abs().max().item())
-            count += stop - start
-    return total / count, max_logp_error
-
-
 class RolloutBackend(Protocol):
     """Backend-specific replay and minibatch operations for a PPO update."""
 
@@ -131,96 +113,9 @@ class RolloutBackend(Protocol):
     def extras(self, optimizer_seconds) -> dict: ...
 
 
-class ReferenceBackend:
-    def __init__(self, policy, episodes, config, device, monitor=None):
-        self.policy, self.episodes, self.config, self.device = (
-            policy,
-            episodes,
-            config,
-            device,
-        )
-        self.encoded = [encode_episode(e, policy.variant) for e in episodes]
-        self.advantages = targets(episodes)
-        self.totals, self.gradients = {}, []
-        self.prefix_seconds = self.backward_seconds = 0.0
-
-    def precheck(self):
-        pre_kl, pre_error = rollout_kl(
-            self.policy, self.episodes, self.encoded, self.device
-        )
-        if pre_error > 0.001:
-            raise RuntimeError(f"Behavior/replay mismatch before PPO: {pre_error}")
-        return pre_kl, pre_error
-
-    def backward(self, minibatch, count, entropy_coefficient):
-        tokens = 0
-        for ep_index, start, stop in minibatch:
-            ep, inputs = self.episodes[ep_index], self.encoded[ep_index]
-            tick = perf_counter()
-            hidden = prefix_hidden(self.policy, inputs, start, self.device)
-            self.prefix_seconds += perf_counter() - tick
-            tick = perf_counter()
-            logits, value, _ = self.policy(
-                batch_inputs(inputs[start:stop], self.device), hidden, sequence=True
-            )
-            index = torch.tensor(ep["chosen"][start:stop], device=self.device)
-            old_logp = torch.tensor(ep["old_logp"][start:stop], device=self.device)
-            returns = torch.full(
-                (stop - start,), float(ep["result"]["reward"]), device=self.device
-            )
-            adv = torch.tensor(
-                self.advantages[ep_index][start:stop], device=self.device
-            )
-            loss, stats = objective(
-                logits,
-                value,
-                index,
-                old_logp,
-                returns,
-                adv,
-                entropy_coefficient,
-                clip_ratio=self.config["ppo"]["clip_ratio"],
-                value_coefficient=self.config["ppo"]["value_coefficient"],
-            )
-            if not torch.isfinite(loss):
-                raise FloatingPointError("Non-finite PPO loss")
-            (loss * ((stop - start) / count)).backward()
-            self.backward_seconds += perf_counter() - tick
-            for key, val in stats.items():
-                self.totals[key] = self.totals.get(key, 0) + val.item() * (stop - start)
-            tokens += stop - start
-        return tokens
-
-    def kl(self):
-        return rollout_kl(self.policy, self.episodes, self.encoded, self.device)[0]
-
-    def record_gradient(self, norm):
-        self.gradients.append(norm.item())
-
-    def statistics(self, tokens):
-        return (
-            {k: v / tokens for k, v in self.totals.items()},
-            float(np.mean(self.gradients)),
-            max(self.gradients),
-        )
-
-    def extras(self, optimizer_seconds):
-        return {}
-
-
 def token_minibatches(order, valid_tokens):
     """Partition shuffled recurrent spans without losing or joining decisions."""
-    batch, used = [], 0
-    for episode, start, stop in order:
-        while start < stop:
-            end = min(stop, start + valid_tokens - used)
-            batch.append((episode, start, end))
-            used += end - start
-            start = end
-            if used == valid_tokens:
-                yield batch
-                batch, used = [], 0
-    if batch:
+    for batch, _ in pack_minibatches(order, None, valid_tokens):
         yield batch
 
 
@@ -239,16 +134,10 @@ def update(
     policy.train()
     start_update = perf_counter()
     if _backend is None:
-        if config.get("performance", {}).get("batched_ppo", False):
-            from civ5rl.engine.ppo_fast import BatchedBackend
+        from civ5rl.engine.ppo_fast import BatchedBackend
 
-            backend: RolloutBackend = BatchedBackend(
-                policy, episodes, config, device, monitor
-            )
-        else:
-            backend = ReferenceBackend(policy, episodes, config, device, monitor)
-    else:
-        backend = _backend(policy, episodes, config, device, monitor)
+        _backend = BatchedBackend
+    backend: RolloutBackend = _backend(policy, episodes, config, device, monitor)
     length = config["ppo"]["sequence_length"]
     chunks = [
         (i, start, min(start + length, len(e["chosen"])))

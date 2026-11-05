@@ -5,9 +5,9 @@ from collections import Counter, defaultdict
 import torch
 from torch.nn import functional as F
 
-from civ5rl.core.model import batch_inputs
 from civ5rl.core.observation import ObservationEncoder
 from civ5rl.engine.ppo_fast import prefixes
+from civ5rl.engine.sequence import SequenceBuffer, pack_minibatches
 from civ5sim import Action
 
 
@@ -17,10 +17,10 @@ def decision_indices(row):
         teacher, executed = row["teacher_action"], row["executed_action"]
     else:
         teacher = executed = row["chosen"]
-    if (
-        any(type(i) is not int or not 0 <= i < len(row["actions"]) for i in (teacher, executed))
-        or row["supervised"] != (len(row["actions"]) >= 2)
-    ):
+    if any(
+        type(i) is not int or not 0 <= i < len(row["actions"])
+        for i in (teacher, executed)
+    ) or row["supervised"] != (len(row["actions"]) >= 2):
         raise ValueError("Invalid demonstration indices or CE mask")
     return teacher, executed
 
@@ -36,46 +36,28 @@ def encode_demonstration(episode):
     return encoded
 
 
-class DemonstrationCache:
+class DemonstrationCache(SequenceBuffer):
     def __init__(self, episodes, device):
         self.episodes, self.device = episodes, device
-        self.encoded = [encode_demonstration(ep) for ep in episodes]
+        super().__init__([encode_demonstration(ep) for ep in episodes], device)
         self.masks = [[r["supervised"] for r in ep["decisions"]] for ep in episodes]
 
     def batch(self, spans):
-        encoded = [x for ep, a, b in spans for x in self.encoded[ep][a:b]]
         rows = [r for ep, a, b in spans for r in self.episodes[ep]["decisions"][a:b]]
         labels = {
-            "indices": torch.tensor([decision_indices(r)[0] for r in rows], device=self.device),
+            "indices": torch.tensor(
+                [decision_indices(r)[0] for r in rows], device=self.device
+            ),
             "mask": torch.tensor(
                 [r["supervised"] for r in rows], device=self.device, dtype=torch.bool
             ),
         }
-        return batch_inputs(encoded, self.device), labels, [b - a for _, a, b in spans]
-
-    def chunks(self):
-        return [
-            (i, a, min(a + 128, len(encoded)))
-            for i, encoded in enumerate(self.encoded)
-            for a in range(0, len(encoded), 128)
-        ]
+        return self.gather_inputs(spans), labels, [b - a for _, a, b in spans]
 
 
 def label_minibatches(order, masks, size=1024):
     """Pack labelled decisions; forced states remain inside recurrent fragments."""
-    batch, count = [], 0
-    for episode, start, stop in order:
-        piece = start
-        for j in range(start, stop):
-            count += int(masks[episode][j])
-            if count == size:
-                batch.append((episode, piece, j + 1))
-                yield batch, count
-                batch, count, piece = [], 0, j + 1
-        if piece < stop and any(masks[episode][piece:stop]):
-            batch.append((episode, piece, stop))
-    if count:
-        yield batch, count
+    yield from pack_minibatches(order, masks, size)
 
 
 def ce_sum(logits, labels):

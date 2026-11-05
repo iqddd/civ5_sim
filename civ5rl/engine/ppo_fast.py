@@ -5,8 +5,9 @@ from time import perf_counter
 import numpy as np
 import torch
 
-from civ5rl.core.model import batch_inputs, distribution_stats
+from civ5rl.core.model import distribution_stats
 from civ5rl.engine.ppo import encode_episode, objective, targets
+from civ5rl.engine.sequence import SequenceBuffer
 
 
 def categorical_distance(behavior_log_probs, logits, mask):
@@ -63,15 +64,14 @@ def validate_behavior_replay(
     return None if use_distribution else tolerance
 
 
-class RolloutCache:
+class RolloutCache(SequenceBuffer):
     def __init__(self, episodes, variant, device, *, resident=True):
         self.episodes, self.device = episodes, device
-        self.encoded = [encode_episode(e, variant) for e in episodes]
-        self.offsets = np.cumsum([0, *[len(e) for e in self.encoded]])
+        super().__init__(
+            [encode_episode(e, variant) for e in episodes], device, resident=resident
+        )
         flat = [x for episode in self.encoded for x in episode]
-        self.action_counts = np.asarray([len(x.sources) for x in flat])
         self.resident = resident
-        self.data = batch_inputs(flat, device, non_blocking=True) if resident else None
         advantages = targets(episodes)
         self.labels = {
             "indices": torch.tensor(
@@ -123,35 +123,8 @@ class RolloutCache:
         ) + sum(v.numel() * v.element_size() for v in self.labels.values())
 
     def batch(self, spans):
-        # Spans are independent, internally ordered episode intervals.
-        indices = torch.cat(
-            [
-                torch.arange(
-                    int(self.offsets[ep]) + start,
-                    int(self.offsets[ep]) + stop,
-                    device=self.device,
-                )
-                for ep, start, stop in spans
-            ]
-        )
-        if self.data is None:
-            data = batch_inputs(
-                [x for ep, start, stop in spans for x in self.encoded[ep][start:stop]],
-                self.device,
-                non_blocking=True,
-            )
-        else:
-            data = {k: v.index_select(0, indices) for k, v in self.data.items()}
-            max_actions = max(
-                int(
-                    self.action_counts[
-                        self.offsets[ep] + start : self.offsets[ep] + stop
-                    ].max()
-                )
-                for ep, start, stop in spans
-            )
-            for key in ("sources", "targets", "action_features", "action_mask"):
-                data[key] = data[key][:, :max_actions].contiguous()
+        indices = self.indices(spans)
+        data = self.gather_inputs(spans, indices)
         labels = {k: v.index_select(0, indices) for k, v in self.labels.items()}
         return data, labels, [stop - start for _, start, stop in spans]
 
@@ -243,7 +216,9 @@ def measure_kl(policy, cache, sequences_per_batch=8):
 
 
 class BatchedBackend:
-    def __init__(self, policy, episodes, config, device, monitor=None):
+    def __init__(
+        self, policy, episodes, config, device, monitor=None, *, force_batched=False
+    ):
         self.policy, self.config, self.device, self.monitor = (
             policy,
             config,
@@ -252,11 +227,12 @@ class BatchedBackend:
         )
         options = config.get("performance", {})
         tick = perf_counter()
+        batched = force_batched or options.get("batched_ppo", False)
         self.cache = RolloutCache(
             episodes,
             policy.variant,
             device,
-            resident=options.get("resident_rollout", True),
+            resident=options.get("resident_rollout", True) if batched else False,
         )
         if str(device).startswith("cuda"):
             torch.cuda.synchronize()
@@ -272,7 +248,9 @@ class BatchedBackend:
         self.totals = torch.zeros(len(self.names), device=device)
         self.gradients = []
         self.prefix_seconds = self.backward_seconds = 0.0
-        self.micro_chunks = config["ppo"]["sequences_per_microbatch"]
+        self.micro_chunks = (
+            config["ppo"].get("sequences_per_microbatch", 1) if batched else 1
+        )
 
     def precheck(self):
         if self.monitor:
@@ -285,7 +263,7 @@ class BatchedBackend:
             pre_kl,
             pre_error,
             amp_enabled=self.policy.amp_enabled,
-            numerics=self.config["numerics"],
+            numerics=self.config.get("numerics", {}),
             full_kl=self.replay["full_kl"],
             max_total_variation=self.replay["max_total_variation"],
         )
@@ -369,6 +347,8 @@ def update_fast(
     policy, optimizer, episodes, config, decisions, device, shuffle_rng, monitor=None
 ):
     """Compatibility entry point; use the batched backend regardless of config."""
+    from functools import partial
+
     from civ5rl.engine.ppo import update
 
     return update(
@@ -380,5 +360,5 @@ def update_fast(
         device,
         shuffle_rng,
         monitor,
-        _backend=BatchedBackend,
+        _backend=partial(BatchedBackend, force_batched=True),
     )

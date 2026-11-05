@@ -196,6 +196,108 @@ class RLTests(unittest.TestCase):
             episodes.append(ep)
         return episodes
 
+    def test_resident_sequence_padding_preserves_logits_and_gradients(self):
+        # Global resident padding must not silently alter training on a smaller map.
+        from civ5rl.engine.sequence import SequenceBuffer
+
+        large, small = scenario(), scenario()
+        small["map"] = flat_map(8)
+        small["units"][2]["tile"] = 54
+        small["units"][3]["tile"] = 62
+        encoded = []
+        for spec in (small, large):
+            with Battle(spec) as battle:
+                obs, actions = (
+                    battle.observe(0),
+                    ordered_actions(battle.available_actions()),
+                )
+            item = ObservationEncoder(context(spec)).encode(obs, actions)
+            encoded.append([item, item])
+        local = SequenceBuffer(encoded, "cpu")
+        resident = SequenceBuffer(encoded, "cpu", resident=True)
+        original = Policy("C")
+        copy = deepcopy(original)
+        outputs = []
+        for model, cache in ((original, local), (copy, resident)):
+            logits, values, hidden = model.forward_sequences(
+                cache.gather_inputs([(0, 0, 2)]), [2]
+            )
+            loss = logits.log_softmax(-1)[:, 0].sum() + values.sum()
+            loss.backward()
+            outputs.append((logits.detach(), values.detach(), hidden.detach()))
+        for a, b in zip(*outputs):
+            torch.testing.assert_close(a, b, rtol=3e-5, atol=2e-7)
+        for a, b in zip(original.parameters(), copy.parameters()):
+            if a.grad is not None:
+                torch.testing.assert_close(a.grad, b.grad, rtol=3e-5, atol=2e-7)
+
+    def test_ppo_backend_matches_serial_gradients_and_adam_step(self):
+        # A mismatch here would silently change learning despite successful replay.
+        from civ5rl.engine.ppo import encode_episode
+        from civ5rl.engine.ppo_fast import BatchedBackend
+
+        original = Policy("C")
+        episodes = self._short_rollout(original)
+        spans = [(0, 1, 5), (1, 0, 3), (2, 1, 2)]
+        count = sum(stop - start for _, start, stop in spans)
+        config = deepcopy(self.config)
+        config["ppo"]["sequences_per_microbatch"] = 2
+        config["ppo"]["sequences_per_minibatch"] = 3
+        reference = deepcopy(original)
+        advantages = targets(episodes)
+        encoded = [encode_episode(ep, "C") for ep in episodes]
+        for ep_index, start, stop in spans:
+            ep = episodes[ep_index]
+            hidden = prefix_hidden(reference, encoded[ep_index], start, "cpu")
+            logits, values, _ = reference(
+                batch_inputs(encoded[ep_index][start:stop], "cpu"),
+                hidden,
+                sequence=True,
+            )
+            loss, _ = objective(
+                logits,
+                values,
+                torch.tensor(ep["chosen"][start:stop]),
+                torch.tensor(ep["old_logp"][start:stop]),
+                torch.full((stop - start,), float(ep["result"]["reward"])),
+                torch.tensor(advantages[ep_index][start:stop]),
+                0.02,
+                clip_ratio=config["ppo"]["clip_ratio"],
+                value_coefficient=config["ppo"]["value_coefficient"],
+            )
+            (loss * ((stop - start) / count)).backward()
+        expected_grads = [p.grad.clone() for p in reference.parameters()]
+        adam_options = {
+            "lr": 1e-4,
+            "betas": tuple(config["optimizer"]["betas"]),
+            "eps": config["optimizer"]["eps"],
+            "weight_decay": config["optimizer"]["weight_decay"],
+        }
+        torch.nn.utils.clip_grad_norm_(
+            reference.parameters(),
+            config["ppo"]["max_gradient_norm"],
+            error_if_nonfinite=True,
+        )
+        torch.optim.Adam(reference.parameters(), **adam_options).step()
+        for batched in (False, True):
+            model = deepcopy(original)
+            config["performance"] = {"batched_ppo": batched}
+            backend = BatchedBackend(model, episodes, config, "cpu")
+            backend.precheck()
+            self.assertEqual(backend.backward(spans, count, 0.02), count)
+            for param, expected in zip(model.parameters(), expected_grads):
+                torch.testing.assert_close(param.grad, expected, rtol=3e-4, atol=4e-7)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                config["ppo"]["max_gradient_norm"],
+                error_if_nonfinite=True,
+            )
+            torch.optim.Adam(model.parameters(), **adam_options).step()
+            # Observed maximum residual is 5.96e-8 in both modes; allow 1e-7
+            # for float32 reduction-order differences across all weights.
+            for param, expected in zip(model.parameters(), reference.parameters()):
+                torch.testing.assert_close(param, expected, rtol=0, atol=1e-7)
+
     def test_batched_gru_has_no_cross_episode_or_padding_effect(self):
         from civ5rl.ppo_fast import RolloutCache, prefixes
 

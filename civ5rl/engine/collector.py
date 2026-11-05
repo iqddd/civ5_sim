@@ -3,6 +3,7 @@
 import multiprocessing as mp
 import random
 import traceback
+from dataclasses import dataclass
 from multiprocessing.connection import wait
 from time import perf_counter
 
@@ -73,6 +74,8 @@ def _worker(connection, profile_path=None, shared_descriptor=None):
                 if shared is not None:
                     for i, action in payload:
                         encoders[i].remember_action(action, previous[i]["observation"])
+            else:
+                raise ValueError(f"Unknown worker command: {kind!r}")
             states = []
             encoding_seconds = 0.0
             for i, env in enumerate(envs):
@@ -164,6 +167,18 @@ class EpisodeBuilder:
         return self.episode
 
 
+@dataclass
+class _WaveState:
+    builders: list
+    encoders: list
+    rngs: list
+    hidden: object
+    completed_at: list
+    states: list
+    pending: set
+    decisions: int = 0
+
+
 class Collector:
     def __init__(self, config, factory, device, error_dir):
         from civ5rl.provenance.validation import validate_config
@@ -239,7 +254,8 @@ class Collector:
             raise RuntimeError(payload["traceback"])
         return payload
 
-    def _poll_workers(self, pending, states, ready_mode, times):
+    def _poll_workers(self, wave, ready_mode, times):
+        pending, states = wave.pending, wave.states
         start = perf_counter()
         if ready_mode:
             connections = [self.workers[w][0] for w in sorted(pending)]
@@ -262,10 +278,10 @@ class Collector:
         times["worker_wait_seconds"] += perf_counter() - start
         return ready, refreshed
 
-    def _infer_live(
-        self, policy, live, states, encoders, hidden, worker_encoding, times
-    ):
+    def _infer_live(self, policy, live, wave, worker_encoding, times):
         import torch
+
+        states, encoders, hidden = wave.states, wave.encoders, wave.hidden
 
         from civ5rl.core.model import batch_inputs
 
@@ -310,19 +326,17 @@ class Collector:
     def _dispatch_actions(
         self,
         ready,
-        pending,
         live,
-        states,
-        builders,
+        wave,
         encoded,
         log_probs,
         values,
         old_hidden,
         h,
-        rngs,
         worker_encoding,
-        encoders,
     ):
+        states, builders, encoders = wave.states, wave.builders, wave.encoders
+        pending, rngs = wave.pending, wave.rngs
         wave_decisions = 0
         dispatch = [[] for _ in self.workers]
         for j, i in enumerate(live):
@@ -446,49 +460,44 @@ class Collector:
                 raise ValueError("Evaluation cases must fill a complete wave")
             if fixed_specs is None:
                 self.factory.validate_specs(specs)
-            builders, encoders, rngs, hidden = self._start_wave(
-                specs, policy, reuse_encoded, worker_encoding
+            wave = _WaveState(
+                *self._start_wave(specs, policy, reuse_encoded, worker_encoding),
+                completed_at=[None] * num_envs,
+                states=[None] * num_envs,
+                pending=set(range(len(self.workers))),
             )
-            completed_at = [None] * num_envs
-            states = [None] * num_envs
-            pending = set(range(len(self.workers)))
-            wave_decisions = 0
-            while pending:
-                ready, refreshed = self._poll_workers(
-                    pending, states, ready_mode, times
-                )
-                live = [i for i in refreshed if not states[i]["done"]]
+            while wave.pending:
+                ready, refreshed = self._poll_workers(wave, ready_mode, times)
+                live = [i for i in refreshed if not wave.states[i]["done"]]
                 now = perf_counter()
                 for i in refreshed:
-                    state = states[i]
-                    if state["done"] and completed_at[i] is None:
-                        builders[i].finalize(state)
-                        completed_at[i] = now
+                    state = wave.states[i]
+                    if state["done"] and wave.completed_at[i] is None:
+                        wave.builders[i].finalize(state)
+                        wave.completed_at[i] = now
                 if not live:
                     continue
                 encoded, log_probs, values, old_hidden, h = self._infer_live(
-                    policy, live, states, encoders, hidden, worker_encoding, times
+                    policy, live, wave, worker_encoding, times
                 )
-                wave_decisions += self._dispatch_actions(
+                wave.decisions += self._dispatch_actions(
                     ready,
-                    pending,
                     live,
-                    states,
-                    builders,
+                    wave,
                     encoded,
                     log_probs,
                     values,
                     old_hidden,
                     h,
-                    rngs,
                     worker_encoding,
-                    encoders,
                 )
-            times["idle_slot_seconds"] += sum(perf_counter() - t for t in completed_at)
-            if wave_decisions == 0:
+            times["idle_slot_seconds"] += sum(
+                perf_counter() - t for t in wave.completed_at
+            )
+            if wave.decisions == 0:
                 raise RuntimeError("Corpus wave produced no learner decisions")
-            episodes.extend(builder.episode for builder in builders)
-            decisions += wave_decisions
+            episodes.extend(builder.episode for builder in wave.builders)
+            decisions += wave.decisions
             next_episode += num_envs
             fixed_offset += num_envs
             if monitor:

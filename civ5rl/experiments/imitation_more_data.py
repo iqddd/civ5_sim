@@ -1,13 +1,9 @@
 """Fixed expanded CP corpus, early throughput estimate and bounded BC training."""
 
-import hashlib
 import json
 import random
 import shutil
-import tempfile
-import zipfile
 from collections import Counter
-from dataclasses import asdict
 from time import perf_counter
 
 import numpy as np
@@ -19,18 +15,24 @@ from civ5rl.engine.imitation import (
     label_minibatches,
     teacher_metrics,
 )
-from civ5rl.engine.imitation_continuation import (
+from civ5rl.engine.imitation_performance import (
+    ResidentDemonstrations,
+    backward_minibatch_fast,
+)
+from civ5rl.engine.resources import ResourceMonitor, analyze_telemetry
+from civ5rl.engine.training import FrozenParamsCheck, bc_optimizer_step
+from civ5rl.experiments.evaluation import (
+    compare_paired_directories,
+    run_validation_cases,
+    verify_replay,
+)
+from civ5rl.experiments.imitation_helpers import (
     CompilationClock,
     assert_equal,
     collect_summary,
     isolated_rng,
     update_selection,
 )
-from civ5rl.engine.imitation_performance import (
-    ResidentDemonstrations,
-    backward_minibatch_fast,
-)
-from civ5rl.engine.resources import ResourceMonitor
 from civ5rl.protocols.imitation import (
     file_hash,
     load_episode,
@@ -39,9 +41,15 @@ from civ5rl.protocols.imitation import (
     task_for,
     validate_case,
 )
+from civ5rl.protocols.imitation_invariants import (
+    MORE_DATA_BUDGET,
+    MORE_DATA_CHANGES,
+    require_changes,
+    require_values,
+)
 from civ5rl.provenance import checkpoint
 from civ5rl.provenance.common import ROOT, configure, read_json, write_json
-from civ5sim import Battle
+from civ5rl.provenance.lineage import current_parent_lineage, verify_existing_run
 from civ5sim.engine import digest
 
 
@@ -49,24 +57,12 @@ def initialize(config, out):
     settings = config["more_data"]
     parent, data = ROOT / settings["parent_run"], ROOT / settings["data_run"]
     original = read_json(parent / "resolved-config.json")
-    differences = {
-        k for k in config.keys() | original.keys() if config.get(k) != original.get(k)
-    }
-    if differences != {
-        "kind",
-        "output",
-        "epochs",
-        "training_labels",
-        "continuation",
+    require_changes(config, original, MORE_DATA_CHANGES)
+    require_values(
+        config,
+        MORE_DATA_BUDGET,
         "more_data",
-    }:
-        raise ValueError(f"Unexpected expanded-data config changes: {differences}")
-    if (
-        config["epochs"] != 10
-        or config["training_labels"] != 100000
-        or config["training_seconds"] != 1800
-    ):
-        raise ValueError("Expanded-data budget differs from fixed protocol")
+    )
     source = parent / settings["parent_checkpoint"]
     if (
         file_hash(source) != settings["parent_checkpoint_sha256"]
@@ -115,15 +111,6 @@ def initialize(config, out):
         for k, v in planned["inputs"]["training"].items()
     ):
         raise ValueError("Parent demonstrations changed in manifest")
-    previous = read_json(parent / "passport.json")
-    with zipfile.ZipFile(parent / "sources.zip") as archive:
-        if any(
-            hashlib.sha256(archive.read(name)).hexdigest() != sha
-            for name, sha in previous["source_hashes"].items()
-        ):
-            raise ValueError("Parent source archive hash mismatch")
-    with tempfile.TemporaryDirectory() as tmp:
-        current = checkpoint.passport(tmp, config, manifest)
     allowed = {
         "tools/run_cp_imitation.py",
         "civ5rl/engine/imitation.py",
@@ -131,23 +118,11 @@ def initialize(config, out):
         "civ5rl/engine/imitation_more_data.py",
         "configs/rl-cp-imitation-more-data.json",
     }
-    changes = sorted(
-        p
-        for p in previous["source_hashes"].keys() | current["source_hashes"].keys()
-        if not p.lower().endswith(".md")
-        and previous["source_hashes"].get(p) != current["source_hashes"].get(p)
+    current, changes = current_parent_lineage(
+        parent, config, manifest, allowed, same_corpus=False
     )
-    if set(changes) - allowed:
-        raise ValueError(f"Unexpected executable changes: {changes}")
-    for key in previous.keys() - {"source_hashes", "corpus_hash", "git_commit"}:
-        if previous[key] != current[key]:
-            raise ValueError(f"Parent environment differs: {key}")
     if (out / "passport.json").exists():
-        identity = read_json(out / "passport.json")
-        if read_json(
-            out / "resolved-config.json"
-        ) != config or not checkpoint.same_execution_identity(identity, current):
-            raise ValueError("Expanded-data execution identity mismatch")
+        identity = verify_existing_run(out, config, current)
     else:
         identity = checkpoint.passport(out, config, manifest)
         write_json(out / "manifest.json", manifest)
@@ -183,7 +158,7 @@ def freeze_dataset(config, out, manifest):
 
 
 def collect(config, out, parent, data, manifest, workers):
-    from tools.run_cp_imitation import pool
+    from civ5rl.experiments.imitation_helpers import pool
 
     if (out / "collection.json").exists():
         raise ValueError(
@@ -320,12 +295,7 @@ def fixed_subset(episodes, manifest, config, out):
 def optimizer_step(policy, optimizer, cache, spans, count, backward, clock):
     torch.cuda.synchronize()
     started = perf_counter()
-    optimizer.zero_grad(set_to_none=True)
-    ce = backward(policy, cache, spans, count)
-    norm = torch.nn.utils.clip_grad_norm_(
-        policy.parameters(), 0.5, error_if_nonfinite=True
-    )
-    optimizer.step()
+    ce, norm = bc_optimizer_step(policy, optimizer, backward, cache, spans, count)
     torch.cuda.synchronize()
     stopped = perf_counter()
     compilation = clock.seconds(started, stopped)
@@ -483,9 +453,8 @@ def compare_math(policy, optimizer, saved, reference, candidate, batch):
 
 
 def train(config, out, parent, data, manifest, identity):
-    from torch._dynamo.callback import callback_handler
 
-    from tools.run_cp_imitation import adam, load_policy
+    from civ5rl.experiments.imitation_helpers import adam, load_policy
 
     if read_json(out / "collection.json")["status"] != "complete":
         raise ValueError("Corpus target not reached; refusing smaller experiment")
@@ -517,13 +486,11 @@ def train(config, out, parent, data, manifest, identity):
     optimizer = adam(policy, config, "cuda")
     optimizer.load_state_dict(saved["optimizer"])
     clock = CompilationClock()
-    callback_handler.register_start_callback(clock.start)
-    callback_handler.register_end_callback(clock.end)
     order = cache.chunks()
     random.Random(17).shuffle(order)
     batches = list(label_minibatches(order, cache.masks))
     preparation_seconds = perf_counter() - started
-    with ResourceMonitor(out / "training-telemetry") as monitor:
+    with clock, ResourceMonitor(out / "training-telemetry") as monitor:
         clock.monitor = monitor
         chosen_cache, backward = preflight(
             policy, optimizer, saved, cache, batches, config, out, clock, monitor
@@ -532,9 +499,7 @@ def train(config, out, parent, data, manifest, identity):
         shuffle = random.Random(17)
         assert_equal(policy.state_dict(), saved["model"])
         assert_equal(optimizer.state_dict(), saved["optimizer"])
-        value_before = {
-            k: v.detach().clone() for k, v in policy.value.state_dict().items()
-        }
+        frozen_value = FrozenParamsCheck(policy.value)
         write_json(
             out / "initialization-check.json",
             {
@@ -638,31 +603,14 @@ def train(config, out, parent, data, manifest, identity):
                 steps += 1
                 elapsed += row["optimizer_seconds"]
                 if elapsed >= 600 and utilization_review is None:
-                    recent = [
-                        json.loads(line)
-                        for line in (out / "training-telemetry/resources.jsonl")
-                        .read_text()
-                        .splitlines()
-                    ]
-                    recent = [
-                        r
-                        for r in recent
-                        if r["phase"] == "iterative_training"
-                        and r["gpu_core_load_percent"] is not None
-                    ][-60:]
-                    average = (
-                        float(np.mean([r["gpu_core_load_percent"] for r in recent]))
-                        if recent
-                        else None
+                    analysis = analyze_telemetry(
+                        out / "training-telemetry/resources.jsonl"
                     )
+                    windows = analysis["windows"]
+                    average = windows[-1]["core_average"] if windows else None
                     utilization_review = {
                         "optimizer_seconds": elapsed,
-                        "last_60_active_samples_core_average": average,
-                        "CPU_one_core_percent": float(
-                            np.mean([r["cpu_tree_percent"] for r in recent])
-                        )
-                        if recent
-                        else None,
+                        "last_60_seconds_core_average": average,
                         "backend": read_json(out / "performance-preflight.json")[
                             "selected"
                         ],
@@ -698,11 +646,7 @@ def train(config, out, parent, data, manifest, identity):
                     "optimizer_steps": records,
                 }
             )
-            if any(
-                not torch.equal(value_before[k], v)
-                for k, v in policy.value.state_dict().items()
-            ):
-                raise RuntimeError("Frozen value head changed")
+            frozen_value.verify()
             monitor.mark("checkpoint", epoch=epoch)
             if not complete:
                 checkpoint.save(
@@ -771,12 +715,9 @@ def train(config, out, parent, data, manifest, identity):
         result = read_json(out / "training.json")
         result["best_checkpoint_sha256"] = file_hash(out / "checkpoints/best.pt")
         write_json(out / "training.json", result)
-    callback_handler.remove_start_callback(clock.start)
-    callback_handler.remove_end_callback(clock.end)
 
 
 def evaluate(config, out, parent, data, manifest, workers):
-    from tools.run_cp_imitation import pool
 
     training = read_json(out / "training.json")
     if (
@@ -792,37 +733,19 @@ def evaluate(config, out, parent, data, manifest, workers):
         if training["best_epoch"] == 0:
             runs[mode] = {**original, "new_matches": 0}
             continue
-        jobs = []
         directories = {
             enemy: out / "evaluation" / mode / enemy for enemy in ("cp", "greedy")
         }
-        for case0 in manifest["base"]["validation_cases"]:
-            for side in (0, 1):
-                case = {**case0, "learner_side": side}
-                case["case_hash"] = digest(
-                    {k: v for k, v in case.items() if k != "case_hash"}
-                )
-                for enemy, directory in directories.items():
-                    jobs.append(
-                        (
-                            config,
-                            manifest["base"],
-                            case,
-                            str(directory / f"case-{case['case_id']:03}-side-{side}"),
-                            {
-                                "checkpoint": str(
-                                    (out / "checkpoints/best.pt").resolve()
-                                ),
-                                "mode": mode,
-                            },
-                            enemy,
-                            "cpu",
-                        )
-                    )
-        with pool(workers) as executor:
-            list(executor.map(match_task, jobs))
+        new_matches = run_validation_cases(
+            config,
+            manifest["base"],
+            (out / "checkpoints/best.pt").resolve(),
+            mode,
+            directories,
+            workers,
+        )
         runs[mode] = {
-            "new_matches": len(jobs),
+            "new_matches": new_matches,
             "mode": mode,
             "checkpoint_sha256": file_hash(out / "checkpoints/best.pt"),
             "directories": {
@@ -1070,86 +993,30 @@ def report(config, out, parent, data, manifest):
     for mode, result in evaluation["runs"].items():
         original = inherited["runs"][inherited["labels"]["final_" + mode]]
         for enemy, directory in result["directories"].items():
-
-            def rows(path):
-                answer = {}
-                for p in sorted((ROOT / path).glob("*/metrics.json")):
-                    metric = read_json(p)
-                    case = read_json(p.parent / "case.json")
-                    if metric["status"] != "completed":
-                        raise ValueError("Technical error in evaluation")
-                    for filename in ("replay.json", "final.json", "result.json"):
-                        if not (p.parent / filename).exists():
-                            raise ValueError("Missing evaluation artifact")
-                    answer[(case["parent_world"], case["case_id"], metric["side"])] = (
-                        metric,
-                        case,
-                        p.parent,
-                    )
-                if len(answer) != 64:
-                    raise ValueError("Incomplete or duplicate evaluation cases")
-                return answer
-
-            actual, previous = rows(directory), rows(original["directories"][enemy])
-            if actual.keys() != previous.keys():
-                raise ValueError("Unpaired validation cases")
-            win = lambda r: float(r[0]["winner"] == r[0]["side"])
-            worlds = sorted({key[0] for key in actual})
-            diffs = np.asarray(
-                [
-                    np.mean(
-                        [
-                            win(actual[k]) - win(previous[k])
-                            for k in sorted(actual)
-                            if k[0] == world
-                        ]
-                    )
-                    for world in worlds
-                ]
+            bootstrap, slices, _, actual = compare_paired_directories(
+                original["directories"][enemy],
+                directory,
+                samples=config["more_data"]["bootstrap_samples"],
+                seed=config["more_data"]["bootstrap_seed"],
+                require_artifacts=True,
             )
-            if len(worlds) != 16:
-                raise ValueError("Wrong bootstrap cluster count")
-            rng = np.random.default_rng(config["more_data"]["bootstrap_seed"])
-            samples = diffs[
-                rng.integers(0, 16, (config["more_data"]["bootstrap_samples"], 16))
-            ].mean(1)
-            low, high = np.quantile(samples, [0.025, 0.975])
             a, b = (
                 collect_summary(ROOT / directory),
                 collect_summary(ROOT / original["directories"][enemy]),
             )
             key = mode + "-" + enemy
             detail = {
-                "bootstrap_clusters": 16,
-                "bootstrap_samples": 10000,
-                "bootstrap_seed": 20261103,
-                "delta": float(diffs.mean()),
-                "CI95": [float(low), float(high)],
+                **bootstrap,
                 "baseline": b,
                 "candidate": a,
                 "slices": {},
             }
-            for slice_name, predicate in (
-                ("contact", lambda m, c: c["placement"] == "contact"),
-                ("separated", lambda m, c: c["placement"] == "separated"),
-                ("side0", lambda m, c: m["side"] == 0),
-                ("side1", lambda m, c: m["side"] == 1),
-            ):
-                selected = [m for m, c, p in actual.values() if predicate(m, c)]
-                outcomes = Counter(
-                    "D"
-                    if m["winner"] is None
-                    else "W"
-                    if m["winner"] == m["side"]
-                    else "L"
-                    for m in selected
-                )
-                detail["slices"][slice_name] = {
-                    name: outcomes[name] for name in ("W", "D", "L")
-                }
+            detail["slices"] = {
+                name: value["outcomes"] for name, value in slices.items()
+            }
             comparisons[key] = detail
             lines.append(
-                f"| {mode} | {enemy} | {b['W']}/{b['D']}/{b['L']} | {a['W']}/{a['D']}/{a['L']} | {100 * a['win_rate']:.3f}% | {100 * diffs.mean():+.3f} | [{100 * low:+.3f}; {100 * high:+.3f}] |"
+                f"| {mode} | {enemy} | {b['W']}/{b['D']}/{b['L']} | {a['W']}/{a['D']}/{a['L']} | {100 * a['win_rate']:.3f}% | {100 * bootstrap['delta']:+.3f} | [{100 * bootstrap['CI95'][0]:+.3f}; {100 * bootstrap['CI95'][1]:+.3f}] |"
             )
             if result["new_matches"]:
                 for desired in ("W", "D", "L"):
@@ -1174,22 +1041,14 @@ def report(config, out, parent, data, manifest):
                         )
                         continue
                     m, case, path = selected
-                    replay = read_json(path / "replay.json")
-                    with Battle(replay["initial"]) as battle:
-                        for step in replay["steps"]:
-                            if (
-                                asdict(battle.step(step["action"])) != step["result"]
-                                or digest(battle.snapshot()) != step["state_sha256"]
-                            ):
-                                raise ValueError("New replay diverged")
-                        assert_equal(battle.snapshot(), read_json(path / "final.json"))
+                    replay_check = verify_replay(path)
                     checks.append(
                         {
                             "group": key,
                             "outcome": desired,
                             "present": True,
                             "path": path.relative_to(ROOT).as_posix(),
-                            "commands": len(replay["steps"]),
+                            "commands": replay_check["commands"],
                             "all_state_hashes_equal": True,
                         }
                     )
@@ -1229,45 +1088,19 @@ def report(config, out, parent, data, manifest):
         "",
         f"Новых полных реплеев проверено: {sum(r['present'] for r in checks)}; отсутствующие исходы перечислены явно в `replay-verification.json`. Проверялись результаты всех команд, промежуточные state hashes и конечные состояния.",
     ]
-    samples = [
-        json.loads(line)
-        for line in (out / "training-telemetry/resources.jsonl")
-        .read_text()
-        .splitlines()
-    ]
-    active = [r for r in samples if r["phase"] == "iterative_training"]
-    for field in (
-        "gpu_core_load_percent",
-        "gpu_memory_controller_load_percent",
-        "vram_used_bytes",
-        "gpu_power_percent_tdp",
-        "cpu_tree_percent",
-        "ram_tree_rss_bytes",
-    ):
-        values = [r[field] for r in active if r[field] is not None]
-        if values:
-            scale = 2**30 if field.endswith("bytes") else 1
-            lines.append(
-                f"- {field}: mean={sum(values) / len(values) / scale:.3f}, max={max(values) / scale:.3f}"
-                + (" GiB" if scale > 1 else "%")
-            )
-    windows = [
-        {
-            "end_elapsed_seconds": active[i]["elapsed_seconds"],
-            "mean_core": float(
-                np.mean([r["gpu_core_load_percent"] for r in active[i - 59 : i + 1]])
-            ),
-        }
-        for i in range(59, len(active))
-        if all(r["gpu_core_load_percent"] is not None for r in active[i - 59 : i + 1])
-    ]
+    telemetry_analysis = analyze_telemetry(out / "training-telemetry/resources.jsonl")
+    windows = telemetry_analysis["windows"]
+    for field, stats in telemetry_analysis["metrics"].items():
+        lines.append(
+            f"- {field}: mean={stats['mean']:.3f}, max={stats['max']:.3f} {stats['unit']}"
+        )
     write_json(out / "gpu-active-windows.json", windows)
     lines += [
         "",
         (
             "Итеративное обучение короче 10 минут: требование GPU Core Load ≥80% не применяется."
             if training["new_optimizer_seconds"] < 600
-            else "Итеративная часть ≥10 минут. Результат короткого profiler-разбора и выбора backend — performance-preflight.json; GPU 60-active-sample averages — gpu-active-windows.json. Сохранённые условия, CPU-сборка/синхронизации и small spatial blocks ограничивают загрузку; при продолжении ниже 80% это явное ограничение выбранного проверенного backend, не заявление о достижении целевого процента."
+            else "Итеративная часть ≥10 минут. Результат короткого profiler-разбора и выбора backend — performance-preflight.json; GPU непрерывные 60-секундные окна — gpu-active-windows.json. Сохранённые условия, CPU-сборка/синхронизации и small spatial blocks ограничивают загрузку; при продолжении ниже 80% это явное ограничение выбранного проверенного backend, не заявление о достижении целевого процента."
         ),
         "",
         "Источник GPU-метрик — NVML, не WDDM D3D Usage. GPU whole-device; CPU tree 100% = одно логическое ядро. Подготовка, compilation, offline metrics, throughput probe и performance investigation размечены отдельно и исключены из активных GPU averages.",

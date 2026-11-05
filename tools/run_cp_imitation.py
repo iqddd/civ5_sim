@@ -2,12 +2,10 @@
 
 import argparse
 import json
-import multiprocessing as mp
 import os
 import random
 import sys
 import tempfile
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from time import perf_counter
 
@@ -15,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
+from civ5rl.engine.training import FrozenParamsCheck, bc_optimizer_step
+from civ5rl.experiments.imitation_helpers import adam, demonstrations, load_policy, pool
 from civ5rl.protocols.imitation import (
     file_hash,
     load_episode,
@@ -22,7 +22,6 @@ from civ5rl.protocols.imitation import (
     match_task,
     prepare_manifest,
     task_for,
-    worker_setup,
 )
 from civ5rl.provenance.common import read_json, write_json
 from civ5sim.engine import digest
@@ -72,58 +71,6 @@ def initialize(config, out):
     if initial["variant"] != "C" or initial["state"]["epoch"] != 0:
         raise ValueError("Unexpected initial BC checkpoint")
     return manifest, identity
-
-
-def adam(policy, config, device):
-    import torch
-
-    values = dict(config["optimizer"])
-    values["betas"] = tuple(values["betas"])
-    return torch.optim.Adam(
-        [p for p in policy.parameters() if p.requires_grad],
-        **values,
-        fused=str(device).startswith("cuda"),
-    )
-
-
-def load_policy(config, path, device):
-    import torch
-
-    from civ5rl.core.model import Policy
-
-    saved = torch.load(path, weights_only=False, map_location="cpu")
-    policy = Policy("C").to(device)
-    policy.load_state_dict(saved["model"])
-    policy.enable_amp(str(device).startswith("cuda"), spatial_batch_size=32)
-    if config["performance"].get("inverse_routing", False):
-        policy.enable_inverse_routing()
-    if config["performance"].get("optimized_routing", False):
-        policy.enable_inverse_routing()
-        policy.enable_action_routing()
-        policy.enable_maximum_routing()
-    if str(device).startswith("cuda") and config["performance"]["compile"]:
-        policy.enable_compile(
-            spatial_mode=config["performance"].get("spatial_compile_mode")
-        )
-    for parameter in policy.value.parameters():
-        parameter.requires_grad_(False)
-    if str(device).startswith("cuda"):
-        if config["performance"].get("coalesced_spatial", False):
-            policy.enable_coalesced_spatial()
-        policy.coalesced_accumulation = config["performance"].get("coalesced_accumulation", False)
-        if config["performance"].get("recurrent_cuda_graphs", False):
-            policy.enable_recurrent_graphs(
-                max_shapes=config["performance"].get("recurrent_graph_max_shapes", 64)
-            )
-    return policy
-
-
-def pool(workers):
-    return ProcessPoolExecutor(
-        max_workers=workers,
-        mp_context=mp.get_context("spawn"),
-        initializer=worker_setup,
-    )
 
 
 def benchmark(config, manifest, out, workers):
@@ -281,30 +228,6 @@ def collect(config, manifest, out, workers):
     return result
 
 
-def demonstrations(config, manifest, out, split):
-    episodes = []
-    files = {}
-    for path in sorted((out / "data" / split).glob("match-*/demonstration.json.gz")):
-        case = read_json(path.parent / "case.json")
-        metrics = read_json(path.parent / "metrics.json")
-        if case != make_case(config, manifest, split, case["case_id"]):
-            raise ValueError("Untrusted demonstration case")
-        if (
-            metrics["status"] != "completed"
-            or file_hash(path) != metrics["demonstration_sha256"]
-        ):
-            raise ValueError("Unfinished/corrupted demonstration")
-        episode = load_episode(path)
-        if (
-            episode["parent_world"] not in manifest["worlds"][split]
-            or episode["split"] != split
-        ):
-            raise ValueError("Demonstration world split leakage")
-        episodes.append(episode)
-        files[path.relative_to(out).as_posix()] = metrics["demonstration_sha256"]
-    return episodes, files
-
-
 def train(config, manifest, identity, out, device):
     import torch
 
@@ -341,7 +264,7 @@ def train(config, manifest, identity, out, device):
     )
     policy = load_policy(config, out / "checkpoints/initial.pt", device)
     optimizer = adam(policy, config, device)
-    value_before = {k: v.detach().clone() for k, v in policy.value.state_dict().items()}
+    frozen_value = FrozenParamsCheck(policy.value)
     train_cache, holdout_cache = (
         DemonstrationCache(training, device),
         DemonstrationCache(holdout, device),
@@ -364,12 +287,15 @@ def train(config, manifest, identity, out, device):
                     completed = False
                     break
                 start = perf_counter()
-                optimizer.zero_grad(set_to_none=True)
-                ce = backward_minibatch(policy, train_cache, spans, count)
-                norm = torch.nn.utils.clip_grad_norm_(
-                    policy.parameters(), 0.5, error_if_nonfinite=True
+                ce, norm = bc_optimizer_step(
+                    policy,
+                    optimizer,
+                    backward_minibatch,
+                    train_cache,
+                    spans,
+                    count,
+                    max_gradient_norm=config["max_gradient_norm"],
                 )
-                optimizer.step()
                 if device.startswith("cuda"):
                     torch.cuda.synchronize()
                 elapsed += perf_counter() - start
@@ -385,11 +311,7 @@ def train(config, manifest, identity, out, device):
                         "seconds": perf_counter() - start,
                     }
                 )
-            if any(
-                not torch.equal(v, value_before[k])
-                for k, v in policy.value.state_dict().items()
-            ):
-                raise RuntimeError("Frozen value head changed")
+            frozen_value.verify()
             row = {
                 "epoch": epoch,
                 "completed": completed,
@@ -476,7 +398,7 @@ def evaluate(config, manifest, out, workers, device):
 
 
 def report(config, out):
-    from tools.report_cp_imitation import report as render
+    from civ5rl.experiments.report_cp_imitation import report as render
 
     render(config, out)
 
@@ -485,7 +407,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "phase",
-        choices=("prepare", "benchmark", "collect", "train", "evaluate", "report", "run"),
+        choices=(
+            "prepare",
+            "benchmark",
+            "collect",
+            "train",
+            "evaluate",
+            "report",
+            "run",
+        ),
     )
     parser.add_argument("--config", default="configs/rl-cp-imitation.json")
     parser.add_argument("--out")
@@ -499,19 +429,19 @@ def main():
     if workers < 1:
         raise ValueError("workers must be positive")
     if config["kind"] == "rl01.cp_imitation_own_states":
-        from civ5rl.engine.imitation_own_states import run
+        from civ5rl.experiments.imitation_own_states import run
 
         run(args.phase, config, out, workers, args.device, args.cycle)
         return
     if args.phase == "run" or args.cycle is not None:
         raise ValueError("run/--cycle are supported only for the own-state protocol")
     if config["kind"] == "rl01.cp_imitation_more_data":
-        from civ5rl.engine.imitation_more_data import run
+        from civ5rl.experiments.imitation_more_data import run
 
         run(args.phase, config, out, workers, args.device)
         return
     if config["kind"] == "rl01.cp_imitation_continuation":
-        from civ5rl.engine.imitation_continuation import run
+        from civ5rl.experiments.imitation_continuation import run
 
         run(args.phase, config, out, workers, args.device)
         return

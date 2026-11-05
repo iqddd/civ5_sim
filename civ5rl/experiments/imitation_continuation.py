@@ -1,14 +1,8 @@
 """Bounded, explicitly parented continuation of the fixed CP imitation experiment."""
 
-import hashlib
 import json
 import random
 import shutil
-import tempfile
-import zipfile
-from collections import Counter
-from contextlib import contextmanager
-from dataclasses import asdict
 from pathlib import Path
 from time import perf_counter
 
@@ -21,84 +15,35 @@ from civ5rl.engine.imitation import (
     label_minibatches,
     teacher_metrics,
 )
-from civ5rl.engine.resources import ResourceMonitor
-from civ5rl.protocols.imitation import file_hash, match_task, prepare_manifest
+from civ5rl.engine.resources import ResourceMonitor, analyze_telemetry
+from civ5rl.engine.training import FrozenParamsCheck, bc_optimizer_step
+from civ5rl.experiments.evaluation import run_validation_cases, verify_replay
+from civ5rl.experiments.imitation_helpers import (
+    CompilationClock,
+    assert_equal,
+    collect_summary,
+    isolated_rng,
+    restore_rng,
+    update_selection,
+)
+from civ5rl.protocols.imitation import file_hash, prepare_manifest
+from civ5rl.protocols.imitation_invariants import (
+    CONTINUATION_BUDGET,
+    CONTINUATION_CHANGES,
+    require_changes,
+    require_values,
+)
 from civ5rl.provenance import checkpoint
 from civ5rl.provenance.common import ROOT, read_json, write_json
-from civ5sim import Battle
-from civ5sim.engine import digest
-
-
-def update_selection(state, epoch, ce, settings):
-    """Best uses actual CE; the significant-improvement threshold only stops training."""
-    result = dict(state)
-    if ce < result["best_ce"]:
-        result.update(best_ce=ce, best_epoch=epoch)
-    if result["anchor_ce"] - ce >= settings["plateau_min_delta"]:
-        result.update(anchor_ce=ce, plateau_count=0)
-    else:
-        result["plateau_count"] += 1
-    result["plateau"] = (
-        epoch >= settings["plateau_min_epoch"]
-        and result["plateau_count"] >= settings["plateau_patience"]
-    )
-    return result
-
-
-def restore_rng(saved, shuffle):
-    random.setstate(saved["python_rng"])
-    np.random.set_state(saved["numpy_rng"])
-    torch.set_rng_state(saved["torch_rng"].cpu())
-    torch.cuda.set_rng_state_all([v.cpu() for v in saved["cuda_rng"]])
-    shuffle.setstate(saved["shuffle_rng"])
-
-
-@contextmanager
-def isolated_rng(shuffle):
-    state = {
-        "python_rng": random.getstate(),
-        "numpy_rng": np.random.get_state(),
-        "torch_rng": torch.get_rng_state(),
-        "cuda_rng": torch.cuda.get_rng_state_all(),
-        "shuffle_rng": shuffle.getstate(),
-    }
-    try:
-        yield
-    finally:
-        restore_rng(state, shuffle)
-
-
-def assert_equal(left, right):
-    """Exact restored parameters/moments/RNG, including optimizer parameter groups."""
-    if isinstance(left, torch.Tensor):
-        assert torch.equal(left.detach().cpu(), right.detach().cpu())
-    elif isinstance(left, np.ndarray):
-        assert np.array_equal(left, right)
-    elif isinstance(left, dict):
-        assert left.keys() == right.keys()
-        for key in left:
-            assert_equal(left[key], right[key])
-    elif isinstance(left, (list, tuple)):
-        assert len(left) == len(right)
-        for a, b in zip(left, right):
-            assert_equal(a, b)
-    else:
-        assert left == right
+from civ5rl.provenance.lineage import current_parent_lineage, verify_existing_run
 
 
 def initialize(config, out):
     settings = config["continuation"]
     parent = ROOT / settings["parent_run"]
     parent_config = read_json(parent / "resolved-config.json")
-    differences = {
-        k
-        for k in set(config) | set(parent_config)
-        if config.get(k) != parent_config.get(k)
-    }
-    if differences != {"kind", "output", "epochs", "checkpoint_rule", "continuation"}:
-        raise ValueError(f"Unexpected continuation config changes: {differences}")
-    if config["epochs"] != 100 or config["training_seconds"] != 1800:
-        raise ValueError("Continuation budget differs from agreed protocol")
+    require_changes(config, parent_config, CONTINUATION_CHANGES)
+    require_values(config, CONTINUATION_BUDGET, "continuation")
     path = parent / settings["parent_checkpoint"]
     if file_hash(path) != settings["parent_checkpoint_sha256"]:
         raise ValueError("Parent checkpoint hash mismatch")
@@ -110,36 +55,17 @@ def initialize(config, out):
     manifest = prepare_manifest(config)
     if manifest != read_json(parent / "manifest.json"):
         raise ValueError("Continuation corpus differs from parent")
-    previous = read_json(parent / "passport.json")
-    with zipfile.ZipFile(parent / "sources.zip") as archive:
-        for name, expected in previous["source_hashes"].items():
-            if hashlib.sha256(archive.read(name)).hexdigest() != expected:
-                raise ValueError(f"Corrupted parent source archive: {name}")
-    with tempfile.TemporaryDirectory() as tmp:
-        current = checkpoint.passport(tmp, config, manifest)
     allowed = {
         "tools/run_cp_imitation.py",
         "civ5rl/protocols/imitation.py",
         "civ5rl/engine/imitation_continuation.py",
         "configs/rl-cp-imitation-continuation.json",
     }
-    changes = sorted(
-        name
-        for name in previous["source_hashes"].keys() | current["source_hashes"].keys()
-        if not name.lower().endswith(".md")
-        and previous["source_hashes"].get(name) != current["source_hashes"].get(name)
+    current, changes = current_parent_lineage(
+        parent, config, manifest, allowed, same_corpus=True
     )
-    if set(changes) - allowed:
-        raise ValueError(f"Unapproved source changes from parent: {changes}")
-    expected = {**previous, "source_hashes": current["source_hashes"]}
-    if not checkpoint.same_execution_identity(expected, current):
-        raise ValueError("Continuation changes corpus/environment")
     if (out / "passport.json").exists():
-        identity = read_json(out / "passport.json")
-        if read_json(
-            out / "resolved-config.json"
-        ) != config or not checkpoint.same_execution_identity(identity, current):
-            raise ValueError("Continuation execution identity mismatch")
+        identity = verify_existing_run(out, config, current)
     else:
         identity = checkpoint.passport(out, config, manifest)
         write_json(out / "manifest.json", manifest)
@@ -162,52 +88,7 @@ def initialize(config, out):
     return parent, manifest, identity
 
 
-class CompilationClock:
-    """Count compilation intervals separately, including deferred backward compilation."""
-
-    def __init__(self):
-        self.intervals = []
-        self.active = None
-        self.monitor = None
-
-    def start(self, args):
-        self.active = perf_counter()
-        if self.monitor:
-            self.previous_phase = dict(self.monitor.state)
-            self.monitor.mark("compilation")
-
-    def end(self, args):
-        self.intervals.append((self.active, perf_counter()))
-        self.active = None
-        if self.monitor:
-            self.monitor.mark(**self.previous_phase)
-
-    def seconds(self, start, stop):
-        return sum(max(0, min(stop, b) - max(start, a)) for a, b in self.intervals)
-
-
-def collect_summary(directory):
-    rows = [read_json(p) for p in sorted(Path(directory).glob("*/metrics.json"))]
-    if len(rows) != 64 or any(r["status"] != "completed" for r in rows):
-        raise ValueError(f"Incomplete battle evaluation: {directory}")
-    outcomes = Counter(
-        "D" if r["winner"] is None else "W" if r["winner"] == r["side"] else "L"
-        for r in rows
-    )
-    return {
-        "matches": len(rows),
-        "W": outcomes["W"],
-        "D": outcomes["D"],
-        "L": outcomes["L"],
-        "win_rate": outcomes["W"] / len(rows),
-        "actions": dict(sum((Counter(r["actions_by_kind"]) for r in rows), Counter())),
-        "draw_reasons": dict(Counter(r["reason"] for r in rows if r["winner"] is None)),
-    }
-
-
 def evaluate_candidate(config, manifest, out, parent, candidate, workers, mode, label):
-    from tools.run_cp_imitation import pool
-
     path = Path(candidate["path"])
     key = file_hash(path) + ":" + mode
     recorded = (
@@ -229,31 +110,9 @@ def evaluate_candidate(config, manifest, out, parent, candidate, workers, mode, 
     else:
         base = out / "evaluation" / mode / f"epoch-{candidate['epoch']:03}"
         directories = {enemy: base / enemy for enemy in ("cp", "greedy")}
-        jobs = []
-        for original in manifest["validation_cases"]:
-            for side in (0, 1):
-                case = {**original, "learner_side": side}
-                case["case_hash"] = digest(
-                    {k: v for k, v in case.items() if k != "case_hash"}
-                )
-                for enemy in ("cp", "greedy"):
-                    directory = (
-                        directories[enemy] / f"case-{case['case_id']:03}-side-{side}"
-                    )
-                    jobs.append(
-                        (
-                            config,
-                            manifest,
-                            case,
-                            str(directory),
-                            {"checkpoint": str(path.resolve()), "mode": mode},
-                            enemy,
-                            "cpu",
-                        )
-                    )
-        with pool(workers) as executor:
-            list(executor.map(match_task, jobs))
-        new_matches = len(jobs)
+        new_matches = run_validation_cases(
+            config, manifest, path.resolve(), mode, directories, workers
+        )
     result = {
         "epoch": candidate["epoch"],
         "checkpoint_sha256": file_hash(path),
@@ -273,8 +132,8 @@ def evaluate_candidate(config, manifest, out, parent, candidate, workers, mode, 
 
 
 def train(config, out, parent, manifest, identity, workers, device):
+    from civ5rl.experiments.imitation_helpers import adam, demonstrations, load_policy
     from civ5rl.provenance.common import configure
-    from tools.run_cp_imitation import adam, demonstrations, load_policy
 
     if (out / "training.json").exists():
         raise ValueError(
@@ -325,15 +184,12 @@ def train(config, out, parent, manifest, identity, workers, device):
     cache, dev_cache, fixed_cache = [
         DemonstrationCache(data, device) for data in (episodes, holdout, subset)
     ]
-    value_before = {k: v.detach().clone() for k, v in policy.value.state_dict().items()}
+    frozen_value = FrozenParamsCheck(policy.value)
     clock = CompilationClock()
-    from torch._dynamo.callback import callback_handler
 
-    callback_handler.register_start_callback(clock.start)
-    callback_handler.register_end_callback(clock.end)
     preparation_seconds = perf_counter() - preparation
     warm_start = perf_counter()
-    with ResourceMonitor(out / "telemetry") as monitor:
+    with clock, ResourceMonitor(out / "telemetry") as monitor:
         clock.monitor = monitor
         monitor.mark("warmup")
         # Compile representative gradient and no-grad paths without an optimizer step.
@@ -448,39 +304,32 @@ def train(config, out, parent, manifest, identity, workers, device):
                     break
                 torch.cuda.synchronize()
                 start = perf_counter()
-                optimizer.zero_grad(set_to_none=True)
-                ce = backward_minibatch(policy, cache, spans, count)
-                norm = torch.nn.utils.clip_grad_norm_(
-                    policy.parameters(), 0.5, error_if_nonfinite=True
+                ce, norm = bc_optimizer_step(
+                    policy,
+                    optimizer,
+                    backward_minibatch,
+                    cache,
+                    spans,
+                    count,
+                    max_gradient_norm=config["max_gradient_norm"],
                 )
-                optimizer.step()
                 torch.cuda.synchronize()
                 stop = perf_counter()
                 compile_seconds = clock.seconds(start, stop)
                 elapsed += stop - start - compile_seconds
                 steps += 1
                 if elapsed >= 600 and utilization_justification is None:
-                    samples = [
-                        json.loads(line)
-                        for line in (out / "telemetry/resources.jsonl")
-                        .read_text()
-                        .splitlines()
-                    ]
-                    active = [
-                        s
-                        for s in samples
-                        if s["phase"] == "iterative_training"
-                        and s["gpu_core_load_percent"] is not None
-                    ][-60:]
+                    recent_windows = analyze_telemetry(
+                        out / "telemetry/resources.jsonl"
+                    )["windows"]
                     utilization_justification = {
                         "reason": "Fixed-condition continuation: CPU batch assembly, synchronous host/device checks and small spatial blocks constrain throughput; do not change minibatch or numerics mid-experiment.",
                         "investigation": "Inspected DemonstrationCache.batch, backward_minibatch and fixed spatial 32; candidate optimizations are resident inputs and fewer host synchronizations, deferred to preserve this experiment.",
                         "optimizer_seconds_at_review": elapsed,
-                        "last_60_active_samples_core_average": sum(
-                            s["gpu_core_load_percent"] for s in active
-                        )
-                        / len(active)
-                        if active
+                        "last_60_seconds_core_average": recent_windows[-1][
+                            "core_average"
+                        ]
+                        if recent_windows
                         else None,
                     }
                     print(
@@ -515,11 +364,7 @@ def train(config, out, parent, manifest, identity, workers, device):
                 )
                 loss_sum += ce * count
                 labels += count
-            if any(
-                not torch.equal(value_before[k], v)
-                for k, v in policy.value.state_dict().items()
-            ):
-                raise RuntimeError("Frozen value head parameters changed")
+            frozen_value.verify()
             row = {
                 "epoch": epoch,
                 "completed": complete,
@@ -612,8 +457,6 @@ def train(config, out, parent, manifest, identity, workers, device):
         best["path"] = str((checkpoint_dir / "best.pt").resolve())
         best["checkpoint_sha256"] = file_hash(checkpoint_dir / "best.pt")
         persist()
-    callback_handler.remove_start_callback(clock.start)
-    callback_handler.remove_end_callback(clock.end)
 
 
 def evaluate(config, out, parent, manifest, workers):
@@ -794,43 +637,17 @@ def report(config, out, parent):
                 if chosen_path is None:
                     lines.append(f"- {label} / {enemy}: исход {desired} отсутствует.")
                     continue
-                replay = read_json(chosen_path.parent / "replay.json")
                 m = read_json(chosen_path)
-                available = selected = omitted = 0
-                with Battle(replay["initial"]) as battle:
-                    for step in replay["steps"]:
-                        if battle.snapshot()["state"]["side"] == m["side"]:
-                            has_attack = any(
-                                a.kind in ("melee", "ranged")
-                                for a in battle.available_actions()
-                            )
-                            is_attack = step["action"]["kind"] in ("melee", "ranged")
-                            available += has_attack
-                            selected += is_attack
-                            omitted += has_attack and not is_attack
-                        if (
-                            asdict(battle.step(step["action"])) != step["result"]
-                            or digest(battle.snapshot()) != step["state_sha256"]
-                        ):
-                            raise ValueError(f"Replay diverged: {chosen_path}")
-                    if battle.snapshot() != read_json(
-                        chosen_path.parent / "final.json"
-                    ):
-                        raise ValueError("Replay final state differs")
-                verification = {
-                    "label": label,
-                    "enemy": enemy,
-                    "outcome": desired,
-                    "directory": str(chosen_path.parent.relative_to(ROOT)),
-                    "commands": len(replay["steps"]),
-                    "rounds": m["rounds"],
-                    "attack_available_decisions": available,
-                    "attacks_chosen": selected,
-                    "non_attack_when_available": omitted,
-                }
+                verification = verify_replay(chosen_path.parent)
+                verification.update(
+                    label=label, enemy=enemy, outcome=desired, rounds=m["rounds"]
+                )
+                available = verification["attack_available_decisions"]
+                selected = verification["attacks_chosen"]
+                omitted = verification["non_attack_when_available"]
                 verified.append(verification)
                 lines.append(
-                    f"- {label} / {enemy}, {chosen_path.parent.name}: {desired}, {m['rounds']} раундов; {len(replay['steps'])} команд, все результаты и state hashes совпали; атак выбрано {selected}, решений с атакой {available}, иных команд при доступной атаке {omitted}."
+                    f"- {label} / {enemy}, {chosen_path.parent.name}: {desired}, {m['rounds']} раундов; {verification['commands']} команд, все результаты и state hashes совпали; атак выбрано {selected}, решений с атакой {available}, иных команд при доступной атаке {omitted}."
                 )
     write_json(out / "replay-verification.json", verified)
     saved = torch.load(
@@ -844,11 +661,8 @@ def report(config, out, parent):
     for key, value in parent_saved["model"].items():
         if key.startswith("value."):
             assert_equal(value, saved["model"][key])
-    telemetry = [
-        json.loads(line)
-        for line in (out / "telemetry/resources.jsonl").read_text().splitlines()
-    ]
-    iterative = [r for r in telemetry if r["phase"] == "iterative_training"]
+    telemetry_analysis = analyze_telemetry(out / "telemetry/resources.jsonl")
+    iterative, windows = telemetry_analysis["active"], telemetry_analysis["windows"]
     lines += [
         "",
         "## Телеметрия и границы вывода",
@@ -856,22 +670,10 @@ def report(config, out, parent):
         f"Итеративных NVML samples: {len(iterative)}. Прогрев, compilation, offline metrics, сохранение и боевая оценка помечены отдельно. CPU tree 100% = одно логическое ядро. WDDM D3D Usage не использовался.",
         "",
     ]
-    if iterative:
-        for field in (
-            "gpu_core_load_percent",
-            "gpu_memory_controller_load_percent",
-            "vram_used_bytes",
-            "gpu_power_percent_tdp",
-            "cpu_tree_percent",
-            "ram_tree_rss_bytes",
-        ):
-            values = [r[field] for r in iterative if r[field] is not None]
-            scale = 2**30 if field.endswith("bytes") else 1
-            if values:
-                lines.append(
-                    f"- {field}: mean={sum(values) / len(values) / scale:.3f}, max={max(values) / scale:.3f}"
-                    + (" GiB" if scale > 1 else "%")
-                )
+    for field, stats in telemetry_analysis["metrics"].items():
+        lines.append(
+            f"- {field}: mean={stats['mean']:.3f}, max={stats['max']:.3f} {stats['unit']}"
+        )
     if training["new_optimizer_seconds"] < 600:
         lines.append(
             "Итеративное обучение суммарно короче 10 минут: требование Core Load ≥80% не применяется."
@@ -880,36 +682,11 @@ def report(config, out, parent):
         lines.append(
             "Для длительной итеративной части GPU Core Load и 60-секундные окна сохранены в gpu-windows.json. При низкой загрузке обоснование продолжения — training.json: GPU_below_target_justification; параметры ради загрузки не менялись."
         )
-    windows = []
-    for i in range(59, len(telemetry)):
-        part = telemetry[i - 59 : i + 1]
-        if all(r["phase"] == "iterative_training" for r in part) and all(
-            r["gpu_core_load_percent"] is not None for r in part
-        ):
-            windows.append(
-                {
-                    "end_elapsed_seconds": part[-1]["elapsed_seconds"],
-                    "core_average": sum(r["gpu_core_load_percent"] for r in part) / 60,
-                }
-            )
-    active_windows = []
-    for i in range(59, len(iterative)):
-        part = iterative[i - 59 : i + 1]
-        if all(r["gpu_core_load_percent"] is not None for r in part):
-            active_windows.append(
-                {
-                    "end_elapsed_seconds": part[-1]["elapsed_seconds"],
-                    "wall_span_seconds": part[-1]["elapsed_seconds"]
-                    - part[0]["elapsed_seconds"],
-                    "core_average": sum(r["gpu_core_load_percent"] for r in part) / 60,
-                }
-            )
     write_json(
         out / "gpu-windows.json",
         {
             "contiguous_wall_windows": windows,
-            "active_sample_windows": active_windows,
-            "note": "Active windows contain 60 iterative samples with excluded phases removed; wall_span_seconds records gaps.",
+            "note": "Windows exclude other phases, gaps, and process resets.",
         },
     )
     lines += [

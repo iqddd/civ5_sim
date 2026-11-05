@@ -27,17 +27,18 @@ class EncodedSlots:
             descriptor = {"slots": slots, "action_capacity": action_capacity}
         slots, capacity = descriptor["slots"], descriptor["action_capacity"]
         layout = {
-            "cells": ((slots, MAX_MAP_CELLS, TILE_DIM), np.float32),
-            "globals": ((slots, GLOBAL_DIM), np.float32),
-            "previous": ((slots, PREV_ACTION_DIM), np.float32),
-            "neighbors": ((slots, MAX_MAP_CELLS, HEX_DIRECTIONS), np.int64),
-            "sources": ((slots, capacity), np.int64),
-            "targets": ((slots, capacity), np.int64),
-            "action_features": ((slots, capacity, ACTION_DIM), np.float32),
+            "cells": ((slots, MAX_MAP_CELLS, TILE_DIM), np.float32, "cell"),
+            "globals": ((slots, GLOBAL_DIM), np.float32, None),
+            "previous": ((slots, PREV_ACTION_DIM), np.float32, None),
+            "neighbors": ((slots, MAX_MAP_CELLS, HEX_DIRECTIONS), np.int64, "cell"),
+            "sources": ((slots, capacity), np.int64, "action"),
+            "targets": ((slots, capacity), np.int64, "action"),
+            "action_features": ((slots, capacity, ACTION_DIM), np.float32, "action"),
         }
+        self.axis_kind = {key: axis for key, (_, _, axis) in layout.items()}
         size = sum(
             int(np.prod(shape)) * np.dtype(dtype).itemsize
-            for shape, dtype in layout.values()
+            for shape, dtype, _ in layout.values()
         )
         self.memory = (
             SharedMemory(create=True, size=size)
@@ -48,7 +49,7 @@ class EncodedSlots:
         try:
             self.descriptor = {**descriptor, "name": self.memory.name}
             offset = 0
-            for key, (shape, dtype) in layout.items():
+            for key, (shape, dtype, _) in layout.items():
                 self.arrays[key] = np.ndarray(
                     shape, dtype, buffer=self.memory.buf, offset=offset
                 )
@@ -68,7 +69,7 @@ class EncodedSlots:
         for key, array in self.arrays.items():
             value = getattr(encoded, key)
             target = array[slot]
-            if key not in ("globals", "previous"):
+            if self.axis_kind[key] is not None:
                 target = target[: len(value)]
             target[...] = value
         return {"encoded_shape": (nc, na)}
@@ -80,10 +81,9 @@ class EncodedSlots:
         values = {}
         for key, array in self.arrays.items():
             value = array[slot]
-            if key in ("cells", "neighbors"):
-                value = value[:nc]
-            elif key not in ("globals", "previous"):
-                value = value[:na]
+            axis = self.axis_kind[key]
+            if axis is not None:
+                value = value[: nc if axis == "cell" else na]
             values[key] = value.copy()
         return Encoded(**values)
 

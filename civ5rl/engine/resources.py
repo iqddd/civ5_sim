@@ -5,6 +5,7 @@ import os
 import threading
 import time
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 
 import psutil
@@ -203,3 +204,67 @@ class ResourceMonitor:
 
     def __exit__(self, *_):
         self.close()
+
+
+def analyze_telemetry(jsonl_path, active_phase="iterative_training", window=60):
+    """Aggregate active NVML samples and time-weighted, uninterrupted windows."""
+    if isinstance(jsonl_path, (str, Path)):
+        path = Path(jsonl_path)
+        samples = [
+            json.loads(line) for line in path.read_text().splitlines() if line.strip()
+        ]
+        schema = path.with_name("resources-schema.json")
+        interval = (
+            json.loads(schema.read_text()).get("interval_seconds", 1.0)
+            if schema.exists()
+            else 1.0
+        )
+    else:
+        samples, interval = list(jsonl_path), 1.0
+    active = [r for r in samples if r["phase"] == active_phase]
+    metrics = {}
+    for field in (
+        "gpu_core_load_percent",
+        "gpu_memory_controller_load_percent",
+        "vram_used_bytes",
+        "gpu_power_percent_tdp",
+        "cpu_tree_percent",
+        "ram_tree_rss_bytes",
+    ):
+        values = [r[field] for r in active if r.get(field) is not None]
+        if values:
+            scale = 2**30 if field.endswith("bytes") else 1
+            metrics[field] = {
+                "mean": sum(values) / len(values) / scale,
+                "max": max(values) / scale,
+                "unit": "GiB" if scale > 1 else "%",
+            }
+    windows, segment = [], []
+    for row in samples:
+        timestamp = row["elapsed_seconds"]
+        if (
+            row["phase"] != active_phase
+            or row.get("gpu_core_load_percent") is None
+            or (
+                segment
+                and not 0 < timestamp - segment[-1]["elapsed_seconds"] <= 2 * interval
+            )
+        ):
+            segment = []
+        if row["phase"] != active_phase or row.get("gpu_core_load_percent") is None:
+            continue
+        segment.append(row)
+        start = timestamp - window
+        while len(segment) > 1 and segment[1]["elapsed_seconds"] <= start:
+            segment.pop(0)
+        if segment[0]["elapsed_seconds"] > start:
+            continue
+        total = sum(
+            a["gpu_core_load_percent"]
+            * (b["elapsed_seconds"] - max(start, a["elapsed_seconds"]))
+            for a, b in pairwise(segment)
+        )
+        windows.append(
+            {"end_elapsed_seconds": timestamp, "core_average": total / window}
+        )
+    return {"active": active, "metrics": metrics, "windows": windows}
