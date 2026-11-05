@@ -8,12 +8,12 @@ import sys
 from pathlib import Path
 from statistics import median
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from civ5sim.evaluation import load_suite, write_json
 from tools.benchmark_combat_ai import run_bounded
-from tools.publish_greedy_replays import compressed, read
+from tools.archive.publish_greedy_replays import compressed, read
 
 
 def prepare(baseline, archive):

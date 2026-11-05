@@ -63,4 +63,4 @@ W/D/L с точки зрения stateless, win rate (draw не победа), s
 конфиг, manifest случаев и хеши исходников/ядра/карт; старые опыты не меняются.
 Новые training seeds, обучение, PPO и закрытые наборы не используются.
 
-Команды: `tools/study_cp_reset.py prepare`, затем `run`, затем `report`.
+Команды: `tools/archive/study_cp_reset.py prepare`, затем `run`, затем `report`.

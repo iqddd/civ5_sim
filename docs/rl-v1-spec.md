@@ -708,7 +708,7 @@ CPU exact-resume, правила, информационный контракт,
 `tools/control_rl.py resume --out <run>` запускает продолжение в фоне из `latest`;
 `status` показывает живой статус и последний checkpoint. OS file lock исключает
 двух одновременных писателей. SIGINT/SIGBREAK также запрашивают мягкую остановку.
-Для этой ревизии предусмотрен узкий `tools/migrate_rl_audit.py`: он переносит
+Для этой ревизии предусмотрен узкий `tools/archive/migrate_rl_audit.py`: он переносит
 неизменённые model/Adam/RNG/counters в новый каталог с lineage и SHA256 родителя.
 Разрешены только перечисленные изменения audit/telemetry и версии документа;
 изменение модели, симулятора, корпуса, окружения, PPO или optimizer отклоняется.

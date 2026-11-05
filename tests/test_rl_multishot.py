@@ -211,7 +211,7 @@ class MultishotTests(unittest.TestCase):
             comparison(rows[:-1], base)
 
     def test_pretraining_stops_have_no_Adam_steps(self):
-        from tools import run_rl_multishot as runner
+        from tools.archive import run_rl_multishot as runner
 
         config = self.short_config()
 

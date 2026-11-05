@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
@@ -548,7 +548,7 @@ def report(directory):
 
     config_path = Path(directory) / "seed-17/resolved-config.json"
     if config_path.exists() and is_d1(read_json(config_path)):
-        from tools.report_rl_d1 import report_d1
+        from tools.archive.report_rl_d1 import report_d1
 
         return report_d1(directory)
     import matplotlib
@@ -560,7 +560,7 @@ def report(directory):
     directory = Path(directory)
     from civ5rl.diagnostic_one import is_one
 
-    from tools.report_rl_one import report_one
+    from tools.archive.report_rl_one import report_one
 
     for saved_config in sorted(directory.glob("seed-*/resolved-config.json")):
         resolved = read_json(saved_config)
@@ -668,7 +668,7 @@ def _run_suite(config, directory, device="cuda", resume=False, prepare_only=Fals
 
     validate_config(config)
     if config.get("diagnostic", {}).get("mode") == "D0-multishot":
-        from tools.run_rl_multishot import run_suite as run_multishot
+        from tools.archive.run_rl_multishot import run_suite as run_multishot
 
         return run_multishot(config, directory, device, resume, prepare_only)
     directory = Path(directory).resolve()

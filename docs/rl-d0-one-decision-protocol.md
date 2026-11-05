@@ -36,8 +36,8 @@ Update 4 выделить в отчёте, если достигнут. D1, seed
 Конфигурация: `configs/rl-diagnostic-one-decision.json`. Команды:
 
 ```powershell
-.venv\Scripts\python.exe tools/run_rl_diagnostic.py --config configs/rl-diagnostic-one-decision.json
-.venv\Scripts\python.exe tools/run_rl_diagnostic.py --config configs/rl-diagnostic-one-decision.json --resume
+.venv\Scripts\python.exe tools/archive/run_rl_diagnostic.py --config configs/rl-diagnostic-one-decision.json
+.venv\Scripts\python.exe tools/archive/run_rl_diagnostic.py --config configs/rl-diagnostic-one-decision.json --resume
 ```
 
 Результаты — `artifacts/rl/diagnostic-one-decision/`. Пауза/продолжение также

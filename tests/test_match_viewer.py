@@ -155,7 +155,7 @@ class MatchViewerTests(unittest.TestCase):
     def test_atomic_publication_retries_transient_windows_reader(self):
         from unittest.mock import patch
 
-        from tools.publish_greedy_replays import atomic_json
+        from tools.archive.publish_greedy_replays import atomic_json
         target = self.root/'summary.json'
         target.write_text(json.dumps({'old': True}))
         original = Path.replace

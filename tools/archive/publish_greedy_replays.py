@@ -9,13 +9,13 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from civ5sim.engine import digest
 from civ5sim.evaluation import write_json
 from tools.benchmark_combat_ai import aggregate
-from tools.summarize_coordinator_acceptance import engagement_audit, verify_waits
+from tools.archive.summarize_coordinator_acceptance import engagement_audit, verify_waits
 
 
 def read(path):

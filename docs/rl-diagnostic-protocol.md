@@ -99,8 +99,8 @@ updates. В каждом rollout не менее 8192 решений с заве
 ## Реализация и воспроизведение
 
 Конфигурация: `configs/rl-diagnostic.json`. Запуск:
-`python tools/run_rl_diagnostic.py`; продолжение после прерывания:
-`python tools/run_rl_diagnostic.py --resume`. Для подготовки только сценариев
+`python tools/archive/run_rl_diagnostic.py`; продолжение после прерывания:
+`python tools/archive/run_rl_diagnostic.py --resume`. Для подготовки только сценариев
 использовать `--prepare-only`. Все материалы — `artifacts/rl/diagnostic-results`.
 Остановка активного seed: `tools/control_rl.py pause --out <каталог seed>`;
 `resume` с тем же каталогом продолжает диагностическую suite.

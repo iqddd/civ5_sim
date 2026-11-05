@@ -262,7 +262,7 @@ def prepare(config, output):
     sources = sorted({*ROOT.glob("civ5sim/*.py"), ROOT/"civ5map/maps.py",
                       ROOT/"civ5rl/protocols/corpus.py", ROOT/"civ5rl/protocols/imitation.py",
                       ROOT/"civ5rl/protocols/imitation_own_states.py", ROOT/"civ5rl/provenance/common.py",
-                      ROOT/"civ5rl/core/observation.py", ROOT/"tools/study_cp_reset.py",
+                      ROOT/"civ5rl/core/observation.py", ROOT/"tools/archive/study_cp_reset.py",
                       ROOT/"configs/cp-reset-study.json", *ROOT.glob("build/combat*.dll")})
     files = {str(p.relative_to(ROOT)).replace("\\","/"):file_hash(p) for p in sources}
     for path in (config["corpus"],config["imitation_manifest"],*[e["path"] for e in maps]):

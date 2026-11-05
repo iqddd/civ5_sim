@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from time import perf_counter
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 import torch
@@ -107,7 +107,7 @@ def run(args):
         "episodes":{str(p.relative_to(ROOT)):file_hash(p) for p in episode_paths},
         "batches":fixture["batches"],"variant":args.variant,"seconds":args.seconds,
         "source_hashes":{p:file_hash(ROOT/p) for p in (
-            "tools/benchmark_gru_ablation.py","civ5rl/core/model.py","civ5rl/core/training_graphs.py",
+            "tools/archive/benchmark_gru_ablation.py","civ5rl/core/model.py","civ5rl/core/training_graphs.py",
             "civ5rl/engine/imitation.py","civ5rl/engine/imitation_performance.py",
             "civ5rl/engine/ppo_fast.py","civ5rl/engine/resources.py")}})
     print(f"{args.variant}: loading/encoding fixed 512 demonstrations",flush=True)

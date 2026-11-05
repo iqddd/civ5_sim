@@ -105,7 +105,7 @@ def main():
         execution = read_json(directory / "execution.json")
         (directory / "stop.request").unlink(missing_ok=True)
         if execution.get("kind") == "diagnostic":
-            from tools.run_rl_diagnostic import run_suite
+            from tools.archive.run_rl_diagnostic import run_suite
 
             run_suite(
                 read_json(directory / "resolved-config.json"),

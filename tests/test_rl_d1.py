@@ -161,7 +161,7 @@ class D1Tests(unittest.TestCase):
         )
 
     def test_evaluation_rng_isolation_even_on_failure(self):
-        from tools import run_rl_diagnostic as runner
+        from tools.archive import run_rl_diagnostic as runner
 
         def consume(*args):
             random.random()

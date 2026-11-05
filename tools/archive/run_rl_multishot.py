@@ -605,6 +605,6 @@ def run_suite(config, directory, device="cuda", resume=False, prepare_only=False
         )
         raise
     finally:
-        from tools.report_rl_multishot import report
+        from tools.archive.report_rl_multishot import report
 
         report(directory)
