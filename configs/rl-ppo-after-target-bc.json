@@ -1,0 +1,34 @@
+{
+  "base_config": "configs/rl-ppo-target-scale.json",
+  "kind": "rl01.ppo_after_target_bc",
+  "output": "artifacts/rl/ppo-after-target-bc",
+  "experiment": {
+    "parent": "artifacts/rl/cp-imitation-target-scale/checkpoints/epoch-10.pt",
+    "parent_label": "target BC epoch 10",
+    "parent_sha256": "4677fa13b2ac7a84214c545a6b311fd68bc05b31b82fe00fbe63c8856fc6e985",
+    "parent_policy_hash": "0a45e67e3c8c69b5d5f4608287b6d0a4450a84280dd1b1fe08842a843b83de03",
+    "parent_manifest": "artifacts/rl/cp-imitation-target-scale/manifest.json",
+    "parent_run": "artifacts/rl/cp-imitation-target-scale",
+    "parent_optimizer_steps": 0,
+    "decisions": 2097152,
+    "active_seconds": 7200,
+    "milestones": [262144, 524288, 1048576, 2097152],
+    "start_episode": 0,
+    "training_namespace": "ppo_after_target_bc_train_v1",
+    "shuffle_namespace": "ppo_after_target_bc_shuffle_v1",
+    "initial_value": "fit_first_rollout",
+    "max_winless_rollouts": 5,
+    "early_gain_decisions": 524288,
+    "protocol": "docs/rl-ppo-after-target-bc-direction.md"
+  },
+  "critic": {
+    "epochs": 2,
+    "active_seconds": 120,
+    "batch_size": 1024,
+    "lr": 0.0001,
+    "betas": [0.9, 0.999],
+    "eps": 0.00001,
+    "weight_decay": 0,
+    "max_gradient_norm": 0.5
+  }
+}

@@ -89,15 +89,23 @@ class PipelineTests(unittest.TestCase):
                 reference = None
                 # Partial replies can otherwise silently lose, duplicate, or mix a slot's history.
                 modes = (
-                    [("barrier", 0, True), ("ready", 0, True), ("ready", 1, True)]
+                    [
+                        ("barrier", 0, True, None),
+                        ("ready", 0, True, None),
+                        ("ready", 1, True, None),
+                        ("ready", 1, True, 4),
+                    ]
                     if variant == "C"
-                    else [("ready", 0, True), ("ready", 1, False)]
+                    else [("ready", 0, True, None), ("ready", 1, False, None)]
                 )
-                for scheduler, reply_size, worker_encoding in modes:
+                for scheduler, reply_size, worker_encoding, workers in modes:
                     config["performance"]["collection_scheduler"] = scheduler
                     config["performance"]["worker_reply_size"] = reply_size
                     config["performance"]["worker_encoding"] = worker_encoding
-                    with Collector(config, None, "cpu", Path(tmp)) as c:
+                    with Collector(config, None, "cpu", Path(tmp), cpu_workers=workers) as c:
+                        if workers is not None:
+                            c.inference_min_batch = 4
+                            c.inference_wait_seconds = 0.002
                         episodes, next_episode, _times = c.collect(
                             policy,
                             None,

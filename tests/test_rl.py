@@ -317,6 +317,32 @@ class RLTests(unittest.TestCase):
                 self.assertEqual(updated, measure_replay(policy, reference, sequences_per_batch=2))
                 self.assertGreater(updated["max_logp_error"], first["max_logp_error"])
 
+    @unittest.skipUnless(torch.cuda.is_available(), "Pinned replay requires CUDA")
+    def test_pinned_cpu_replay_recomputes_after_weight_updates(self):
+        # A stale hidden/output cache silently invalidates the KL rollback gate.
+        from civ5rl.engine.ppo import encode_episode
+        from civ5rl.engine.ppo_fast import RolloutCache, measure_replay
+
+        policy = Policy("C")
+        episodes = self._short_rollout(policy)
+        for ep in episodes:
+            encoded = encode_episode(ep, "C")
+            with torch.no_grad():
+                logits, _, _ = policy(batch_inputs(encoded, "cpu"), sequence=True)
+            ep["old_log_probs"] = list(logits.log_softmax(-1).numpy())
+        policy.cuda()
+        cached = RolloutCache(episodes, "C", "cuda", resident=False, cpu_labels=True)
+        reference = RolloutCache(episodes, "C", "cuda", resident=False, cpu_labels=True)
+        cached.enable_pinned_replay()
+        first = measure_replay(policy, cached, 2, full_distribution=True)
+        self.assertGreater(cached.pinned_replay_bytes, 0)
+        with torch.no_grad():
+            policy.action[-1].weight.add_(0.1)
+        actual = measure_replay(policy, cached, 2, full_distribution=True)
+        self.assertEqual(actual, measure_replay(policy, reference, 2, full_distribution=True))
+        self.assertGreater(actual["full_kl"], first["full_kl"])
+        self.assertGreater(cached.pinned_replay_hits, 0)
+
     def test_batched_gru_has_no_cross_episode_or_padding_effect(self):
         from civ5rl.ppo_fast import RolloutCache, prefixes
 

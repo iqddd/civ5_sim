@@ -8,6 +8,7 @@ import torch
 from civ5rl.core.encoded_layout import ENCODED_FIELDS
 from civ5rl.core.model import batch_inputs
 from civ5rl.core.schema import INVALID_INDEX
+from civ5rl.core.spatial import SPATIAL_KEYS
 from civ5rl.engine.constants import DEFAULT_GPU_RESERVE_BYTES, DEFAULT_PREFIX_BLOCK_SIZE
 from civ5rl.engine.spans import Span
 
@@ -110,7 +111,7 @@ class SequenceBuffer:
             data[key] = data[key][:, :width].contiguous()
         return data
 
-    def gather_inputs(self, spans, indices=None):
+    def gather_inputs(self, spans, indices=None, *, device=None):
         if self.data is None:
             return batch_inputs(
                 [
@@ -118,7 +119,7 @@ class SequenceBuffer:
                     for episode_index, start, stop in spans
                     for item in self.encoded[episode_index][start:stop]
                 ],
-                self.device,
+                self.device if device is None else device,
                 non_blocking=True,
             )
         if indices is None:
@@ -135,6 +136,22 @@ class SequenceBuffer:
             for episode_index, start, stop in spans
         )
         return (self._gather_runner or self._gather)(indices, width)
+
+    def gather_spatial_inputs(self, spans):
+        """Recurrent prefixes need neither action tensors nor PPO labels."""
+        if self.data is None:
+            return batch_inputs(
+                [
+                    item
+                    for episode, start, stop in spans
+                    for item in self.encoded[episode][start:stop]
+                ],
+                self.device,
+                non_blocking=True,
+                spatial_only=True,
+            )
+        indices = self.indices(spans)
+        return {key: self.data[key].index_select(0, indices) for key in SPATIAL_KEYS}
 
     def enable_compiled_gather(self):
         self._gather_runner = torch.compile(self._gather, dynamic=True, fullgraph=True)

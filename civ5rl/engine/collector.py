@@ -17,9 +17,8 @@ from civ5rl.core.contracts import (
     WorkerState,
 )
 from civ5rl.core.observation import ObservationEncoder
-from civ5rl.provenance.common import choose
 from civ5rl.engine.worker import worker as _worker
-
+from civ5rl.provenance.common import choose
 
 WORKER_TIMEOUT_SECONDS = 300
 
@@ -97,7 +96,7 @@ class _WaveState:
 
 
 class Collector:
-    def __init__(self, config, factory, device, error_dir):
+    def __init__(self, config, factory, device, error_dir, *, cpu_workers=None):
         from civ5rl.provenance.validation import validate_config
 
         validate_config(config)
@@ -105,8 +104,29 @@ class Collector:
         self.error_dir = error_dir
         self.workers = []
         self.shared = []
+        worker_count = config["collection"]["cpu_workers"]
         self.envs_per_worker = config["collection"]["envs_per_worker"]
+        if cpu_workers is not None:
+            num_envs = config["collection"]["num_envs"]
+            if (
+                type(cpu_workers) is not int
+                or cpu_workers < 1
+                or num_envs % cpu_workers
+            ):
+                raise ValueError(
+                    "Collection workers must divide the fixed environment count"
+                )
+            worker_count = cpu_workers
+            self.envs_per_worker = num_envs // worker_count
         self.reply_size = config.get("performance", {}).get("worker_reply_size", 0)
+        if cpu_workers is not None:
+            self.reply_size = min(self.reply_size, self.envs_per_worker)
+        self.inference_min_batch = config.get("performance", {}).get(
+            "inference_min_batch", 0
+        )
+        self.inference_wait_seconds = config.get("performance", {}).get(
+            "inference_wait_seconds", 0.0
+        )
         self._wave_id = 0
         if (
             type(self.reply_size) is not int
@@ -120,7 +140,7 @@ class Collector:
             from civ5rl.engine.stream_worker import worker as worker_target
         ctx = mp.get_context("spawn")
         try:
-            for _ in range(config["collection"]["cpu_workers"]):
+            for _ in range(worker_count):
                 parent = child = process = None
                 try:
                     parent, child = ctx.Pipe()
@@ -346,40 +366,54 @@ class Collector:
             if not wait(connections, timeout=WORKER_TIMEOUT_SECONDS):
                 raise TimeoutError("No partial collector reply within 300 seconds")
             live, ready, ready_at = [], [], []
-            for w, (conn, _) in enumerate(self.workers):
-                while conn.poll():
-                    payload = self._receive_one(w)
-                    if payload["wave"] != wave.wave_id:
-                        raise RuntimeError("Stale worker wave")
-                    times["worker_encoding_seconds"] += payload[
-                        "worker_encoding_seconds"
-                    ]
-                    times["worker_request_seconds"] += payload["worker_request_seconds"]
-                    times["worker_replies"] += 1
-                    for item in payload["items"]:
-                        slot = item.slot
-                        generation = item.generation
-                        state = item.state
-                        at = item.completed_at
-                        i = w * self.envs_per_worker + slot
-                        if (
-                            not 0 <= slot < self.envs_per_worker
-                            or generation != wave.generations[i] + 1
-                            or wave.completed_at[i] is not None
-                        ):
-                            raise RuntimeError("Stale or duplicate slot reply")
-                        wave.generations[i] = generation
-                        wave.states[i] = state
-                        publish_delays.append(payload["published_at"] - at)
-                        if state["done"]:
-                            wave.builders[i].finalize(state)
-                            wave.completed_at[i] = perf_counter()
-                            completed += 1
-                        else:
-                            live.append(i)
-                            ready_at.append(at)
-                    if w not in ready:
-                        ready.append(w)
+            # Briefly combine replies already in flight. Never wait for a slot
+            # whose next action depends on this inference, including wave tails.
+            coalesce_until = perf_counter() + self.inference_wait_seconds
+            while True:
+                for w, (conn, _) in enumerate(self.workers):
+                    while conn.poll():
+                        payload = self._receive_one(w)
+                        if payload["wave"] != wave.wave_id:
+                            raise RuntimeError("Stale worker wave")
+                        times["worker_encoding_seconds"] += payload[
+                            "worker_encoding_seconds"
+                        ]
+                        times["worker_request_seconds"] += payload[
+                            "worker_request_seconds"
+                        ]
+                        times["worker_replies"] += 1
+                        for item in payload["items"]:
+                            slot = item.slot
+                            generation = item.generation
+                            state = item.state
+                            at = item.completed_at
+                            i = w * self.envs_per_worker + slot
+                            if (
+                                not 0 <= slot < self.envs_per_worker
+                                or generation != wave.generations[i] + 1
+                                or wave.completed_at[i] is not None
+                            ):
+                                raise RuntimeError("Stale or duplicate slot reply")
+                            wave.generations[i] = generation
+                            wave.states[i] = state
+                            publish_delays.append(payload["published_at"] - at)
+                            if state["done"]:
+                                wave.builders[i].finalize(state)
+                                wave.completed_at[i] = perf_counter()
+                                completed += 1
+                            else:
+                                live.append(i)
+                                ready_at.append(at)
+                        if w not in ready:
+                            ready.append(w)
+                remaining = coalesce_until - perf_counter()
+                if (
+                    len(live) >= self.inference_min_batch
+                    or len(live) + completed == len(wave.states)
+                    or remaining <= 0
+                    or not wait(connections, timeout=remaining)
+                ):
+                    break
             times["worker_wait_seconds"] += perf_counter() - tick
             if live:
                 now = perf_counter()

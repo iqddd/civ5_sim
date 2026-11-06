@@ -15,8 +15,11 @@ def main():
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
     import json
-    target = json.loads((ROOT / args.config).read_text())['kind'] == 'rl01.ppo_target_scale'
-    if target:
+    kind = json.loads((ROOT / args.config).read_text())['kind']
+    if kind == 'rl01.ppo_after_target_bc':
+        from civ5rl.protocols.ppo_after_target_bc import load_config
+        from civ5rl.experiments.ppo_after_target_bc import run
+    elif kind == 'rl01.ppo_target_scale':
         from civ5rl.protocols.ppo_target_scale import load_config
         from civ5rl.experiments.ppo_target_scale import run
     else:

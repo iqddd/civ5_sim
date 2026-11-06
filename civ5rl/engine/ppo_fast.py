@@ -7,7 +7,11 @@ import numpy as np
 import torch
 
 from civ5rl.core.schema import MIN_FREE_ACTIONS
-from civ5rl.engine.constants import DEFAULT_GPU_RESERVE_BYTES, DEFAULT_PREFIX_BLOCK_SIZE
+from civ5rl.engine.constants import (
+    DEFAULT_GPU_RESERVE_BYTES,
+    DEFAULT_PINNED_REPLAY_BYTES,
+    DEFAULT_PREFIX_BLOCK_SIZE,
+)
 from civ5rl.engine.ppo import encode_episode, objective, targets
 from civ5rl.engine.replay_metrics import REPLAY_DIAGNOSTIC_KEYS
 from civ5rl.engine.sequence import SequenceBuffer
@@ -149,6 +153,9 @@ class RolloutCache(SequenceBuffer):
         self.replay_inputs = False
         self._replay_plan = None
         self._replay_sums_runner = None
+        self._pinned_replay = None
+        self.pinned_replay_bytes = 0
+        self.pinned_replay_hits = 0
 
     def enable_cached_replay(self):
         """Cache inputs only; GRU state and logits always use current weights."""
@@ -163,7 +170,42 @@ class RolloutCache(SequenceBuffer):
             )
         self.replay_inputs = True
 
-    def batch(self, spans):
+    def enable_pinned_replay(self, limit_bytes=DEFAULT_PINNED_REPLAY_BYTES):
+        """Keep immutable replay inputs on CPU; stream each part to the GPU."""
+        if (
+            self.data is None
+            and self.cpu_labels
+            and str(self.device).startswith("cuda")
+        ):
+            self._pinned_replay = {}
+            self._pinned_replay_limit = limit_bytes
+
+    def replay_batch(self, spans):
+        if self._pinned_replay is None:
+            return self.batch(spans)
+        key = tuple(spans)
+        part = self._pinned_replay.get(key)
+        if part is None:
+            data, labels, lengths = self.batch(spans, device="cpu")
+            size = sum(
+                v.numel() * v.element_size() for v in (*data.values(), *labels.values())
+            )
+            if self.pinned_replay_bytes + size <= self._pinned_replay_limit:
+                data = {k: v.pin_memory() for k, v in data.items()}
+                labels = {k: v.pin_memory() for k, v in labels.items()}
+                self._pinned_replay[key] = data, labels, lengths
+                self.pinned_replay_bytes += size
+        else:
+            data, labels, lengths = part
+            self.pinned_replay_hits += 1
+        return (
+            {k: v.to(self.device, non_blocking=True) for k, v in data.items()},
+            {k: v.to(self.device, non_blocking=True) for k, v in labels.items()},
+            lengths,
+        )
+
+    def batch(self, spans, *, device=None, include_behavior=True):
+        device = self.device if device is None else device
         indices = (
             torch.tensor(
                 [
@@ -178,20 +220,21 @@ class RolloutCache(SequenceBuffer):
             if self.cpu_labels
             else self.indices(spans)
         )
-        data = self.gather_inputs(spans, indices)
+        data = self.gather_inputs(spans, indices, device=device)
         selected = indices.cpu() if self.cpu_labels else indices
         labels = {
-            k: v.index_select(0, selected).to(self.device)
+            k: v.index_select(0, selected).to(device)
             for k, v in self.labels.items()
+            if include_behavior or k != "old_log_probs"
         }
-        if self.ragged_behavior is not None:
+        if include_behavior and self.ragged_behavior is not None:
             rows = [self.ragged_behavior[i] for i in selected.tolist()]
             behavior = np.full(
                 (len(rows), data["action_mask"].shape[1]), -np.inf, np.float32
             )
             for i, values in enumerate(rows):
                 behavior[i, : len(values)] = values
-            labels["old_log_probs"] = torch.from_numpy(behavior).to(self.device)
+            labels["old_log_probs"] = torch.from_numpy(behavior).to(device)
         return data, labels, [stop - start for _, start, stop in spans]
 
 
@@ -210,7 +253,11 @@ def prefixes(policy, cache, spans, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
             Span(episode, offset, min(start, offset + block_size))
             for _, episode, start in active
         ]
-        batch, _, lengths = cache.batch(subspans)
+        if hasattr(cache, "gather_spatial_inputs"):
+            batch = cache.gather_spatial_inputs(subspans)
+            lengths = [span.length for span in subspans]
+        else:
+            batch, _, lengths = cache.batch(subspans)
         slots = torch.tensor([slot for slot, _, _ in active], device=cache.device)
         if policy.spatial_cuda_graphs:
             torch.compiler.cudagraph_mark_step_begin()
@@ -279,7 +326,7 @@ def _replay_parts(cache, episodes):
             )
             for _, episode in active
         ]
-        batch, labels, lengths = cache.batch(spans)
+        batch, labels, lengths = cache.replay_batch(spans)
         slots = torch.tensor([slot for slot, _ in active], device=cache.device)
         free_count = sum(
             int(
@@ -423,7 +470,15 @@ def measure_kl(policy, cache, sequences_per_batch=8):
 
 class BatchedBackend:
     def __init__(
-        self, policy, episodes, config, device, monitor=None, *, force_batched=False
+        self,
+        policy,
+        episodes,
+        config,
+        device,
+        monitor=None,
+        *,
+        force_batched=False,
+        pinned_replay=False,
     ):
         self.policy, self.config, self.device, self.monitor = (
             policy,
@@ -451,6 +506,8 @@ class BatchedBackend:
             self.cache.enable_async_transfers()
         if options.get("ppo_cached_replay", False):
             self.cache.enable_cached_replay()
+        if pinned_replay or options.get("ppo_pinned_replay", False):
+            self.cache.enable_pinned_replay()
         self.kl_batch = options.get("kl_sequences_per_batch", 8)
         self.names = (
             "policy_loss",
@@ -501,7 +558,7 @@ class BatchedBackend:
         for micro_start in range(0, len(minibatch), self.micro_chunks):
             spans = minibatch[micro_start : micro_start + self.micro_chunks]
             tick = perf_counter()
-            batch, labels, lengths = self.cache.batch(spans)
+            batch, labels, lengths = self.cache.batch(spans, include_behavior=False)
             logits, value, _ = self.policy.forward_sequences(
                 batch,
                 lengths,
@@ -581,6 +638,8 @@ class BatchedBackend:
             "cache_seconds": self.cache_seconds,
             "rollout_device_bytes": self.cache.resident_bytes,
             "cached_replay_inputs": self.cache.replay_inputs,
+            "pinned_replay_input_bytes": self.cache.pinned_replay_bytes,
+            "pinned_replay_hits": self.cache.pinned_replay_hits,
             "cached_replay_input_bytes": sum(
                 tensor.numel() * tensor.element_size()
                 for _, parts in (

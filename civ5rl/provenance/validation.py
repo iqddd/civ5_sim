@@ -148,6 +148,10 @@ SUPPORTED = {
 
 
 def validate_config(config):
+    if config.get("kind") == "rl01.ppo_after_target_bc":
+        from civ5rl.protocols.ppo_after_target_bc import validate_profile
+
+        return validate_profile(config)
     if config.get("kind") == "rl01.ppo_target_scale":
         from civ5rl.protocols.ppo_target_scale import validate_profile
 

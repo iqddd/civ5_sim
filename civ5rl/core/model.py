@@ -15,10 +15,10 @@ from civ5rl.core.schema import (
     HEX_DIM,
     HEX_DIRECTIONS,
     HEX_MLP_DIM,
-    OPPOSITE_HEX_OFFSET,
-    SELF_AND_HEX_DIRECTIONS,
     HIDDEN_SIZE,
     MEMORY_MLP_DIM,
+    OPPOSITE_HEX_OFFSET,
+    SELF_AND_HEX_DIRECTIONS,
     TILE_DIM,
 )
 from civ5rl.core.spatial import iter_spatial_blocks
@@ -27,40 +27,44 @@ from civ5rl.core.variants import PolicyVariant
 GRU_GATES = 3
 
 
-def batch_inputs(items, device, *, non_blocking=False):
+def batch_inputs(items, device, *, non_blocking=False, spatial_only=False):
     if not items or any(len(item.cells) == 0 for item in items):
         raise ValueError("Each batch item must contain at least one cell")
     batch_size = len(items)
     num_cells = max(len(item.cells) for item in items)
-    num_actions = max(len(item.sources) for item in items)
     cells = np.zeros((batch_size, num_cells, TILE_DIM), np.float32)
     masks = np.zeros((batch_size, num_cells), bool)
     neighbors = np.full((batch_size, num_cells, HEX_DIRECTIONS), -1, np.int64)
-    sources = np.full((batch_size, num_actions), -1, np.int64)
-    targets = sources.copy()
-    action_mask = np.zeros((batch_size, num_actions), bool)
-    features = np.zeros((batch_size, num_actions, ACTION_DIM), np.float32)
     for i, x in enumerate(items):
         cell_count = len(x.cells)
-        action_count = len(x.sources)
         cells[i, :cell_count] = x.cells
         neighbors[i, :cell_count] = x.neighbors
         masks[i, :cell_count] = True
-        sources[i, :action_count] = x.sources
-        targets[i, :action_count] = x.targets
-        action_mask[i, :action_count] = True
-        features[i, :action_count] = x.action_features
     values = {
         "cells": cells,
         "cell_mask": masks,
         "neighbors": neighbors,
         "globals": np.stack([x.globals for x in items]),
         "previous": np.stack([x.previous for x in items]),
-        "sources": sources,
-        "targets": targets,
-        "action_features": features,
-        "action_mask": action_mask,
     }
+    if not spatial_only:
+        num_actions = max(len(item.sources) for item in items)
+        sources = np.full((batch_size, num_actions), -1, np.int64)
+        targets = sources.copy()
+        action_mask = np.zeros((batch_size, num_actions), bool)
+        features = np.zeros((batch_size, num_actions, ACTION_DIM), np.float32)
+        for i, item in enumerate(items):
+            action_count = len(item.sources)
+            sources[i, :action_count] = item.sources
+            targets[i, :action_count] = item.targets
+            action_mask[i, :action_count] = True
+            features[i, :action_count] = item.action_features
+        values.update(
+            sources=sources,
+            targets=targets,
+            action_features=features,
+            action_mask=action_mask,
+        )
     return {
         k: torch.from_numpy(v).to(device, non_blocking=non_blocking)
         for k, v in values.items()
