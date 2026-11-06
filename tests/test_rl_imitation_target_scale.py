@@ -9,7 +9,8 @@ import torch
 
 from civ5rl.core.model import Policy
 from civ5rl.engine.imitation import DemonstrationCache, backward_minibatch, label_minibatches
-from civ5rl.engine.imitation_stream import PreparedDemonstrations, prepare_episode
+from civ5rl.engine.imitation_stream import FileDemonstrations, PreparedDemonstrations, prepare_episode
+from civ5rl.engine.imitation_performance import backward_minibatch_async
 from civ5rl.engine.ppo_fast import prefixes
 from civ5rl.experiments.imitation_target_scale import load_config
 from civ5rl.protocols.imitation import RecordingCP, dump_episode, run_imitation_match, search_config
@@ -84,23 +85,41 @@ class TargetImitationChecks(unittest.TestCase):
                 entries.append({'path':path,'supervised':[r['supervised'] for r in ep['decisions']]})
             prepared=[prepare_episode((str(root),e,str(root/f'{i}.npz'))) for i,e in enumerate(entries)]
             file_cache=PreparedDemonstrations(root,prepared,'cpu',limit_bytes=1)
+            raw_cache=FileDemonstrations(root,entries,'cpu')
+            raw_inputs,raw_labels,raw_lengths=raw_cache.batch([(0,0,3)])
+            prepared_inputs,prepared_labels,prepared_lengths=file_cache.batch([(0,0,3)])
+            self.assertEqual(raw_lengths,prepared_lengths)
+            for key in raw_inputs:torch.testing.assert_close(raw_inputs[key],prepared_inputs[key])
+            for key in raw_labels:torch.testing.assert_close(raw_labels[key],prepared_labels[key])
+            raw_cache.get(0)
+            self.assertEqual((raw_cache.counters['cache_misses'],raw_cache.counters['cache_hits']),(1,1))
+            raw_cache.clear()
+            self.assertEqual(raw_cache.resident_bytes,0)
             reference=DemonstrationCache(episodes,'cpu')
             spans=[(0,2,6),(1,1,5)]
             count=sum(sum(reference.masks[e][a:b]) for e,a,b in spans)
-            model=Policy('C');clone=deepcopy(model)
+            model=Policy('C');clone=deepcopy(model);coalesced=deepcopy(model)
+            coalesced.coalesced_accumulation=True
             for p in model.value.parameters():p.requires_grad_(False)
             for p in clone.value.parameters():p.requires_grad_(False)
+            for p in coalesced.value.parameters():p.requires_grad_(False)
             a=backward_minibatch(model,reference,spans,count,micro_size=2)
             b=backward_minibatch(clone,file_cache,spans,count,micro_size=1)
+            c=float(backward_minibatch_async(coalesced,file_cache,spans,count,micro_size=1))
             self.assertAlmostEqual(a,b,places=6)
+            self.assertAlmostEqual(b,c,places=6)
             for p,q in zip(model.parameters(),clone.parameters()):
                 if p.requires_grad:torch.testing.assert_close(p.grad,q.grad,rtol=3e-5,atol=2e-7)
+            for p,q in zip(model.parameters(),coalesced.parameters()):
+                if p.requires_grad:torch.testing.assert_close(p.grad,q.grad,rtol=3e-5,atol=2e-7)
+                else:self.assertIsNone(q.grad)
             before={k:v.clone() for k,v in clone.value.state_dict().items()}
-            for policy in (model,clone):
+            for policy in (model,clone,coalesced):
                 torch.nn.utils.clip_grad_norm_(policy.parameters(),.5)
                 torch.optim.Adam([p for p in policy.parameters() if p.requires_grad],lr=1e-4,eps=1e-5).step()
             for p,q in zip(model.parameters(),clone.parameters()):torch.testing.assert_close(p,q,rtol=3e-5,atol=2e-7)
-            self.assertTrue(all(torch.equal(v,clone.value.state_dict()[k]) for k,v in before.items()))
+            for p,q in zip(model.parameters(),coalesced.parameters()):torch.testing.assert_close(p,q,rtol=3e-5,atol=2e-7)
+            self.assertTrue(all(torch.equal(v,clone.value.state_dict()[k]) and torch.equal(v,coalesced.value.state_dict()[k]) for k,v in before.items()))
             self.assertGreater(file_cache.counters['prefix_positions'],0)
             packed=list(label_minibatches(file_cache.chunks(),file_cache.masks,size=4))
             self.assertEqual([n for _,n in packed],[4,3])

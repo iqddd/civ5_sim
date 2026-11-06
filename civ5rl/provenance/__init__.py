@@ -72,21 +72,23 @@ def validate_cases(specs, trusted_manifest):
         raise ValueError("Fixed cases require an explicit trusted manifest")
     validate_manifest(trusted_manifest)
     for spec in specs:
-        p = spec.get("provenance", {})
-        i = p.get("case_id")
-        if type(i) is not int or not 0 <= i < len(trusted_manifest["cases"]):
+        provenance = spec.get("provenance", {})
+        case_id = provenance.get("case_id")
+        if type(case_id) is not int or not 0 <= case_id < len(
+            trusted_manifest["cases"]
+        ):
             raise ValueError("Case provenance identifier is missing or invalid")
-        expected = trusted_manifest["cases"][i]
+        expected = trusted_manifest["cases"][case_id]
         fields = {
             "source": trusted_manifest["source"],
             "split": trusted_manifest["split"],
             "namespace": trusted_manifest["namespace"],
             "manifest_hash": trusted_manifest["hash"],
-            "case_id": i,
+            "case_id": case_id,
             "case_hash": case_digest(expected),
             "scenario_hash": digest(expected["scenario"]),
         }
-        if p != fields or case_digest(spec) != fields["case_hash"]:
+        if provenance != fields or case_digest(spec) != fields["case_hash"]:
             raise ValueError("Case differs from trusted manifest/provenance")
-        if spec.get("split", p["split"]) != p["split"]:
+        if spec.get("split", provenance["split"]) != provenance["split"]:
             raise ValueError("Case split differs from trusted provenance")

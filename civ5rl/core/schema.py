@@ -24,6 +24,9 @@ if tuple(map(tuple, (TERRAINS, ELEVATIONS, FEATURES, UNIT_TYPES, KINDS))) != (
 ):
     raise ValueError("Engine categories do not match the RL-01 feature schema")
 
+INVALID_INDEX = -1
+MIN_FREE_ACTIONS = 2
+
 HEX_DIRECTIONS = 6
 OPPOSITE_HEX_OFFSET = HEX_DIRECTIONS // 2
 SELF_AND_HEX_DIRECTIONS = HEX_DIRECTIONS + 1

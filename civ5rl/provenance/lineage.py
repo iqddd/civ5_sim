@@ -6,6 +6,7 @@ import zipfile
 
 from civ5rl.provenance import checkpoint
 from civ5rl.provenance.common import read_json
+from civ5rl.provenance.identity import execution_identity
 
 
 def verify_parent_lineage(parent, previous, current, allowed, *, same_corpus=False):
@@ -13,7 +14,13 @@ def verify_parent_lineage(parent, previous, current, allowed, *, same_corpus=Fal
         for name, expected in previous["source_hashes"].items():
             if hashlib.sha256(archive.read(name)).hexdigest() != expected:
                 raise ValueError(f"Corrupted parent source archive: {name}")
-    old, new = previous["source_hashes"], current["source_hashes"]
+    old_identity = execution_identity(
+        previous, include_markdown=False, include_corpus=same_corpus
+    )
+    new_identity = execution_identity(
+        current, include_markdown=False, include_corpus=same_corpus
+    )
+    old, new = old_identity["source_hashes"], new_identity["source_hashes"]
     changes = sorted(
         name
         for name in old.keys() | new.keys()
@@ -21,13 +28,16 @@ def verify_parent_lineage(parent, previous, current, allowed, *, same_corpus=Fal
     )
     if set(changes) - allowed:
         raise ValueError(f"Unapproved source changes from parent: {changes}")
-    excluded = {"source_hashes", "git_commit"}
-    if not same_corpus:
-        excluded.add("corpus_hash")
-    if previous.keys() - excluded != current.keys() - excluded:
+    old_fields = {
+        key: value for key, value in old_identity.items() if key != "source_hashes"
+    }
+    new_fields = {
+        key: value for key, value in new_identity.items() if key != "source_hashes"
+    }
+    if old_fields.keys() != new_fields.keys():
         raise ValueError("Parent execution identity fields differ")
-    for key in previous.keys() - excluded:
-        if previous[key] != current[key]:
+    for key, value in old_fields.items():
+        if value != new_fields[key]:
             raise ValueError(f"Parent execution identity differs: {key}")
     return changes
 

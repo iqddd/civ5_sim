@@ -63,6 +63,57 @@ class ProvenanceRefactorTests(unittest.TestCase):
                 checkpoint.same_execution_identity(before, {**after, **change})
             )
 
+    def test_rng_capture_restore_repeats_all_streams(self):
+        # Divergent random streams silently break exact checkpoint resumption.
+        import random
+
+        import numpy as np
+        import torch
+
+        from civ5rl.provenance.rng import capture_rng, restore_rng
+
+        shuffle = random.Random(42)
+        original = capture_rng(shuffle)
+        try:
+            for cuda_enabled in (False, torch.cuda.is_available()):
+                with patch.object(
+                    torch.cuda, "is_available", return_value=cuda_enabled
+                ):
+                    saved = capture_rng(shuffle)
+
+                    def draw(cuda_enabled=cuda_enabled):
+                        return (
+                            random.random(),
+                            np.random.random(),
+                            torch.rand(3),
+                            torch.rand(3, device="cuda").cpu()
+                            if cuda_enabled
+                            else None,
+                            shuffle.random(),
+                        )
+
+                    expected = draw()
+                    restore_rng(saved, shuffle)
+                    actual = draw()
+                    self.assertEqual(expected[:2], actual[:2])
+                    torch.testing.assert_close(expected[2], actual[2], rtol=0, atol=0)
+                    if cuda_enabled:
+                        torch.testing.assert_close(
+                            expected[3], actual[3], rtol=0, atol=0
+                        )
+                    self.assertEqual(expected[4], actual[4])
+        finally:
+            restore_rng(original, shuffle)
+
+    def test_migration_identity_is_strict_about_markdown(self):
+        from civ5rl.provenance.migration import validate_audit_migration
+
+        old = {"source_hashes": {"docs/rl-plan.md": "old"}}
+        new = {"source_hashes": {"docs/rl-plan.md": "changed"}}
+        self.assertTrue(checkpoint.same_execution_identity(old, new))
+        with self.assertRaises(ValueError):
+            validate_audit_migration({}, {}, old, new)
+
     def test_discovery_and_passport_archive_match(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

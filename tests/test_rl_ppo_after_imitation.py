@@ -86,6 +86,7 @@ class PPOAfterTests(unittest.TestCase):
     def test_free_KL_has_correct_denominator_and_all_forced_is_null(self):
         class Model:
             variant = "B"
+            is_recurrent = False
             spatial_cuda_graphs = False
 
             def forward_sequences(self, batch, lengths, hidden):

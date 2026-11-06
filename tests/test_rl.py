@@ -298,6 +298,25 @@ class RLTests(unittest.TestCase):
             for param, expected in zip(model.parameters(), reference.parameters()):
                 torch.testing.assert_close(param, expected, rtol=0, atol=1e-7)
 
+    def test_cached_replay_uses_current_weights_on_every_pass(self):
+        # A silently empty replay plan would invalidate later KL measurements.
+        from civ5rl.engine.ppo_fast import RolloutCache, measure_replay
+
+        with torch.random.fork_rng(devices=[]):
+            for cpu_labels in (False, True):
+                policy = Policy("C")
+                episodes = self._short_rollout(policy)
+                cached = RolloutCache(episodes, "C", "cpu", cpu_labels=cpu_labels)
+                reference = RolloutCache(episodes, "C", "cpu", cpu_labels=cpu_labels)
+                cached.enable_cached_replay()
+                first = measure_replay(policy, cached, sequences_per_batch=2)
+                self.assertEqual(first, measure_replay(policy, reference, sequences_per_batch=2))
+                with torch.no_grad():
+                    policy.action[-1].weight.add_(0.1)
+                updated = measure_replay(policy, cached, sequences_per_batch=2)
+                self.assertEqual(updated, measure_replay(policy, reference, sequences_per_batch=2))
+                self.assertGreater(updated["max_logp_error"], first["max_logp_error"])
+
     def test_batched_gru_has_no_cross_episode_or_padding_effect(self):
         from civ5rl.ppo_fast import RolloutCache, prefixes
 

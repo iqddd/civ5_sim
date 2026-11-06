@@ -38,3 +38,25 @@ def bc_optimizer_step(
         torch._assert_async(torch.isfinite(norm), "Non-finite gradient")
     optimizer.step()
     return ce, norm
+
+
+class GradientAccumulator:
+    """Accumulate scaled losses for one minibatch."""
+
+    def __init__(self, parameters, *, coalesced: bool):
+        self.parameters = (
+            tuple(p for p in parameters if p.requires_grad) if coalesced else None
+        )
+        self.accumulated = None
+
+    def backward(self, scaled_loss):
+        if self.parameters is None:
+            scaled_loss.backward()
+            return
+        gradients = torch.autograd.grad(scaled_loss, self.parameters)
+        if self.accumulated is None:
+            self.accumulated = list(gradients)
+            for parameter, gradient in zip(self.parameters, self.accumulated):
+                parameter.grad = gradient
+        else:
+            torch._foreach_add_(self.accumulated, gradients)

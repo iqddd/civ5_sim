@@ -9,15 +9,9 @@ from multiprocessing.shared_memory import SharedMemory
 
 import numpy as np
 
+from civ5rl.core.encoded_layout import ENCODED_FIELDS
 from civ5rl.core.observation import Encoded
-from civ5rl.core.schema import (
-    ACTION_DIM,
-    GLOBAL_DIM,
-    HEX_DIRECTIONS,
-    MAX_MAP_CELLS,
-    PREV_ACTION_DIM,
-    TILE_DIM,
-)
+from civ5rl.core.schema import MAX_MAP_CELLS
 
 
 class EncodedSlots:
@@ -26,14 +20,16 @@ class EncodedSlots:
         if self.owner:
             descriptor = {"slots": slots, "action_capacity": action_capacity}
         slots, capacity = descriptor["slots"], descriptor["action_capacity"]
+        axis_sizes = {"cells": MAX_MAP_CELLS, "actions": capacity}
         layout = {
-            "cells": ((slots, MAX_MAP_CELLS, TILE_DIM), np.float32, "cell"),
-            "globals": ((slots, GLOBAL_DIM), np.float32, None),
-            "previous": ((slots, PREV_ACTION_DIM), np.float32, None),
-            "neighbors": ((slots, MAX_MAP_CELLS, HEX_DIRECTIONS), np.int64, "cell"),
-            "sources": ((slots, capacity), np.int64, "action"),
-            "targets": ((slots, capacity), np.int64, "action"),
-            "action_features": ((slots, capacity, ACTION_DIM), np.float32, "action"),
+            field.name: (
+                (slots,)
+                + ((axis_sizes[field.axis],) if field.axis != "fixed" else ())
+                + field.trailing_shape,
+                field.dtype,
+                field.axis,
+            )
+            for field in ENCODED_FIELDS
         }
         self.axis_kind = {key: axis for key, (_, _, axis) in layout.items()}
         size = sum(
@@ -62,28 +58,31 @@ class EncodedSlots:
             raise
 
     def write(self, slot, encoded):
-        nc, na = len(encoded.cells), len(encoded.sources)
-        if nc > MAX_MAP_CELLS or na > self.descriptor["action_capacity"]:
+        num_cells, num_actions = len(encoded.cells), len(encoded.sources)
+        if (
+            num_cells > MAX_MAP_CELLS
+            or num_actions > self.descriptor["action_capacity"]
+        ):
             # Unusually large legal lists remain supported without truncation.
             return {"encoded_inline": encoded}
         for key, array in self.arrays.items():
             value = getattr(encoded, key)
             target = array[slot]
-            if self.axis_kind[key] is not None:
+            if self.axis_kind[key] != "fixed":
                 target = target[: len(value)]
             target[...] = value
-        return {"encoded_shape": (nc, na)}
+        return {"encoded_shape": (num_cells, num_actions)}
 
     def read(self, slot, state):
         if "encoded_inline" in state:
             return state["encoded_inline"]
-        nc, na = state["encoded_shape"]
+        num_cells, num_actions = state["encoded_shape"]
         values = {}
         for key, array in self.arrays.items():
             value = array[slot]
             axis = self.axis_kind[key]
-            if axis is not None:
-                value = value[: nc if axis == "cell" else na]
+            if axis != "fixed":
+                value = value[: num_cells if axis == "cells" else num_actions]
             values[key] = value.copy()
         return Encoded(**values)
 

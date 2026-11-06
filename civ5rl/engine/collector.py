@@ -2,7 +2,6 @@
 
 import multiprocessing as mp
 import random
-import traceback
 from dataclasses import dataclass
 from multiprocessing.connection import wait
 from time import perf_counter
@@ -10,112 +9,19 @@ from time import perf_counter
 import numpy as np
 
 from civ5rl.core.context import context_from_spec
-from civ5rl.core.contracts import Episode, ScenarioSpec, WorkerPayload, WorkerState
-from civ5rl.core.env import DecisionEnv
+from civ5rl.core.contracts import (
+    Episode,
+    ScenarioSpec,
+    WorkerCommand,
+    WorkerPayload,
+    WorkerState,
+)
 from civ5rl.core.observation import ObservationEncoder
 from civ5rl.provenance.common import choose
-from civ5sim.engine import step_batch
+from civ5rl.engine.worker import worker as _worker
 
 
-def _worker(connection, profile_path=None, shared_descriptor=None):
-    # This process never imports torch or initializes CUDA.
-    import os
-
-    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
-        os.environ[name] = "1"
-    envs = []
-    encoders = []
-    previous = []
-    shared = None
-    if shared_descriptor is not None:
-        from civ5rl.engine.shared import EncodedSlots
-
-        shared = EncodedSlots(descriptor=shared_descriptor)
-    reported_done = []
-    profiler = None
-    if profile_path is not None:
-        import cProfile
-
-        profiler = cProfile.Profile()
-        profiler.enable()
-    try:
-        while True:
-            kind, payload = connection.recv()
-            if kind == "close":
-                break
-            if kind == "reset":
-                for env in envs:
-                    env.close()
-                envs = []
-                specs = payload["specs"] if isinstance(payload, dict) else payload
-                reported_done = [False] * len(specs)
-                encoders = []
-                for spec in specs:
-                    envs.append(DecisionEnv(spec))
-                    if shared is not None:
-                        encoders.append(
-                            ObservationEncoder(
-                                context_from_spec(spec),
-                                payload["variant"],
-                            )
-                        )
-            elif kind == "step":
-                selected = [(envs[i], action) for i, action in payload]
-                for env, action in selected:
-                    env.prepare(action)
-                start = perf_counter()
-                results = step_batch(
-                    [e.battle for e, _ in selected], [a for _, a in selected]
-                )
-                elapsed = (perf_counter() - start) / max(len(selected), 1)
-                for (env, action), result in zip(selected, results):
-                    env.timings["simulation_seconds"] += elapsed
-                    env.applied(action, result)
-                if shared is not None:
-                    for i, action in payload:
-                        encoders[i].remember_action(action, previous[i]["observation"])
-            else:
-                raise ValueError(f"Unknown worker command: {kind!r}")
-            states = []
-            encoding_seconds = 0.0
-            for i, env in enumerate(envs):
-                state = {"done": True} if reported_done[i] else env.request()
-                reported_done[i] = state["done"]
-                if shared is not None and not state["done"]:
-                    start = perf_counter()
-                    state.update(
-                        shared.write(
-                            i,
-                            encoders[i].encode(state["observation"], state["actions"]),
-                        )
-                    )
-                    encoding_seconds += perf_counter() - start
-                states.append(state)
-            previous = states
-            connection.send(
-                ("ok", {"states": states, "worker_encoding_seconds": encoding_seconds})
-            )
-    except EOFError:
-        pass
-    except BaseException:  # noqa: BLE001 -- worker boundary must preserve reproduction
-        connection.send(
-            (
-                "error",
-                {
-                    "traceback": traceback.format_exc(),
-                    "episodes": [e.reproduction() for e in envs],
-                },
-            )
-        )
-    finally:
-        if profiler is not None:
-            profiler.disable()
-            profiler.dump_stats(profile_path)
-        for env in envs:
-            env.close()
-        if shared is not None:
-            shared.close()
-        connection.close()
+WORKER_TIMEOUT_SECONDS = 300
 
 
 class EpisodeBuilder:
@@ -154,9 +60,10 @@ class EpisodeBuilder:
             decision_metrics(state["actions"], chosen, np.exp(logp))
         )
         ep["old_value"].append(float(value))
+        is_initial_step = len(ep["chosen"]) == 1
         ep["old_hidden"].append(
             None
-            if old_hidden is None or len(ep["chosen"]) == 1
+            if old_hidden is None or is_initial_step
             else old_hidden.reshape(1, 1, self.hidden_size).copy()
         )
         return action
@@ -165,6 +72,14 @@ class EpisodeBuilder:
         self.episode["result"] = state["result"]
         self.episode["joint_commands"] = state["joint_commands"]
         return self.episode
+
+
+@dataclass
+class _InferenceOutput:
+    encoded: list
+    log_probs: np.ndarray
+    critic_values: np.ndarray
+    old_hidden: np.ndarray | None
 
 
 @dataclass
@@ -260,7 +175,7 @@ class Collector:
         from civ5rl.provenance.common import write_json
 
         conn, proc = self.workers[index]
-        if not conn.poll(300):
+        if not conn.poll(WORKER_TIMEOUT_SECONDS):
             raise TimeoutError(f"Collector worker {proc.pid} timed out")
         kind, payload = conn.recv()
         if kind != "ok":
@@ -273,7 +188,7 @@ class Collector:
         start = perf_counter()
         if ready_mode:
             connections = [self.workers[w][0] for w in sorted(pending)]
-            available = wait(connections, timeout=300)
+            available = wait(connections, timeout=WORKER_TIMEOUT_SECONDS)
             if not available:
                 raise TimeoutError("No collector worker replied within 300 seconds")
             # Include all replies ready now; never wait for a slow worker.
@@ -322,33 +237,25 @@ class Collector:
                 torch.compiler.cudagraph_mark_step_begin()
             slots = torch.tensor(live, device=self.device)
             h = hidden.index_select(1, slots) if hidden is not None else None
-            logits, values, next_hidden = policy(batch, h)
-            pieces = [logits.log_softmax(-1), values[:, None]]
+            logits, critic_values, next_hidden = policy(batch, h)
+            pieces = [logits.log_softmax(-1), critic_values[:, None]]
             if h is not None:
                 pieces.append(h[0])
             # One D2H synchronization per inference batch, including diagnostic h.
             host = torch.cat(pieces, -1).cpu().numpy()
             action_width = logits.shape[1]
-            log_probs, values = host[:, :action_width], host[:, action_width]
-            old_hidden = host[:, action_width + 1 :]
+            log_probs = host[:, :action_width]
+            cpu_critic_values = host[:, action_width]
+            old_hidden = host[:, action_width + 1 :] if h is not None else None
             if next_hidden is not None:
                 hidden.index_copy_(1, slots, next_hidden)
         times["inference_seconds"] += perf_counter() - start
         times["inference_batches"] += 1
         times["inference_batch_items"] += len(live)
-        return encoded, log_probs, values, old_hidden, h
+        return _InferenceOutput(encoded, log_probs, cpu_critic_values, old_hidden)
 
     def _dispatch_actions(
-        self,
-        ready,
-        live,
-        wave,
-        encoded,
-        log_probs,
-        values,
-        old_hidden,
-        h,
-        worker_encoding,
+        self, ready, live, wave, inference: _InferenceOutput, worker_encoding
     ):
         states, builders, encoders = wave.states, wave.builders, wave.encoders
         pending, rngs = wave.pending, wave.rngs
@@ -356,21 +263,20 @@ class Collector:
         dispatch = [[] for _ in self.workers]
         for j, i in enumerate(live):
             state = states[i]
-            logp = log_probs[j, : len(state["actions"])]
+            logp = inference.log_probs[j, : len(state["actions"])]
             chosen = choose(np.exp(logp), rngs[i])
             action = builders[i].record_step(
                 state,
-                encoded[j],
+                inference.encoded[j],
                 chosen,
                 logp,
-                values[j],
-                None if h is None else old_hidden[j],
+                inference.critic_values[j],
+                None if inference.old_hidden is None else inference.old_hidden[j],
             )
             if not worker_encoding:
                 encoders[i].remember_action(action, state["observation"])
-            item = (i % self.envs_per_worker, action)
-            if wave.generations is not None:
-                item = (item[0], wave.generations[i], action)
+            generation = wave.generations[i] if wave.generations is not None else None
+            item = WorkerCommand(i % self.envs_per_worker, generation, action)
             dispatch[i // self.envs_per_worker].append(item)
             wave_decisions += 1
         for w in ready:
@@ -391,7 +297,7 @@ class Collector:
                 s,
                 policy.variant,
                 reuse_encoded,
-                policy.hidden_size if policy.variant == "C" else 0,
+                policy.hidden_size if policy.is_recurrent else 0,
             )
             for s in specs
         ]
@@ -409,7 +315,7 @@ class Collector:
         rngs = [random.Random(s["agent_seeds"][s["learner_side"]]) for s in specs]
         hidden = (
             torch.zeros((1, len(specs), policy.hidden_size), device=self.device)
-            if policy.variant == "C"
+            if policy.is_recurrent
             else None
         )
         self._wave_id += 1
@@ -437,7 +343,7 @@ class Collector:
         completed = 0
         while completed < len(wave.states):
             tick = perf_counter()
-            if not wait(connections, timeout=300):
+            if not wait(connections, timeout=WORKER_TIMEOUT_SECONDS):
                 raise TimeoutError("No partial collector reply within 300 seconds")
             live, ready, ready_at = [], [], []
             for w, (conn, _) in enumerate(self.workers):
@@ -478,18 +384,12 @@ class Collector:
             if live:
                 now = perf_counter()
                 infer_delays.extend(now - at for at in ready_at)
-                encoded, log_probs, values, old_hidden, h = self._infer_live(
-                    policy, live, wave, worker_encoding, times
-                )
+                inference = self._infer_live(policy, live, wave, worker_encoding, times)
                 wave.decisions += self._dispatch_actions(
                     ready,
                     live,
                     wave,
-                    encoded,
-                    log_probs,
-                    values,
-                    old_hidden,
-                    h,
+                    inference,
                     worker_encoding,
                 )
         times["worker_publish_delay_seconds"] += sum(publish_delays)
@@ -585,18 +485,12 @@ class Collector:
                         wave.completed_at[i] = now
                 if not live:
                     continue
-                encoded, log_probs, values, old_hidden, h = self._infer_live(
-                    policy, live, wave, worker_encoding, times
-                )
+                inference = self._infer_live(policy, live, wave, worker_encoding, times)
                 wave.decisions += self._dispatch_actions(
                     ready,
                     live,
                     wave,
-                    encoded,
-                    log_probs,
-                    values,
-                    old_hidden,
-                    h,
+                    inference,
                     worker_encoding,
                 )
             times["idle_slot_seconds"] += sum(

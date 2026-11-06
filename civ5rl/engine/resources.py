@@ -79,10 +79,10 @@ class ResourceMonitor:
             "unavailable": "null plus errors; no D3D fallback",
         }
         if self.gpu:
-            n = self.nvml
+            nvml = self.nvml
             metadata.update(
-                gpu_name=self._query("name", lambda: n.nvmlDeviceGetName(self.gpu)),
-                gpu_uuid=self._query("uuid", lambda: n.nvmlDeviceGetUUID(self.gpu)),
+                gpu_name=self._query("name", lambda: nvml.nvmlDeviceGetName(self.gpu)),
+                gpu_uuid=self._query("uuid", lambda: nvml.nvmlDeviceGetUUID(self.gpu)),
             )
         write_json(self.directory / "resources-schema.json", metadata)
         self.thread = threading.Thread(
@@ -124,11 +124,13 @@ class ResourceMonitor:
             **dict.fromkeys(self._GPU_FIELDS, None),
         }
         if self.gpu:
-            n, h = self.nvml, self.gpu
+            nvml, gpu_handle = self.nvml, self.gpu
             util = self._query(
-                "utilization", lambda: n.nvmlDeviceGetUtilizationRates(h)
+                "utilization", lambda: nvml.nvmlDeviceGetUtilizationRates(gpu_handle)
             )
-            mem = self._query("memory", lambda: n.nvmlDeviceGetMemoryInfo(h))
+            mem = self._query(
+                "memory", lambda: nvml.nvmlDeviceGetMemoryInfo(gpu_handle)
+            )
             if util:
                 row.update(
                     gpu_core_load_percent=util.gpu,
@@ -137,14 +139,17 @@ class ResourceMonitor:
             if mem:
                 row.update(vram_used_bytes=mem.used, vram_total_bytes=mem.total)
             for field, fn in (
-                ("gpu_power_watts", n.nvmlDeviceGetPowerUsage),
+                ("gpu_power_watts", nvml.nvmlDeviceGetPowerUsage),
                 (
                     "gpu_default_power_limit_watts",
-                    n.nvmlDeviceGetPowerManagementDefaultLimit,
+                    nvml.nvmlDeviceGetPowerManagementDefaultLimit,
                 ),
-                ("gpu_enforced_power_limit_watts", n.nvmlDeviceGetEnforcedPowerLimit),
+                (
+                    "gpu_enforced_power_limit_watts",
+                    nvml.nvmlDeviceGetEnforcedPowerLimit,
+                ),
             ):
-                value = self._query(field, lambda fn=fn: fn(h))
+                value = self._query(field, lambda fn=fn: fn(gpu_handle))
                 row[field] = None if value is None else value / 1000
             if (
                 row["gpu_default_power_limit_watts"]
@@ -168,13 +173,13 @@ class ResourceMonitor:
                         "update",
                         "decisions",
                     ):
-                        s = self.summary.setdefault(
+                        summary = self.summary.setdefault(
                             key, {"count": 0, "sum": 0, "max": value}
                         )
-                        s.update(
-                            count=s["count"] + 1,
-                            sum=s["sum"] + value,
-                            max=max(s["max"], value),
+                        summary.update(
+                            count=summary["count"] + 1,
+                            sum=summary["sum"] + value,
+                            max=max(summary["max"], value),
                         )
             except Exception as exc:  # noqa: BLE001 -- never interrupt training from sampler
                 self.errors["sampler"] = f"{type(exc).__name__}: {exc}"

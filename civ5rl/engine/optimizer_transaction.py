@@ -1,10 +1,10 @@
 """In-place Adam transactions preserve captured CUDA graph tensor identities."""
 
 from copy import deepcopy
-import random
 
-import numpy as np
 import torch
+
+from civ5rl.provenance.rng import capture_rng, restore_rng
 
 
 class AdamSnapshot:
@@ -12,14 +12,17 @@ class AdamSnapshot:
         self.model = [(v, v.detach().clone()) for v in model.state_dict().values()]
         self.optimizer = optimizer
         self.states = {
-            p: {k: (v, v.detach().clone()) if torch.is_tensor(v) else deepcopy(v)
-                for k, v in state.items()}
+            p: {
+                k: (v, v.detach().clone()) if torch.is_tensor(v) else deepcopy(v)
+                for k, v in state.items()
+            }
             for p, state in optimizer.state.items()
         }
-        self.groups = [{k: deepcopy(v) for k, v in g.items() if k != "params"}
-                       for g in optimizer.param_groups]
-        self.rng = (random.getstate(), np.random.get_state(), torch.get_rng_state(),
-                    torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [])
+        self.groups = [
+            {k: deepcopy(v) for k, v in g.items() if k != "params"}
+            for g in optimizer.param_groups
+        ]
+        self.rng = capture_rng()
 
     @torch.no_grad()
     def restore(self):
@@ -45,21 +48,24 @@ class AdamSnapshot:
                 if k != "params" and k not in saved:
                     del group[k]
             group.update(deepcopy(saved))
-        random.setstate(self.rng[0])
-        np.random.set_state(self.rng[1])
-        torch.set_rng_state(self.rng[2])
-        if self.rng[3]:
-            torch.cuda.set_rng_state_all(self.rng[3])
+        restore_rng(self.rng)
         # A single device reduction also catches accidentally replaced/corrupted buffers.
-        if self.model and not torch.stack([
-            (current == saved).all() for current, saved in self.model
-        ]).all().item():
+        if (
+            self.model
+            and not torch.stack(
+                [(current == saved).all() for current, saved in self.model]
+            )
+            .all()
+            .item()
+        ):
             raise RuntimeError("Adam rollback failed to restore model exactly")
 
 
 def require_finite_state(model, optimizer):
     tensors = list(model.state_dict().values()) + [
-        v for state in optimizer.state.values() for v in state.values()
+        v
+        for state in optimizer.state.values()
+        for v in state.values()
         if torch.is_tensor(v)
     ]
     # Adam step tensors may be on CPU while parameters live on CUDA.

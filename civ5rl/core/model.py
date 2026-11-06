@@ -223,6 +223,10 @@ class Policy(nn.Module):
         self._memory_runner = None
         self._initialize()
 
+    @property
+    def is_recurrent(self) -> bool:
+        return self.variant == PolicyVariant.CONTACTS_GRU
+
     def enable_amp(self, enabled=True, *, spatial_batch_size=0):
         if enabled and (
             next(self.parameters()).device.type != "cuda"

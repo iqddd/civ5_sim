@@ -26,6 +26,7 @@ class ControlledPPOTests(unittest.TestCase):
         # A sampled estimator or forced-diluted mean silently changes acceptance.
         class Model:
             variant = "B"
+            is_recurrent = False
             spatial_cuda_graphs = False
             def forward_sequences(self, batch, lengths, hidden):
                 return batch["logits"], torch.zeros(sum(lengths)), None

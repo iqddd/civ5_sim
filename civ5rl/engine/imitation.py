@@ -6,8 +6,12 @@ import torch
 from torch.nn import functional as F
 
 from civ5rl.core.observation import ObservationEncoder
+from civ5rl.core.schema import MIN_FREE_ACTIONS
+from civ5rl.core.variants import PolicyVariant
+from civ5rl.engine.constants import DEFAULT_BC_MICROBATCH_SIZE
 from civ5rl.engine.ppo_fast import prefixes
 from civ5rl.engine.sequence import SequenceBuffer, pack_minibatches
+from civ5rl.engine.training import GradientAccumulator
 from civ5sim import Action
 
 
@@ -20,13 +24,13 @@ def decision_indices(row):
     if any(
         type(i) is not int or not 0 <= i < len(row["actions"])
         for i in (teacher, executed)
-    ) or row["supervised"] != (len(row["actions"]) >= 2):
+    ) or row["supervised"] != (len(row["actions"]) >= MIN_FREE_ACTIONS):
         raise ValueError("Invalid demonstration indices or CE mask")
     return teacher, executed
 
 
 def encode_demonstration(episode):
-    encoder = ObservationEncoder(episode["context"], "C")
+    encoder = ObservationEncoder(episode["context"], PolicyVariant.CONTACTS_GRU)
     encoded = []
     for row in episode["decisions"]:
         legal = tuple(Action(**a) for a in row["actions"])
@@ -62,14 +66,14 @@ def label_minibatches(order, masks, size=1024):
 
 def ce_sum(logits, labels):
     mask = labels["mask"]
-    if mask.any():
-        return F.cross_entropy(logits[mask], labels["indices"][mask], reduction="sum")
-    return (
-        logits[:, 0].sum() * 0
-    )  # caller skips backward for entirely forced microbatches
+    if not mask.any():
+        raise ValueError("BC loss requires at least one supervised decision")
+    return F.cross_entropy(logits[mask], labels["indices"][mask], reduction="sum")
 
 
-def backward_minibatch(policy, cache, spans, count, micro_size=8):
+def backward_minibatch(
+    policy, cache, spans, count, micro_size=DEFAULT_BC_MICROBATCH_SIZE
+):
     if policy.coalesced_accumulation:
         from civ5rl.engine.imitation_performance import backward_minibatch_async
 
@@ -78,6 +82,7 @@ def backward_minibatch(policy, cache, spans, count, micro_size=8):
         torch.compiler.cudagraph_mark_step_begin()
     hidden = prefixes(policy, cache, spans)
     total = 0.0
+    accumulator = GradientAccumulator(policy.parameters(), coalesced=False)
     for first in range(0, len(spans), micro_size):
         part = spans[first : first + micro_size]
         batch, labels, lengths = cache.batch(part)
@@ -89,7 +94,7 @@ def backward_minibatch(policy, cache, spans, count, micro_size=8):
         loss = ce_sum(logits, labels)
         if not torch.isfinite(loss):
             raise FloatingPointError("Non-finite BC loss")
-        (loss / count).backward()
+        accumulator.backward(loss / count)
         total += loss.detach().item()
     return total / count
 
@@ -102,8 +107,8 @@ def teacher_metrics(policy, cache, *, move_details=False):
         if policy.spatial_cuda_graphs:
             torch.compiler.cudagraph_mark_step_begin()
         hidden = prefixes(policy, cache, spans)
-        for first in range(0, len(spans), 8):
-            part = spans[first : first + 8]
+        for first in range(0, len(spans), DEFAULT_BC_MICROBATCH_SIZE):
+            part = spans[first : first + DEFAULT_BC_MICROBATCH_SIZE]
             batch, labels, lengths = cache.batch(part)
             logits, _, _ = policy.forward_sequences(
                 batch, lengths, hidden[:, first : first + len(part)].contiguous()

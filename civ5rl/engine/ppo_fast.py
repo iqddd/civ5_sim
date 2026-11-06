@@ -1,13 +1,18 @@
 """GPU-resident rollout and batched recurrent chunks; same PPO minibatch/targets."""
 
 from time import perf_counter
+from typing import NamedTuple
 
 import numpy as np
 import torch
 
-from civ5rl.core.model import distribution_stats
+from civ5rl.core.schema import MIN_FREE_ACTIONS
+from civ5rl.engine.constants import DEFAULT_GPU_RESERVE_BYTES, DEFAULT_PREFIX_BLOCK_SIZE
 from civ5rl.engine.ppo import encode_episode, objective, targets
+from civ5rl.engine.replay_metrics import REPLAY_DIAGNOSTIC_KEYS
 from civ5rl.engine.sequence import SequenceBuffer
+from civ5rl.engine.spans import Span
+from civ5rl.engine.training import GradientAccumulator
 
 
 def categorical_distance(behavior_log_probs, logits, mask):
@@ -98,13 +103,21 @@ class RolloutCache(SequenceBuffer):
         self.has_behavior_distribution = all(has_full)
         self.ragged_behavior = None
         if self.has_behavior_distribution and cpu_labels:
-            self.ragged_behavior = [values for ep in episodes for values in ep["old_log_probs"]]
+            self.ragged_behavior = [
+                values for ep in episodes for values in ep["old_log_probs"]
+            ]
             if len(self.ragged_behavior) != len(flat):
                 raise ValueError("Behavior distribution count differs from decisions")
-            for i, (values, count) in enumerate(zip(self.ragged_behavior, self.action_counts)):
-                if (len(values) != count or not np.isfinite(values).all()
-                    or float(values[int(self.labels['indices'][i])]) != float(self.labels['old_logp'][i])
-                    or not np.isclose(np.exp(values).sum(), 1., atol=1e-5, rtol=0)):
+            for i, (values, count) in enumerate(
+                zip(self.ragged_behavior, self.action_counts)
+            ):
+                if (
+                    len(values) != count
+                    or not np.isfinite(values).all()
+                    or float(values[int(self.labels["indices"][i])])
+                    != float(self.labels["old_logp"][i])
+                    or not np.isclose(np.exp(values).sum(), 1.0, atol=1e-5, rtol=0)
+                ):
                     raise ValueError("Invalid ragged behavior distribution")
         elif self.has_behavior_distribution:
             width = int(self.action_counts.max())
@@ -143,7 +156,7 @@ class RolloutCache(SequenceBuffer):
             return
         if str(self.device).startswith("cuda"):
             free, _ = torch.cuda.mem_get_info(self.device)
-            if free < self.resident_bytes + 2 * 1024**3:
+            if free < self.resident_bytes + DEFAULT_GPU_RESERVE_BYTES:
                 return
             self._replay_sums_runner = torch.compile(
                 _replay_sums, dynamic=True, fullgraph=True
@@ -151,35 +164,54 @@ class RolloutCache(SequenceBuffer):
         self.replay_inputs = True
 
     def batch(self, spans):
-        indices = (torch.tensor([i for ep, a, b in spans
-                                for i in range(int(self.offsets[ep])+a, int(self.offsets[ep])+b)])
-                   if self.cpu_labels else self.indices(spans))
+        indices = (
+            torch.tensor(
+                [
+                    i
+                    for episode, start, stop in spans
+                    for i in range(
+                        int(self.offsets[episode]) + start,
+                        int(self.offsets[episode]) + stop,
+                    )
+                ]
+            )
+            if self.cpu_labels
+            else self.indices(spans)
+        )
         data = self.gather_inputs(spans, indices)
         selected = indices.cpu() if self.cpu_labels else indices
-        labels = {k: v.index_select(0, selected).to(self.device) for k, v in self.labels.items()}
+        labels = {
+            k: v.index_select(0, selected).to(self.device)
+            for k, v in self.labels.items()
+        }
         if self.ragged_behavior is not None:
             rows = [self.ragged_behavior[i] for i in selected.tolist()]
-            behavior = np.full((len(rows), data['action_mask'].shape[1]), -np.inf, np.float32)
+            behavior = np.full(
+                (len(rows), data["action_mask"].shape[1]), -np.inf, np.float32
+            )
             for i, values in enumerate(rows):
-                behavior[i, :len(values)] = values
-            labels['old_log_probs'] = torch.from_numpy(behavior).to(self.device)
+                behavior[i, : len(values)] = values
+            labels["old_log_probs"] = torch.from_numpy(behavior).to(self.device)
         return data, labels, [stop - start for _, start, stop in spans]
 
 
 @torch.no_grad()
-def prefixes(policy, cache, spans, block_size=128):
-    if policy.variant != "C":
+def prefixes(policy, cache, spans, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
+    if not policy.is_recurrent:
         return None
     hidden = torch.zeros((1, len(spans), policy.hidden_size), device=cache.device)
     for offset in range(0, max(start for _, start, _ in spans), block_size):
         active = [
-            (j, ep, start) for j, (ep, start, _) in enumerate(spans) if start > offset
+            (slot, episode, start)
+            for slot, (episode, start, _) in enumerate(spans)
+            if start > offset
         ]
         subspans = [
-            (ep, offset, min(start, offset + block_size)) for _, ep, start in active
+            Span(episode, offset, min(start, offset + block_size))
+            for _, episode, start in active
         ]
         batch, _, lengths = cache.batch(subspans)
-        slots = torch.tensor([j for j, _, _ in active], device=cache.device)
+        slots = torch.tensor([slot for slot, _, _ in active], device=cache.device)
         if policy.spatial_cuda_graphs:
             torch.compiler.cudagraph_mark_step_begin()
         last = policy.forward_sequences(
@@ -189,37 +221,81 @@ def prefixes(policy, cache, spans, block_size=128):
     return hidden
 
 
+class _ReplaySums(NamedTuple):
+    sampled_kl: torch.Tensor
+    sampled_kl_free: torch.Tensor
+    critic_sum: torch.Tensor
+    residual_square_sum: torch.Tensor
+    residual_sum: torch.Tensor
+    return_sum: torch.Tensor
+    return_square_sum: torch.Tensor
+
+
+class _ReplayTotals(NamedTuple):
+    sampled_kl: float
+    sampled_kl_free: float
+    critic_sum: float
+    residual_square_sum: float
+    residual_sum: float
+    return_sum: float
+    return_square_sum: float
+    max_logp_error: float
+    full_kl: float
+    max_total_variation: float
+    full_kl_free: float
+
+
 def _replay_sums(logits, value, indices, old_logp, returns, action_mask):
     logp = logits.log_softmax(-1).gather(1, indices[:, None])[:, 0]
     delta = logp - old_logp
     sampled = delta.exp() - 1 - delta
-    free = action_mask.sum(-1) >= 2
+    free = action_mask.sum(-1) >= MIN_FREE_ACTIONS
     residual = returns - value
-    return (
-        torch.stack(
-            (
-                sampled.sum(),
-                sampled.masked_fill(~free, 0).sum(),
-                value.sum(),
-                residual.square().sum(),
-                residual.sum(),
-                returns.sum(),
-                returns.square().sum(),
-            )
-        ),
-        delta.abs().max(),
+    sums = _ReplaySums(
+        sampled.sum(),
+        sampled.masked_fill(~free, 0).sum(),
+        value.sum(),
+        residual.square().sum(),
+        residual.sum(),
+        returns.sum(),
+        returns.square().sum(),
     )
+    return torch.stack(sums), delta.abs().max()
 
 
 def _replay_parts(cache, episodes):
-    for offset in range(0, max(len(cache.encoded[ep]) for ep in episodes), 128):
-        active = [(j, ep) for j, ep in enumerate(episodes) if len(cache.encoded[ep]) > offset]
-        spans = [(ep, offset, min(offset+128, len(cache.encoded[ep]))) for _, ep in active]
+    max_length = max(len(cache.encoded[episode]) for episode in episodes)
+    for offset in range(0, max_length, DEFAULT_PREFIX_BLOCK_SIZE):
+        active = [
+            (slot, episode)
+            for slot, episode in enumerate(episodes)
+            if len(cache.encoded[episode]) > offset
+        ]
+        spans = [
+            Span(
+                episode,
+                offset,
+                min(offset + DEFAULT_PREFIX_BLOCK_SIZE, len(cache.encoded[episode])),
+            )
+            for _, episode in active
+        ]
         batch, labels, lengths = cache.batch(spans)
-        slots = torch.tensor([j for j, _ in active], device=cache.device)
-        free = sum(int((cache.action_counts[int(cache.offsets[ep])+a:int(cache.offsets[ep])+b] >= 2).sum())
-                   for ep, a, b in spans)
-        yield batch, labels, lengths, slots, free
+        slots = torch.tensor([slot for slot, _ in active], device=cache.device)
+        free_count = sum(
+            int(
+                (
+                    cache.action_counts[
+                        int(cache.offsets[span.episode]) + span.start : int(
+                            cache.offsets[span.episode]
+                        )
+                        + span.stop
+                    ]
+                    >= MIN_FREE_ACTIONS
+                ).sum()
+            )
+            for span in spans
+        )
+        yield batch, labels, lengths, slots, free_count
 
 
 def _replay_groups(cache, sequences_per_batch):
@@ -233,46 +309,25 @@ def _replay_groups(cache, sequences_per_batch):
         episodes = list(
             range(first, min(first + sequences_per_batch, len(cache.episodes)))
         )
-        if getattr(cache, "cpu_labels", False):
-            yield len(episodes), _replay_parts(cache, episodes)
-            continue
-        parts = []
-        for offset in range(0, max(len(cache.encoded[ep]) for ep in episodes), 128):
-            active = [
-                (j, ep)
-                for j, ep in enumerate(episodes)
-                if len(cache.encoded[ep]) > offset
-            ]
-            spans = [
-                (ep, offset, min(offset + 128, len(cache.encoded[ep])))
-                for _, ep in active
-            ]
-            batch, labels, lengths = cache.batch(spans)
-            slots = torch.tensor([j for j, _ in active], device=cache.device)
-            free_count = sum(
-                int(
-                    (
-                        cache.action_counts[
-                            int(cache.offsets[ep]) + a : int(cache.offsets[ep]) + b
-                        ]
-                        >= 2
-                    ).sum()
-                )
-                for ep, a, b in spans
-            )
-            parts.append((batch, labels, lengths, slots, free_count))
+        parts = _replay_parts(cache, episodes)
+        if not getattr(cache, "cpu_labels", False):
+            parts = list(parts)
         group = len(episodes), parts
-        if getattr(cache, "replay_inputs", False):
+        if getattr(cache, "replay_inputs", False) and not getattr(
+            cache, "cpu_labels", False
+        ):
             plan.append(group)
         yield group
-    if getattr(cache, "replay_inputs", False):
+    if getattr(cache, "replay_inputs", False) and not getattr(
+        cache, "cpu_labels", False
+    ):
         cache._replay_plan = sequences_per_batch, plan
 
 
 @torch.no_grad()
 def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=False):
     device = cache.device
-    totals = torch.zeros(7, device=device)
+    totals = torch.zeros(len(_ReplaySums._fields), device=device)
     maximum = torch.zeros((), device=device)
     free_count = count = 0
     full_total = torch.zeros((), device=device, dtype=torch.float64)
@@ -282,7 +337,7 @@ def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=Fa
     for group_size, parts in _replay_groups(cache, sequences_per_batch):
         hidden = (
             torch.zeros((1, group_size, policy.hidden_size), device=device)
-            if policy.variant == "C"
+            if policy.is_recurrent
             else None
         )
         for batch, labels, lengths, slots, part_free in parts:
@@ -314,50 +369,48 @@ def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=Fa
                     batch["action_mask"],
                 )
                 full_total += kl.sum()
-                full_free_total += kl.masked_fill(batch["action_mask"].sum(-1) < 2, 0).sum()
+                full_free_total += kl.masked_fill(
+                    batch["action_mask"].sum(-1) < MIN_FREE_ACTIONS, 0
+                ).sum()
                 max_tv = torch.maximum(max_tv, tv.max())
     # One host transfer for all diagnostics; full-distribution sums stay FP64.
-    values = (
+    host_metrics = (
         torch.cat(
-            (totals.double(), maximum[None].double(), full_total[None], max_tv[None], full_free_total[None])
+            (
+                totals.double(),
+                maximum[None].double(),
+                full_total[None],
+                max_tv[None],
+                full_free_total[None],
+            )
         )
         .cpu()
         .tolist()
     )
-    (
-        total,
-        free_total,
-        value_sum,
-        value_error,
-        value_residual,
-        return_sum,
-        return_square,
-        maximum,
-        full_total,
-        max_tv,
-        full_free_total,
-    ) = values
-    variance = return_square / count - (return_sum / count) ** 2
+    replay = _ReplayTotals(*host_metrics)
+    variance = replay.return_square_sum / count - (replay.return_sum / count) ** 2
     return {
-        "sampled_kl": total / count,
-        "sampled_kl_free": free_total / free_count if free_count else None,
+        "sampled_kl": replay.sampled_kl / count,
+        "sampled_kl_free": replay.sampled_kl_free / free_count if free_count else None,
         "free_decisions": free_count,
         "all_decisions": count,
-        "critic_mean": value_sum / count,
-        "critic_mse": value_error / count,
+        "critic_mean": replay.critic_sum / count,
+        "critic_mse": replay.residual_square_sum / count,
         "critic_explained_variance": (
-            1 - (value_error / count - (value_residual / count) ** 2) / variance
+            1
+            - (replay.residual_square_sum / count - (replay.residual_sum / count) ** 2)
+            / variance
             if variance > 1e-12
             else None
         ),
-        "max_logp_error": maximum,
-        "full_kl": full_total / count
+        "max_logp_error": replay.max_logp_error,
+        "full_kl": replay.full_kl / count
         if full_distribution and cache.has_behavior_distribution
         else None,
-        "full_kl_free": full_free_total / free_count
+        "full_kl_free": replay.full_kl_free / free_count
         if full_distribution and cache.has_behavior_distribution and free_count
         else None,
-        "max_total_variation": max_tv
+        "max_total_variation": replay.max_total_variation
         if full_distribution and cache.has_behavior_distribution
         else None,
     }
@@ -442,8 +495,9 @@ class BatchedBackend:
         self.prefix_seconds += perf_counter() - tick
         finite = torch.ones((), dtype=torch.bool, device=self.device)
         tokens = 0
-        parameters = tuple(p for p in self.policy.parameters() if p.requires_grad)
-        accumulated = None
+        accumulator = GradientAccumulator(
+            self.policy.parameters(), coalesced=self.policy.coalesced_accumulation
+        )
         for micro_start in range(0, len(minibatch), self.micro_chunks):
             spans = minibatch[micro_start : micro_start + self.micro_chunks]
             tick = perf_counter()
@@ -469,16 +523,7 @@ class BatchedBackend:
             finite &= torch.isfinite(loss.detach())
             valid_tokens = sum(lengths)
             weighted_loss = loss * (valid_tokens / count)
-            if self.policy.coalesced_accumulation:
-                gradients = torch.autograd.grad(weighted_loss, parameters)
-                if accumulated is None:
-                    accumulated = list(gradients)
-                    for p, g in zip(parameters, accumulated):
-                        p.grad = g
-                else:
-                    torch._foreach_add_(accumulated, gradients)
-            else:
-                weighted_loss.backward()
+            accumulator.backward(weighted_loss)
             self.backward_seconds += perf_counter() - tick
             self.totals += (
                 torch.stack([stats[key] for key in self.names]) * valid_tokens
@@ -489,11 +534,14 @@ class BatchedBackend:
         return tokens
 
     def kl(self):
-        exact = self.config["ppo"].get("step_acceptance") == "full_categorical_kl_rollback"
+        exact = (
+            self.config["ppo"].get("step_acceptance") == "full_categorical_kl_rollback"
+        )
         if exact and not self.cache.has_behavior_distribution:
             raise ValueError("Controlled PPO requires behavior distributions")
-        self.last_replay = measure_replay(self.policy, self.cache, self.kl_batch,
-                                          full_distribution=exact)
+        self.last_replay = measure_replay(
+            self.policy, self.cache, self.kl_batch, full_distribution=exact
+        )
         if exact:
             return self.last_replay["full_kl_free"]
         return (
@@ -521,18 +569,7 @@ class BatchedBackend:
             **{
                 k: v
                 for k, v in getattr(self, "last_replay", self.replay).items()
-                if k
-                in (
-                    "sampled_kl_free",
-                    "sampled_kl",
-                    "full_kl",
-                    "full_kl_free",
-                    "free_decisions",
-                    "all_decisions",
-                    "critic_mean",
-                    "critic_mse",
-                    "critic_explained_variance",
-                )
+                if k in REPLAY_DIAGNOSTIC_KEYS
             },
             "pre_update_full_kl": self.replay["full_kl"],
             "pre_update_max_total_variation": self.replay["max_total_variation"],

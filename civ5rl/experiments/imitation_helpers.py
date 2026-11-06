@@ -1,9 +1,6 @@
 """Shared primitives for CP imitation experiments."""
 
-import multiprocessing as mp
-import random
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from time import perf_counter
@@ -11,8 +8,10 @@ from time import perf_counter
 import numpy as np
 import torch
 
-from civ5rl.protocols.imitation import load_episode, make_case, worker_setup
+from civ5rl.engine.pool import pool
+from civ5rl.protocols.imitation import load_episode, make_case
 from civ5rl.provenance.common import file_sha256, read_json
+from civ5rl.provenance.rng import capture_rng, restore_rng as _restore_rng
 
 
 def adam(policy, config, device):
@@ -60,14 +59,6 @@ def load_policy(config, path, device):
                 max_shapes=config["performance"].get("recurrent_graph_max_shapes", 64)
             )
     return policy
-
-
-def pool(workers):
-    return ProcessPoolExecutor(
-        max_workers=workers,
-        mp_context=mp.get_context("spawn"),
-        initializer=worker_setup,
-    )
 
 
 def demonstrations(config, manifest, out, split):
@@ -151,22 +142,12 @@ def update_selection(state, epoch, ce, settings):
 
 
 def restore_rng(saved, shuffle):
-    random.setstate(saved["python_rng"])
-    np.random.set_state(saved["numpy_rng"])
-    torch.set_rng_state(saved["torch_rng"].cpu())
-    torch.cuda.set_rng_state_all([v.cpu() for v in saved["cuda_rng"]])
-    shuffle.setstate(saved["shuffle_rng"])
+    _restore_rng(saved, shuffle)
 
 
 @contextmanager
 def isolated_rng(shuffle):
-    state = {
-        "python_rng": random.getstate(),
-        "numpy_rng": np.random.get_state(),
-        "torch_rng": torch.get_rng_state(),
-        "cuda_rng": torch.cuda.get_rng_state_all(),
-        "shuffle_rng": shuffle.getstate(),
-    }
+    state = capture_rng(shuffle)
     try:
         yield
     finally:

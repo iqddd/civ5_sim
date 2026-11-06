@@ -5,29 +5,23 @@ import importlib.metadata
 import json
 import os
 import platform
-import random
 import subprocess
 import zipfile
 from pathlib import Path
 
-import numpy as np
-
 from civ5rl.provenance.common import ROOT, write_json
+from civ5rl.provenance.identity import execution_identity
+from civ5rl.provenance.rng import capture_rng, restore_rng
 
 
 def same_execution_identity(left, right):
     """Keep Markdown in snapshots, but compare executable experiment identity."""
 
-    def execution_fields(identity):
-        fields = {k: v for k, v in identity.items() if k != "git_commit"}
-        fields["source_hashes"] = {
-            path: digest
-            for path, digest in fields.get("source_hashes", {}).items()
-            if Path(path).suffix.lower() != ".md"
-        }
-        return fields
-
-    return execution_fields(left) == execution_fields(right)
+    left = {**left, "source_hashes": left.get("source_hashes", {})}
+    right = {**right, "source_hashes": right.get("source_hashes", {})}
+    return execution_identity(left, include_markdown=False) == execution_identity(
+        right, include_markdown=False
+    )
 
 
 DEFAULT_ARTIFACT_GLOBS = (
@@ -131,11 +125,7 @@ def save(path, policy, optimizer, state, shuffle_rng, config, identity):
         "state": state,
         "config": config,
         "identity": identity,
-        "python_rng": random.getstate(),
-        "numpy_rng": np.random.get_state(),
-        "torch_rng": torch.get_rng_state(),
-        "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
-        "shuffle_rng": shuffle_rng.getstate(),
+        **capture_rng(shuffle_rng),
     }
     tmp = path.with_suffix(".tmp")
     torch.save(value, tmp)
@@ -152,10 +142,5 @@ def restore(path, policy, optimizer, shuffle_rng, config, identity):
         raise ValueError("Resume config/source/corpus/environment identity mismatch")
     policy.load_state_dict(value["model"])
     optimizer.load_state_dict(value["optimizer"])
-    random.setstate(value["python_rng"])
-    np.random.set_state(value["numpy_rng"])
-    torch.set_rng_state(value["torch_rng"])
-    if value["cuda_rng"]:
-        torch.cuda.set_rng_state_all(value["cuda_rng"])
-    shuffle_rng.setstate(value["shuffle_rng"])
+    restore_rng(value, shuffle_rng)
     return value["state"]

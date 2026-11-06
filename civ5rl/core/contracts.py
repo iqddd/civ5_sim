@@ -104,6 +104,12 @@ class WorkerState(TypedDict):
     encoded_shape: NotRequired[tuple[int, int]]
 
 
+class WorkerCommand(NamedTuple):
+    slot: int
+    generation: int | None
+    action: Action
+
+
 class WorkerStepItem(NamedTuple):
     slot: int
     generation: int

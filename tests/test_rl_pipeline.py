@@ -87,8 +87,16 @@ class PipelineTests(unittest.TestCase):
                 configure(17)
                 policy = Policy(variant).eval()
                 reference = None
-                for scheduler in ("barrier", "ready") if variant == "C" else ("ready",):
+                # Partial replies can otherwise silently lose, duplicate, or mix a slot's history.
+                modes = (
+                    [("barrier", 0, True), ("ready", 0, True), ("ready", 1, True)]
+                    if variant == "C"
+                    else [("ready", 0, True), ("ready", 1, False)]
+                )
+                for scheduler, reply_size, worker_encoding in modes:
                     config["performance"]["collection_scheduler"] = scheduler
+                    config["performance"]["worker_reply_size"] = reply_size
+                    config["performance"]["worker_encoding"] = worker_encoding
                     with Collector(config, None, "cpu", Path(tmp)) as c:
                         episodes, next_episode, _times = c.collect(
                             policy,

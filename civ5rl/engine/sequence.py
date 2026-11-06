@@ -5,7 +5,11 @@ from time import perf_counter
 import numpy as np
 import torch
 
+from civ5rl.core.encoded_layout import ENCODED_FIELDS
 from civ5rl.core.model import batch_inputs
+from civ5rl.core.schema import INVALID_INDEX
+from civ5rl.engine.constants import DEFAULT_GPU_RESERVE_BYTES, DEFAULT_PREFIX_BLOCK_SIZE
+from civ5rl.engine.spans import Span
 
 
 class SequenceBuffer:
@@ -16,7 +20,7 @@ class SequenceBuffer:
         *,
         resident=False,
         deadline=None,
-        reserve_bytes=2 * 1024**3,
+        reserve_bytes=DEFAULT_GPU_RESERVE_BYTES,
     ):
         self.encoded, self.device = encoded, device
         self.offsets = np.cumsum([0, *map(len, encoded)])
@@ -31,12 +35,14 @@ class SequenceBuffer:
             cells = max(len(x.cells) for x in flat)
             actions = int(self.action_counts.max())
             shapes = {}
+            axes = {field.name: field.axis for field in ENCODED_FIELDS}
+            axes.update(cell_mask="cells", action_mask="actions")
             for key, value in template.items():
                 shape = list(value.shape)
                 shape[0] = rows
-                if key in ("cells", "cell_mask", "neighbors"):
+                if axes[key] == "cells":
                     shape[1] = cells
-                elif key in ("sources", "targets", "action_features", "action_mask"):
+                elif axes[key] == "actions":
                     shape[1] = actions
                 shapes[key] = shape
             self.required_bytes = sum(
@@ -65,7 +71,9 @@ class SequenceBuffer:
                 for key, target in self.data.items():
                     destination = target[first : first + len(part["cells"])]
                     destination.fill_(
-                        -1 if key in ("neighbors", "sources", "targets") else 0
+                        INVALID_INDEX
+                        if key in ("neighbors", "sources", "targets")
+                        else 0
                     )
                     destination[tuple(slice(0, size) for size in part[key].shape)] = (
                         part[key]
@@ -73,19 +81,22 @@ class SequenceBuffer:
         self.async_transfers = False
         self._gather_runner = None
 
-    def chunks(self, size=128):
+    def chunks(self, size=DEFAULT_PREFIX_BLOCK_SIZE):
         return [
-            (i, a, min(a + size, len(ep)))
-            for i, ep in enumerate(self.encoded)
-            for a in range(0, len(ep), size)
+            Span(episode_index, start, min(start + size, len(episode)))
+            for episode_index, episode in enumerate(self.encoded)
+            for start in range(0, len(episode), size)
         ]
 
     def indices(self, spans):
         indices = torch.tensor(
             [
                 i
-                for ep, a, b in spans
-                for i in range(int(self.offsets[ep]) + a, int(self.offsets[ep]) + b)
+                for episode_index, start, stop in spans
+                for i in range(
+                    int(self.offsets[episode_index]) + start,
+                    int(self.offsets[episode_index]) + stop,
+                )
             ],
             device="cpu" if self.async_transfers else self.device,
         )
@@ -102,7 +113,11 @@ class SequenceBuffer:
     def gather_inputs(self, spans, indices=None):
         if self.data is None:
             return batch_inputs(
-                [x for ep, a, b in spans for x in self.encoded[ep][a:b]],
+                [
+                    item
+                    for episode_index, start, stop in spans
+                    for item in self.encoded[episode_index][start:stop]
+                ],
                 self.device,
                 non_blocking=True,
             )
@@ -111,10 +126,13 @@ class SequenceBuffer:
         width = max(
             int(
                 self.action_counts[
-                    int(self.offsets[ep]) + a : int(self.offsets[ep]) + b
+                    int(self.offsets[episode_index]) + start : int(
+                        self.offsets[episode_index]
+                    )
+                    + stop
                 ].max()
             )
-            for ep, a, b in spans
+            for episode_index, start, stop in spans
         )
         return (self._gather_runner or self._gather)(indices, width)
 
@@ -145,7 +163,7 @@ def pack_minibatches(order, masks, size):
         while start < stop:
             end, used = take_counted_span(episode, start, stop, masks, size - count)
             if used:
-                batch.append((episode, start, end))
+                batch.append(Span(episode, start, end))
             count += used
             start = end
             if count == size:

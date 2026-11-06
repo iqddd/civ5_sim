@@ -1,38 +1,19 @@
 """CPU-only worker publishing bounded groups of independently ready episodes."""
 
-import os
-import traceback
 from collections import deque
 from time import perf_counter
 
-from civ5rl.core.context import context_from_spec
 from civ5rl.core.contracts import WorkerStepItem
-from civ5rl.core.env import DecisionEnv
-from civ5rl.core.observation import ObservationEncoder
-from civ5sim.engine import step_batch
+from civ5rl.engine.worker_runtime import _WorkerRuntime
 
 
 def worker(connection, profile_path=None, shared_descriptor=None):
-    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
-        os.environ[name] = "1"
-    envs, encoders, previous = [], [], []
+    runtime = _WorkerRuntime(connection, profile_path, shared_descriptor)
     offered, done, generations = [], [], []
     pending = deque()
     wave_id, reply_size = None, None
-    shared = None
-    profiler = None
-    if shared_descriptor is not None:
-        from civ5rl.engine.shared import EncodedSlots
-
-        shared = EncodedSlots(descriptor=shared_descriptor)
-    if profile_path is not None:
-        import cProfile
-
-        profiler = cProfile.Profile()
-        profiler.enable()
 
     def command(kind, payload):
-        nonlocal envs, encoders, previous
         nonlocal offered, done, generations
         nonlocal wave_id, reply_size
         if kind == "close":
@@ -40,21 +21,12 @@ def worker(connection, profile_path=None, shared_descriptor=None):
         if kind == "reset":
             if pending or any(offered):
                 raise RuntimeError("Reset before all episode replies completed")
-            for env in envs:
-                env.close()
-            envs, encoders = [], []
             wave_id, reply_size = payload["wave"], payload["reply_size"]
-            for spec in payload["specs"]:
-                envs.append(DecisionEnv(spec))
-                if shared is not None:
-                    encoders.append(
-                        ObservationEncoder(context_from_spec(spec), payload["variant"])
-                    )
-            previous = [None] * len(envs)
-            offered = [False] * len(envs)
-            done = [False] * len(envs)
-            generations = [0] * len(envs)
-            pending.extend(range(len(envs)))
+            runtime.reset(payload["specs"], payload["variant"])
+            offered = [False] * len(runtime.envs)
+            done = [False] * len(runtime.envs)
+            generations = [0] * len(runtime.envs)
+            pending.extend(range(len(runtime.envs)))
         elif kind == "step":
             if payload["wave"] != wave_id:
                 raise RuntimeError("Stale episode wave")
@@ -62,9 +34,11 @@ def worker(connection, profile_path=None, shared_descriptor=None):
             indices = [i for i, _, _ in commands]
             if len(set(indices)) != len(indices):
                 raise RuntimeError("Duplicate slot in learner commands")
-            for i, generation, action in commands:
+
+            def validate(item):
+                i, generation, action = item
                 if (
-                    not 0 <= i < len(envs)
+                    not 0 <= i < len(runtime.envs)
                     or not offered[i]
                     or done[i]
                     or generation != generations[i]
@@ -72,21 +46,16 @@ def worker(connection, profile_path=None, shared_descriptor=None):
                     raise RuntimeError(
                         "Stale learner action or slot ownership violation"
                     )
-                if action not in previous[i]["actions"]:
+                if action not in runtime.previous[i]["actions"]:
                     raise RuntimeError("Learner action not in offered legal list")
-                envs[i].prepare(action)
-            start = perf_counter()
-            results = step_batch(
-                [envs[i].battle for i in indices], [a for _, _, a in commands]
+
+            def applied(item):
+                offered[item.slot] = False
+                pending.append(item.slot)
+
+            runtime.step(
+                commands, interleave_history=True, validate=validate, applied=applied
             )
-            elapsed = (perf_counter() - start) / max(len(commands), 1)
-            for (i, _, action), result in zip(commands, results):
-                envs[i].timings["simulation_seconds"] += elapsed
-                envs[i].applied(action, result)
-                if shared is not None:
-                    encoders[i].remember_action(action, previous[i]["observation"])
-                offered[i] = False
-                pending.append(i)
         else:
             raise ValueError(f"Unknown worker command: {kind!r}")
         return True
@@ -107,21 +76,13 @@ def worker(connection, profile_path=None, shared_descriptor=None):
                 if offered[i] or done[i]:
                     raise RuntimeError("Slot advanced before its previous action")
                 start = perf_counter()
-                state = envs[i].request()
+                state = runtime.envs[i].request()
                 request_seconds += perf_counter() - start
                 done[i] = state["done"]
-                if shared is not None and not state["done"]:
-                    start = perf_counter()
-                    state.update(
-                        shared.write(
-                            i,
-                            encoders[i].encode(state["observation"], state["actions"]),
-                        )
-                    )
-                    encoding_seconds += perf_counter() - start
+                encoding_seconds += runtime.encode(i, state)
                 offered[i] = not state["done"]
                 generations[i] += 1
-                previous[i] = state
+                runtime.previous[i] = state
                 items.append(WorkerStepItem(i, generations[i], state, perf_counter()))
             if items:
                 connection.send(
@@ -139,21 +100,6 @@ def worker(connection, profile_path=None, shared_descriptor=None):
     except EOFError:
         pass
     except BaseException:
-        connection.send(
-            (
-                "error",
-                {
-                    "traceback": traceback.format_exc(),
-                    "episodes": [env.reproduction() for env in envs],
-                },
-            )
-        )
+        runtime.send_error()
     finally:
-        if profiler is not None:
-            profiler.disable()
-            profiler.dump_stats(profile_path)
-        for env in envs:
-            env.close()
-        if shared is not None:
-            shared.close()
-        connection.close()
+        runtime.close()
