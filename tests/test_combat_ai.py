@@ -112,7 +112,15 @@ class PlannerTests(unittest.TestCase):
         )
         reused = self.planner()
         results = []
-        for current in (root, injured, blocked, root):
+        map_variants = (
+            replace(root, width=8, height=32),
+            replace(root, row_parity=1),
+            replace(root, wrap_x=True),
+            *(replace(root, tiles=(*root.tiles[:17], tile, *root.tiles[18:]))
+              for tile in (PlanningTile(1, 0, 0, 0), PlanningTile(0, 1, 0, 0),
+                           PlanningTile(0, 0, 1, 0), PlanningTile(0, 0, 0, 63))),
+        )
+        for current in (root, injured, blocked, *map_variants, root):
             query = SearchRequest(current, 0, 0, 18, (0,))
             with Planner() as fresh:
                 expected = fresh.search(query)
@@ -122,7 +130,7 @@ class PlannerTests(unittest.TestCase):
         self.assertTrue(results[0].assignments)
         self.assertNotEqual(results[0].assignments, results[1].assignments)
         self.assertEqual(results[2].reason, SearchReason.INVALID_REQUEST)
-        self.assertEqual(results[0], results[3])
+        self.assertEqual(results[0], results[-1])
 
     def test_contact_memory_crosses_abi_and_rejects_invalid_history(self):
         p = self.planner()

@@ -56,8 +56,9 @@ int friends_at(const TacticalView& v, const RulesAdapter& a, int tile, int side,
   return count;
 }
 }
-Plan support_assignments(const CaiSearchRequest& r, int32_t mode, DecisionTrace* trace) {
-  auto adapter = make_rules_adapter(*r.state,r.side);
+Plan support_assignments(const CaiSearchRequest& r, int32_t mode, DecisionTrace* trace,
+                         MapCache* cache) {
+  auto adapter = make_rules_adapter(*r.state,r.side,cache);
   ContactMemory memory{r.contacts.turn,r.contacts.side,{}};
   for (int i = 0; i < r.contacts.known_enemy_count; ++i)
     memory.known_enemies.push_back({r.contacts.known_enemies[i].id,
@@ -163,11 +164,12 @@ Plan support_assignments(const CaiSearchRequest& r, int32_t mode, DecisionTrace*
   return plan;
 }
 
-std::vector<int32_t> attack_candidates(const CaiSearchRequest& request, DecisionTrace* trace) {
+std::vector<int32_t> attack_candidates(const CaiSearchRequest& request, DecisionTrace* trace,
+                                      MapCache* cache) {
   // Pinned CvTacticalAI.cpp:4529-4612 FindUnitsWithinStrikingDistance, called
   // by ExecuteAttack (:4143) BEFORE ExecuteAttackWithUnits (:3251-3275).
   // This is a recruitment query, not a tactical plan or an attack guarantee.
-  auto adapter = make_rules_adapter(*request.state,request.side);
+  auto adapter = make_rules_adapter(*request.state,request.side,cache);
   ContactMemory memory{request.contacts.turn,request.contacts.side,{}};
   for (int i=0;i<request.contacts.known_enemy_count;++i)
     memory.known_enemies.push_back({request.contacts.known_enemies[i].id,
@@ -236,13 +238,14 @@ std::vector<int32_t> attack_candidates(const CaiSearchRequest& request, Decision
 // (3566). Movement-enabled ranged searches live in CPAgent and share its
 // ordinary search budget. Return after a retreat so those searches see real
 // damage/contact, rather than a speculative continuation.
-Plan recovery_assignments(const CaiSearchRequest& request, CaiSearchDiagnostics& diagnostics, DecisionTrace* trace) {
+Plan recovery_assignments(const CaiSearchRequest& request, CaiSearchDiagnostics& diagnostics,
+                          DecisionTrace* trace, MapCache* cache) {
   Plan plan{{},{CAI_NO_PLAN,0,{}}};
   if (request.selected_count != 1) {
     plan.result.reason = CAI_INVALID_REQUEST;
     return plan;
   }
-  auto adapter = make_rules_adapter(*request.state,request.side);
+  auto adapter = make_rules_adapter(*request.state,request.side,cache);
   ContactMemory memory{request.contacts.turn,request.contacts.side,{}};
   for (int i=0;i<request.contacts.known_enemy_count;++i)
     memory.known_enemies.push_back({request.contacts.known_enemies[i].id,

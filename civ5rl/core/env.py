@@ -168,7 +168,7 @@ class DecisionEnv:
 
                 planning = CallPlanningServices(
                     self.opponent.planner,
-                    PlanningState.from_battle(self.battle, 1 - self.side),
+                    PlanningState.from_battle(self.battle, 1 - self.side, observation=obs),
                     1 - self.side,
                     obs["turn"],
                 )

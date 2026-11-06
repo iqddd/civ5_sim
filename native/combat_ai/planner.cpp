@@ -371,7 +371,8 @@ class Search {
   }
  public:
   Search(SearchWorkspace& workspace, const CaiConfig& settings, const CaiSearchRequest& input)
-      : work(workspace), config(settings), request(input), adapter(make_rules_adapter(*input.state,input.side)),
+      : work(workspace), config(settings), request(input),
+        adapter(make_rules_adapter(*input.state,input.side,&workspace.map_cache)),
         selected(input.selected_units,input.selected_count,input.state->unit_count) {}
   Plan run() {
     const auto& state = *request.state;

@@ -13,9 +13,11 @@ from civ5sim.combat_ai import (
     Assignment,
     CallPlanningServices,
     ContactMemory,
+    Planner,
     PlanningState,
     SearchConfig,
     SearchReason,
+    SearchRequest,
     SearchResult,
     SearchStats,
     SupportMode,
@@ -233,6 +235,43 @@ class ExecutorTests(unittest.TestCase):
             service.expire()
             with self.assertRaisesRegex(RuntimeError, "expired"):
                 service.search(19, (0,), contacts=ContactMemory())
+
+    def test_interleaved_services_keep_their_own_detached_state(self):
+        # A planner-wide dynamic cache could silently mix two calls' units and
+        # visibility. Compare interleaved capabilities with fresh native roots.
+        with Battle(scenario([unit("horseman", 0, 16), unit("warrior", 1, 24),
+                              unit("warrior", 1, 21)], fog=True)) as b:
+            a = self.agent(b)
+            before_obs = b.observe(0)
+            before = PlanningState.from_battle(b, 0, observation=before_obs)
+            before_memory = ContactMemory().updated(before_obs)
+            old = CallPlanningServices(a.planner, before, 0, before.turn)
+            self.addCleanup(old.expire)
+            old.search(24, (0,), contacts=before_memory)
+            self.assertTrue(b.step(Action("move", 0, 19)).ok)
+            after_obs = b.observe(0)
+            after = PlanningState.from_battle(b, 0, observation=after_obs)
+            self.assertNotEqual(before.visibility, after.visibility)
+            self.assertNotEqual(before.units, after.units)
+            new = CallPlanningServices(a.planner, after, 0, after.turn)
+            self.addCleanup(new.expire)
+            after_memory = before_memory.updated(after_obs)
+            physical = b.snapshot()
+            for service, state, memory in ((old, before, before_memory),
+                                           (new, after, after_memory),
+                                           (old, before, ContactMemory())):
+                query = SearchRequest(state, 0, state.turn, 24, (0,), memory)
+                with Planner(SMALL) as fresh:
+                    self.assertEqual(service.attack_candidates(24, (0,), contacts=memory),
+                                     fresh.attack_candidates(query))
+                    self.assertEqual(service.search(24, (0,), contacts=memory), fresh.search(query))
+                    for mode in SupportMode:
+                        self.assertEqual(service.support(24, (0,), contacts=memory, mode=mode),
+                                         fresh.support(query, mode))
+            self.assertEqual(b.snapshot(), physical)
+            old.expire()
+            self.assertEqual(new.search(24, (0,), contacts=after_memory),
+                             a.planner.search(SearchRequest(after, 0, after.turn, 24, (0,), after_memory)))
 
     def test_search_limit_bounds_replanning_despite_progress(self):
         with Battle(scenario([unit("horseman", 0, 0), unit("warrior", 1, 19)])) as b:

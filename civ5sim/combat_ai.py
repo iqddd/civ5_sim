@@ -115,10 +115,12 @@ class PlanningState:
     visibility_history: tuple[tuple[int, ...], ...] = ()
 
     @classmethod
-    def from_battle(cls, battle: Battle, side: int):
-        """Organizer-only copy for privileged CP v1; never stores RNG."""
+    def from_battle(cls, battle: Battle, side: int, *, observation: dict | None = None):
+        """Organizer-only copy; observation must be from this state and side."""
         integer(side, "side", 0, 1)
-        observed = battle.observe(side)
+        observed = battle.observe(side) if observation is None else observation
+        if observed["side"] != side:
+            raise ValueError("Planning observation belongs to another side")
         # Battle owns immutable terrain; unit/visibility state is always fresh.
         tiles = getattr(battle, "_planning_tiles", None)
         if tiles is None:
@@ -304,6 +306,14 @@ class CallPlanningServices:
         self._side = side
         self._turn = turn
         self._metrics = metrics
+        self._packed_state = None
+
+    def _packed(self):
+        # This capability owns the buffers, including when services sharing a
+        # planner are interleaved. Nothing dynamic is cached on the planner.
+        if self._packed_state is None:
+            self._packed_state = self._planner._pack_state(self._state)
+        return self._packed_state
 
     def search(self, target, selected_units, *, contacts, aggression=None):
         if self._state is None:
@@ -313,7 +323,7 @@ class CallPlanningServices:
         with measure(self._metrics, "search", side=self._side, turn=self._turn):
             return self._planner.search(SearchRequest(
                 self._state, self._side, self._turn, target, tuple(selected_units), contacts, aggression
-            ))
+            ), _packed_state=self._packed())
 
     def support(self, target, selected_units, *, contacts, mode):
         if self._state is None:
@@ -323,7 +333,7 @@ class CallPlanningServices:
         with measure(self._metrics, "support", side=self._side, turn=self._turn):
             return self._planner.support(SearchRequest(
                 self._state, self._side, self._turn, target, tuple(selected_units), contacts
-            ), mode)
+            ), mode, _packed_state=self._packed())
 
     def attack_candidates(self, target, selected_units, *, contacts):
         if self._state is None:
@@ -332,12 +342,14 @@ class CallPlanningServices:
 
         with measure(self._metrics, "candidates", side=self._side, turn=self._turn):
             return self._planner.attack_candidates(SearchRequest(
-                self._state, self._side, self._turn, target, tuple(selected_units), contacts))
+                self._state, self._side, self._turn, target, tuple(selected_units), contacts
+            ), _packed_state=self._packed())
 
     def expire(self):
         self._state = None
         self._planner = None
         self._metrics = None
+        self._packed_state = None
 
 
 def _structure(name, names):
@@ -464,6 +476,13 @@ def _pack(structure, value):
     return structure(*(_i32(getattr(value, name)) for name in _field_names(type(value))))
 
 
+@dataclass
+class _PackedState:
+    native: _State
+    # Explicit ownership keeps every array alive through all native calls.
+    buffers: tuple
+
+
 class Planner:
     """Owned search context. Independent instances may run concurrently.
 
@@ -513,16 +532,16 @@ class Planner:
     def __del__(self):
         self.close()
 
-    def search(self, request: SearchRequest) -> SearchResult:
-        return self._plan(request)
+    def search(self, request: SearchRequest, *, _packed_state=None) -> SearchResult:
+        return self._plan(request, packed_state=_packed_state)
 
-    def support(self, request: SearchRequest, mode: SupportMode) -> SearchResult:
+    def support(self, request: SearchRequest, mode: SupportMode, *, _packed_state=None) -> SearchResult:
         if not isinstance(mode, SupportMode):
             raise TypeError("mode must be a SupportMode value")
-        return self._plan(request, mode)
+        return self._plan(request, mode, packed_state=_packed_state)
 
-    def attack_candidates(self, request: SearchRequest) -> tuple[int, ...]:
-        return self._plan(request, candidates_only=True)
+    def attack_candidates(self, request: SearchRequest, *, _packed_state=None) -> tuple[int, ...]:
+        return self._plan(request, candidates_only=True, packed_state=_packed_state)
 
     def set_trace(self, enabled, max_bytes=64 * 1024 * 1024):
         if not hasattr(self._lib, "cai_trace_enable"):
@@ -549,14 +568,15 @@ class Planner:
         return {"available": True, "truncated": bool(self._lib.cai_trace_status(self._handle)),
                 "events": [json.loads(row) for row in data.splitlines()]}
 
-    def _plan(self, request: SearchRequest, mode=None, *, candidates_only=False):
+    def _plan(self, request: SearchRequest, mode=None, *, candidates_only=False, packed_state=None):
         recorder = getattr(self, "_decision_recorder", None)
         if recorder is not None:
             try:
                 self.set_trace(recorder.mode == "full")
             except Exception as exc:  # noqa: BLE001 -- diagnostics must not change decisions
                 recorder.errors.append(f"trace setup: {exc}")
-        result = self._execute_plan(request, mode, candidates_only=candidates_only)
+        result = self._execute_plan(request, mode, candidates_only=candidates_only,
+                                    packed_state=packed_state)
         if recorder is not None:
             trace = None
             if recorder.mode == "full":
@@ -568,30 +588,20 @@ class Planner:
                             "search" if mode is None else int(mode), result, trace, self.version)
         return result
 
-    def _execute_plan(self, request: SearchRequest, mode=None, *, candidates_only=False):
+    def _pack_state(self, s: PlanningState) -> _PackedState:
         if not self._handle:
             raise RuntimeError("Planner is closed")
-        s = request.state
-        if request.aggression is not None and not isinstance(request.aggression, Aggression):
-            raise TypeError("aggression must be an Aggression value or None")
         boolean(s.wrap_x, "wrap_x")
         boolean(s.fog, "fog")
         # Bound Python-side allocations before constructing any ctypes array.
         if len(s.tiles) > 4096 or len(s.units) > 512 or len(s.visibility) > 4096:
             raise ValueError("Planning state exceeds kernel limits")
-        if (
-            len(request.selected_units) > (512 if candidates_only else 13)
-            or len(request.contacts.known_enemies) > 512
-        ):
-            if candidates_only:
-                raise ValueError("Invalid attack candidate query")
-            return SearchResult((), SearchReason.INVALID_REQUEST, SearchStats())
         cached = self._tile_cache
         if cached is not None and cached[0] is s.tiles:
             tiles = cached[1]
         else:
             tiles = (_Tile * len(s.tiles))(*(_pack(_Tile, t) for t in s.tiles))
-            # Immutable public terrain only; never cache units, visibility or RNG.
+            # Only immutable terrain survives between planning capabilities.
             self._tile_cache = (
                 (s.tiles, tiles)
                 if isinstance(s.tiles, tuple)
@@ -605,12 +615,6 @@ class Planner:
             raise ValueError("Invalid planning visibility history")
         history_values = [v for row in s.visibility_history for v in row]
         history = (C.c_int32 * len(history_values))(*map(_i32, history_values))
-        selected = (C.c_int32 * len(request.selected_units))(
-            *map(_i32, request.selected_units)
-        )
-        known = (_Contact * len(request.contacts.known_enemies))(
-            *(_pack(_Contact, c) for c in request.contacts.known_enemies)
-        )
         state = _State(
             _i32(s.width),
             _i32(s.height),
@@ -628,8 +632,31 @@ class Planner:
             history if history_values else None,
             len(history_values),
         )
+        return _PackedState(state, (tiles, units, visibility, history))
+
+    def _execute_plan(self, request: SearchRequest, mode=None, *, candidates_only=False,
+                      packed_state=None):
+        if not self._handle:
+            raise RuntimeError("Planner is closed")
+        if request.aggression is not None and not isinstance(request.aggression, Aggression):
+            raise TypeError("aggression must be an Aggression value or None")
+        if (
+            len(request.selected_units) > (512 if candidates_only else 13)
+            or len(request.contacts.known_enemies) > 512
+        ):
+            if candidates_only:
+                raise ValueError("Invalid attack candidate query")
+            return SearchResult((), SearchReason.INVALID_REQUEST, SearchStats())
+        if packed_state is None:
+            packed_state = self._pack_state(request.state)
+        selected = (C.c_int32 * len(request.selected_units))(
+            *map(_i32, request.selected_units)
+        )
+        known = (_Contact * len(request.contacts.known_enemies))(
+            *(_pack(_Contact, c) for c in request.contacts.known_enemies)
+        )
         packed = _Request(
-            C.pointer(state),
+            C.pointer(packed_state.native),
             _i32(request.side),
             _i32(request.expected_turn),
             _i32(request.target),

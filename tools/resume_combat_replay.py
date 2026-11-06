@@ -115,7 +115,8 @@ def resume(source, boundary, *, search_config=None, diagnostics="off"):
                 if recording is not None:
                     recording.begin(commands + 1, side, obs, agent)
                 if side == cp_side:
-                    service = CallPlanningServices(agent.planner, PlanningState.from_battle(battle, side),
+                    service = CallPlanningServices(agent.planner,
+                                                   PlanningState.from_battle(battle, side, observation=obs),
                                                    side, obs["turn"])
                     try:
                         action = agent.act_with_planning(obs, actions, service)

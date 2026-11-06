@@ -5,7 +5,15 @@
 #include <memory>
 #include <vector>
 
+struct Geometry;
+
 namespace combat_ai {
+// One immutable map per planner context. Never retains a caller's pointers or
+// dynamic battle state. Access, like the rest of the context, is serialized.
+struct MapCache {
+  std::shared_ptr<const Geometry> geometry;
+  std::shared_ptr<const std::vector<CaiTile>> tiles;
+};
 struct ReachableTile {
   int32_t tile, remaining_moves;
 };
@@ -101,7 +109,8 @@ class RulesAdapter {
 
 // Invalid snapshots, foreign branches, query IDs and tile indices throw
 // std::invalid_argument. Invalid commands return the core result code.
-std::unique_ptr<RulesAdapter> make_rules_adapter(const CaiBattleState&, int32_t observer);
+std::unique_ptr<RulesAdapter> make_rules_adapter(const CaiBattleState&, int32_t observer,
+                                                MapCache* = nullptr);
 
 struct DecisionTrace;
 class DangerModel {

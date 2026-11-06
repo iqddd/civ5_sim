@@ -59,6 +59,7 @@ class CandidateExecutor {
   bool apply(TacticalPosition&, const CpCombo&);
 };
 struct SearchWorkspace {
+  MapCache map_cache;
   DecisionTrace trace;
   CaiSearchDiagnostics diagnostics{};
   // CvTactPosStorage: fixed addresses, peek at the next slot and consume only
@@ -74,7 +75,10 @@ struct SearchWorkspace {
 };
 struct Plan { std::vector<CaiAssignment> assignments; CaiSearchResult result; };
 Plan find_assignments(SearchWorkspace&, const CaiConfig&, const CaiSearchRequest&);
-Plan support_assignments(const CaiSearchRequest&, int32_t mode, DecisionTrace* = nullptr);
-Plan recovery_assignments(const CaiSearchRequest&, CaiSearchDiagnostics&, DecisionTrace* = nullptr);
-std::vector<int32_t> attack_candidates(const CaiSearchRequest&, DecisionTrace* = nullptr);
+Plan support_assignments(const CaiSearchRequest&, int32_t mode, DecisionTrace* = nullptr,
+                         MapCache* = nullptr);
+Plan recovery_assignments(const CaiSearchRequest&, CaiSearchDiagnostics&, DecisionTrace* = nullptr,
+                          MapCache* = nullptr);
+std::vector<int32_t> attack_candidates(const CaiSearchRequest&, DecisionTrace* = nullptr,
+                                      MapCache* = nullptr);
 }  // namespace combat_ai

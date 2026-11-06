@@ -246,7 +246,7 @@ class CoordinatorTests(unittest.TestCase):
             a.reset({"map": b._map, "side": 0})
             a._turn = 0
             a._phase = 3
-            a.planner.attack_candidates = lambda request: ()
+            a.planner.attack_candidates = lambda request, **kwargs: ()
             calls = []
             first = self.act(a, b, calls)
             self.assertEqual(first, Action("move", 2, 12))

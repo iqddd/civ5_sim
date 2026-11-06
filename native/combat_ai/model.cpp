@@ -253,9 +253,23 @@ class Adapter final : public RulesAdapter {
   }
 
  public:
-  Adapter(const CaiBattleState& state, int side) : observer(side) {
+  Adapter(const CaiBattleState& state, int side, MapCache* cache) : observer(side) {
     require(bit(side), "invalid observer");
     validate_header(state);
+    if (cache && cache->geometry && cache->tiles) {
+      const auto& geometry = *cache->geometry;
+      if (state.width == geometry.w && state.height == geometry.h &&
+          state.row_parity == geometry.parity && state.wrap_x == geometry.wrap &&
+          std::equal(cache->tiles->begin(), cache->tiles->end(), state.tiles,
+                     [](const CaiTile& a, const CaiTile& b) {
+                       return a.terrain == b.terrain && a.elevation == b.elevation &&
+                              a.feature == b.feature && a.rivers == b.rivers;
+                     })) {
+        geo = cache->geometry;
+        map_tiles = cache->tiles;
+        return;
+      }
+    }
     std::vector<Tile> map_input;
     map_input.reserve(state.tile_count);
     for (int tile_index = 0; tile_index < state.tile_count; ++tile_index) {
@@ -268,6 +282,10 @@ class Adapter final : public RulesAdapter {
     validate_model_geometry(*geo);
     map_tiles =
         std::make_shared<const std::vector<CaiTile>>(state.tiles, state.tiles + state.tile_count);
+    if (cache) {
+      cache->geometry = geo;
+      cache->tiles = map_tiles;
+    }
   }
   std::unique_ptr<Branch> root(const CaiBattleState& state,
                                const ContactMemory& contacts) const override {
@@ -750,8 +768,9 @@ class Danger final : public DangerModel {
   }
 };
 }  // namespace
-std::unique_ptr<RulesAdapter> make_rules_adapter(const CaiBattleState& state, int32_t observer) {
-  return std::make_unique<Adapter>(state, observer);
+std::unique_ptr<RulesAdapter> make_rules_adapter(const CaiBattleState& state, int32_t observer,
+                                                MapCache* cache) {
+  return std::make_unique<Adapter>(state, observer, cache);
 }
 std::unique_ptr<DangerModel> make_danger_model(const RulesAdapter& adapter, DecisionTrace* trace) {
   auto* concrete = dynamic_cast<const Adapter*>(&adapter);

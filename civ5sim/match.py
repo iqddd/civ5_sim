@@ -275,7 +275,8 @@ def run_match(config, agents, *, metrics=None, diagnostics="off", scenario=None,
 
                     with measure(metrics, "prepare_planning", side=side, turn=completed_turns):
                         planning = CallPlanningServices(
-                            agents[side].planner, PlanningState.from_battle(battle, side),
+                            agents[side].planner,
+                            PlanningState.from_battle(battle, side, observation=observation),
                             side, observation["turn"], metrics=metrics,
                         )
                     try:
