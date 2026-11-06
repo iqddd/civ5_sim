@@ -20,6 +20,7 @@ class RLAgent:
         checkpoint = torch.load(path, map_location=device, weights_only=False)
         policy = Policy(checkpoint["variant"]).to(device)
         policy.load_state_dict(checkpoint["model"])
+        policy.spatial_cell_padding = checkpoint.get('config',{}).get('performance',{}).get('spatial_cell_padding',0)
         policy.enable_amp(
             checkpoint.get("config", {}).get("numerics", {}).get("amp", False)
             and str(device).startswith("cuda"),

@@ -1,0 +1,23 @@
+{
+  "base_config": "configs/rl-ppo-controlled-updates.json",
+  "kind": "rl01.ppo_scale_up",
+  "profile": "continuation",
+  "output": "artifacts/rl/ppo-scale-up-continuation",
+  "experiment": {
+    "parent": "artifacts/rl/ppo-scale-up/checkpoints/update-0361.pt",
+    "parent_label": "scale-up update 361",
+    "parent_sha256": "6f80defe680d86c7536589d63d977b0067f8faad4f960be4a985e3e2b4185c2f",
+    "parent_policy_hash": "15ff81b139237a7ba6f664c8723f73a80a0694947ae187fa81e1e62d5d200f7f",
+    "parent_manifest": "artifacts/rl/ppo-scale-up/manifest.json",
+    "parent_manifest_sha256": "ef1056d8994b87e56a4985906eaa9fe408bc451bccbbe21ccd76ea0ac6ead640",
+    "parent_optimizer_steps": 16565,
+    "decisions": 8388608,
+    "active_seconds": 21600,
+    "milestones": [1048576, 2097152, 3145728, 4194304, 5242880, 6291456, 7340032, 8388608],
+    "start_episode": 129152,
+    "training_namespace": "ppo_scale_up_continuation_train_v1",
+    "shuffle_namespace": "ppo_scale_up_continuation_shuffle_v1",
+    "initial_value": "preserve_parent",
+    "protocol": "docs/rl-ppo-scale-up-continuation.md"
+  }
+}

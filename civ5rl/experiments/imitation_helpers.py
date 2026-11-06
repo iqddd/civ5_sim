@@ -35,6 +35,7 @@ def load_policy(config, path, device):
     saved = torch.load(path, weights_only=False, map_location="cpu")
     policy = Policy("C").to(device)
     policy.load_state_dict(saved["model"])
+    policy.spatial_cell_padding = config['performance'].get('spatial_cell_padding',0)
     policy.enable_amp(str(device).startswith("cuda"), spatial_batch_size=32)
     if config["performance"].get("inverse_routing", False):
         policy.enable_inverse_routing()

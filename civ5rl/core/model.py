@@ -192,6 +192,7 @@ class Policy(nn.Module):
         self._heads_runner = None
         self.amp_enabled = False
         self.spatial_batch_size = 0
+        self.spatial_cell_padding = 0
         self.action_routing = False
         self.maximum_routing = False
         self.spatial_cuda_graphs = False
@@ -288,6 +289,14 @@ class Policy(nn.Module):
         )
 
     def encode_spatial(self, batch):
+        extra = self.spatial_cell_padding - batch['cells'].shape[1]
+        if extra > 0:
+            # Keep BF16 GEMM geometry independent of which map sizes happen
+            # to share a collector/replay batch. Padding never enters pooling.
+            batch = {**batch,
+                     'cells': F.pad(batch['cells'], (0,0,0,extra)),
+                     'neighbors': F.pad(batch['neighbors'], (0,0,0,extra), value=-1),
+                     'cell_mask': F.pad(batch['cell_mask'], (0,extra), value=False)}
         with self.autocast(batch["cells"]):
             return self._encode_spatial(batch)
 

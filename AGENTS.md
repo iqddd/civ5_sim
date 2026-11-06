@@ -20,3 +20,7 @@ Before adding a test, identify the specific failure it catches and why a normal 
 - If the 60-second average is below 80%, investigate bottlenecks and optimization options. Continuing below this target requires an explicit, evidence-based explanation.
 - Evaluate each sustained iterative GPU phase separately if a run has several. The requirement does not apply to an iterative phase shorter than 10 minutes; total run wall time is not the criterion. Do not extend a short phase just to measure or raise utilization.
 - Exclude initial preparation, compilation, post-processing, CPU-only collection/evaluation, pauses, and other work outside iterative GPU data processing from both phase duration and utilization averages. Preserve the agreed experimental conditions when optimizing; do not silently change the model, precision, batch size, or training budget to raise utilization.
+
+## Vast.ai machine selection
+
+- Unless explicitly agreed otherwise, search and prepare two parallel candidates (`--parallel 2`) when creating a Vast.ai instance. Keep the requested GPU profile and its other defaults unchanged.

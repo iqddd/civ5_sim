@@ -131,6 +131,7 @@ def update(
     *,
     _backend=None,
     deadline=None,
+    on_step=None,
 ):
     policy.train()
     start_update = perf_counter()
@@ -276,6 +277,8 @@ def update(
                         },
                     }
                 )
+                if on_step is not None:
+                    on_step(step_records[-1])
                 timed_out = deadline is not None and perf_counter() >= deadline
                 if timed_out or not accepted or (not controlled and kl is not None and kl > config["ppo"]["stop_kl"]):
                     stop_reason = "active_time_limit" if timed_out else ("rejected_full_kl" if controlled else "stop_kl")

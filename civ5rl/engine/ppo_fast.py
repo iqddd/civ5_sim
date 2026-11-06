@@ -65,20 +65,22 @@ def validate_behavior_replay(
 
 
 class RolloutCache(SequenceBuffer):
-    def __init__(self, episodes, variant, device, *, resident=True):
+    def __init__(self, episodes, variant, device, *, resident=True, cpu_labels=False):
         self.episodes, self.device = episodes, device
         super().__init__(
             [encode_episode(e, variant) for e in episodes], device, resident=resident
         )
         flat = [x for episode in self.encoded for x in episode]
         self.resident = resident
+        self.cpu_labels = cpu_labels
+        label_device = "cpu" if cpu_labels else device
         advantages = targets(episodes)
         self.labels = {
             "indices": torch.tensor(
-                [v for ep in episodes for v in ep["chosen"]], device=device
+                [v for ep in episodes for v in ep["chosen"]], device=label_device
             ),
             "old_logp": torch.tensor(
-                [v for ep in episodes for v in ep["old_logp"]], device=device
+                [v for ep in episodes for v in ep["old_logp"]], device=label_device
             ),
             "returns": torch.tensor(
                 [
@@ -86,15 +88,25 @@ class RolloutCache(SequenceBuffer):
                     for ep in episodes
                     for _ in ep["chosen"]
                 ],
-                device=device,
+                device=label_device,
             ),
-            "advantages": torch.tensor(np.concatenate(advantages), device=device),
+            "advantages": torch.tensor(np.concatenate(advantages), device=label_device),
         }
         has_full = ["old_log_probs" in ep for ep in episodes]
         if any(has_full) and not all(has_full):
             raise ValueError("Mixed complete/incomplete behavior distributions")
         self.has_behavior_distribution = all(has_full)
-        if self.has_behavior_distribution:
+        self.ragged_behavior = None
+        if self.has_behavior_distribution and cpu_labels:
+            self.ragged_behavior = [values for ep in episodes for values in ep["old_log_probs"]]
+            if len(self.ragged_behavior) != len(flat):
+                raise ValueError("Behavior distribution count differs from decisions")
+            for i, (values, count) in enumerate(zip(self.ragged_behavior, self.action_counts)):
+                if (len(values) != count or not np.isfinite(values).all()
+                    or float(values[int(self.labels['indices'][i])]) != float(self.labels['old_logp'][i])
+                    or not np.isclose(np.exp(values).sum(), 1., atol=1e-5, rtol=0)):
+                    raise ValueError("Invalid ragged behavior distribution")
+        elif self.has_behavior_distribution:
             width = int(self.action_counts.max())
             behavior = np.full((len(flat), width), -np.inf, np.float32)
             full = [values for ep in episodes for values in ep["old_log_probs"]]
@@ -139,9 +151,18 @@ class RolloutCache(SequenceBuffer):
         self.replay_inputs = True
 
     def batch(self, spans):
-        indices = self.indices(spans)
+        indices = (torch.tensor([i for ep, a, b in spans
+                                for i in range(int(self.offsets[ep])+a, int(self.offsets[ep])+b)])
+                   if self.cpu_labels else self.indices(spans))
         data = self.gather_inputs(spans, indices)
-        labels = {k: v.index_select(0, indices) for k, v in self.labels.items()}
+        selected = indices.cpu() if self.cpu_labels else indices
+        labels = {k: v.index_select(0, selected).to(self.device) for k, v in self.labels.items()}
+        if self.ragged_behavior is not None:
+            rows = [self.ragged_behavior[i] for i in selected.tolist()]
+            behavior = np.full((len(rows), data['action_mask'].shape[1]), -np.inf, np.float32)
+            for i, values in enumerate(rows):
+                behavior[i, :len(values)] = values
+            labels['old_log_probs'] = torch.from_numpy(behavior).to(self.device)
         return data, labels, [stop - start for _, start, stop in spans]
 
 
@@ -190,6 +211,17 @@ def _replay_sums(logits, value, indices, old_logp, returns, action_mask):
     )
 
 
+def _replay_parts(cache, episodes):
+    for offset in range(0, max(len(cache.encoded[ep]) for ep in episodes), 128):
+        active = [(j, ep) for j, ep in enumerate(episodes) if len(cache.encoded[ep]) > offset]
+        spans = [(ep, offset, min(offset+128, len(cache.encoded[ep]))) for _, ep in active]
+        batch, labels, lengths = cache.batch(spans)
+        slots = torch.tensor([j for j, _ in active], device=cache.device)
+        free = sum(int((cache.action_counts[int(cache.offsets[ep])+a:int(cache.offsets[ep])+b] >= 2).sum())
+                   for ep, a, b in spans)
+        yield batch, labels, lengths, slots, free
+
+
 def _replay_groups(cache, sequences_per_batch):
     # Immutable inputs only: no prefix states or outputs from previous weights.
     previous = getattr(cache, "_replay_plan", None)
@@ -201,6 +233,9 @@ def _replay_groups(cache, sequences_per_batch):
         episodes = list(
             range(first, min(first + sequences_per_batch, len(cache.episodes)))
         )
+        if getattr(cache, "cpu_labels", False):
+            yield len(episodes), _replay_parts(cache, episodes)
+            continue
         parts = []
         for offset in range(0, max(len(cache.encoded[ep]) for ep in episodes), 128):
             active = [
@@ -351,6 +386,7 @@ class BatchedBackend:
             policy.variant,
             device,
             resident=options.get("resident_rollout", True) if batched else False,
+            cpu_labels=options.get("cpu_rollout_labels", False),
         )
         if str(device).startswith("cuda"):
             torch.cuda.synchronize()

@@ -131,14 +131,18 @@ class TrainingFactory:
 
     def make(self, index, unused=None):
         worlds = self.base["worlds"]["training"]
+        namespace = self.config.get("experiment", {}).get("training_namespace")
         cells = list(range(4)) * 32
-        random.Random(int(digest([17, index // 128, "balance"]), 16)).shuffle(cells)
+        balance_key = [17, index // 128, "balance"]
+        if namespace:
+            balance_key.append(namespace)
+        random.Random(int(digest(balance_key), 16)).shuffle(cells)
         cell = cells[index % 128]
         world = worlds[index % len(worlds)]
         spec = self.generators[world].make(
             index,
             stage(cell // 2),
-            namespace="ppo_after_imitation_train",
+            namespace=namespace or "ppo_after_imitation_train",
             split="train",
             case_index=index // len(worlds),
         )

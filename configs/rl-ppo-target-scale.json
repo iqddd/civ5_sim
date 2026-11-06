@@ -1,0 +1,29 @@
+{
+  "base_config": "configs/rl-ppo-controlled-updates.json",
+  "kind": "rl01.ppo_target_scale",
+  "output": "artifacts/rl/ppo-target-scale",
+  "collection": {"num_envs": 16, "envs_per_worker": 4},
+  "performance": {
+    "resident_rollout": false,
+    "ppo_cached_replay": false,
+    "ppo_optimized_inputs": false,
+    "cpu_rollout_labels": true,
+    "spatial_cell_padding": 256,
+    "worker_reply_size": 4
+  },
+  "experiment": {
+    "parent": "artifacts/rl/ppo-scale-up-continuation/checkpoints/update-0759.pt",
+    "parent_label": "continuation update 759",
+    "parent_sha256": "4b15e634fc111cc0cb7458eb7076e75eb4cc7e41da76aa27fc66bb0d808aeb6c",
+    "parent_policy_hash": "c36d5c22d6d6f3bc52438b1f3e51a88e3226c9608aee55bc0af505ea1dc7e2e1",
+    "parent_manifest": "artifacts/rl/ppo-scale-up-continuation/manifest.json",
+    "parent_optimizer_steps": 45915,
+    "decisions": 8388608,
+    "active_seconds": 21600,
+    "milestones": [2097152, 4194304, 6291456, 8388608],
+    "start_episode": 350592,
+    "training_namespace": "ppo_target_scale_train_v1",
+    "shuffle_namespace": "ppo_target_scale_shuffle_v1",
+    "initial_value": "preserve_parent"
+  }
+}

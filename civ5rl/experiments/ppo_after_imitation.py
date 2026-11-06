@@ -205,6 +205,11 @@ def evaluation_task(task):
         raise ValueError("Closed evaluation case")
     if digest({k: v for k, v in case.items() if k != "case_hash"}) != case["case_hash"]:
         raise ValueError("Evaluation case changed")
+    return play_case(config, case, checkpoint_path, mode, enemy, directory)
+
+
+def play_case(config, case, checkpoint_path, mode, enemy, directory):
+    """Shared ordinary-match execution; protocol callers supply validated cases."""
     directory = Path(directory)
     configure(17, "cpu")
     agent = RLAgent.from_checkpoint(checkpoint_path, "cpu", mode)

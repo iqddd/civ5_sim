@@ -14,6 +14,7 @@ from civ5rl.core.schema import (
     GLOBAL_DIM,
     HEX_DIRECTIONS,
     MAX_MAP_AXIS,
+    MAX_ROSTER_UNITS,
     PREV_ACTION_DIM,
     PREVIOUS,
     ROSTER_SCALE,
@@ -91,7 +92,7 @@ class ObservationEncoder:
         self.max_rounds = context["max_rounds"]
         self.random_damage = context["random_damage"]
         self.rosters = context["armies"]
-        if any(len(a) > ROSTER_SCALE for a in self.rosters):
+        if any(len(a) > MAX_ROSTER_UNITS for a in self.rosters):
             raise ValueError("RL-01 roster capacity exceeded")
         self.static = np.zeros((w * h, TILE_DIM), np.float32)
         self.neighbors = np.full((w * h, HEX_DIRECTIONS), -1, np.int64)

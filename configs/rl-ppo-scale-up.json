@@ -1,0 +1,21 @@
+{
+  "base_config": "configs/rl-ppo-controlled-updates.json",
+  "kind": "rl01.ppo_scale_up",
+  "output": "artifacts/rl/ppo-scale-up",
+  "experiment": {
+    "parent": "artifacts/rl/ppo-controlled-updates/checkpoints/update-0043.pt",
+    "parent_sha256": "a71daecfa179e7eb6c1994fcc5ea17b8ea463f4f4910f350675c6dc1662ff070",
+    "parent_policy_hash": "c7b7aee771652cff8f9441057afa5e99735473841d1d35a7ccc9d681730ccd3e",
+    "parent_manifest": "artifacts/rl/ppo-controlled-updates/manifest.json",
+    "parent_manifest_sha256": "33f76e0a4fc5725f3cbd840bdb97071c406849dbf8728a1fca10f22e6eb5ee94",
+    "parent_optimizer_steps": 2076,
+    "decisions": 4194304,
+    "active_seconds": 14400,
+    "milestones": [524288, 1048576, 1572864, 2097152, 2621440, 3145728, 3670016, 4194304],
+    "start_episode": 22912,
+    "training_namespace": "ppo_scale_up_train_v1",
+    "shuffle_namespace": "ppo_scale_up_shuffle_v1",
+    "initial_value": "preserve_parent",
+    "protocol": "docs/rl-ppo-scale-up.md"
+  }
+}
