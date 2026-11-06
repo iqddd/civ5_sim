@@ -2,12 +2,33 @@
 
 from dataclasses import asdict
 from time import perf_counter
+from typing import NamedTuple
 
 from civ5rl.core.context import context_for
 from civ5rl.core.contracts import ScenarioSpec, WorkerState
 from civ5rl.core.observation import ordered_actions
 from civ5sim.agents import load_agent
 from civ5sim.engine import Battle
+
+
+ATTACK_KINDS = ("melee", "ranged")
+END_TURN = "end_turn"
+NUM_SIDES = 2
+
+
+class PendingAttack(NamedTuple):
+    attacker_side: int
+    attacker_hp: int
+    defender_side: int
+    defender_hp: int
+
+
+def _terminal_reward(winner: int | None, side: int, profile: str) -> int:
+    if winner is None:
+        return 0
+    if winner == side:
+        return 1
+    return 0 if profile == "win_probability" else -1
 
 
 def terminal_result(battle, completed_turns, max_rounds):
@@ -17,7 +38,7 @@ def terminal_result(battle, completed_turns, max_rounds):
             "winner": None if all(destroyed) else (1 if destroyed[0] else 0),
             "reason": "mutual_destruction" if all(destroyed) else "army_destroyed",
         }
-    if completed_turns >= 2 * max_rounds:
+    if completed_turns >= NUM_SIDES * max_rounds:
         return {"winner": None, "reason": "turn_limit"}
     return None
 
@@ -34,7 +55,9 @@ class DecisionEnv:
             raise ValueError("Learner decision limit must be a positive integer")
         self.battle = Battle(spec["scenario"], log=False)
         self.side = spec["learner_side"]
-        self.turns = self.calls = self.commands = 0
+        self.turns = 0
+        self.calls = 0
+        self.commands = 0
         self.history = []
         self.timings = {"simulation_seconds": 0, "opponent_seconds": 0}
         self.reward_profile = spec.get("reward_profile", "symmetric")
@@ -73,13 +96,13 @@ class DecisionEnv:
         self._pending_attack = None
         if self.spec.get("record_step_events", False):
             self._step_before = self.battle.snapshot()["units"]
-        if self.spec.get("diagnostics") and action.kind in ("melee", "ranged"):
+        if self.spec.get("diagnostics") and action.kind in ATTACK_KINDS:
             units = self.battle.snapshot()["units"]
             attacker = units[action.unit]
             defender = next(
                 u for u in units if u["tile"] == action.target and u["hp"] > 0
             )
-            self._pending_attack = (
+            self._pending_attack = PendingAttack(
                 attacker["side"],
                 attacker["hp"],
                 defender["side"],
@@ -106,33 +129,35 @@ class DecisionEnv:
             after = self.battle.snapshot()["units"]
             self.diagnostic_events.append(
                 {
-                    "side": self.turns % 2,
+                    "side": self.turns % NUM_SIDES,
                     "turn": self.turns,
                     "action": asdict(action),
                     "hp_before": [u["hp"] for u in self._step_before],
                     "hp_after": [u["hp"] for u in after],
                     "healing": [
-                        max(0, b["hp"] - a["hp"])
-                        for a, b in zip(self._step_before, after)
+                        max(0, unit_after["hp"] - unit_before["hp"])
+                        for unit_before, unit_after in zip(self._step_before, after)
                     ],
                 }
             )
             self._step_before = None
-        if self.turns % 2 == self.side:
+        if self.turns % NUM_SIDES == self.side:
             self.learner_decisions += 1
         if self._pending_attack is not None:
-            side, hp, other, other_hp = self._pending_attack
-            self.damage[side] += min(result.damage, other_hp)
-            self.damage[other] += min(result.retaliation, hp)
+            attack = self._pending_attack
+            self.damage[attack.attacker_side] += min(result.damage, attack.defender_hp)
+            self.damage[attack.defender_side] += min(
+                result.retaliation, attack.attacker_hp
+            )
             self._pending_attack = None
         self.commands += 1
         self.calls += 1
-        if action.kind == "end_turn":
+        if action.kind == END_TURN:
             self.turns += 1
             self.calls = 0
 
     def request(self) -> WorkerState:
-        while not self.check() and self.turns % 2 != self.side:
+        while not self.check() and self.turns % NUM_SIDES != self.side:
             if self.calls >= self.spec["max_calls_per_turn"]:
                 raise RuntimeError("Opponent action limit")
             obs = self.battle.observe(1 - self.side)
@@ -175,28 +200,22 @@ class DecisionEnv:
                 "joint_commands": self.history,
                 "result": {
                     **self.terminal,
-                    "reward": 0
-                    if self.terminal["winner"] is None
-                    else (
-                        1
-                        if self.terminal["winner"] == self.side
-                        else 0
-                        if self.reward_profile == "win_probability"
-                        else -1
+                    "reward": _terminal_reward(
+                        self.terminal["winner"], self.side, self.reward_profile
                     ),
                     "commands": self.commands,
                     "learner_decisions": self.learner_decisions,
-                    "rounds": self.turns / 2,
+                    "rounds": self.turns / NUM_SIDES,
                     "timings": self.timings.copy(),
                     "first_contact_turn": self.first_contact_turn,
                     "remaining_hp": [
                         sum(u["hp"] for u in final["units"] if u["side"] == s)
-                        for s in (0, 1)
+                        for s in range(NUM_SIDES)
                     ],
                     "damage_dealt": self.damage.copy(),
                     "units_lost": [
                         sum(u["hp"] <= 0 for u in final["units"] if u["side"] == s)
-                        for s in (0, 1)
+                        for s in range(NUM_SIDES)
                     ],
                     **(
                         {"diagnostic_events": self.diagnostic_events}

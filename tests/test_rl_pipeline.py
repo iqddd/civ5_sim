@@ -7,8 +7,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from civ5rl.config import load_config
 from civ5rl.collector import Collector
-from civ5rl.common import configure, read_json
+from civ5rl.common import configure
 from civ5rl.corpus import context_for
 from civ5rl.model import Policy
 from civ5rl.observation import ObservationEncoder, ordered_actions
@@ -72,7 +73,7 @@ class PipelineTests(unittest.TestCase):
                     slots.close()
 
     def test_worker_history_and_commands_are_independent_of_scheduler(self):
-        config = read_json("configs/rl-v1-throughput.json")
+        config = load_config("configs/rl-v1-throughput.json")
         config["collection"].update(num_envs=4, cpu_workers=2, envs_per_worker=2)
         specs = self.specs(8)
         from civ5rl.provenance import bound_cases, case_manifest
@@ -150,8 +151,8 @@ class PipelineTests(unittest.TestCase):
     def test_pipeline_migration_rejects_learning_and_model_changes(self):
         from civ5rl.migration import validate_pipeline_migration
 
-        old = read_json("configs/rl-v1.json")
-        new = read_json("configs/rl-v1-throughput.json")
+        old = load_config("configs/rl-v1.json")
+        new = load_config("configs/rl-v1-throughput.json")
         identity = {"corpus_hash": "same", "source_hashes": {"civ5rl/model.py": "same"}}
         validate_pipeline_migration(old, new, identity, identity)
         for section, key, value in (

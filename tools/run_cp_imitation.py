@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
+from civ5rl.config import load_config
 from civ5rl.engine.training import FrozenParamsCheck, bc_optimizer_step
 from civ5rl.experiments.imitation_helpers import adam, demonstrations, load_policy, pool
 from civ5rl.protocols.imitation import (
@@ -422,15 +423,15 @@ def main():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--cycle", type=int, choices=(1, 2))
     args = parser.parse_args()
-    config = read_json(args.config)
+    config = load_config(args.config)
     out = Path(args.out or config["output"]).resolve()
     workers = args.workers or config["workers"]
     if workers < 1:
         raise ValueError("workers must be positive")
     if config["kind"] == "rl01.cp_imitation_target_scale":
-        from civ5rl.experiments.imitation_target_scale import load_config, run
+        from civ5rl.experiments.imitation_target_scale import load_config as load_target_config, run
 
-        config = load_config(args.config)
+        config = load_target_config(args.config)
         run(args.phase, config, out, workers, args.device)
         return
     if config["kind"] == "rl01.cp_imitation_own_states":

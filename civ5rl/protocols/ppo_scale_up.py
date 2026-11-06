@@ -4,6 +4,7 @@ from collections import Counter
 
 from civ5rl.protocols.imitation_own_states import own_state_physical_hash
 from civ5rl.protocols.ppo_after_imitation import TrainingFactory
+from civ5rl.config import load_config as resolve_config
 from civ5rl.provenance.common import ROOT, read_json
 from civ5sim.engine import digest
 
@@ -11,21 +12,13 @@ KIND = "rl01.ppo_scale_up"
 
 
 def load_config(path):
-    overlay = read_json(path)
-    config = read_json(ROOT / overlay["base_config"])
-    for key, value in overlay.items():
-        if key == "base_config":
-            continue
-        if isinstance(value, dict):
-            config[key].update(value)
-        else:
-            config[key] = value
+    config = resolve_config(path)
     validate_profile(config)
     return config
 
 
 def validate_profile(config):
-    reference = read_json(ROOT / "configs/rl-ppo-controlled-updates.json")
+    reference = resolve_config(ROOT / "configs/rl-ppo-controlled-updates.json")
     for key in ("observation", "environment", "model", "reward", "collection", "ppo",
                 "optimizer", "numerics", "performance", "teacher_search", "seed", "workers"):
         if config.get(key) != reference[key]:

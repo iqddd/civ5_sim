@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
+from civ5rl.config import load_config
 from civ5rl.common import configure, read_json
 from civ5rl.diagnostic import DecisionEnvContext, DiagnosticFactory
 from civ5rl.diagnostic_one import gate_one, load_initial_weights, next_state_one
@@ -21,7 +22,7 @@ from civ5sim import Action
 class OneDecisionTests(unittest.TestCase):
     def setUp(self):
         configure(17)
-        self.config = read_json("configs/rl-diagnostic-one-decision.json")
+        self.config = load_config("configs/rl-diagnostic-one-decision.json")
         path = Path("artifacts/rl/diagnostic-one-decision/manifests/manifest.json")
         if not path.exists():
             self.skipTest("Run --prepare-only for one-decision dataset")

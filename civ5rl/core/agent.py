@@ -7,31 +7,34 @@ import torch
 from civ5rl.core.contracts import AgentContext
 from civ5rl.core.model import Policy, batch_inputs
 from civ5rl.core.observation import ObservationEncoder, ordered_actions
+from civ5rl.core.variants import PolicyVariant
 from civ5rl.provenance.common import choose
 
 
 class RLAgent:
     def __init__(self, policy, device="cpu", mode="sample"):
-        self.policy, self.device, self.mode = policy, device, mode
+        self.policy = policy
+        self.device = device
+        self.mode = mode
         self.policy.eval()
 
     @classmethod
     def from_checkpoint(cls, path, device="cpu", mode="sample"):
         checkpoint = torch.load(path, map_location=device, weights_only=False)
-        policy = Policy(checkpoint["variant"]).to(device)
+        policy = Policy(PolicyVariant(checkpoint["variant"])).to(device)
         policy.load_state_dict(checkpoint["model"])
-        policy.spatial_cell_padding = checkpoint.get('config',{}).get('performance',{}).get('spatial_cell_padding',0)
+        config = checkpoint.get("config", {})
+        performance = config.get("performance", {})
+        numerics = config.get("numerics", {})
+        policy.spatial_cell_padding = performance.get("spatial_cell_padding", 0)
         policy.enable_amp(
-            checkpoint.get("config", {}).get("numerics", {}).get("amp", False)
-            and str(device).startswith("cuda"),
-            spatial_batch_size=checkpoint.get("config", {})
-            .get("performance", {})
-            .get("spatial_batch_size", 0),
+            numerics.get("amp", False) and str(device).startswith("cuda"),
+            spatial_batch_size=performance.get("spatial_batch_size", 0),
         )
         return cls(policy, device, mode)
 
     def reset(self, context: AgentContext):
-        self.encoder = ObservationEncoder(context, self.policy.variant)
+        self.encoder = ObservationEncoder(context, PolicyVariant(self.policy.variant))
         self.rng = random.Random(context["seed"])
         self.hidden = None
         self.events = []
@@ -69,10 +72,10 @@ class RLAgent:
                 "contacts": [
                     {
                         "id": uid,
-                        "type_index": c[0],
-                        "tile": c[1],
-                        "last_hp": c[2],
-                        "last_enemy_clock": c[3],
+                        "type_index": c.type_index,
+                        "tile": c.tile,
+                        "last_hp": c.last_hp,
+                        "last_enemy_clock": c.last_clock,
                     }
                     for uid, c in sorted(self.encoder.contacts.items())
                 ],
@@ -81,5 +84,6 @@ class RLAgent:
         return actions[index]
 
     def drain_diagnostics(self):
-        events, self.events = self.events, []
+        events = self.events
+        self.events = []
         return events

@@ -48,7 +48,8 @@ def main():
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--updates", type=int, default=10)
     args = parser.parse_args()
-    config = common.read_json(args.config)
+    from civ5rl.config import load_config
+    config = load_config(args.config)
     manifest = common.read_json(ROOT / "artifacts/rl/corpus/manifest.json")
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)

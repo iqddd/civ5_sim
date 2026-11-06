@@ -765,7 +765,7 @@ def run_suite(config, directory, device="cuda", resume=False, prepare_only=False
 
 
 def main():
-    from civ5rl.common import read_json
+    from civ5rl.config import load_config
 
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default="configs/rl-diagnostic.json")
@@ -776,7 +776,7 @@ def main():
     args = p.parse_args()
     from civ5rl.diagnostic_one import is_one
 
-    config = read_json(args.config)
+    config = load_config(args.config)
     from civ5rl.protocols.diagnostic_d1 import is_d1
 
     out = args.out or (

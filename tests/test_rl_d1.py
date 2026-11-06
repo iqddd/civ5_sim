@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
+from civ5rl.config import load_config
 from civ5rl.common import configure, read_json
 from civ5rl.ppo import token_minibatches, update
 from civ5rl.validation import validate_config
@@ -26,7 +27,7 @@ class LowKLBackend(FakeBackend):
 class D1Tests(unittest.TestCase):
     def setUp(self):
         configure(17)
-        self.config = read_json("configs/rl-diagnostic-d1.json")
+        self.config = load_config("configs/rl-diagnostic-d1.json")
 
     def test_token_partition_short_long_mixed_and_remainder(self):
         for lengths in ([1] * 8192, [128] * 64, [13, 123, 1, 128] * 9):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, NotRequired, NamedTuple, TypedDict
 
 if TYPE_CHECKING:
     import numpy as np
@@ -104,11 +104,18 @@ class WorkerState(TypedDict):
     encoded_shape: NotRequired[tuple[int, int]]
 
 
+class WorkerStepItem(NamedTuple):
+    slot: int
+    generation: int
+    state: WorkerState
+    completed_at: float
+
+
 class WorkerPayload(TypedDict):
     states: NotRequired[list[WorkerState]]
     worker_encoding_seconds: float
     wave: NotRequired[int]
-    items: NotRequired[list[tuple[int, int, WorkerState, float]]]
+    items: NotRequired[list[WorkerStepItem]]
     published_at: NotRequired[float]
     worker_request_seconds: NotRequired[float]
 

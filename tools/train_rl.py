@@ -484,6 +484,7 @@ def _run(
 
 
 def main():
+    from civ5rl.config import load_config
     from civ5rl.common import read_json
 
     p = argparse.ArgumentParser(description=__doc__)
@@ -497,7 +498,7 @@ def main():
     p.add_argument("--max-updates", type=int)
     p.add_argument("--no-evaluation", action="store_true")
     args = p.parse_args()
-    config = read_json(args.config)
+    config = load_config(args.config)
     run(
         config,
         read_json(args.corpus),

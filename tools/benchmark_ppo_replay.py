@@ -13,11 +13,13 @@ sys.path.insert(0, str(ROOT))
 def main():
     import torch
 
+    from civ5sim.engine import digest
+    from civ5rl.config import load_config
     from civ5rl.engine.ppo_fast import RolloutCache, measure_replay
     from civ5rl.engine.resources import ResourceMonitor
     from civ5rl.experiments.imitation_helpers import load_policy
     from civ5rl.experiments.ppo_artifacts import load_rollout
-    from civ5rl.provenance.common import configure, file_sha256, read_json, write_json
+    from civ5rl.provenance.common import configure, file_sha256, write_json
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
@@ -30,7 +32,7 @@ def main():
         parser.error("--seconds must be positive")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    config = read_json(args.config)
+    config = load_config(args.config)
     configure(17, "cuda")
     episodes = load_rollout(args.rollout)
     policy = load_policy(config, args.checkpoint, "cuda")
@@ -57,20 +59,31 @@ def main():
                 times.append(perf_counter() - tick)
             duration = perf_counter() - start
             record = {
-                "mode": mode, "seconds": duration, "passes": len(times),
-                "mean_seconds": mean(times), "median_seconds": median(times),
-                "min_seconds": min(times), "max_seconds": max(times),
-                "metrics": result, "cached_inputs_enabled": cache.replay_inputs,
+                "mode": mode,
+                "seconds": duration,
+                "passes": len(times),
+                "mean_seconds": mean(times),
+                "median_seconds": median(times),
+                "min_seconds": min(times),
+                "max_seconds": max(times),
+                "metrics": result,
+                "cached_inputs_enabled": cache.replay_inputs,
             }
             records.append(record)
             print(record, flush=True)
-    write_json(out / "benchmark.json", {
-        "config_sha256": file_sha256(args.config),
-        "checkpoint_sha256": file_sha256(args.checkpoint),
-        "rollout_sha256": file_sha256(args.rollout),
-        "source_sha256": file_sha256(ROOT / "civ5rl/engine/ppo_fast.py"),
-        "warmup_excluded": True, "Adam_steps": 0, "results": records,
-    })
+    write_json(
+        out / "benchmark.json",
+        {
+            "config_sha256": file_sha256(args.config),
+            "resolved_config_sha256": digest(config),
+            "checkpoint_sha256": file_sha256(args.checkpoint),
+            "rollout_sha256": file_sha256(args.rollout),
+            "source_sha256": file_sha256(ROOT / "civ5rl/engine/ppo_fast.py"),
+            "warmup_excluded": True,
+            "Adam_steps": 0,
+            "results": records,
+        },
+    )
 
 
 if __name__ == "__main__":

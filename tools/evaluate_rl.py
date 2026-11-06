@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def main():
+    from civ5rl.config import load_config
     from civ5rl.common import configure, read_json, write_json
     from civ5rl.evaluation import require_split
 
@@ -19,7 +20,7 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--device", default="cuda")
     args = p.parse_args()
-    config = read_json(args.config)
+    config = load_config(args.config)
     require_split(config, args.split)  # Fail before loading the model/corpus.
     configure(config["seed"], args.device)
     from civ5rl.agent import RLAgent

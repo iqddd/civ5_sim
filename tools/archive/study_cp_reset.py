@@ -11,6 +11,7 @@ from time import perf_counter
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT))
 
+from civ5rl.config import load_config
 from civ5rl.provenance.common import read_json, write_json
 from civ5sim.cp_reset_study import check_identity, prepare, report, run_task
 
@@ -71,7 +72,7 @@ def main():
     parser.add_argument("phase",choices=("prepare","run","report"))
     parser.add_argument("--config",default="configs/cp-reset-study.json")
     args = parser.parse_args()
-    config = read_json(ROOT/args.config)
+    config = load_config(ROOT/args.config)
     output = ROOT/config["output"]
     try:
         if args.phase == "prepare":

@@ -14,6 +14,7 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 def main():
     import torch
 
+    from civ5rl.config import load_config
     from civ5rl.collector import Collector
     from civ5rl.common import configure, read_json, write_json
     from civ5rl.corpus import ScenarioFactory
@@ -32,7 +33,7 @@ def main():
     args = p.parse_args()
     directory = Path(args.out).resolve()
     directory.mkdir(parents=True, exist_ok=True)
-    config = copy.deepcopy(read_json(args.config))
+    config = copy.deepcopy(load_config(args.config))
     config["collection"]["min_learner_decisions_per_update"] = 1
     if args.profile_workers:
         config.setdefault("performance", {})["worker_profile_dir"] = str(directory)

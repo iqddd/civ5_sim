@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def main():
+    from civ5rl.config import load_config
     from civ5rl.common import read_json, write_json
     from tools.train_rl import run
 
@@ -17,7 +18,7 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--device", default="cuda")
     args = p.parse_args()
-    config, manifest = read_json(args.config), read_json(args.corpus)
+    config, manifest = load_config(args.config), read_json(args.corpus)
     target = config["resource_targets"]
     rows = []
     for repetition in range(target["benchmark_repetitions"]):

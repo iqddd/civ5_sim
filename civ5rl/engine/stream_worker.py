@@ -6,6 +6,7 @@ from collections import deque
 from time import perf_counter
 
 from civ5rl.core.context import context_from_spec
+from civ5rl.core.contracts import WorkerStepItem
 from civ5rl.core.env import DecisionEnv
 from civ5rl.core.observation import ObservationEncoder
 from civ5sim.engine import step_batch
@@ -31,7 +32,9 @@ def worker(connection, profile_path=None, shared_descriptor=None):
         profiler.enable()
 
     def command(kind, payload):
-        nonlocal envs, encoders, previous, offered, done, generations, wave_id, reply_size
+        nonlocal envs, encoders, previous
+        nonlocal offered, done, generations
+        nonlocal wave_id, reply_size
         if kind == "close":
             return False
         if kind == "reset":
@@ -66,7 +69,9 @@ def worker(connection, profile_path=None, shared_descriptor=None):
                     or done[i]
                     or generation != generations[i]
                 ):
-                    raise RuntimeError("Stale learner action or slot ownership violation")
+                    raise RuntimeError(
+                        "Stale learner action or slot ownership violation"
+                    )
                 if action not in previous[i]["actions"]:
                     raise RuntimeError("Learner action not in offered legal list")
                 envs[i].prepare(action)
@@ -109,14 +114,15 @@ def worker(connection, profile_path=None, shared_descriptor=None):
                     start = perf_counter()
                     state.update(
                         shared.write(
-                            i, encoders[i].encode(state["observation"], state["actions"])
+                            i,
+                            encoders[i].encode(state["observation"], state["actions"]),
                         )
                     )
                     encoding_seconds += perf_counter() - start
                 offered[i] = not state["done"]
                 generations[i] += 1
                 previous[i] = state
-                items.append((i, generations[i], state, perf_counter()))
+                items.append(WorkerStepItem(i, generations[i], state, perf_counter()))
             if items:
                 connection.send(
                     (

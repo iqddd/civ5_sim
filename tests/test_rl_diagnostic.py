@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
+from civ5rl.config import load_config
 from civ5rl.common import configure, read_json
 from civ5rl.diagnostic import (
     AttackOrEndTurn,
@@ -27,7 +28,7 @@ from civ5sim import Action
 class DiagnosticTests(unittest.TestCase):
     def setUp(self):
         configure(17)
-        self.config = read_json("configs/rl-diagnostic.json")
+        self.config = load_config("configs/rl-diagnostic.json")
 
     def dataset(self):
         path = Path("artifacts/rl/diagnostic-results/manifests/manifest.json")

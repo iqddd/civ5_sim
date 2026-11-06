@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
+from civ5rl.config import load_config
 from civ5rl.common import configure, read_json
 from civ5rl.model import Policy
 from civ5rl.validation import validate_config
@@ -34,7 +35,7 @@ from civ5sim import Action
 class MultishotTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.config = read_json("configs/rl-diagnostic-multishot.json")
+        cls.config = load_config("configs/rl-diagnostic-multishot.json")
         cls.dataset = read_json(
             "artifacts/rl/diagnostic-multishot/manifests/manifest.json"
         )

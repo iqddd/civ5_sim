@@ -8,6 +8,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
+from civ5rl.config import load_config
 from civ5rl.engine.optimizer_transaction import AdamSnapshot, require_finite_state
 from civ5rl.engine.ppo import update
 from civ5rl.engine.ppo_fast import measure_replay
@@ -19,7 +20,7 @@ from civ5rl.provenance.validation import validate_config
 class ControlledPPOTests(unittest.TestCase):
     def setUp(self):
         configure(17)
-        self.config = read_json("configs/rl-ppo-controlled-updates.json")
+        self.config = load_config("configs/rl-ppo-controlled-updates.json")
 
     def test_exact_kl_uses_legal_actions_and_free_denominator(self):
         # A sampled estimator or forced-diluted mean silently changes acceptance.

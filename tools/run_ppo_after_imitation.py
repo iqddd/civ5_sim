@@ -16,10 +16,10 @@ def main():
     parser.add_argument("--config", default="configs/rl-ppo-after-imitation.json")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
-    from civ5rl.provenance.common import read_json
+    from civ5rl.config import load_config
     from civ5rl.experiments.ppo_after_imitation import run
 
-    config = read_json(ROOT / args.config)
+    config = load_config(ROOT / args.config)
     if args.phase == "run" and not (ROOT / config["output"] / "passport.json").exists():
         run("prepare", config, ROOT / config["output"], args.device)
     run(args.phase, config, ROOT / config["output"], args.device)

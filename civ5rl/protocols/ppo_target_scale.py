@@ -9,6 +9,7 @@ from civ5map.maps import components, load
 from civ5rl.core.observation import distance
 from civ5rl.protocols.corpus import ScenarioFactory, map_path
 from civ5rl.protocols.imitation_own_states import own_state_physical_hash
+from civ5rl.config import load_config as resolve_config
 from civ5rl.provenance.common import ROOT, read_json, seed_for
 from civ5sim import Battle
 from civ5sim.engine import digest
@@ -72,22 +73,14 @@ class InvalidDataset(RuntimeError):
 
 
 def load_config(path):
-    overlay = read_json(path)
-    config = read_json(ROOT / overlay['base_config'])
-    for key, value in overlay.items():
-        if key == 'base_config':
-            continue
-        if isinstance(value, dict):
-            config[key].update(value)
-        else:
-            config[key] = value
+    config = resolve_config(path)
     validate_profile(config)
     return config
 
 
 def validate_profile(config):
     expected = read_json(ROOT / 'configs/rl-ppo-target-scale.json')
-    reference = read_json(ROOT / expected['base_config'])
+    reference = resolve_config(ROOT / expected['base_config'])
     for section in ('observation', 'environment', 'model', 'reward', 'optimizer', 'numerics', 'teacher_search', 'seed', 'workers'):
         if config[section] != reference[section]:
             raise ValueError(f'Unsupported target-scale {section}')

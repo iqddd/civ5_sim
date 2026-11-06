@@ -311,7 +311,9 @@ class Collector:
         batch = batch_inputs(
             encoded,
             self.device,
-            non_blocking=self.config.get("performance", {}).get("non_blocking_inputs", False),
+            non_blocking=self.config.get("performance", {}).get(
+                "non_blocking_inputs", False
+            ),
         )
         times["encoding_seconds"] += perf_counter() - start
         start = perf_counter()
@@ -443,10 +445,16 @@ class Collector:
                     payload = self._receive_one(w)
                     if payload["wave"] != wave.wave_id:
                         raise RuntimeError("Stale worker wave")
-                    times["worker_encoding_seconds"] += payload["worker_encoding_seconds"]
+                    times["worker_encoding_seconds"] += payload[
+                        "worker_encoding_seconds"
+                    ]
                     times["worker_request_seconds"] += payload["worker_request_seconds"]
                     times["worker_replies"] += 1
-                    for slot, generation, state, at in payload["items"]:
+                    for item in payload["items"]:
+                        slot = item.slot
+                        generation = item.generation
+                        state = item.state
+                        at = item.completed_at
                         i = w * self.envs_per_worker + slot
                         if (
                             not 0 <= slot < self.envs_per_worker

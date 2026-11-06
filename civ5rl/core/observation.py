@@ -2,6 +2,7 @@
 
 import warnings
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import numpy as np
 
@@ -17,14 +18,22 @@ from civ5rl.core.schema import (
     MAX_ROSTER_UNITS,
     PREV_ACTION_DIM,
     PREVIOUS,
+    PREVIOUS_START_KIND,
+    PREVIOUS_START_SOURCE_TYPE,
     ROSTER_SCALE,
     TILE,
     TILE_DIM,
+    opposite_direction,
 )
-from civ5sim.engine import ELEVATIONS, FEATURES, KINDS, TERRAINS, UNIT_TYPES
+from civ5rl.core.contracts import AgentContext
+from civ5rl.core.variants import PolicyVariant
+from civ5sim.engine import ELEVATIONS, FEATURES, KINDS, MAX_MOVES, TERRAINS, UNIT_TYPES
 
 HP_SCALE = 100
 MOVEMENT_SCALE = 240
+if max(MAX_MOVES) != MOVEMENT_SCALE:
+    raise ValueError("Engine movement scale does not match RL-01 preprocessing")
+OWNED_RIVER_DIRECTIONS = (1, 2, 3)
 MAX_ROUNDS_SCALE = 60
 DISTANCE_SCALE = 32
 
@@ -67,6 +76,13 @@ def public_map(m):
     return {k: deepcopy(m[k]) for k in keys if k in m}
 
 
+class ContactRecord(NamedTuple):
+    type_index: int
+    tile: int
+    last_hp: int
+    last_clock: int
+
+
 @dataclass
 class Encoded:
     cells: np.ndarray
@@ -79,19 +95,21 @@ class Encoded:
 
 
 class ObservationEncoder:
-    def __init__(self, context, variant="C"):
+    def __init__(
+        self,
+        context: AgentContext,
+        variant: PolicyVariant | str = PolicyVariant.CONTACTS_GRU,
+    ):
         self.map = validate(public_map(context["map"]))
         m = self.map
         w, h = m["width"], m["height"]
         if max(w, h) > MAX_MAP_AXIS or min(w, h) < 2 or m["wrap_x"]:
             raise ValueError("RL-01 requires a non-wrapping map with axes 2..16")
-        if variant not in ("A", "B", "C"):
-            raise ValueError("Unknown RL variant")
-        self.variant = variant
+        self.variant = PolicyVariant(variant)
         self.side = context["side"]
         self.max_rounds = context["max_rounds"]
         self.random_damage = context["random_damage"]
-        self.rosters = context["armies"]
+        self.rosters = [list(army) for army in context["armies"]]
         if any(len(a) > MAX_ROSTER_UNITS for a in self.rosters):
             raise ValueError("RL-01 roster capacity exceeded")
         self.static = np.zeros((w * h, TILE_DIM), np.float32)
@@ -111,7 +129,15 @@ class ObservationEncoder:
                     self.static[i, TILE["neighbors"].start + d] = 1
                 river = self._has_river(i, d, xy)
                 self.static[i, TILE["rivers"].start + d] = river
-        self.contacts = {}
+        for tile_index, neighbors in enumerate(self.neighbors):
+            for direction, neighbor in enumerate(neighbors):
+                if (
+                    neighbor >= 0
+                    and self.neighbors[neighbor, opposite_direction(direction)]
+                    != tile_index
+                ):
+                    raise ValueError("Map neighbors are not reciprocal")
+        self.contacts: dict[int, ContactRecord] = {}
         self.last_visible = np.full(w * h, -1, np.int64)
         self.last_clock = 0
         self.last_turn = None
@@ -120,11 +146,13 @@ class ObservationEncoder:
     def _has_river(self, tile_index, direction, adjacent_xy):
         m = self.map
         w = m["width"]
-        if direction in (1, 2, 3):
+        if direction in OWNED_RIVER_DIRECTIONS:
             return m["tiles"][tile_index]["rivers"][direction - 1] >= 0
         if adjacent_xy is not None:
             neighbor = adjacent_xy[1] * w + adjacent_xy[0]
-            return m["tiles"][neighbor]["rivers"][(direction + 3) % 6 - 1] >= 0
+            return (
+                m["tiles"][neighbor]["rivers"][opposite_direction(direction) - 1] >= 0
+            )
         return any(
             edge["x"] == tile_index % w
             and edge["y"] == tile_index // w
@@ -135,7 +163,8 @@ class ObservationEncoder:
     @staticmethod
     def start_action():
         result = np.zeros(PREV_ACTION_DIM, np.float32)
-        result[PREVIOUS["kind"].stop - 1] = result[PREVIOUS["source_type"].stop - 1] = 1
+        result[PREVIOUS_START_KIND] = 1
+        result[PREVIOUS_START_SOURCE_TYPE] = 1
         return result
 
     def xy(self, tile):
@@ -169,7 +198,7 @@ class ObservationEncoder:
         cells, own, enemy = self._encode_cells(observation, clock)
         globals_ = self._encode_globals(own, enemy, turn, clock)
         previous = self.previous.copy()
-        if self.variant == "A":
+        if self.variant == PolicyVariant.CURRENT_ONLY_MLP:
             for name in (
                 "visibility_age",
                 "seen",
@@ -182,6 +211,8 @@ class ObservationEncoder:
                 globals_[GLOBAL[name]] = 0
             previous = self.start_action()
         sources, targets, features = self._encode_actions(actions, own)
+        self.last_clock = clock
+        self.last_turn = turn
         return Encoded(
             cells, globals_, previous, self.neighbors, sources, targets, features
         )
@@ -220,21 +251,24 @@ class ObservationEncoder:
                 enemy.append(u)
                 cells[i, TILE["enemy_type"].start + kind] = 1
                 cells[i, TILE["enemy_status"]] = (u["hp"] / HP_SCALE, u["fortified"])
-                self.contacts[u["id"]] = (kind, i, u["hp"], clock)
+                self.contacts[u["id"]] = ContactRecord(kind, i, u["hp"], clock)
         visible_ids = {u["id"] for u in enemy}
         historical = {}
-        for uid, (kind, tile, hp, when) in self.contacts.items():
+        for uid, contact in self.contacts.items():
             if uid not in visible_ids:
-                historical.setdefault((tile, kind), []).append((hp, when))
+                historical.setdefault((contact.tile, contact.type_index), []).append(
+                    contact
+                )
         for (tile, kind), records in historical.items():
             cells[tile, TILE["contact_count"].start + kind] = (
                 len(records) / ROSTER_SCALE
             )
             cells[tile, TILE["contact_age"].start + kind] = (
-                min(clock - max(r[1] for r in records), AGE_CAP) / AGE_CAP
+                min(clock - max(record.last_clock for record in records), AGE_CAP)
+                / AGE_CAP
             )
             cells[tile, TILE["contact_hp"].start + kind] = (
-                np.mean([r[0] for r in records]) / HP_SCALE
+                np.mean([record.last_hp for record in records]) / HP_SCALE
             )
         return cells, own, enemy
 
@@ -248,8 +282,8 @@ class ObservationEncoder:
         ):
             for kind in types:
                 globals_[offset + UNIT_TYPES.index(kind)] += 1 / ROSTER_SCALE
-        for kind, *_ in self.contacts.values():
-            globals_[GLOBAL["contacts"].start + kind] += 1 / ROSTER_SCALE
+        for contact in self.contacts.values():
+            globals_[GLOBAL["contacts"].start + contact.type_index] += 1 / ROSTER_SCALE
         globals_[GLOBAL["turn"] :] = (
             turn / (2 * self.max_rounds),
             min(clock - self.last_clock, AGE_CAP) / AGE_CAP,
@@ -260,7 +294,6 @@ class ObservationEncoder:
             self.random_damage,
             self.max_rounds / MAX_ROUNDS_SCALE,
         )
-        self.last_clock, self.last_turn = clock, turn
         return globals_
 
     def _encode_actions(self, actions, own):

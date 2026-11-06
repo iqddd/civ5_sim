@@ -18,6 +18,7 @@ def main():
     import torch
 
     from civ5rl import checkpoint
+    from civ5rl.config import load_config
     from civ5rl.common import read_json, write_json
     from civ5rl.control import is_active
     from civ5rl.migration import validate_audit_migration, validate_pipeline_migration
@@ -34,7 +35,7 @@ def main():
         raise ValueError("Source must be stopped; destination must be a new directory")
     value = torch.load(source, map_location="cpu", weights_only=False)
     config, manifest = (
-        read_json(args.config),
+        load_config(args.config),
         read_json(parent / "corpus-manifest.json"),
     )
     with tempfile.TemporaryDirectory() as temporary:

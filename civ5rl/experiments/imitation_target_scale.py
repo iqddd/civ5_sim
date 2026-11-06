@@ -17,6 +17,7 @@ import psutil
 import torch
 from torch.nn import functional as F
 
+from civ5rl.config import load_config as resolve_config
 from civ5rl.engine.control import RunLock
 from civ5rl.engine.imitation import decision_indices, label_minibatches
 from civ5rl.engine.imitation_performance import backward_minibatch_async
@@ -37,7 +38,7 @@ from civ5sim.engine import digest
 
 
 def load_config(path):
-    overlay=read_json(path); base=read_json(ROOT/overlay['base_config'])
+    overlay=read_json(path); base=resolve_config(ROOT/overlay['base_config'])
     config={k:deepcopy(base[k]) for k in ('model','observation','numerics','optimizer','teacher_search','performance')}
     config.update({k:v for k,v in overlay.items() if k!='performance'})
     config['performance'].update(overlay['performance'])

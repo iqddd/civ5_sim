@@ -9,6 +9,9 @@ from torch.autograd.function import once_differentiable
 from civ5rl.core.spatial import SPATIAL_KEYS, iter_spatial_blocks
 
 
+CUDA_GRAPH_WARMUP_STEPS = 3
+
+
 class CoalescedSpatial(torch.autograd.Function):
     """Run the usual block graphs; sum their parameter gradients with foreach."""
 
@@ -77,7 +80,7 @@ class _GRUEntry:
         stream = torch.cuda.Stream(device=x.device)
         stream.wait_stream(torch.cuda.current_stream(x.device))
         with torch.cuda.stream(stream), torch.enable_grad():
-            for _ in range(3):
+            for _ in range(CUDA_GRAPH_WARMUP_STEPS):
                 outputs = self.module(self.x, self.hidden)
                 torch.autograd.grad(outputs, inputs, (self.dy, self.dh))
         torch.cuda.current_stream(x.device).wait_stream(stream)
