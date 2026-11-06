@@ -33,7 +33,10 @@ int32_t formation_score(int32_t role, int32_t distance, bool enemies) {
                                {-1,6,12,2,-1}, {1,1,8,12,-1}};
   constexpr int target[4][5] = {{-1,-1,-1,-1,-1}, {6,6,5,3,1},
                                {8,8,3,2,1}, {10,10,2,1,1}};
-  return 10 * (enemies ? combat : target)[role][std::clamp(distance, 0, 4)];
+  // Keep index evaluation separate from array selection for portable codegen.
+  const int column = std::clamp(distance, 0, 4);
+  if (enemies) return 10 * combat[role][column];
+  return 10 * target[role][column];
 }
 EndScore score_turn_end(const CaiConfig& config, const RulesAdapter& adapter,
                        DangerModel& danger, const Branch& branch,

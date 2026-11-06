@@ -300,6 +300,14 @@ void check_root_exclusion(const Fixture& fixture, TacticalFixture& context, Slot
       [unit](const CaiAssignment& record) { return record.unit==unit; }));
 }
 void cp_area_and_preferences() {
+  // GCC can silently select the wrong column when clamp and conditional
+  // array selection share one expression. These scores must be table lookups.
+  CHECK(formation_score(CAI_SECOND_LINE,2,false)==30);
+  CHECK(formation_score(CAI_FIRST_LINE,3,false)==30);
+  CHECK(formation_score(CAI_THIRD_LINE,2,false)==20);
+  CHECK(formation_score(CAI_SECOND_LINE,-1,false)==80);
+  CHECK(formation_score(CAI_SECOND_LINE,8,false)==10);
+  CHECK(formation_score(CAI_SECOND_LINE,2,true)==120);
   Fixture distant; distant.w=16; distant.h=1; distant.tiles.resize(16);
   distant.add(4,0,0); distant.add(0,1,9); distant.start();
   TacticalFixture f(distant,9);
