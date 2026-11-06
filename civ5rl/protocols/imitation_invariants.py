@@ -1,5 +1,7 @@
 """Fixed experimental protocol constraints."""
 
+from civ5rl.protocols.common import require_config
+
 CONTINUATION_CHANGES = {"kind", "output", "epochs", "checkpoint_rule", "continuation"}
 MORE_DATA_CHANGES = {
     "kind",
@@ -49,9 +51,7 @@ OWN_SETTINGS = {
 
 
 def require_values(actual, expected, label):
-    for key, value in expected.items():
-        if actual.get(key) != value:
-            raise ValueError(f"Unsupported {label}.{key}")
+    require_config(actual, expected, prefix=f"Unsupported {label}.")
 
 
 def require_changes(actual, parent, expected):

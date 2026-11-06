@@ -8,13 +8,14 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
-from civ5rl.config import load_config
 from civ5rl.common import configure, read_json
-from civ5rl.diagnostic import DecisionEnvContext, DiagnosticFactory
+from civ5rl.diagnostic import DiagnosticFactory
 from civ5rl.diagnostic_one import gate_one, load_initial_weights, next_state_one
 from civ5rl.model import Policy
 from civ5rl.validation import validate_config
 
+from civ5rl.config import load_config
+from civ5rl.core.env import DecisionEnv
 from civ5rl.provenance import bound_cases, validate_cases
 from civ5sim import Action
 
@@ -31,7 +32,7 @@ class OneDecisionTests(unittest.TestCase):
     def test_all_dev_controls_and_no_opponent_after_first_command(self):
         for spec in bound_cases(self.dataset["D0"]["dev"]):
             for kind in ("ranged", "end_turn", "move", "skip", "fortify"):
-                with DecisionEnvContext(spec) as env:
+                with DecisionEnv(spec) as env:
                     state = env.request()
                     action = next((a for a in state["actions"] if a.kind == kind), None)
                     if action is None:
@@ -67,7 +68,7 @@ class OneDecisionTests(unittest.TestCase):
         bad.pop("diagnostic_protocol")
         with self.assertRaises(ValueError):
             validate_cases([bad], self.dataset["D0"]["dev"])
-        with DecisionEnvContext(spec) as env:
+        with DecisionEnv(spec) as env:
             env.request()
             action = Action("ranged", 999, 999)
             result = env.battle.step(action)

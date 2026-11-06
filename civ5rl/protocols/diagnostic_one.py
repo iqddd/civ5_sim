@@ -6,12 +6,12 @@ from pathlib import Path
 import numpy as np
 
 from civ5rl.core.context import context_from_spec
+from civ5rl.core.env import DecisionEnv
 from civ5rl.core.observation import ObservationEncoder
 from civ5rl.protocols.common import advance_stage_state
 from civ5rl.protocols.diagnostic import (
     _SHOT_DAMAGE_ROLLS,
-    DecisionEnvContext,
-    _minimum_shot_damage,
+    shot_damage_bounds,
 )
 from civ5rl.provenance import bound_cases, case_manifest
 from civ5rl.provenance.common import (
@@ -98,7 +98,7 @@ def _certify_one_decision_case(old, new):
         for k, v in new.items()
         if k not in ("provenance", "diagnostic_protocol", "learner_decision_limit")
     } == old
-    with DecisionEnvContext(old) as a, DecisionEnvContext(new) as b:
+    with DecisionEnv(old) as a, DecisionEnv(new) as b:
         x, y = a.request(), b.request()
         if x != y:
             raise ValueError("One-decision protocol changed the first player input")
@@ -123,7 +123,7 @@ def _certify_one_decision_case(old, new):
                 u["hp"] for u in y["observation"]["units"] if u["tile"] == shot.target
             )
             preview = b.battle.preview_attack(shot)
-            minimum = _minimum_shot_damage(preview, "Native random roll range changed")
+            minimum, _ = shot_damage_bounds(preview, "Native random roll range changed")
             if minimum < hp:
                 raise ValueError("Initial ranged attack is not guaranteed lethal")
             minima.append(
@@ -138,7 +138,7 @@ def _certify_one_decision_case(old, new):
         win = b.request()
         if not win["done"] or win["result"]["reward"] != 1:
             raise ValueError("Immediate shot control did not win")
-    with DecisionEnvContext(new) as env:
+    with DecisionEnv(new) as env:
         env.request()
         action = Action("end_turn")
         env.prepare(action)

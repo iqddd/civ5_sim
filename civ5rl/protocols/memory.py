@@ -10,6 +10,7 @@ from civ5rl.core.agent import RLAgent
 from civ5rl.core.context import context_for
 from civ5rl.core.model import batch_inputs
 from civ5rl.core.observation import ordered_actions
+from civ5rl.protocols.common import flat_map
 from civ5rl.protocols.evaluation import require_split
 from civ5rl.provenance.common import seed_for, write_json
 from civ5sim.agents import load_agent
@@ -24,25 +25,6 @@ FAMILIES = (
 )
 
 MEMORY_SCOPE = "history_sensitivity_only_not_gru_isolation"
-
-
-def flat_map(size=16, parity=0):
-    return {
-        "schema": 1,
-        "width": size,
-        "height": size,
-        "row_parity": parity,
-        "wrap_x": False,
-        "tiles": [
-            {
-                "terrain": "grass",
-                "elevation": "flat",
-                "feature": None,
-                "rivers": [-1, -1, -1],
-            }
-            for _ in range(size * size)
-        ],
-    }
 
 
 def _history(geometry, history_index, side, branch, shared_last_contact=False):

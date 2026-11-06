@@ -14,10 +14,11 @@ from civ5rl.core.env import DecisionEnv
 from civ5rl.protocols.common import (
     advance_stage_state,
     bootstrap_ci95,
+    flat_map,
     paired_layout_deltas,
+    physical_hash,
 )
 from civ5rl.protocols.diagnostic_metrics import summarize_decisions
-from civ5rl.protocols.memory import flat_map
 from civ5rl.provenance import bound_cases, case_manifest, validate_cases
 from civ5rl.provenance.common import seed_for, verify_self_digest, write_json
 from civ5sim import Action
@@ -37,25 +38,6 @@ class AttackOrEndTurn:
         return self.rng.choice(attacks) if attacks else Action("end_turn")
 
 
-def physical_hash(scenario):
-    """Ignore RNG/unit ordering and identify side-permuted copies together."""
-    variants = []
-    for swap in (0, 1):
-        units = [{**u, "side": u["side"] ^ swap} for u in scenario["units"]]
-        units.sort(key=lambda u: json.dumps(u, sort_keys=True))
-        variants.append(
-            digest(
-                {
-                    "map": scenario["map"],
-                    "units": units,
-                    "fog": True,
-                    "random_damage": True,
-                }
-            )
-        )
-    return min(variants)
-
-
 def make_spec(scenario, stage, side, index, *, seed=20261108):
     value = deepcopy(scenario)
     value["seed"] = seed_for(seed, index, "battle", namespace="diagnostic_" + stage)
@@ -72,6 +54,7 @@ def make_spec(scenario, stage, side, index, *, seed=20261108):
         "max_calls_per_turn": 2000,
         "opponent": "end_turn"
         if stage == "D0"
+        # The historical alias resolves via civ5rl.__init__._ALIASES; it is hashed.
         else "civ5rl.diagnostic:AttackOrEndTurn",
         "agent_seeds": [
             seed_for(seed, index, "sampling", s, "diagnostic_" + stage) for s in (0, 1)
@@ -87,8 +70,8 @@ def make_spec(scenario, stage, side, index, *, seed=20261108):
 _SHOT_DAMAGE_ROLLS = 1200
 
 
-def _minimum_shot_damage(preview, range_error):
-    lib = native.library()
+def shot_damage_bounds(preview, range_error, *, library=None):
+    lib = library if library is not None else native.library()
     if (
         lib.sim_damage(
             preview.attacker_strength, preview.defender_strength, _SHOT_DAMAGE_ROLLS
@@ -96,10 +79,11 @@ def _minimum_shot_damage(preview, range_error):
         != -1
     ):
         raise ValueError(range_error)
-    return min(
+    values = [
         lib.sim_damage(preview.attacker_strength, preview.defender_strength, roll)
         for roll in range(_SHOT_DAMAGE_ROLLS)
-    )
+    ]
+    return min(values), max(values)
 
 
 def d0_certificate(spec):
@@ -111,7 +95,7 @@ def d0_certificate(spec):
         certificates = []
         for action in shots:
             preview = env.battle.preview_attack(action)
-            minimum = _minimum_shot_damage(
+            minimum, _ = shot_damage_bounds(
                 preview,
                 "Native roll range changed; D0 exhaustive certificate must be revised",
             )
@@ -127,9 +111,6 @@ def d0_certificate(spec):
                 }
             )
         return certificates
-
-
-DecisionEnvContext = DecisionEnv
 
 
 def reference_win(spec):

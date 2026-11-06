@@ -3,7 +3,7 @@
 from copy import deepcopy
 from pathlib import Path
 
-from civ5rl.protocols.common import advance_stage_state
+from civ5rl.protocols.common import advance_stage_state, physical_hash
 from civ5rl.provenance import bound_cases, validate_cases
 from civ5rl.provenance.common import (
     ROOT,
@@ -54,8 +54,6 @@ def prepare_d1(directory, config):
         if any("learner_decision_limit" in s for s in manifest["cases"]):
             raise ValueError("D1 cannot have a diagnostic decision limit")
     train, dev = (dataset["D1"][s]["cases"] for s in ("train", "dev"))
-    from civ5rl.protocols.diagnostic import physical_hash
-
     for spec in [*train, *dev]:
         if physical_hash(spec["scenario"]) != spec["physical_hash"]:
             raise ValueError("D1 physical hash differs")

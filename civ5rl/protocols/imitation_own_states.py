@@ -8,6 +8,10 @@ from pathlib import Path
 from time import perf_counter
 
 from civ5rl.core.observation import ordered_actions
+from civ5rl.protocols.common import (
+    own_state_physical_hash,
+    self_digest,
+)  # re-exported public API
 from civ5rl.protocols.imitation import (
     dump_episode,
     imitation_scenario_factory,
@@ -98,17 +102,6 @@ class AdvisedPolicy:
         self.advisor.close()
 
 
-def own_state_physical_hash(scenario):
-    # Seeds, side-to-play and unit list order do not create a new physical layout.
-    units = [
-        (u["side"], u["type"], u["tile"], u.get("hp", 100)) for u in scenario["units"]
-    ]
-    flipped = [(1 - s, k, t, hp) for s, k, t, hp in units]
-    return digest(
-        {"map": digest(scenario["map"]), "units": min(sorted(units), sorted(flipped))}
-    )
-
-
 def make_case(config, base, split, index, *, attempt=0):
     if split not in ("dev", "cycle-01", "cycle-02"):
         raise ValueError("Closed or unsupported own-state split")
@@ -148,7 +141,7 @@ def make_case(config, base, split, index, *, attempt=0):
         source="rl01.cp_imitation_own_states",
     )
     case["physical_hash"] = own_state_physical_hash(case["scenario"])
-    case["case_hash"] = digest(case)
+    case["case_hash"] = self_digest(case)
     return case
 
 

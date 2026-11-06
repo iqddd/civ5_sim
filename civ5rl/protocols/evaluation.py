@@ -18,8 +18,6 @@ def require_split(config, split, mode="pilot", frozen_plan=None):
         raise ValueError(f"Closed split: {split}; final evaluation is not implemented")
     if mode == "pilot" and split not in config["evaluation"]["pilot_allowed_splits"]:
         raise ValueError(f"Pilot cannot evaluate closed split {split}")
-    if split in ("test", "diagnostic_test") and not frozen_plan:
-        raise ValueError("Final test requires a frozen A/B/C evaluation plan")
 
 
 def validation_specs(factory, config):

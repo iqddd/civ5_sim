@@ -1,5 +1,25 @@
 """Validate fixed diagnostic protocol settings before workers run."""
 
+from civ5rl.protocols.common import require_config
+
+
+def _validate_step_ppo(config, *, multishot):
+    ppo = config["ppo"]
+    if ppo.get("valid_tokens_per_minibatch") != 1024:
+        message = (
+            "Unsupported D0-multishot PPO configuration"
+            if multishot
+            else "Unsupported configuration: ppo.valid_tokens_per_minibatch"
+        )
+        raise ValueError(message)
+    if ppo["kl_measurement"] != "whole_rollout_after_optimizer_step":
+        message = (
+            "Unsupported D0-multishot PPO configuration"
+            if multishot
+            else "Unsupported configuration: ppo.kl_measurement"
+        )
+        raise ValueError(message)
+
 
 def validate_diagnostic_config(config):
     mode = config["diagnostic"].get("mode", "D0-D1")
@@ -34,12 +54,7 @@ def validate_diagnostic_config(config):
             random_checkpoint="artifacts/rl/diagnostic-results/seed-17/checkpoints/initial.pt",
             source_dataset="artifacts/rl/diagnostic-results/manifests/manifest.json",
         )
-        if config["ppo"].get("valid_tokens_per_minibatch") != 1024:
-            raise ValueError(
-                "Unsupported configuration: ppo.valid_tokens_per_minibatch"
-            )
-        if config["ppo"]["kl_measurement"] != "whole_rollout_after_optimizer_step":
-            raise ValueError("Unsupported configuration: ppo.kl_measurement")
+        _validate_step_ppo(config, multishot=False)
     if mode == "D0-multishot":
         expected.update(
             seeds=[17],
@@ -51,11 +66,7 @@ def validate_diagnostic_config(config):
             source_dataset="artifacts/rl/diagnostic-results/manifests/manifest.json",
             specification="configs/rl-diagnostic-multishot.spec.json",
         )
-        if (
-            config["ppo"].get("valid_tokens_per_minibatch") != 1024
-            or config["ppo"]["kl_measurement"] != "whole_rollout_after_optimizer_step"
-        ):
-            raise ValueError("Unsupported D0-multishot PPO configuration")
-    for key, value in expected.items():
-        if config["diagnostic"].get(key) != value:
-            raise ValueError(f"Unsupported configuration: diagnostic.{key}")
+        _validate_step_ppo(config, multishot=True)
+    require_config(
+        config["diagnostic"], expected, prefix="Unsupported configuration: diagnostic."
+    )

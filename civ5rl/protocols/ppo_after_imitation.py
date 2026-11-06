@@ -1,18 +1,18 @@
 """Frozen P(win) PPO protocol, deterministic training and open confirmation cases."""
 
-import random
 import hashlib
 import json
+import random
 from copy import deepcopy
 
+from civ5rl.protocols.common import require_config, self_digest
 from civ5rl.protocols.corpus import ScenarioFactory, validate_corpus
-from civ5rl.provenance.common import file_sha256 as file_hash
 from civ5rl.protocols.imitation_own_states import (
     own_state_physical_hash as physical_hash,
 )
 from civ5rl.provenance.common import ROOT, read_json
+from civ5rl.provenance.common import file_sha256 as file_hash
 from civ5sim.engine import digest
-
 
 KIND = "rl01.ppo_after_imitation"
 CONTROLLED_KIND = "rl01.ppo_controlled_updates"
@@ -60,22 +60,19 @@ def validate_profile(config):
         "experiment.parent_sha256": "035581230481bb5cc5cbd02f6a947549dc2ccb30d3797c7acbad25d5268ba7a1",
     }
     if controlled(config):
-        fixed.update({
-            "ppo.step_acceptance": "full_categorical_kl_rollback",
-            "experiment.parent": "artifacts/rl/ppo-after-imitation/checkpoints/initial.pt",
-            "experiment.parent_run": "artifacts/rl/ppo-after-imitation",
-            "experiment.parent_sha256": "ad1ec38bd730822c5a1328fddb8437cce641141251340ce45c8b64686bf4413e",
-            "experiment.protocol": "docs/rl-ppo-controlled-updates.md",
-            "experiment.max_zero_accepted_rollouts": 3,
-        })
+        fixed.update(
+            {
+                "ppo.step_acceptance": "full_categorical_kl_rollback",
+                "experiment.parent": "artifacts/rl/ppo-after-imitation/checkpoints/initial.pt",
+                "experiment.parent_run": "artifacts/rl/ppo-after-imitation",
+                "experiment.parent_sha256": "ad1ec38bd730822c5a1328fddb8437cce641141251340ce45c8b64686bf4413e",
+                "experiment.protocol": "docs/rl-ppo-controlled-updates.md",
+                "experiment.max_zero_accepted_rollouts": 3,
+            }
+        )
     elif config["ppo"].get("step_acceptance") is not None:
         raise ValueError("Unsupported configuration: ppo.step_acceptance")
-    for field, expected in fixed.items():
-        value = config
-        for key in field.split("."):
-            value = value.get(key) if isinstance(value, dict) else None
-        if value != expected:
-            raise ValueError(f"Unsupported configuration: {field}")
+    require_config(config, fixed)
     if "lr_schedule" in config["optimizer"] or "entropy_schedule" in config["ppo"]:
         raise ValueError("This protocol has no schedules")
     if type(config["performance"].get("ppo_cached_replay", False)) is not bool:
@@ -168,22 +165,31 @@ def prepare_cases(config):
     parent = ROOT / config["experiment"]["parent_run"]
     if controlled(config):
         previous = read_json(parent / "manifest.json")
-        if digest({k: v for k, v in previous.items() if k != "hash"}) != previous["hash"]:
+        if self_digest(previous, key="hash") != previous["hash"]:
             raise ValueError("Previous PPO manifest changed")
         if previous["kind"] != KIND:
             raise ValueError("Unexpected previous PPO manifest")
         recorded = read_json(parent / "passport.json")
-        if hashlib.sha256(json.dumps(previous, sort_keys=True).encode()).hexdigest() != recorded["corpus_hash"]:
+        if (
+            hashlib.sha256(json.dumps(previous, sort_keys=True).encode()).hexdigest()
+            != recorded["corpus_hash"]
+        ):
             raise ValueError("Previous PPO manifest differs from frozen passport")
         validate_corpus({"maps": previous["base"]["maps"]})
-        if file_hash(ROOT / config["experiment"]["corpus"]) != previous["base"]["source_corpus_sha256"]:
+        if (
+            file_hash(ROOT / config["experiment"]["corpus"])
+            != previous["base"]["source_corpus_sha256"]
+        ):
             raise ValueError("Corpus manifest changed")
         plan = deepcopy(previous)
-        plan.update(kind=CONTROLLED_KIND, parent_sha256=config["experiment"]["parent_sha256"],
-                    reused_manifest_sha256=file_hash(parent / "manifest.json"),
-                    reused_training_streams=True)
+        plan.update(
+            kind=CONTROLLED_KIND,
+            parent_sha256=config["experiment"]["parent_sha256"],
+            reused_manifest_sha256=file_hash(parent / "manifest.json"),
+            reused_training_streams=True,
+        )
         plan.pop("hash")
-        plan["hash"] = digest(plan)
+        plan["hash"] = self_digest(plan, key="hash")
         return plan
     base = read_json(parent / "manifest.json")["base"]
     corpus = read_json(ROOT / config["experiment"]["corpus"])
@@ -200,9 +206,7 @@ def prepare_cases(config):
     for original in base["validation_cases"]:
         for side in (0, 1):
             case = {**deepcopy(original), "learner_side": side}
-            case["case_hash"] = digest(
-                {k: v for k, v in case.items() if k != "case_hash"}
-            )
+            case["case_hash"] = self_digest(case)
             development.append(case)
     used = {physical_hash(c["scenario"]) for c in development}
     confirmation = []
@@ -253,5 +257,5 @@ def prepare_cases(config):
         "confirmation": confirmation,
         "parent_sha256": config["experiment"]["parent_sha256"],
     }
-    plan["hash"] = digest(plan)
+    plan["hash"] = self_digest(plan, key="hash")
     return plan

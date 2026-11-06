@@ -7,7 +7,12 @@ from time import perf_counter
 import numpy as np
 
 from civ5rl.core.env import DecisionEnv
-from civ5rl.protocols.diagnostic import DiagnosticFactory, physical_hash
+from civ5rl.protocols.common import physical_hash
+from civ5rl.protocols.diagnostic import (
+    _SHOT_DAMAGE_ROLLS,
+    DiagnosticFactory,
+    shot_damage_bounds,
+)
 from civ5rl.protocols.diagnostic_metrics import decision_metrics
 from civ5rl.protocols.multishot_metrics import summarize
 from civ5rl.provenance import bound_cases, case_manifest, validate_cases
@@ -227,26 +232,24 @@ def _certify_multishot_case(case, lib):
                 if u["tile"] == action.target
             )
             preview = env.battle.preview_attack(action)
-            values = [
-                lib.sim_damage(preview.attacker_strength, preview.defender_strength, r)
-                for r in range(1200)
-            ]
-            if (
-                hp != 40
-                or min(values) < 0
-                or max(values) >= hp
-                or lib.sim_damage(
-                    preview.attacker_strength, preview.defender_strength, 1200
+            try:
+                minimum, maximum = shot_damage_bounds(
+                    preview,
+                    "Initial shot non-lethality certificate failed",
+                    library=lib,
                 )
-                != -1
-            ):
+            except ValueError as error:
+                raise InvalidDataset(
+                    "Initial shot non-lethality certificate failed"
+                ) from error
+            if hp != 40 or minimum < 0 or maximum >= hp:
                 raise InvalidDataset("Initial shot non-lethality certificate failed")
             bounds.append(
                 {
                     "target_hp": hp,
-                    "min": min(values),
-                    "max": max(values),
-                    "rolls": 1200,
+                    "min": minimum,
+                    "max": maximum,
+                    "rolls": _SHOT_DAMAGE_ROLLS,
                     "attacker_strength": preview.attacker_strength,
                     "defender_strength": preview.defender_strength,
                 }

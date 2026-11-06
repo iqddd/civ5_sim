@@ -172,20 +172,30 @@ class ScenarioFactory:
                 rng.sample([y * size + x for x, y in zone], n)
                 for zone in m["spawn_candidates"]
             ]
+        return ScenarioFactory.sample_contact_positions(m, group, n, rng, radius=2)
+
+    @staticmethod
+    def sample_contact_positions(m, group, n, rng, *, radius=2, reasons=None):
         a = rng.choice(group)
         anchors = [t for t in group if distance(m, a, t) == 2]
         if not anchors:
+            if reasons is not None:
+                reasons["no_anchor"] += 1
             return None
         b = rng.choice(anchors)
         pools = [
-            [t for t in group if distance(m, anchor, t) <= 2 and t not in (a, b)]
+            [t for t in group if t not in (a, b) and distance(m, anchor, t) <= radius]
             for anchor in (a, b)
         ]
         if min(map(len, pools)) < n - 1:
+            if reasons is not None:
+                reasons["capacity"] += 1
             return None
         pos0 = [a, *rng.sample(pools[0], n - 1)]
         pool1 = [t for t in pools[1] if t not in pos0]
         if len(pool1) < n - 1:
+            if reasons is not None:
+                reasons["overlap"] += 1
             return None
         pos1 = [b, *rng.sample(pool1, n - 1)]
         rng.shuffle(pos0)
@@ -314,8 +324,6 @@ class ScenarioFactory:
                         "scenario_hash": digest(scenario),
                         "manifest_hash": self.manifest_hash,
                     }
-                    if split not in ("train", "validation"):
-                        raise ValueError(f"Closed corpus split: {split}")
                     self._issued.add(digest(spec))
                     return spec
             rejected.append(

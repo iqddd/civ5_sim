@@ -16,6 +16,7 @@ from pathlib import Path
 from time import perf_counter
 
 from civ5rl.core.observation import ordered_actions
+from civ5rl.protocols.common import self_digest
 from civ5rl.protocols.corpus import ScenarioFactory, validate_corpus
 from civ5rl.provenance.common import ROOT, file_sha256, read_json, write_json
 from civ5sim import MatchConfig
@@ -213,7 +214,7 @@ def prepare_manifest(config):
     result["validation_cases"] = [
         make_case(config, result, "validation", i) for i in range(32)
     ]
-    result["hash"] = digest(result)
+    result["hash"] = self_digest(result, key="hash")
     return result
 
 
@@ -222,9 +223,7 @@ def validate_case(case, config, manifest):
     expected = make_case(config, manifest, split, index)
     if split == "validation" and case["learner_side"] in (0, 1):
         expected["learner_side"] = case["learner_side"]
-        expected["case_hash"] = digest(
-            {k: v for k, v in expected.items() if k != "case_hash"}
-        )
+        expected["case_hash"] = self_digest(expected)
     if expected != case:
         raise ValueError("Imitation case differs from its trusted deterministic source")
 

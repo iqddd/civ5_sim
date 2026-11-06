@@ -3,7 +3,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from civ5rl.protocols.diagnostic import _minimum_shot_damage
+from civ5rl.protocols.diagnostic import shot_damage_bounds
 from civ5rl.provenance.migration import validate_pipeline_migration
 
 
@@ -21,13 +21,13 @@ class ProtocolCleanupTests(unittest.TestCase):
             return_value=SimpleNamespace(sim_damage=damage),
         ):
             self.assertEqual(
-                _minimum_shot_damage(
+                shot_damage_bounds(
                     SimpleNamespace(attacker_strength=17, defender_strength=23),
                     "changed",
                 ),
-                2,
+                (2, 8),
             )
-        self.assertEqual(set(rolls), set(range(1201)))
+        self.assertEqual(rolls, [1200, *range(1200)])
         with (
             patch(
                 "civ5rl.protocols.diagnostic.native.library",
@@ -35,7 +35,7 @@ class ProtocolCleanupTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(ValueError, "changed"),
         ):
-            _minimum_shot_damage(
+            shot_damage_bounds(
                 SimpleNamespace(attacker_strength=17, defender_strength=23),
                 "changed",
             )
