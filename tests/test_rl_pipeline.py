@@ -161,7 +161,10 @@ class PipelineTests(unittest.TestCase):
                     )
                     for original, again in zip(episodes, repeated):
                         np.testing.assert_allclose(
-                            original["old_value"], again["old_value"], atol=1e-6
+                            original["old_value"],
+                            again["old_value"],
+                            rtol=1e-5,
+                            atol=1e-5,
                         )
                         for before, after in zip(
                             original["old_hidden"], again["old_hidden"]
@@ -169,7 +172,11 @@ class PipelineTests(unittest.TestCase):
                             if before is None:
                                 self.assertIsNone(after)
                             else:
-                                np.testing.assert_allclose(before, after, atol=1e-6)
+                                # Ready batching changes GEMM shapes. FP32 BLAS
+                                # rounding varies across Linux/Windows backends.
+                                np.testing.assert_allclose(
+                                    before, after, rtol=1e-5, atol=1e-5
+                                )
                     commands = [e["joint_commands"] for e in episodes]
                     if reference is None:
                         reference = commands
