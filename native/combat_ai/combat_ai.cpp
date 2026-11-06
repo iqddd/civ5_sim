@@ -1,8 +1,10 @@
 #include "combat_ai.h"
 #include "model.h"
 #include "planner.h"
+#include "profile.h"
 
 #include <array>
+#include <algorithm>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -27,6 +29,7 @@ bool valid_config(const CaiConfig& c) {
          c.risk_budget_per_kill >= 0 && c.risk_budget_per_kill <= 13;
 }
 bool valid_request(const CaiSearchRequest& r, int32_t max_selected = CAI_MAX_SELECTED) {
+  CAI_PROFILE_SCOPE(ValidateRequest);
   if (!r.state || r.side < 0 || r.side > 1 || r.expected_turn < 0 ||
       r.selected_count < 0 || r.selected_count > max_selected ||
       (r.selected_count && !r.selected_units) ||
@@ -149,10 +152,12 @@ static int32_t run_plan(CaiContext* context, const CaiSearchRequest* request, in
 }
 int32_t cai_search(CaiContext* context, const CaiSearchRequest* request,
                    CaiAssignment* assignments, int32_t capacity, CaiSearchResult* result) {
+  CAI_PROFILE_SCOPE(SearchCall);
   return run_plan(context, request, -1, assignments, capacity, result);
 }
 int32_t cai_support(CaiContext* context, const CaiSearchRequest* request, int32_t mode,
                     CaiAssignment* assignments, int32_t capacity, CaiSearchResult* result) {
+  CAI_PROFILE_SCOPE(SupportCall);
   if (mode < CAI_HEAL_BEFORE || mode > CAI_RECOVERY) {
     if (context) context->workspace.diagnostics = {};
     if (result) *result = {CAI_INVALID_REQUEST, 0, {0,0,0,0,0}};
@@ -167,6 +172,7 @@ int32_t cai_search_diagnostics(const CaiContext* context, CaiSearchDiagnostics* 
 }
 int32_t cai_attack_candidates(const CaiContext* context, const CaiSearchRequest* request,
                               int32_t* units, int32_t capacity, int32_t* count) {
+  CAI_PROFILE_SCOPE(CandidatesCall);
   if (context) const_cast<CaiContext*>(context)->workspace.trace.reset();
   if (count) *count = 0;
   if (!context || !request || !count || capacity < 0 || (capacity && !units))
@@ -184,3 +190,16 @@ int32_t cai_attack_candidates(const CaiContext* context, const CaiSearchRequest*
   } catch (const std::invalid_argument&) { return CAI_BAD_ARGUMENT; }
   catch (...) { return CAI_INTERNAL_ERROR; }
 }
+
+#ifdef CAI_PROFILE
+extern "C" {
+CAI_API int32_t cai_profile_count() { return combat_ai::ProfileCount; }
+CAI_API const char* cai_profile_name(int32_t i) { return combat_ai::profile_names[i]; }
+CAI_API uint64_t cai_profile_ns(int32_t i) { return combat_ai::profile_ns[i]; }
+CAI_API uint64_t cai_profile_calls(int32_t i) { return combat_ai::profile_calls[i]; }
+CAI_API void cai_profile_reset() {
+  std::fill_n(combat_ai::profile_ns, combat_ai::ProfileCount, uint64_t(0));
+  std::fill_n(combat_ai::profile_calls, combat_ai::ProfileCount, uint64_t(0));
+}
+}
+#endif

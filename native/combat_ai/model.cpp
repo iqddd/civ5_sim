@@ -1,6 +1,7 @@
 #include "model.h"
 #include "trace.h"
 #include "storage_metrics.h"
+#include "profile.h"
 #include "../combat_state.h"
 #include <algorithm>
 #include <iterator>
@@ -150,6 +151,7 @@ class OwnedBranch final : public Branch {
   mutable std::vector<int32_t> visibility;
   mutable std::vector<int32_t> visibility_history;
   mutable CaiBattleState snapshot{};
+  mutable bool snapshot_valid = false;
   mutable std::map<std::pair<int32_t, int32_t>, int32_t> danger_cache;
   OwnedBranch(std::shared_ptr<const Geometry> geometry,
               std::shared_ptr<const std::vector<CaiTile>> map_tiles, int side)
@@ -159,6 +161,7 @@ class OwnedBranch final : public Branch {
     auto copy = std::make_unique<OwnedBranch>(*this);
     // Export buffers are branch-owned. Never retain the parent's raw view.
     copy->snapshot = {};
+    copy->snapshot_valid = false;
     copy->danger_cache.clear();
     return copy;
   }
@@ -179,10 +182,13 @@ class OwnedBranch final : public Branch {
     copy->visibility.clear();
     copy->visibility_history.clear();
     copy->snapshot = {};
+    copy->snapshot_valid = false;
     copy->danger_cache.clear();
     return storage;
   }
   const CaiBattleState& state() const override {
+    if (snapshot_valid) return snapshot;
+    CAI_PROFILE_SCOPE(StateExport);
     units.clear();
     for (int index = 0; index < int(rules.units.size()); ++index)
       units.push_back(export_unit(index, rules.units[index]));
@@ -199,10 +205,12 @@ class OwnedBranch final : public Branch {
                 visibility.data(), int32_t(visibility.size()),
                 rules.side,        rules.turn,
                 rules.fog, visibility_history.data(), int32_t(visibility_history.size())};
+    snapshot_valid = true;
     return snapshot;
   }
   const ContactMemory& contacts() const override { return memory; }
   void observe() {
+    snapshot_valid = false;
     danger_cache.clear();
     memory.side = observer;
     // Branch-local observation time; the caller's real memory is a copy.
@@ -270,6 +278,7 @@ class Adapter final : public RulesAdapter {
         return;
       }
     }
+    CAI_PROFILE_SCOPE(GeometryBuild);
     std::vector<Tile> map_input;
     map_input.reserve(state.tile_count);
     for (int tile_index = 0; tile_index < state.tile_count; ++tile_index) {
@@ -289,6 +298,7 @@ class Adapter final : public RulesAdapter {
   }
   std::unique_ptr<Branch> root(const CaiBattleState& state,
                                const ContactMemory& contacts) const override {
+    CAI_PROFILE_SCOPE(RootImport);
     validate_header(state);
     require(state.width == geo->w && state.height == geo->h && state.row_parity == geo->parity &&
                 state.wrap_x == geo->wrap,

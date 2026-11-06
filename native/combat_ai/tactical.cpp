@@ -1,11 +1,13 @@
 // Adapted from CvTacticalAI.cpp ScorePlotForCombatUnitMove and
 // ScoreCombatUnitTurnEnd, pinned CP Only commit in combat-ai-sources.json.
 #include "tactical.h"
+#include "profile.h"
 #include <algorithm>
 #include <cmath>
 
 namespace combat_ai {
 TacticalView::TacticalView(const Branch& branch, int32_t side) {
+  CAI_PROFILE_SCOPE(TacticalViewBuild);
   const auto& s = branch.state();
   units.assign(s.units, s.units + s.unit_count);
   visibility.assign(s.visibility, s.visibility + s.tile_count);

@@ -417,7 +417,7 @@ def skipped_metrics(reason):
     }
 
 
-def train(config, plan, out, device):
+def train(config, plan, out, device, runtime_path=None):
     state = read_json(out / "state.json")
     if state["stop_reason"]:
         return
@@ -435,17 +435,43 @@ def train(config, plan, out, device):
         if not state["evaluated"]:
             development(config, plan, out, state, shuffle, clock)
         factory = TargetFactory(config, plan["base"])
-        # Runtime tuning preserves 16-episode waves and the checkpoint config.
-        # Only CPU ownership changes: eight workers each hold two environments.
-        collection_workers = 8
+        # Runtime capacity can change rollout boundaries; record it separately.
+        runtime_path = Path(
+            runtime_path or ROOT / "configs/rl-ppo-after-target-bc-runtime.json"
+        )
+        runtime = read_json(runtime_path)
+        if not {"cpu_workers", "worker_reply_size"} <= set(runtime) or set(runtime) - {
+            "cpu_workers",
+            "worker_reply_size",
+            "num_envs",
+        }:
+            raise ValueError(
+                "Runtime config supports cpu_workers, worker_reply_size and num_envs"
+            )
+        collection_workers = runtime["cpu_workers"]
+        reply_size = runtime["worker_reply_size"]
+        num_envs = runtime.get("num_envs", config["collection"]["num_envs"])
+        if (
+            type(collection_workers) is not int
+            or collection_workers < 1
+            or type(num_envs) is not int
+            or num_envs < 1
+            or num_envs % collection_workers
+            or type(reply_size) is not int
+            or not 1 <= reply_size <= num_envs // collection_workers
+        ):
+            raise ValueError(
+                "Runtime workers/reply size must fit the environment count"
+            )
         write_json(
             out / "runtime.json",
             {
                 "collection_workers": collection_workers,
-                "num_envs": config["collection"]["num_envs"],
-                "envs_per_worker": config["collection"]["num_envs"]
-                // collection_workers,
-                "worker_reply_size": 2,
+                "num_envs": num_envs,
+                "envs_per_worker": num_envs // collection_workers,
+                "worker_reply_size": reply_size,
+                "runtime_config": str(runtime_path),
+                "runtime_config_sha256": file_sha256(runtime_path),
                 "ppo_pinned_replay": True,
                 "pinned_replay_limit_bytes": DEFAULT_PINNED_REPLAY_BYTES,
                 "inference_coalescing": False,
@@ -454,7 +480,13 @@ def train(config, plan, out, device):
         with (
             ResourceMonitor(out / "telemetry") as monitor,
             Collector(
-                config, factory, device, out / "errors", cpu_workers=collection_workers
+                config,
+                factory,
+                device,
+                out / "errors",
+                cpu_workers=collection_workers,
+                reply_size=reply_size,
+                num_envs=num_envs,
             ) as collector,
         ):
             while not state["stop_reason"]:
@@ -732,7 +764,7 @@ def report(config, out):
     (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run(phase, config, out, device):
+def run(phase, config, out, device, runtime_path=None):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     validate_profile(config)
@@ -750,7 +782,7 @@ def run(phase, config, out, device):
             plan = read_json(out / "manifest.json")
             if phase in ("train", "run", "resume"):
                 write_json(out / "status.json", {"status": "training"})
-                train(config, plan, out, device)
+                train(config, plan, out, device, runtime_path=runtime_path)
                 if (out / "pause.request").exists():
                     report(config, out)
                     return

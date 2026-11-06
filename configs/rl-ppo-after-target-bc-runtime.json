@@ -1,0 +1,4 @@
+{
+  "cpu_workers": 16,
+  "worker_reply_size": 1
+}

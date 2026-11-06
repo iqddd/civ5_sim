@@ -1,5 +1,6 @@
 #include "cp_tactical.h"
 #include "storage_metrics.h"
+#include "profile.h"
 #include "../combat_state.h"
 #include <algorithm>
 #include <cmath>
@@ -235,6 +236,7 @@ CpBoard CpTactics::rebuild_board(const TacticalPosition &position) const {
   return board;
 }
 const CpBoard &CpTactics::board(const TacticalPosition &position) const {
+  CAI_PROFILE_SCOPE(BoardRefresh);
   if (!position.tactical_board)
     position.tactical_board = rebuild_board(position);
   auto &current = *position.tactical_board;

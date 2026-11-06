@@ -21,6 +21,15 @@ from .combat_ai import AssignmentKind as K
 from .engine import Action, digest
 
 
+def _observation_snapshot(observation):
+    """Own the public schema's lists/dicts; unit fields and headers are scalars."""
+    return {
+        **observation,
+        "visibility": observation["visibility"].copy(),
+        "units": [unit.copy() for unit in observation["units"]],
+    }
+
+
 def hex_distance(map_info, a, b):
     """Kernel-compatible offset coordinates, including the horizontal seam."""
     w = map_info["width"]
@@ -380,7 +389,7 @@ class CPAgent:
         action = Action("skip", unit["id"])
         a = Assignment(K.FINISH, unit["id"], unit["tile"], unit["tile"],
                        unit["moves"], 0, 0, 0, 0, -1)
-        self._pending = (action, a, None, deepcopy(observation))
+        self._pending = (action, a, None, _observation_snapshot(observation))
         self._finished.add(unit["id"])
         self._event("waiting", unit=unit["id"], reason=reason)
         return self._issue(action)
@@ -640,7 +649,7 @@ class CPAgent:
                     if partner is None or partner["tile"] != reverse.from_tile:
                         self._cancel("precondition_failed")
                         continue
-                self._pending = (action, a, reverse, deepcopy(observation))
+                self._pending = (action, a, reverse, _observation_snapshot(observation))
                 if a.kind == K.FINISH:
                     self._finished.add(a.unit)
                 return self._issue(action)
@@ -752,7 +761,7 @@ class CPAgent:
         self._search_cache.clear()  # Even a failed command expires the detached planning snapshot.
         if self._pending is None:
             self._event("action_result", action=asdict(action), reason="turn_ended")
-            self._last_observation = deepcopy(observation)
+            self._last_observation = _observation_snapshot(observation)
             return
         expected_action, a, reverse, before = self._pending
         self._pending = None
@@ -841,7 +850,7 @@ class CPAgent:
                 self._finish_task(reason, retry_approach=True)
                 self._phase = min(self._phase, 1)
                 self._combat_attempts.clear()
-        self._last_observation = deepcopy(observation)
+        self._last_observation = _observation_snapshot(observation)
 
     def __del__(self):
         self.close()

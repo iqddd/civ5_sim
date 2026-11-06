@@ -106,9 +106,19 @@ class ExecutorTests(unittest.TestCase):
                 assignment(K.FINISH, 0, 17, 17, 0, target=-1),
                 assignment(K.FINISH, 1, 10, 10, 120, target=-1),
             ))
-            command = self.act(a, b, p)
+            observation = b.observe(0)
+            command = a.act_with_planning(observation, tuple(b.available_actions()), p)
             self.assertEqual(command, Action("ranged", 0, 19))
-            self.execute(a, b, command)
+            # Caller-owned observations may be reused/mutated after either
+            # callback. Aliasing them silently corrupts plan validation/history.
+            observation["units"][0]["hp"] = 1
+            observation["visibility"].clear()
+            result = b.step(command)
+            self.assertTrue(result.ok)
+            after = b.observe(0)
+            a.on_action_result(command, result, after)
+            after["units"][0]["hp"] = 1
+            after["visibility"].clear()
             self.assertTrue(a._queue)
             self.assertEqual(self.act(a, b, p), Action("skip", 1))
             self.execute(a, b, Action("skip", 1))

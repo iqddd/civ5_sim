@@ -96,7 +96,17 @@ class _WaveState:
 
 
 class Collector:
-    def __init__(self, config, factory, device, error_dir, *, cpu_workers=None):
+    def __init__(
+        self,
+        config,
+        factory,
+        device,
+        error_dir,
+        *,
+        cpu_workers=None,
+        reply_size=None,
+        num_envs=None,
+    ):
         from civ5rl.provenance.validation import validate_config
 
         validate_config(config)
@@ -104,23 +114,26 @@ class Collector:
         self.error_dir = error_dir
         self.workers = []
         self.shared = []
-        worker_count = config["collection"]["cpu_workers"]
-        self.envs_per_worker = config["collection"]["envs_per_worker"]
-        if cpu_workers is not None:
-            num_envs = config["collection"]["num_envs"]
-            if (
-                type(cpu_workers) is not int
-                or cpu_workers < 1
-                or num_envs % cpu_workers
-            ):
-                raise ValueError(
-                    "Collection workers must divide the fixed environment count"
-                )
-            worker_count = cpu_workers
-            self.envs_per_worker = num_envs // worker_count
+        worker_count = (
+            config["collection"]["cpu_workers"] if cpu_workers is None else cpu_workers
+        )
+        self.num_envs = (
+            config["collection"]["num_envs"] if num_envs is None else num_envs
+        )
+        if (
+            type(worker_count) is not int
+            or worker_count < 1
+            or type(self.num_envs) is not int
+            or self.num_envs < 1
+            or self.num_envs % worker_count
+        ):
+            raise ValueError("Collection workers must divide the environment count")
+        self.envs_per_worker = self.num_envs // worker_count
         self.reply_size = config.get("performance", {}).get("worker_reply_size", 0)
-        if cpu_workers is not None:
+        if cpu_workers is not None or num_envs is not None:
             self.reply_size = min(self.reply_size, self.envs_per_worker)
+        if reply_size is not None:
+            self.reply_size = reply_size
         self.inference_min_batch = config.get("performance", {}).get(
             "inference_min_batch", 0
         )
@@ -340,6 +353,8 @@ class Collector:
         )
         self._wave_id += 1
         for w, (conn, _) in enumerate(self.workers):
+            if w * self.envs_per_worker >= len(specs):
+                break
             conn.send(
                 (
                     "reset",
@@ -358,7 +373,8 @@ class Collector:
     def _partial_wave(self, policy, wave, worker_encoding, times):
         wave.wave_id = self._wave_id
         wave.generations = [0] * len(wave.states)
-        connections = [conn for conn, _ in self.workers]
+        active_workers = sorted(wave.pending)
+        connections = [self.workers[w][0] for w in active_workers]
         publish_delays, infer_delays = [], []
         completed = 0
         while completed < len(wave.states):
@@ -370,7 +386,8 @@ class Collector:
             # whose next action depends on this inference, including wave tails.
             coalesce_until = perf_counter() + self.inference_wait_seconds
             while True:
-                for w, (conn, _) in enumerate(self.workers):
+                for w in active_workers:
+                    conn = self.workers[w][0]
                     while conn.poll():
                         payload = self._receive_one(w)
                         if payload["wave"] != wave.wave_id:
@@ -390,6 +407,7 @@ class Collector:
                             i = w * self.envs_per_worker + slot
                             if (
                                 not 0 <= slot < self.envs_per_worker
+                                or i >= len(wave.states)
                                 or generation != wave.generations[i] + 1
                                 or wave.completed_at[i] is not None
                             ):
@@ -477,7 +495,7 @@ class Collector:
         reuse_encoded = performance.get("reuse_encoded", False)
         start_rollout = perf_counter()
         target = self.config["collection"]["min_learner_decisions_per_update"]
-        num_envs = self.config["collection"]["num_envs"]
+        num_envs = self.num_envs
         if num_envs != len(self.workers) * self.envs_per_worker:
             raise ValueError("Worker/env count mismatch")
         fixed_offset = 0
@@ -495,15 +513,17 @@ class Collector:
                 if fixed_specs is None
                 else fixed_specs[fixed_offset : fixed_offset + num_envs]
             )
-            if len(specs) != num_envs:
-                raise ValueError("Evaluation cases must fill a complete wave")
             if fixed_specs is None:
                 self.factory.validate_specs(specs)
             wave = _WaveState(
                 *self._start_wave(specs, policy, reuse_encoded, worker_encoding),
-                completed_at=[None] * num_envs,
-                states=[None] * num_envs,
-                pending=set(range(len(self.workers))),
+                completed_at=[None] * len(specs),
+                states=[None] * len(specs),
+                pending=set(
+                    range(
+                        (len(specs) + self.envs_per_worker - 1) // self.envs_per_worker
+                    )
+                ),
             )
             if self.reply_size:
                 self._partial_wave(policy, wave, worker_encoding, times)
@@ -534,8 +554,8 @@ class Collector:
                 raise RuntimeError("Corpus wave produced no learner decisions")
             episodes.extend(builder.episode for builder in wave.builders)
             decisions += wave.decisions
-            next_episode += num_envs
-            fixed_offset += num_envs
+            next_episode += len(specs)
+            fixed_offset += len(specs)
             if monitor:
                 monitor.mark("collection", rollout_decisions=decisions)
         times["collection_seconds"] = perf_counter() - start_rollout

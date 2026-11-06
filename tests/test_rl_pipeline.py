@@ -7,7 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from civ5rl.config import load_config
 from civ5rl.collector import Collector
 from civ5rl.common import configure
 from civ5rl.corpus import context_for
@@ -17,6 +16,7 @@ from civ5rl.ppo import encode_episode
 from civ5rl.shared import EncodedSlots
 from test_rl import scenario
 
+from civ5rl.config import load_config
 from civ5sim import Battle
 from civ5sim.greedy_agent import GreedyAgent
 
@@ -75,7 +75,7 @@ class PipelineTests(unittest.TestCase):
     def test_worker_history_and_commands_are_independent_of_scheduler(self):
         config = load_config("configs/rl-v1-throughput.json")
         config["collection"].update(num_envs=4, cpu_workers=2, envs_per_worker=2)
-        specs = self.specs(8)
+        specs = self.specs(7)
         from civ5rl.provenance import bound_cases, case_manifest
 
         manifest = case_manifest(
@@ -94,6 +94,7 @@ class PipelineTests(unittest.TestCase):
                         ("ready", 0, True, None),
                         ("ready", 1, True, None),
                         ("ready", 1, True, 4),
+                        ("ready", 1, True, 3),
                     ]
                     if variant == "C"
                     else [("ready", 0, True, None), ("ready", 1, False, None)]
@@ -102,7 +103,15 @@ class PipelineTests(unittest.TestCase):
                     config["performance"]["collection_scheduler"] = scheduler
                     config["performance"]["worker_reply_size"] = reply_size
                     config["performance"]["worker_encoding"] = worker_encoding
-                    with Collector(config, None, "cpu", Path(tmp), cpu_workers=workers) as c:
+                    with Collector(
+                        config,
+                        None,
+                        "cpu",
+                        Path(tmp),
+                        cpu_workers=workers,
+                        reply_size=reply_size,
+                        num_envs=6 if workers == 3 else None,
+                    ) as c:
                         if workers is not None:
                             c.inference_min_batch = 4
                             c.inference_wait_seconds = 0.002
@@ -113,8 +122,54 @@ class PipelineTests(unittest.TestCase):
                             fixed_specs=specs,
                             trusted_manifest=manifest,
                         )
-                    self.assertEqual(next_episode, 8)
-                    self.assertEqual(len(episodes), 8)
+                        # A single-slot wave leaves whole workers idle; the next
+                        # full wave must reset all slots and recurrent histories.
+                        short_manifest = case_manifest(
+                            [specs[0]],
+                            source="test",
+                            split="train",
+                            namespace="unit_test",
+                        )
+                        short_specs = bound_cases(short_manifest)
+                        short, short_next, _ = c.collect(
+                            policy,
+                            None,
+                            100,
+                            fixed_specs=short_specs,
+                            trusted_manifest=short_manifest,
+                        )
+                        repeated, repeated_next, _ = c.collect(
+                            policy,
+                            None,
+                            200,
+                            fixed_specs=specs,
+                            trusted_manifest=manifest,
+                        )
+                    self.assertEqual(next_episode, 7)
+                    self.assertEqual(short_next, 101)
+                    self.assertEqual(repeated_next, 207)
+                    self.assertEqual(len(episodes), 7)
+                    self.assertEqual(
+                        [ep["spec"]["episode_id"] for ep in episodes], list(range(7))
+                    )
+                    self.assertEqual(
+                        short[0]["joint_commands"], episodes[0]["joint_commands"]
+                    )
+                    self.assertEqual(
+                        [ep["joint_commands"] for ep in repeated],
+                        [ep["joint_commands"] for ep in episodes],
+                    )
+                    for original, again in zip(episodes, repeated):
+                        np.testing.assert_allclose(
+                            original["old_value"], again["old_value"], atol=1e-6
+                        )
+                        for before, after in zip(
+                            original["old_hidden"], again["old_hidden"]
+                        ):
+                            if before is None:
+                                self.assertIsNone(after)
+                            else:
+                                np.testing.assert_allclose(before, after, atol=1e-6)
                     commands = [e["joint_commands"] for e in episodes]
                     if reference is None:
                         reference = commands
@@ -128,6 +183,53 @@ class PipelineTests(unittest.TestCase):
                                 np.testing.assert_array_equal(
                                     getattr(a, key), getattr(b, key)
                                 )
+
+    def test_container_cpu_limits_include_ancestors_and_fractional_quota(self):
+        # Host CPU counts can silently choose an unusable parallelism in Docker.
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "collection_hardware",
+            Path(__file__).resolve().parents[1] / "tools/rl_collection_hardware.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.effective_cpu_budget(range(32), 6.4, range(16)), 6.4)
+        self.assertEqual(module.effective_cpu_budget(range(8), 16), 8)
+        self.assertEqual(module.effective_cpu_budget(range(32), cpuset=range(8, 16)), 8)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "proc/self"
+            proc.mkdir(parents=True)
+            mount = root / "unified"
+            child = mount / "parent/child"
+            child.mkdir(parents=True)
+            (proc / "cgroup").write_text("0::/parent/child\n")
+            (proc / "mountinfo").write_text(
+                f"1 0 0:1 / {mount.as_posix()} rw - cgroup2 cgroup rw\n"
+            )
+            (child / "cpu.max").write_text("max 100000")
+            (child.parent / "cpu.max").write_text("640000 100000")
+            (mount / "cpu.max").write_text("1200000 100000")
+            (child / "cpuset.cpus.effective").write_text("2-9,12")
+            (child.parent / "memory.max").write_text("1000")
+            (child.parent / "memory.current").write_text("400")
+            limits = module.cgroup_limits(root / "proc")
+            self.assertEqual(limits["cpu_quota"], 6.4)
+            self.assertEqual(limits["cpuset"], [*range(2, 10), 12])
+            self.assertEqual(limits["memory_available_bytes"], 600)
+            # v1 reports the same restrictions in separate controller files.
+            (proc / "cgroup").write_text(
+                "1:cpu,cpuacct:/parent/child\n2:cpuset:/parent/child\n"
+            )
+            (proc / "mountinfo").write_text(
+                f"1 0 0:1 / {mount.as_posix()} rw - cgroup cgroup rw,cpu,cpuacct,cpuset\n"
+            )
+            (child / "cpu.cfs_quota_us").write_text("-1")
+            (child / "cpu.cfs_period_us").write_text("100000")
+            (child.parent / "cpu.cfs_quota_us").write_text("800000")
+            (child.parent / "cpu.cfs_period_us").write_text("100000")
+            self.assertEqual(module.cgroup_limits(root / "proc")["cpu_quota"], 8)
 
     def test_greedy_cached_geometry_matches_fresh_public_probe(self):
         class FreshProbe(GreedyAgent):
