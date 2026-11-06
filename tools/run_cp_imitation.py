@@ -427,6 +427,12 @@ def main():
     workers = args.workers or config["workers"]
     if workers < 1:
         raise ValueError("workers must be positive")
+    if config["kind"] == "rl01.cp_imitation_target_scale":
+        from civ5rl.experiments.imitation_target_scale import load_config, run
+
+        config = load_config(args.config)
+        run(args.phase, config, out, workers, args.device)
+        return
     if config["kind"] == "rl01.cp_imitation_own_states":
         from civ5rl.experiments.imitation_own_states import run
 

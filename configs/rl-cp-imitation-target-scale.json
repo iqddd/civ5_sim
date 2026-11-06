@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "kind": "rl01.cp_imitation_target_scale",
+  "base_config": "configs/rl-cp-imitation-own-states.json",
+  "output": "artifacts/rl/cp-imitation-target-scale",
+  "target_manifest": "artifacts/rl/ppo-target-scale/manifest.json",
+  "parent": "artifacts/rl/ppo-scale-up-continuation/checkpoints/update-0759.pt",
+  "parent_sha256": "4b15e634fc111cc0cb7458eb7076e75eb4cc7e41da76aa27fc66bb0d808aeb6c",
+  "seed": 17,
+  "workers": 4,
+  "training_labels": 200000,
+  "collection_seconds": 3600,
+  "training_seconds": 3600,
+  "epochs": 10,
+  "evaluate_epochs": [2, 5, 10],
+  "labels_per_minibatch": 1024,
+  "sequence_length": 128,
+  "microbatch_sequences": 8,
+  "max_gradient_norm": 0.5,
+  "cache_bytes": 4294967296,
+  "fixed_training_labels": 2000,
+  "experiment": {
+    "start_episode": 0,
+    "training_namespace": "cp_imitation_target_scale_train_v1",
+    "shuffle_namespace": "cp_imitation_target_scale_shuffle_v1"
+  },
+  "performance": {"resident_rollout": false, "spatial_cell_padding": 256},
+  "baseline_archive": "artifacts/rl/ppo-target-scale/deployment/remote/inputs.zip"
+}
