@@ -179,15 +179,19 @@ def main():
             )
             lines += [
                 "",
-                f"B = streaming/{args.pair_workers}; C = streaming/80. "
-                f"Медианы: B={medians['B']:.3f} с; C={medians['C']:.3f} с. "
-                f"B сохраняет {retained:.2f}% скорости C.",
+                (
+                    f"B = streaming/{args.pair_workers}; C = streaming/80. "
+                    f"Медианы: B={medians['B']:.3f} с; C={medians['C']:.3f} с. "
+                    f"B сохраняет {retained:.2f}% скорости C."
+                ),
             ]
         if args.pair_workers:
             lines += [
                 "",
-                "cpu.stat: разности счётчиков вокруг collector.collect; "
-                "включают всю активность указанной cgroup. Вложенные cgroup не суммируются.",
+                (
+                    "cpu.stat: разности счётчиков вокруг collector.collect; "
+                    "включают всю активность указанной cgroup. Вложенные cgroup не суммируются."
+                ),
                 "",
                 "| Запуск | cgroup | Δnr_periods | Δnr_throttled | Δthrottled_usec | Δthrottled_time, ns (v1) |",
                 "|---|---|---:|---:|---:|---:|",
