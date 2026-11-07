@@ -45,8 +45,17 @@ def main():
         type=int,
         help="Compare streaming W/80/80/W with cpu.stat snapshots",
     )
+    parser.add_argument(
+        "--diagnostic-pair",
+        action="store_true",
+        help="One diagnostic pass W/80; no performance ranking",
+    )
     args = parser.parse_args()
+    if args.diagnostic_pair and not args.pair_workers:
+        parser.error("--diagnostic-pair requires --pair-workers")
     order = ("B", "C", "C", "B") if args.pair_workers else ORDER
+    if args.diagnostic_pair:
+        order = ("B", "C")
     modes = {**MODES, "B": ("streaming", args.pair_workers or 8)}
     if args.pair_workers is not None and not 1 <= args.pair_workers <= 80:
         parser.error("--pair-workers must be between 1 and 80")
@@ -65,6 +74,7 @@ def main():
                 "--series-worker",
                 "--deadline",
                 str(deadline - 12),
+                *(["--diagnostic-pair"] if args.diagnostic_pair else []),
                 *(
                     ["--pair-workers", str(args.pair_workers)]
                     if args.pair_workers
@@ -138,7 +148,8 @@ def main():
         "native_library_sha256": native_sha,
         "inference_min_batch": 0,
         "inference_wait_seconds": 0,
-        "diagnostics": False,
+        "diagnostics": args.diagnostic_pair,
+        "diagnostic_only": args.diagnostic_pair,
         "etw": False,
     }
 
@@ -150,7 +161,11 @@ def main():
             (
                 f"Прежние 200 случаев; {PRIORITY_NAME}; batching 0/0; reply=1. "
                 "Каждый worker выполняет один CP-вызов до короткого GPU-прогрева. "
-                "ETW и подробная диагностика выключены."
+                + (
+                    "Диагностический запуск; времена не используются для ранжирования. ETW выключен."
+                    if args.diagnostic_pair
+                    else "ETW и подробная диагностика выключены."
+                )
             ),
             "",
             "| Запуск | Scheduler | Workers | Collection, с | Batch | Inference-вызовы | CPU, лог. ядер | Peak RSS, GiB |",
@@ -334,6 +349,7 @@ def main():
                 "--reference-trace",
                 str(old / "trace.npz"),
                 *(["--cpu-stat"] if args.pair_workers else []),
+                *(["--collection-diagnostics"] if args.diagnostic_pair else []),
             ]
             print(
                 f"{label}: starting; {remaining:.1f}s available before cleanup reserve",
