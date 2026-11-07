@@ -193,6 +193,11 @@ def main():
         psutil.Process().nice(worker_priority)
     elif args.process_priority == "above_normal":
         parser.error("Above Normal process priority requires Windows")
+    else:
+        import psutil
+
+        worker_priority = 0
+        psutil.Process().nice(worker_priority)
     started = perf_counter()
     if (
         min(args.episodes, args.repeat) < 1

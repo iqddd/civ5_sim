@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import statistics
 import subprocess
@@ -16,6 +17,13 @@ from tune_rl_collection import collection_resources, stop_tree
 ROOT = Path(__file__).resolve().parents[1]
 ORDER = ("A", "B", "C", "C", "B", "A")
 MODES = {"A": ("ready", 8), "B": ("streaming", 8), "C": ("streaming", 80)}
+PRIORITY = int(psutil.ABOVE_NORMAL_PRIORITY_CLASS) if os.name == "nt" else 0
+PRIORITY_NAME = "ABOVE_NORMAL" if os.name == "nt" else "POSIX nice=0"
+PROCESS_OPTIONS = (
+    {"creationflags": subprocess.ABOVE_NORMAL_PRIORITY_CLASS}
+    if os.name == "nt"
+    else {"start_new_session": True}
+)
 
 
 def read(path):
@@ -38,7 +46,7 @@ def main():
     if not args.series_worker:
         # An independent watchdog also bounds verification, hashing and report
         # writing, not just the individual Collection subprocesses.
-        psutil.Process().nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+        psutil.Process().nice(PRIORITY)
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -50,7 +58,7 @@ def main():
                 str(deadline - 12),
             ],
             cwd=ROOT,
-            creationflags=subprocess.ABOVE_NORMAL_PRIORITY_CLASS,
+            **PROCESS_OPTIONS,
         )
         try:
             process.wait(timeout=max(0.01, deadline - perf_counter() - 12))
@@ -99,6 +107,10 @@ def main():
     config = ROOT / "artifacts/benchmarks/combat-cp-v1/config.json"
     checkpoint = ROOT / "artifacts/benchmarks/combat-cp-v1/checkpoint.pt"
     reference = read(old / "result.json")
+    native = (
+        ROOT / "build" / ("combat_ai.dll" if os.name == "nt" else "libcombat_ai.so")
+    )
+    native_sha = sha(native)
     rows = []
     summary = {
         "order": ORDER,
@@ -107,7 +119,8 @@ def main():
         "complete": False,
         "envs": 80,
         "reply_size": 1,
-        "priority": "ABOVE_NORMAL",
+        "priority": PRIORITY_NAME,
+        "native_library_sha256": native_sha,
         "inference_min_batch": 0,
         "inference_wait_seconds": 0,
         "diagnostics": False,
@@ -120,7 +133,7 @@ def main():
             "# Ready / Streaming: сопоставимая серия",
             "",
             (
-                "Прежние 200 случаев; Above Normal; batching 0/0; reply=1. "
+                f"Прежние 200 случаев; {PRIORITY_NAME}; batching 0/0; reply=1. "
                 "Каждый worker выполняет один CP-вызов до короткого GPU-прогрева. "
                 "ETW и подробная диагностика выключены."
             ),
@@ -197,15 +210,22 @@ def main():
 
     try:
         for path in (carrier, config, checkpoint):
-            if sha(path) != reference["protected_inputs"][str(path)]:
+            # The frozen reference was written on Windows; compare portable
+            # basenames without rewriting its original serialized contents.
+            expected = [
+                value
+                for name, value in reference["protected_inputs"].items()
+                if name.replace("\\", "/").rsplit("/", 1)[-1] == path.name
+            ]
+            if len(expected) != 1 or sha(path) != expected[0]:
                 raise ValueError(f"Frozen input changed: {path}")
-        if sha(ROOT / "build/combat_ai.dll") != reference["native_library_sha256"]:
+        if os.name == "nt" and native_sha != reference["native_library_sha256"]:
             raise ValueError("Native library changed")
         paths = [
             carrier,
             config,
             checkpoint,
-            ROOT / "build/combat_ai.dll",
+            native,
             old / "result.json",
             old / "trace.npz",
             ROOT / "artifacts/rl/ppo-after-target-bc/state.json",
@@ -220,7 +240,7 @@ def main():
         ]
         protected.update({str(p): sha(p) for p in paths if p.exists()})
         summary["protected_inputs_and_sources"] = protected
-        psutil.Process().nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+        psutil.Process().nice(PRIORITY)
         for index, mode in enumerate(ORDER, 1):
             verify_files()
             remaining = deadline - perf_counter() - 15
@@ -263,7 +283,7 @@ def main():
                 "--inference-wait-seconds",
                 "0",
                 "--process-priority",
-                "above_normal",
+                "above_normal" if os.name == "nt" else "normal",
                 "--reference-trace",
                 str(old / "trace.npz"),
             ]
@@ -277,7 +297,7 @@ def main():
                     cwd=ROOT,
                     stdout=log,
                     stderr=subprocess.STDOUT,
-                    creationflags=subprocess.ABOVE_NORMAL_PRIORITY_CLASS,
+                    **PROCESS_OPTIONS,
                 )
                 try:
                     process.wait(timeout=max(0.01, deadline - perf_counter() - 15))
@@ -291,7 +311,7 @@ def main():
             for key in ("commands_hash", "results_hash", "positions", "commands"):
                 if trial[key] != reference["trials"][0][key]:
                     raise AssertionError(f"{label}: changed {key}")
-            if result["native_library_sha256"] != reference["native_library_sha256"]:
+            if result["native_library_sha256"] != native_sha:
                 raise AssertionError("Native library changed")
             if result["warmup_case_indices"] != [0, 2, 6, 25, 50, 75, 100, 125]:
                 raise AssertionError("GPU warmup cases changed")
@@ -304,7 +324,7 @@ def main():
                 or any(a["cp_calls"] != 1 for a in acknowledgements)
             ):
                 raise AssertionError("Not every worker completed CP warmup")
-            priority = int(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+            priority = PRIORITY
             if result["parent_priority"] != priority or any(
                 v != priority for v in result["worker_priorities"].values()
             ):
