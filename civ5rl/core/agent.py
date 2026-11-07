@@ -1,7 +1,9 @@
 """Checkpoint policy implementing the ordinary player-only Agent protocol."""
 
+import math
 import random
 
+import numpy as np
 import torch
 
 from civ5rl.core.contracts import AgentContext
@@ -11,15 +13,43 @@ from civ5rl.core.variants import PolicyVariant
 from civ5rl.provenance.common import choose
 
 
+def action_probabilities(logits, temperature=1.0):
+    """Keep the T=1 FP32 softmax path; temperature never changes legal masks."""
+    if not math.isfinite(temperature) or temperature <= 0:
+        raise ValueError("Temperature must be finite and positive")
+    logits = logits.float()
+    return (logits if temperature == 1 else logits / temperature).softmax(-1)
+
+
 class RLAgent:
-    def __init__(self, policy, device="cpu", mode="sample"):
+    def __init__(
+        self,
+        policy,
+        device="cpu",
+        mode="sample",
+        *,
+        temperature=1.0,
+        collect_selection_metrics=False,
+    ):
+        if not math.isfinite(temperature) or temperature <= 0:
+            raise ValueError("Temperature must be finite and positive")
         self.policy = policy
         self.device = device
         self.mode = mode
+        self.temperature = temperature
+        self.collect_selection_metrics = collect_selection_metrics
         self.policy.eval()
 
     @classmethod
-    def from_checkpoint(cls, path, device="cpu", mode="sample"):
+    def from_checkpoint(
+        cls,
+        path,
+        device="cpu",
+        mode="sample",
+        *,
+        temperature=1.0,
+        collect_selection_metrics=False,
+    ):
         checkpoint = torch.load(path, map_location=device, weights_only=False)
         policy = Policy(PolicyVariant(checkpoint["variant"])).to(device)
         policy.load_state_dict(checkpoint["model"])
@@ -31,13 +61,20 @@ class RLAgent:
             numerics.get("amp", False) and str(device).startswith("cuda"),
             spatial_batch_size=performance.get("spatial_batch_size", 0),
         )
-        return cls(policy, device, mode)
+        return cls(
+            policy,
+            device,
+            mode,
+            temperature=temperature,
+            collect_selection_metrics=collect_selection_metrics,
+        )
 
     def reset(self, context: AgentContext):
         self.encoder = ObservationEncoder(context, PolicyVariant(self.policy.variant))
         self.rng = random.Random(context["seed"])
         self.hidden = None
         self.events = []
+        self.selection_metrics = []
 
     def _infer(self, observation, actions):
         encoded = self.encoder.encode(observation, actions)
@@ -58,12 +95,31 @@ class RLAgent:
     def act(self, observation, actions):
         actions = ordered_actions(actions)
         logits = self._infer(observation, actions)
-        probabilities = logits.softmax(-1)[0].cpu().numpy()
+        probabilities = (
+            action_probabilities(
+                logits, 1.0 if self.mode == "argmax" else self.temperature
+            )[0]
+            .cpu()
+            .numpy()
+        )
         index = (
             int(logits[0].argmax())
             if self.mode == "argmax"
             else choose(probabilities, self.rng)
         )
+        if self.collect_selection_metrics and len(actions) > 1:
+            p = probabilities[: len(actions)].astype(np.float64)
+            positive = p[p > 0]
+            self.selection_metrics.append(
+                {
+                    "p_max": float(p.max()),
+                    "argmax_selected": index == int(logits[0].argmax()),
+                    "normalized_entropy": float(
+                        -(positive * np.log(positive)).sum() / math.log(len(actions))
+                    ),
+                    "legal_actions": len(actions),
+                }
+            )
         self.encoder.remember_action(actions[index], observation)
         self.events.append(
             {

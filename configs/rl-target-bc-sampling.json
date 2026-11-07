@@ -1,0 +1,15 @@
+{
+  "checkpoint": "artifacts/rl/cp-imitation-target-scale/checkpoints/epoch-10.pt",
+  "checkpoint_sha256": "4677fa13b2ac7a84214c545a6b311fd68bc05b31b82fe00fbe63c8856fc6e985",
+  "manifest": "artifacts/rl/cp-imitation-target-scale/manifest.json",
+  "evaluator_config": "configs/rl-ppo-after-target-bc.json",
+  "output": "artifacts/rl/target-bc-sampling",
+  "workers": 4,
+  "modes": [
+    {"label": "argmax", "mode": "argmax", "temperature": 1.0},
+    {"label": "sample-t1", "mode": "sample", "temperature": 1.0},
+    {"label": "sample-t0.5", "mode": "sample", "temperature": 0.5}
+  ],
+  "bootstrap_samples": 10000,
+  "bootstrap_seed": 20261103
+}

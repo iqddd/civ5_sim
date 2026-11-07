@@ -48,6 +48,7 @@ Python-инструментов и `combat_viewer.html`, ресурс просм
 | [train_rl.py](train_rl.py) | Обучение/продолжение PPO по переданной конфигурации. |
 | [control_rl.py](control_rl.py) | Статус, pause/resume существующего запуска; исторические диагностики делегируются архивному runner. |
 | [evaluate_rl.py](evaluate_rl.py) | Оценка checkpoint на разрешённых открытых split. |
+| [evaluate_target_bc_sampling.py](evaluate_target_bc_sampling.py) | Один CPU-опыт исходного target BC: argmax, sampling T=1/T=0,5; 128 development-случаев на режим, парный world-bootstrap и метрики уверенности. |
 | [report_rl.py](report_rl.py) | Отчёт и графики для переданного каталога RL-запуска. |
 | [run_cp_imitation.py](run_cp_imitation.py) | Общий CLI фаз prepare/collect/train/evaluate/report и диспетчер настроенных BC-экспериментов. |
 | [run_ppo_after_imitation.py](run_ppo_after_imitation.py) | Отдельный ограниченный PPO-опыт от BC: prepare/train/evaluate/report/run, с фиксированным бюджетом и закрытым test. |

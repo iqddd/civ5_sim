@@ -208,11 +208,17 @@ def evaluation_task(task):
     return play_case(config, case, checkpoint_path, mode, enemy, directory)
 
 
-def play_case(config, case, checkpoint_path, mode, enemy, directory):
+def play_case(
+    config, case, checkpoint_path, mode, enemy, directory, *,
+    temperature=1.0, collect_selection_metrics=False,
+):
     """Shared ordinary-match execution; protocol callers supply validated cases."""
     directory = Path(directory)
     configure(17, "cpu")
-    agent = RLAgent.from_checkpoint(checkpoint_path, "cpu", mode)
+    agent = RLAgent.from_checkpoint(
+        checkpoint_path, "cpu", mode, temperature=temperature,
+        collect_selection_metrics=collect_selection_metrics,
+    )
     opponent = CPAgent(search_config(config)) if enemy == "cp" else "greedy"
     side = case["learner_side"]
     agents = [None, None]
@@ -254,6 +260,8 @@ def play_case(config, case, checkpoint_path, mode, enemy, directory):
         "remaining_hp": outcome.result["remaining_hp"],
         "case_hash": case["case_hash"],
     }
+    if collect_selection_metrics:
+        write_json(directory / "selection-metrics.json", agent.selection_metrics)
     write_json(directory / "metrics.json", result)
     return result
 
