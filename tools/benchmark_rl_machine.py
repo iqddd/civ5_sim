@@ -82,6 +82,12 @@ def chosen_collection(summary):
     )
 
 
+def collection_trials(summary, row):
+    if summary.get("selection_trials") == "all":
+        return row["trials"]
+    return row["confirmations"] or row["trials"]
+
+
 def validate_collection(summary, manifest):
     if summary["episodes"] != manifest["episodes"]:
         raise ValueError("Collection used a different number of episodes")
@@ -96,7 +102,7 @@ def validate_collection(summary, manifest):
     row = chosen_collection(summary)
     if row is None or row["status"] != "ok":
         raise ValueError("Collection has no usable recommendation")
-    trials = row["confirmations"] or row["trials"]
+    trials = collection_trials(summary, row)
     signatures = {(t["commands_hash"], t["results_hash"]) for t in trials}
     if len(signatures) != 1:
         raise ValueError("Collection commands/outcomes differ between trials")
@@ -567,15 +573,25 @@ def run(args):
                 return
             collection = read(path)
         selected, signature = validate_collection(collection, manifest)
-        trials = selected["confirmations"] or selected["trials"]
+        trials = collection_trials(collection, selected)
         result = {
             **summarize(trials, trials[0]["positions"], "decisions"),
             "signature": signature,
             "preliminary": collection["preliminary"],
             "runtime": {
-                k: selected[k] for k in ("num_envs", "cpu_workers", "worker_reply_size")
+                k: selected[k]
+                for k in (
+                    "num_envs",
+                    "cpu_workers",
+                    "worker_reply_size",
+                    "collection_scheduler",
+                    "inference_min_batch",
+                    "inference_wait_seconds",
+                )
+                if k in selected
             },
-            "at_search_limit": selected["num_envs"] == manifest["auto_env_limit"],
+            "at_search_limit": selected["num_envs"]
+            == collection.get("max_envs", manifest["auto_env_limit"]),
             "trials": trials,
             "sessions": selected["sessions"],
         }

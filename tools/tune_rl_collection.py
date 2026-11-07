@@ -1,4 +1,4 @@
-"""Choose Collection env/workers/reply settings on a fixed policy and workload."""
+"""Bounded streaming Collection tuning on a fixed policy and workload."""
 
 import argparse
 import hashlib
@@ -17,6 +17,8 @@ from time import perf_counter
 from rl_collection_hardware import hardware
 
 ROOT = Path(__file__).resolve().parents[1]
+TIE_FRACTION = 0.03
+DEFAULT_ENV_CAPACITY = 80
 
 
 @dataclass(frozen=True, order=True)
@@ -32,7 +34,6 @@ class Candidate:
         if (
             min(self.envs, self.workers, self.reply) < 1
             or self.workers > self.envs
-            or (self.scheduler != "streaming" and self.envs % self.workers)
             or self.reply > math.ceil(self.envs / self.workers)
         ):
             raise ValueError(
@@ -51,16 +52,11 @@ class Candidate:
             "cpu_workers": self.workers,
             "worker_reply_size": self.reply,
         }
-        if (
-            self.scheduler == "streaming"
-            or self.inference_min_batch
-            or self.inference_wait_seconds
-        ):
-            result.update(
-                collection_scheduler=self.scheduler,
-                inference_min_batch=self.inference_min_batch,
-                inference_wait_seconds=self.inference_wait_seconds,
-            )
+        result.update(
+            collection_scheduler=self.scheduler,
+            inference_min_batch=self.inference_min_batch,
+            inference_wait_seconds=self.inference_wait_seconds,
+        )
         return result
 
 
@@ -74,11 +70,25 @@ class Measurements:
 
     @property
     def median(self):
-        trials = self.confirmations if len(self.confirmations) == 3 else self.trials
-        return statistics.median(t["seconds"] for t in trials) if trials else None
+        return (
+            statistics.median(t["seconds"] for t in self.trials)
+            if self.trials
+            else None
+        )
+
+
+def streaming_candidates(budget, count):
+    """Three probes; retain a large env pool independently of the CPU quota."""
+    workers = max(1, math.ceil(budget))
+    envs = min(count, max(DEFAULT_ENV_CAPACITY, 2 * workers))
+    return [
+        Candidate(envs, value, scheduler="streaming")
+        for value in sorted({min(envs, workers), min(envs, 2 * workers), envs})
+    ]
 
 
 def initial_candidates(budget, max_envs):
+    """CPU replay search used by benchmark_rl_machine, not the streaming tuner."""
     base = max(1, math.floor(budget))
     counts = sorted(
         {max(1, math.floor(value + 0.5)) for value in (base / 2, base, 1.5 * base)}
@@ -95,7 +105,7 @@ def preferred(rows):
     if not valid:
         return None
     fastest = min(r.median for r in valid)
-    close = [r for r in valid if r.median <= fastest * 1.03]
+    close = [r for r in valid if r.median <= fastest * (1 + TIE_FRACTION)]
     return min(
         close,
         key=lambda r: (
@@ -185,7 +195,7 @@ def main():
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--episodes", type=int)
     parser.add_argument("--cpu-budget", type=float)
-    parser.add_argument("--budget-seconds", type=float, default=900)
+    parser.add_argument("--budget-seconds", type=float, default=600)
     parser.add_argument(
         "--warmup-episodes",
         type=int,
@@ -193,9 +203,13 @@ def main():
         help="Cases in each Collection warmup; 0 uses the full workload",
     )
     parser.add_argument("--candidates", help="Explicit list, e.g. 12/12/1,16/16/1")
-    parser.add_argument("--scheduler", choices=("ready", "streaming"), default="ready")
+    parser.add_argument(
+        "--scheduler", choices=("ready", "streaming"), default="streaming"
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    if args.scheduler != "streaming" and not args.candidates:
+        parser.error("Automatic tuning uses streaming; ready requires --candidates")
     started = perf_counter()
     if (
         args.warmup_episodes < 0
@@ -213,11 +227,7 @@ def main():
     from civ5rl.config import load_config
     from civ5rl.experiments.ppo_artifacts import load_rollout
 
-    config = load_config(args.config)
-    if config.get("performance", {}).get("collection_scheduler") != "ready":
-        parser.error(
-            "Reply-size tuning requires a config with collection_scheduler=ready"
-        )
+    load_config(args.config)
     machine = hardware()
     try:
         import pynvml
@@ -235,20 +245,16 @@ def main():
         if args.cpu_budget is not None
         else machine["effective_cpu_budget"]
     )
-    base = max(1, math.floor(cpu_budget))
+    base = max(1, math.ceil(cpu_budget))
     episodes = load_rollout(args.rollout)
     count = (
         args.episodes
         if args.episodes is not None
-        else min(len(episodes), max(32, 4 * base))
+        else min(len(episodes), 2 * max(DEFAULT_ENV_CAPACITY, 2 * base))
     )
     if count < 1 or count > len(episodes):
         parser.error("Episode count must be positive and fit the saved rollout")
-    max_envs = (
-        count
-        if args.candidates or args.scheduler == "streaming"
-        else max(1, count // 2)
-    )
+    max_envs = count
     if not args.candidates and count < 2:
         parser.error("Automatic search requires at least two saved episodes")
     try:
@@ -258,19 +264,7 @@ def main():
                 for part in args.candidates.split(",")
             ]
             if args.candidates
-            else (
-                [
-                    Candidate(count, workers, scheduler="streaming")
-                    for workers in sorted(
-                        {
-                            min(count, max(1, math.floor(value + 0.5)))
-                            for value in (base / 2, base, 1.5 * base, 2 * base, count)
-                        }
-                    )
-                ]
-                if args.scheduler == "streaming"
-                else initial_candidates(cpu_budget, max_envs)
-            )
+            else streaming_candidates(cpu_budget, count)
         )
     except (ValueError, TypeError) as exc:
         parser.error(str(exc))
@@ -278,13 +272,24 @@ def main():
     if any(c.envs > count for c in candidates):
         parser.error("A candidate cannot have more environments than selected episodes")
     report = {
+        "method": "streaming-quick-v1",
+        "selection_trials": "all",
         "hardware": machine,
         "cpu_budget": cpu_budget,
         "episodes": count,
         "available_episodes": len(episodes),
         "budget_seconds": args.budget_seconds,
         "warmup_episodes": min(count, args.warmup_episodes or count),
+        "warmup_workers": True,
         "collection_scheduler": args.scheduler,
+        "tie_fraction": TIE_FRACTION,
+        "confirmation_repeats_per_finalist": 1,
+        "max_automatic_probes": 5,
+        "max_envs": max_envs,
+        "initial_env_capacity": candidates[0].envs,
+        "initial_refill_expected": count > candidates[0].envs,
+        "cpu_stat_enabled": sys.platform == "linux"
+        and bool(machine.get("cgroup", {}).get("quota_sources")),
         "initial_candidates": [str(c) for c in candidates],
         "results": [],
     }
@@ -315,7 +320,7 @@ def main():
 
     def save():
         confirmed = len(finalists) == 2 and all(
-            len(r.confirmations) == 3 for r in finalists
+            r.status == "ok" and len(r.confirmations) == 1 for r in finalists
         )
         best = preferred(finalists if confirmed else rows.values())
         report["elapsed_seconds"] = perf_counter() - started
@@ -328,6 +333,8 @@ def main():
                 **r.candidate.runtime(),
                 "status": r.status,
                 "median_seconds": r.median,
+                "min_seconds": min((t["seconds"] for t in r.trials), default=None),
+                "max_seconds": max((t["seconds"] for t in r.trials), default=None),
                 "decisions_per_second": (
                     r.trials[-1]["positions"] / r.median
                     if r.median is not None
@@ -340,6 +347,43 @@ def main():
             for r in rows.values()
         ]
         _json(args.out / "summary.json", report)
+        lines = [
+            "# Short Collection tuning",
+            "",
+            (
+                "Same cases and frozen policy; median of all successful trials. "
+                "This is a bounded practical selection, not a claim of an optimum."
+            ),
+            "",
+            "| env/workers/reply | Collection median, s | Range, s | Decisions/s | Trials | Status |",
+            "|---|---:|---|---:|---:|---|",
+        ]
+        for item in report["results"]:
+            if item["median_seconds"] is None:
+                lines.append(
+                    f"| {item['candidate']} | — | — | — | 0 | {item['status']} |"
+                )
+                continue
+            lines.append(
+                f"| {item['candidate']} | {item['median_seconds']:.3f} | "
+                f"{item['min_seconds']:.3f}–{item['max_seconds']:.3f} | "
+                f"{item['decisions_per_second']:.1f} | {len(item['trials'])} | {item['status']} |"
+            )
+        lines += [
+            "",
+            f"Recommended: {report['recommended']}; preliminary: {report['preliminary']}.",
+            (
+                f"Elapsed: {report['elapsed_seconds']:.1f}/{args.budget_seconds:g} s. "
+                f"Budget exhausted: {exhausted}."
+            ),
+            "",
+            (
+                "Per-trial timings, inference batch, CPU/RAM, NVML, quota counters and "
+                "verification are in summary.json and the profiler session directories. "
+                "CPU pressure or GPU load do not override Collection time in selection."
+            ),
+        ]
+        (args.out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
         runtime_path = args.out / "recommended-runtime.json"
         if best:
             _json(runtime_path, best.candidate.runtime())
@@ -394,11 +438,14 @@ def main():
             str(candidate.inference_wait_seconds),
             "--warmup",
             "1",
+            "--warmup-workers",
             "--warmup-episodes",
             str(args.warmup_episodes),
             "--repeat",
             "1",
         ]
+        if report["cpu_stat_enabled"]:
+            command.append("--cpu-stat")
         if reference_trace:
             command += ["--reference-trace", str(reference_trace.resolve())]
         print(
@@ -432,6 +479,7 @@ def main():
         if path.exists():
             output = json.loads(path.read_text(encoding="utf-8"))
             session["setup_seconds"] = output.get("setup_seconds")
+            session["worker_warmup_seconds"] = output.get("worker_warmup_seconds")
             session["warmup_trials"] = output.get("warmup_trials", [])
             trials = output["trials"]
         else:
@@ -453,6 +501,7 @@ def main():
                 )
             else:
                 row.status = "ok"
+                trial["resources"] = session["collection_resources"]
                 row.trials.append(trial)
                 if confirmation:
                     row.confirmations.append(trial)
@@ -466,65 +515,32 @@ def main():
     try:
         for candidate in candidates:
             measure(candidate)
-        if not args.candidates and not exhausted and args.scheduler == "streaming":
+        if not args.candidates and not exhausted:
             best = preferred(rows.values())
             if best:
-                workers = best.candidate.workers
-                for envs in sorted(
-                    {min(count, multiplier * workers) for multiplier in (1, 2, 4)}
-                ):
-                    measure(Candidate(envs, workers, scheduler="streaming"))
-            best = preferred(rows.values())
-            if best and best.candidate.envs > best.candidate.workers:
-                measure(replace(best.candidate, reply=2))
-            best = preferred(rows.values())
-            if best:
-                for minimum, delay in ((8, 0.0005), (16, 0.001)):
-                    measure(
-                        replace(
-                            best.candidate,
-                            inference_min_batch=minimum,
-                            inference_wait_seconds=delay,
-                        )
-                    )
-        elif not args.candidates and not exhausted:
-            probes = [
-                rows[c] for c in candidates if c in rows and rows[c].status == "ok"
-            ]
-            if len(probes) >= 2:
-                fastest = min(probes, key=lambda r: r.median)
-                ordered = sorted(probes, key=lambda r: r.candidate.workers)
-                if (
-                    fastest is ordered[-1]
-                    and fastest.median <= ordered[-2].median * 0.95
-                ):
-                    measure(Candidate(2 * base, 2 * base))
-                elif fastest is not ordered[0] and fastest is not ordered[-1]:
-                    neighbor = min(
-                        (r for r in probes if r is not fastest), key=lambda r: r.median
-                    )
-                    middle = (
-                        fastest.candidate.workers + neighbor.candidate.workers + 1
-                    ) // 2
-                    measure(Candidate(middle, middle))
-            best = preferred(rows.values())
-            if best:
-                workers = best.candidate.workers
-                doubled = measure(Candidate(2 * workers, workers))
-                if (
-                    doubled
-                    and doubled.status == "ok"
-                    and doubled.median <= best.median * 0.95
-                ):
-                    measure(Candidate(3 * workers, workers))
+                candidate = best.candidate
+                # Change only capacity. If one env per worker won, try a second;
+                # otherwise check whether half the env pool retains the speed.
+                envs = (
+                    max(candidate.workers, candidate.envs // 2)
+                    if candidate.envs > candidate.workers
+                    else min(count, 2 * candidate.envs)
+                )
+                measure(replace(candidate, envs=envs))
             best = preferred(rows.values())
             if best and best.candidate.envs >= 2 * best.candidate.workers:
-                measure(Candidate(best.candidate.envs, best.candidate.workers, 2))
-        finalists = sorted(
+                measure(replace(best.candidate, reply=2))
+        valid = sorted(
             (r for r in rows.values() if r.status == "ok"), key=lambda r: r.median
-        )[:2]
-        for repetition in range(3):
-            for row in finalists if repetition % 2 == 0 else list(reversed(finalists)):
+        )
+        best = preferred(valid)
+        if best:
+            # Include the simpler near-tie, rather than discard it on the probe.
+            finalists = [best, *(r for r in valid if r is not best)][:2]
+            order = list(rows)
+            for row in sorted(
+                finalists, key=lambda r: order.index(r.candidate), reverse=True
+            ):
                 measure(row.candidate, confirmation=True)
     finally:
         changed = [
