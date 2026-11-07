@@ -40,7 +40,16 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--series-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--deadline", type=float, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--pair-workers",
+        type=int,
+        help="Compare streaming W/80/80/W with cpu.stat snapshots",
+    )
     args = parser.parse_args()
+    order = ("B", "C", "C", "B") if args.pair_workers else ORDER
+    modes = {**MODES, "B": ("streaming", args.pair_workers or 8)}
+    if args.pair_workers is not None and not 1 <= args.pair_workers <= 80:
+        parser.error("--pair-workers must be between 1 and 80")
     started = perf_counter()
     deadline = args.deadline if args.series_worker else started + 900
     if not args.series_worker:
@@ -56,6 +65,11 @@ def main():
                 "--series-worker",
                 "--deadline",
                 str(deadline - 12),
+                *(
+                    ["--pair-workers", str(args.pair_workers)]
+                    if args.pair_workers
+                    else []
+                ),
             ],
             cwd=ROOT,
             **PROCESS_OPTIONS,
@@ -113,7 +127,8 @@ def main():
     native_sha = sha(native)
     rows = []
     summary = {
-        "order": ORDER,
+        "order": order,
+        "modes": modes,
         "budget_seconds": 900,
         "rows": rows,
         "complete": False,
@@ -152,10 +167,38 @@ def main():
             )
         medians = {
             mode: statistics.median(r["seconds"] for r in rows if r["mode"] == mode)
-            for mode in MODES
+            for mode in dict.fromkeys(order)
             if sum(r["mode"] == mode for r in rows) == 2
         }
         summary["medians_seconds"] = medians
+        if args.pair_workers and "B" in medians and "C" in medians:
+            retained = 100 * medians["C"] / medians["B"]
+            summary["pair_retained_speed_percent"] = retained
+            summary["pair_collection_overhead_percent"] = 100 * (
+                medians["B"] / medians["C"] - 1
+            )
+            lines += [
+                "",
+                f"B = streaming/{args.pair_workers}; C = streaming/80. "
+                f"Медианы: B={medians['B']:.3f} с; C={medians['C']:.3f} с. "
+                f"B сохраняет {retained:.2f}% скорости C.",
+            ]
+        if args.pair_workers:
+            lines += [
+                "",
+                "cpu.stat: разности счётчиков вокруг collector.collect; "
+                "включают всю активность указанной cgroup. Вложенные cgroup не суммируются.",
+                "",
+                "| Запуск | cgroup | Δnr_periods | Δnr_throttled | Δthrottled_usec | Δthrottled_time, ns (v1) |",
+                "|---|---|---:|---:|---:|---:|",
+            ]
+            for row in rows:
+                for path, delta in row["timings"]["cpu_stat"]["delta"].items():
+                    lines.append(
+                        f"| {row['label']} | {path} | {delta.get('nr_periods', '—')} | "
+                        f"{delta.get('nr_throttled', '—')} | {delta.get('throttled_usec', '—')} | "
+                        f"{delta.get('throttled_time', '—')} |"
+                    )
         if len(medians) == 3:
             gain = 100 * (1 - medians["B"] / medians["A"])
             retained = 100 * medians["C"] / medians["B"]
@@ -241,12 +284,12 @@ def main():
         protected.update({str(p): sha(p) for p in paths if p.exists()})
         summary["protected_inputs_and_sources"] = protected
         psutil.Process().nice(PRIORITY)
-        for index, mode in enumerate(ORDER, 1):
+        for index, mode in enumerate(order, 1):
             verify_files()
             remaining = deadline - perf_counter() - 15
             if remaining <= 0:
                 raise TimeoutError("Series budget exhausted before next launch")
-            scheduler, workers = MODES[mode]
+            scheduler, workers = modes[mode]
             label = f"{index:02d}-{mode}-{scheduler}-w{workers}"
             directory = out / label
             command = [
@@ -286,6 +329,7 @@ def main():
                 "above_normal" if os.name == "nt" else "normal",
                 "--reference-trace",
                 str(old / "trace.npz"),
+                *(["--cpu-stat"] if args.pair_workers else []),
             ]
             print(
                 f"{label}: starting; {remaining:.1f}s available before cleanup reserve",

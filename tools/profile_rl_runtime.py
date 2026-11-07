@@ -167,6 +167,11 @@ def main():
     parser.add_argument("--python-profile", action="store_true")
     parser.add_argument("--collection-diagnostics", action="store_true")
     parser.add_argument(
+        "--cpu-stat",
+        action="store_true",
+        help="Snapshot quota cgroup cpu.stat around Collection",
+    )
+    parser.add_argument(
         "--warmup-workers",
         action="store_true",
         help="Execute one temporary CP command in every worker",
@@ -379,8 +384,33 @@ def main():
                     nonlocal reference_trace, diagnostic_index
                     import numpy as np
 
+                    stat_paths = (
+                        [
+                            Path(p) / "cpu.stat"
+                            for p in result["hardware"]
+                            .get("cgroup", {})
+                            .get("quota_sources", [])
+                        ]
+                        if args.cpu_stat
+                        else []
+                    )
+                    if args.cpu_stat and not stat_paths:
+                        raise RuntimeError("No visible CPU quota cgroup for cpu.stat")
+
+                    def cpu_stat_snapshot():
+                        return {
+                            str(p): {
+                                key: int(value)
+                                for key, value in (
+                                    line.split() for line in p.read_text().splitlines()
+                                )
+                            }
+                            for p in stat_paths
+                        }
+
                     with CompilationClock() as compiler:
                         compiler.monitor = monitor
+                        stat_before = cpu_stat_snapshot()
                         values, _, timings = collector.collect(
                             policy,
                             None,
@@ -389,6 +419,21 @@ def main():
                             fixed_specs=warmup_specs if warmup else specs,
                             trusted_manifest=warmup_manifest if warmup else manifest,
                         )
+                        stat_after = cpu_stat_snapshot()
+                    if args.cpu_stat:
+                        timings["cpu_stat"] = {
+                            "scope": "quota cgroup counters around collector.collect; shared cgroup activity included",
+                            "before": stat_before,
+                            "after": stat_after,
+                            "delta": {
+                                p: {
+                                    key: value - stat_before[p][key]
+                                    for key, value in counters.items()
+                                    if key in stat_before[p]
+                                }
+                                for p, counters in stat_after.items()
+                            },
+                        }
                     timings["compilation_seconds"] = sum(
                         b - a for a, b in compiler.intervals
                     )
