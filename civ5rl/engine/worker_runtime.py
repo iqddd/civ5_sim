@@ -34,7 +34,8 @@ class _WorkerRuntime:
 
     def reset(self, specs: list[ScenarioSpec], variant):
         for env in self.envs:
-            env.close()
+            if env is not None:
+                env.close()
         self.envs = []
         self.encoders = []
         for spec in specs:
@@ -44,6 +45,14 @@ class _WorkerRuntime:
                     ObservationEncoder(context_from_spec(spec), variant)
                 )
         self.previous = [None] * len(self.envs)
+
+    def assign(self, slot: int, spec: ScenarioSpec, variant):
+        if self.envs[slot] is not None:
+            self.envs[slot].close()
+        self.envs[slot] = DecisionEnv(spec)
+        if self.shared is not None:
+            self.encoders[slot] = ObservationEncoder(context_from_spec(spec), variant)
+        self.previous[slot] = None
 
     def step(
         self,
@@ -98,7 +107,9 @@ class _WorkerRuntime:
                 "error",
                 {
                     "traceback": traceback.format_exc(),
-                    "episodes": [env.reproduction() for env in self.envs],
+                    "episodes": [
+                        env.reproduction() for env in self.envs if env is not None
+                    ],
                 },
             )
         )
@@ -108,7 +119,8 @@ class _WorkerRuntime:
             self.profiler.disable()
             self.profiler.dump_stats(self.profile_path)
         for env in self.envs:
-            env.close()
+            if env is not None:
+                env.close()
         if self.shared is not None:
             self.shared.close()
         self.connection.close()

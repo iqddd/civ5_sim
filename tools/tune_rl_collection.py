@@ -9,7 +9,7 @@ import signal
 import statistics
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import pairwise
 from pathlib import Path
 from time import perf_counter
@@ -24,26 +24,44 @@ class Candidate:
     envs: int
     workers: int
     reply: int = 1
+    scheduler: str = "ready"
+    inference_min_batch: int = 0
+    inference_wait_seconds: float = 0.0
 
     def __post_init__(self):
         if (
             min(self.envs, self.workers, self.reply) < 1
-            or self.envs % self.workers
-            or self.reply > self.envs // self.workers
+            or self.workers > self.envs
+            or (self.scheduler != "streaming" and self.envs % self.workers)
+            or self.reply > math.ceil(self.envs / self.workers)
         ):
             raise ValueError(
-                "Require envs % workers == 0 and 1 <= reply <= envs/workers"
+                "Require workers <= envs and a reply size that fits worker slots"
             )
 
     def __str__(self):
-        return f"{self.envs}/{self.workers}/{self.reply}"
+        label = f"{self.envs}/{self.workers}/{self.reply}"
+        if self.inference_min_batch or self.inference_wait_seconds:
+            label += f"@{self.inference_min_batch}/{self.inference_wait_seconds:g}"
+        return label
 
     def runtime(self):
-        return {
+        result = {
             "num_envs": self.envs,
             "cpu_workers": self.workers,
             "worker_reply_size": self.reply,
         }
+        if (
+            self.scheduler == "streaming"
+            or self.inference_min_batch
+            or self.inference_wait_seconds
+        ):
+            result.update(
+                collection_scheduler=self.scheduler,
+                inference_min_batch=self.inference_min_batch,
+                inference_wait_seconds=self.inference_wait_seconds,
+            )
+        return result
 
 
 @dataclass
@@ -79,7 +97,14 @@ def preferred(rows):
     fastest = min(r.median for r in valid)
     close = [r for r in valid if r.median <= fastest * 1.03]
     return min(
-        close, key=lambda r: (r.candidate.workers, r.candidate.envs, r.candidate.reply)
+        close,
+        key=lambda r: (
+            r.candidate.workers,
+            r.candidate.envs,
+            r.candidate.inference_wait_seconds,
+            r.candidate.reply,
+            r.candidate.inference_min_batch,
+        ),
     )
 
 
@@ -96,19 +121,19 @@ def _sha(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def collection_resources(path):
+def collection_resources(path, phase="collection"):
     if not path.exists():
         return {}
     samples = [
         json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
     ]
-    selected = [s for s in samples if s["phase"] == "collection"]
+    selected = [s for s in samples if s["phase"] == phase]
     result = {"samples": len(selected)}
     for name in ("gpu_core_load_percent", "cpu_tree_percent"):
         weighted = duration = 0.0
         for before, after in pairwise(samples):
             if (
-                before["phase"] == after["phase"] == "collection"
+                before["phase"] == after["phase"] == phase
                 and before.get(name) is not None
             ):
                 seconds = after["elapsed_seconds"] - before["elapsed_seconds"]
@@ -161,19 +186,29 @@ def main():
     parser.add_argument("--episodes", type=int)
     parser.add_argument("--cpu-budget", type=float)
     parser.add_argument("--budget-seconds", type=float, default=900)
+    parser.add_argument(
+        "--warmup-episodes",
+        type=int,
+        default=8,
+        help="Cases in each Collection warmup; 0 uses the full workload",
+    )
     parser.add_argument("--candidates", help="Explicit list, e.g. 12/12/1,16/16/1")
+    parser.add_argument("--scheduler", choices=("ready", "streaming"), default="ready")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     started = perf_counter()
     if (
-        not math.isfinite(args.budget_seconds)
+        args.warmup_episodes < 0
+        or not math.isfinite(args.budget_seconds)
         or args.budget_seconds <= 0
         or (
             args.cpu_budget is not None
             and (not math.isfinite(args.cpu_budget) or args.cpu_budget <= 0)
         )
     ):
-        parser.error("CPU/time budgets must be positive finite numbers")
+        parser.error(
+            "CPU/time budgets must be positive finite numbers; warmup cases must be nonnegative"
+        )
     sys.path.insert(0, str(ROOT))
     from civ5rl.config import load_config
     from civ5rl.experiments.ppo_artifacts import load_rollout
@@ -209,17 +244,33 @@ def main():
     )
     if count < 1 or count > len(episodes):
         parser.error("Episode count must be positive and fit the saved rollout")
-    max_envs = count if args.candidates else max(1, count // 2)
+    max_envs = (
+        count
+        if args.candidates or args.scheduler == "streaming"
+        else max(1, count // 2)
+    )
     if not args.candidates and count < 2:
         parser.error("Automatic search requires at least two saved episodes")
     try:
         candidates = (
             [
-                Candidate(*map(int, part.split("/")))
+                Candidate(*map(int, part.split("/")), scheduler=args.scheduler)
                 for part in args.candidates.split(",")
             ]
             if args.candidates
-            else initial_candidates(cpu_budget, max_envs)
+            else (
+                [
+                    Candidate(count, workers, scheduler="streaming")
+                    for workers in sorted(
+                        {
+                            min(count, max(1, math.floor(value + 0.5)))
+                            for value in (base / 2, base, 1.5 * base, 2 * base, count)
+                        }
+                    )
+                ]
+                if args.scheduler == "streaming"
+                else initial_candidates(cpu_budget, max_envs)
+            )
         )
     except (ValueError, TypeError) as exc:
         parser.error(str(exc))
@@ -232,6 +283,8 @@ def main():
         "episodes": count,
         "available_episodes": len(episodes),
         "budget_seconds": args.budget_seconds,
+        "warmup_episodes": min(count, args.warmup_episodes or count),
+        "collection_scheduler": args.scheduler,
         "initial_candidates": [str(c) for c in candidates],
         "results": [],
     }
@@ -333,8 +386,16 @@ def main():
             str(candidate.workers),
             "--reply-size",
             str(candidate.reply),
+            "--scheduler",
+            candidate.scheduler,
+            "--inference-min-batch",
+            str(candidate.inference_min_batch),
+            "--inference-wait-seconds",
+            str(candidate.inference_wait_seconds),
             "--warmup",
             "1",
+            "--warmup-episodes",
+            str(args.warmup_episodes),
             "--repeat",
             "1",
         ]
@@ -405,7 +466,28 @@ def main():
     try:
         for candidate in candidates:
             measure(candidate)
-        if not args.candidates and not exhausted:
+        if not args.candidates and not exhausted and args.scheduler == "streaming":
+            best = preferred(rows.values())
+            if best:
+                workers = best.candidate.workers
+                for envs in sorted(
+                    {min(count, multiplier * workers) for multiplier in (1, 2, 4)}
+                ):
+                    measure(Candidate(envs, workers, scheduler="streaming"))
+            best = preferred(rows.values())
+            if best and best.candidate.envs > best.candidate.workers:
+                measure(replace(best.candidate, reply=2))
+            best = preferred(rows.values())
+            if best:
+                for minimum, delay in ((8, 0.0005), (16, 0.001)):
+                    measure(
+                        replace(
+                            best.candidate,
+                            inference_min_batch=minimum,
+                            inference_wait_seconds=delay,
+                        )
+                    )
+        elif not args.candidates and not exhausted:
             probes = [
                 rows[c] for c in candidates if c in rows and rows[c].status == "ok"
             ]

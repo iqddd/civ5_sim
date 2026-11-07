@@ -10,7 +10,6 @@ from civ5rl.core.observation import ordered_actions
 from civ5sim.agents import load_agent
 from civ5sim.engine import Battle
 
-
 ATTACK_KINDS = ("melee", "ranged")
 END_TURN = "end_turn"
 NUM_SIDES = 2
@@ -157,7 +156,14 @@ class DecisionEnv:
             self.calls = 0
 
     def request(self) -> WorkerState:
-        while not self.check() and self.turns % NUM_SIDES != self.side:
+        state = self.request_slice()
+        while state is None:
+            state = self.request_slice()
+        return state
+
+    def request_slice(self) -> WorkerState | None:
+        """Advance at most one opponent command; None yields this CPU slot."""
+        if not self.check() and self.turns % NUM_SIDES != self.side:
             if self.calls >= self.spec["max_calls_per_turn"]:
                 raise RuntimeError("Opponent action limit")
             obs = self.battle.observe(1 - self.side)
@@ -168,7 +174,9 @@ class DecisionEnv:
 
                 planning = CallPlanningServices(
                     self.opponent.planner,
-                    PlanningState.from_battle(self.battle, 1 - self.side, observation=obs),
+                    PlanningState.from_battle(
+                        self.battle, 1 - self.side, observation=obs
+                    ),
                     1 - self.side,
                     obs["turn"],
                 )
@@ -193,6 +201,7 @@ class DecisionEnv:
                 callback(action, result, self.battle.observe(1 - self.side))
                 self.timings["opponent_seconds"] += perf_counter() - start
                 self._drain_opponent()
+            return None
         if self.terminal:
             final = self.battle.snapshot()
             return {

@@ -1,6 +1,8 @@
 """Complete-episode waves with ready-worker pipelining; learner owns the GPU."""
 
+import math
 import multiprocessing as mp
+import os
 import random
 from dataclasses import dataclass
 from multiprocessing.connection import wait
@@ -106,6 +108,9 @@ class Collector:
         cpu_workers=None,
         reply_size=None,
         num_envs=None,
+        collection_scheduler=None,
+        inference_min_batch=None,
+        inference_wait_seconds=None,
     ):
         from civ5rl.provenance.validation import validate_config
 
@@ -114,6 +119,12 @@ class Collector:
         self.error_dir = error_dir
         self.workers = []
         self.shared = []
+        performance = config.get("performance", {})
+        self.scheduler = collection_scheduler or performance.get(
+            "collection_scheduler", "barrier"
+        )
+        if self.scheduler not in ("barrier", "ready", "streaming"):
+            raise ValueError("Unknown collection scheduler")
         worker_count = (
             config["collection"]["cpu_workers"] if cpu_workers is None else cpu_workers
         )
@@ -125,10 +136,20 @@ class Collector:
             or worker_count < 1
             or type(self.num_envs) is not int
             or self.num_envs < 1
-            or self.num_envs % worker_count
+            or worker_count > self.num_envs
+            or (self.scheduler != "streaming" and self.num_envs % worker_count)
         ):
             raise ValueError("Collection workers must divide the environment count")
-        self.envs_per_worker = self.num_envs // worker_count
+        quotient, remainder = divmod(self.num_envs, worker_count)
+        self.worker_capacities = [
+            quotient + (w < remainder) for w in range(worker_count)
+        ]
+        self.slot_locations = [
+            (w, slot)
+            for w, capacity in enumerate(self.worker_capacities)
+            for slot in range(capacity)
+        ]
+        self.envs_per_worker = max(self.worker_capacities)
         self.reply_size = config.get("performance", {}).get("worker_reply_size", 0)
         if cpu_workers is not None or num_envs is not None:
             self.reply_size = min(self.reply_size, self.envs_per_worker)
@@ -140,6 +161,19 @@ class Collector:
         self.inference_wait_seconds = config.get("performance", {}).get(
             "inference_wait_seconds", 0.0
         )
+        if inference_min_batch is not None:
+            self.inference_min_batch = inference_min_batch
+        if inference_wait_seconds is not None:
+            self.inference_wait_seconds = inference_wait_seconds
+        if (
+            type(self.inference_min_batch) is not int
+            or self.inference_min_batch < 0
+            or not isinstance(self.inference_wait_seconds, (int, float))
+            or isinstance(self.inference_wait_seconds, bool)
+            or not math.isfinite(self.inference_wait_seconds)
+            or self.inference_wait_seconds < 0
+        ):
+            raise ValueError("Invalid inference batching limits")
         self._wave_id = 0
         if (
             type(self.reply_size) is not int
@@ -147,11 +181,20 @@ class Collector:
         ):
             raise ValueError("Invalid performance.worker_reply_size")
         worker_target = _worker
-        if self.reply_size:
-            if config.get("performance", {}).get("collection_scheduler") != "ready":
+        if self.scheduler == "streaming":
+            self.reply_size = max(self.reply_size, 1)
+            from civ5rl.engine.streaming_worker import worker as worker_target
+        elif self.reply_size:
+            if self.scheduler != "ready":
                 raise ValueError("Partial replies require the ready collector")
             from civ5rl.engine.stream_worker import worker as worker_target
         ctx = mp.get_context("spawn")
+        # Spawn imports NumPy before _WorkerRuntime.__init__. Inherit the math
+        # limits now, otherwise BLAS can create a full thread pool per worker.
+        math_variables = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+        previous_environment = {name: os.environ.get(name) for name in math_variables}
+        for name in math_variables:
+            os.environ[name] = "1"
         try:
             for _ in range(worker_count):
                 parent = child = process = None
@@ -162,7 +205,7 @@ class Collector:
                         from civ5rl.engine.shared import EncodedSlots
 
                         shared = EncodedSlots(
-                            self.envs_per_worker,
+                            self.worker_capacities[len(self.workers)],
                             config.get("performance", {}).get(
                                 "shared_action_capacity", 4096
                             ),
@@ -203,6 +246,12 @@ class Collector:
         except BaseException:
             self.close()
             raise
+        finally:
+            for name, value in previous_environment.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
     def _receive_one(self, index) -> WorkerPayload:
         from civ5rl.provenance.common import write_json
@@ -249,8 +298,8 @@ class Collector:
 
         start = perf_counter()
         encoded = [
-            self.shared[i // self.envs_per_worker].read(
-                i % self.envs_per_worker, states[i]
+            self.shared[self.slot_locations[i][0]].read(
+                self.slot_locations[i][1], states[i]
             )
             if worker_encoding
             else encoders[i].encode(states[i]["observation"], states[i]["actions"])
@@ -309,8 +358,9 @@ class Collector:
             if not worker_encoding:
                 encoders[i].remember_action(action, state["observation"])
             generation = wave.generations[i] if wave.generations is not None else None
-            item = WorkerCommand(i % self.envs_per_worker, generation, action)
-            dispatch[i // self.envs_per_worker].append(item)
+            worker, slot = self.slot_locations[i]
+            item = WorkerCommand(slot, generation, action)
+            dispatch[worker].append(item)
             wave_decisions += 1
         for w in ready:
             if dispatch[w]:
@@ -461,11 +511,27 @@ class Collector:
         trusted_manifest=None,
         deadline=None,
         max_decisions=None,
+        episode_length_hint=None,
     ):
         from civ5rl.provenance import validate_cases
 
         if fixed_specs is not None:
             validate_cases(fixed_specs, trusted_manifest)
+
+        if self.scheduler == "streaming":
+            from civ5rl.engine.streaming_collector import collect_streaming
+
+            return collect_streaming(
+                self,
+                policy,
+                stage,
+                next_episode,
+                monitor,
+                fixed_specs,
+                deadline,
+                max_decisions,
+                episode_length_hint,
+            )
 
         policy.eval()
         episodes, decisions = [], 0
@@ -490,15 +556,23 @@ class Collector:
             "ready",
         ):
             raise ValueError("Unknown collection scheduler")
-        ready_mode = performance.get("collection_scheduler", "barrier") == "ready"
+        ready_mode = self.scheduler == "ready"
         worker_encoding = performance.get("worker_encoding", False)
         reuse_encoded = performance.get("reuse_encoded", False)
         start_rollout = perf_counter()
         target = self.config["collection"]["min_learner_decisions_per_update"]
+        if fixed_specs is None:
+            if max_decisions is not None:
+                target = min(target, max_decisions)
+            if episode_length_hint is None:
+                episode_length_hint = getattr(self, "_episode_length_hint", 128.0)
+            if not math.isfinite(episode_length_hint) or episode_length_hint <= 0:
+                raise ValueError("episode_length_hint must be positive and finite")
         num_envs = self.num_envs
         if num_envs != len(self.workers) * self.envs_per_worker:
             raise ValueError("Worker/env count mismatch")
         fixed_offset = 0
+        wave_sizes = []
         while (
             decisions < target
             if fixed_specs is None
@@ -508,13 +582,22 @@ class Collector:
                 max_decisions is not None and decisions >= max_decisions
             ):
                 break
+            wave_size = num_envs
+            if fixed_specs is None:
+                mean_length = (
+                    decisions / len(episodes) if episodes else episode_length_hint
+                )
+                wave_size = min(
+                    num_envs, max(1, math.ceil((target - decisions) / mean_length))
+                )
             specs = (
-                [self.factory.make(next_episode + i, stage) for i in range(num_envs)]
+                [self.factory.make(next_episode + i, stage) for i in range(wave_size)]
                 if fixed_specs is None
                 else fixed_specs[fixed_offset : fixed_offset + num_envs]
             )
             if fixed_specs is None:
                 self.factory.validate_specs(specs)
+            wave_sizes.append(len(specs))
             wave = _WaveState(
                 *self._start_wave(specs, policy, reuse_encoded, worker_encoding),
                 completed_at=[None] * len(specs),
@@ -561,6 +644,15 @@ class Collector:
         times["collection_seconds"] = perf_counter() - start_rollout
         times["inference_batch_mean"] = times["inference_batch_items"] / max(
             times["inference_batches"], 1
+        )
+        if episodes:
+            self._episode_length_hint = decisions / len(episodes)
+        times.update(
+            wave_sizes=wave_sizes,
+            admitted_episodes=len(episodes),
+            rollout_decisions=decisions,
+            target_decisions=target if fixed_specs is None else None,
+            rollout_overshoot=max(0, decisions - target) if fixed_specs is None else 0,
         )
         return episodes, next_episode, times
 

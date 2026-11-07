@@ -103,6 +103,28 @@ def load_collection_policy(config, checkpoint):
     return policy
 
 
+def warmup_indices(episodes, count):
+    """Cover map shapes first, then spread the remaining warmup cases."""
+    count = min(count or len(episodes), len(episodes))
+    selected = set()
+    shapes = set()
+    for index, episode in enumerate(episodes):
+        map_data = episode["spec"]["scenario"]["map"]
+        shape = (map_data["width"], map_data["height"])
+        if shape not in shapes and len(selected) < count:
+            selected.add(index)
+            shapes.add(shape)
+    for index in range(count):
+        selected.add(index * len(episodes) // count)
+        if len(selected) >= count:
+            break
+    for index in range(len(episodes)):
+        if len(selected) >= count:
+            break
+        selected.add(index)
+    return sorted(selected)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=("cpu", "collection"))
@@ -112,18 +134,46 @@ def main():
     parser.add_argument("--episodes", type=int, default=32)
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument(
+        "--warmup-episodes",
+        type=int,
+        default=8,
+        help="Collection warmup case limit (default: 8, covering map shapes; 0: full workload)",
+    )
     parser.add_argument("--config", type=Path)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--workers", type=int)
     parser.add_argument("--envs", type=int)
     parser.add_argument("--reply-size", type=int)
+    parser.add_argument("--scheduler", choices=("barrier", "ready", "streaming"))
+    parser.add_argument("--inference-min-batch", type=int)
+    parser.add_argument("--inference-wait-seconds", type=float)
     parser.add_argument("--reference-trace", type=Path)
     parser.add_argument("--native-library", type=Path)
     parser.add_argument("--python-profile", action="store_true")
+    parser.add_argument(
+        "--cpu-benchmark",
+        action="store_true",
+        help="Time fixed-action CPU replay; verify full public histories separately",
+    )
+    parser.add_argument("--cpu-history-reference", type=Path)
     args = parser.parse_args()
     started = perf_counter()
-    if min(args.episodes, args.repeat) < 1 or args.warmup < 0:
+    if (
+        min(args.episodes, args.repeat) < 1
+        or min(args.warmup, args.warmup_episodes) < 0
+    ):
         parser.error("Positive episode/repeat counts and nonnegative warmup required")
+    if args.cpu_benchmark and args.phase != "cpu":
+        parser.error("--cpu-benchmark requires phase=cpu")
+    if args.cpu_history_reference and not args.cpu_benchmark:
+        parser.error("--cpu-history-reference requires --cpu-benchmark")
+    if (
+        args.phase == "cpu"
+        and args.workers is not None
+        and (not args.cpu_benchmark or args.workers < 1 or args.native_library)
+    ):
+        parser.error("CPU workers require --cpu-benchmark and no native counters")
     sys.path.insert(0, str(args.source_root.resolve()))
     import torch
 
@@ -173,6 +223,7 @@ def main():
     result["native_library_sha256"] = file_sha256(LIBRARY_PATH)
     with ResourceMonitor(args.out) as monitor:
         collector = None
+        cpu_replay = None
         try:
             if args.phase == "collection":
                 if args.config is None or args.checkpoint is None:
@@ -192,8 +243,27 @@ def main():
                     namespace="fixed_cases",
                 )
                 specs = bound_cases(manifest)
+                warmup_selection = warmup_indices(episodes, args.warmup_episodes)
+                warmup_manifest = case_manifest(
+                    [episodes[i]["spec"] for i in warmup_selection],
+                    source="runtime_profile",
+                    split="train",
+                    namespace="fixed_cases",
+                )
+                warmup_specs = bound_cases(warmup_manifest)
+                result.update(
+                    warmup_episodes=len(warmup_specs) if args.warmup else 0,
+                    warmup_case_indices=warmup_selection if args.warmup else [],
+                )
                 # Runtime choices preserve scientific config and case specs.
                 runtime = {"cpu_workers": args.workers}
+                for argument, key in (
+                    (args.scheduler, "collection_scheduler"),
+                    (args.inference_min_batch, "inference_min_batch"),
+                    (args.inference_wait_seconds, "inference_wait_seconds"),
+                ):
+                    if argument is not None:
+                        runtime[key] = argument
                 if args.envs is not None:
                     runtime["num_envs"] = args.envs
                 if args.reply_size is not None:
@@ -205,6 +275,9 @@ def main():
                     workers=len(collector.workers),
                     num_envs=collector.num_envs,
                     reply_size=collector.reply_size,
+                    collection_scheduler=collector.scheduler,
+                    inference_min_batch=collector.inference_min_batch,
+                    inference_wait_seconds=collector.inference_wait_seconds,
                     GPU=torch.cuda.get_device_name(),
                     torch=torch.__version__,
                 )
@@ -217,7 +290,7 @@ def main():
                             name: archive[name] for name in archive.files
                         }
 
-                def action():
+                def action(*, warmup=False):
                     nonlocal reference_trace
                     import numpy as np
 
@@ -227,8 +300,8 @@ def main():
                             policy,
                             None,
                             0,
-                            fixed_specs=specs,
-                            trusted_manifest=manifest,
+                            fixed_specs=warmup_specs if warmup else specs,
+                            trusted_manifest=warmup_manifest if warmup else manifest,
                         )
                     timings["compilation_seconds"] = sum(
                         b - a for a, b in compiler.intervals
@@ -245,15 +318,16 @@ def main():
                         trace[name] = (
                             np.concatenate(parts) if parts else np.empty(0, np.float32)
                         )
-                    if reference_trace is None:
+                    if reference_trace is None and not warmup:
                         reference_trace = trace
-                    if not (args.out / "trace.npz").exists():
+                    if not warmup and not (args.out / "trace.npz").exists():
                         np.savez(args.out / "trace.npz", **trace)
                     errors = {
                         name: None
                         if v.shape != reference_trace[name].shape
                         else float(np.max(np.abs(v - reference_trace[name]), initial=0))
                         for name, v in trace.items()
+                        if not warmup
                     }
                     return {
                         "commands_hash": digest(
@@ -276,11 +350,49 @@ def main():
                         "timings": timings,
                     }
             else:
+                if args.cpu_benchmark:
+                    from rl_cpu_replay import CPUReplay
 
-                def action():
-                    return replay(episodes)
+                    monitor.mark("verification")
+                    tick = perf_counter()
+                    if args.cpu_history_reference:
+                        reference = json.loads(
+                            args.cpu_history_reference.read_text(encoding="utf-8")
+                        )
+                        if (
+                            not reference.get("history_verified")
+                            or reference["episodes"] != len(episodes)
+                            or reference["native_library_sha256"]
+                            != result["native_library_sha256"]
+                            or reference["source_commit"] != result["source_commit"]
+                            or before[str(args.rollout.resolve())]
+                            not in reference["protected_inputs"].values()
+                        ):
+                            raise ValueError(
+                                "CPU history reference does not match this workload/build"
+                            )
+                        result["history_reference_sha256"] = file_sha256(
+                            args.cpu_history_reference
+                        )
+                    else:
+                        replay(episodes)
+                    result["history_verified"] = True
+                    result["history_verification_seconds"] = perf_counter() - tick
+                    workers = args.workers or 1
+                    if workers > len(episodes):
+                        parser.error("CPU workers cannot exceed episode count")
+                    monitor.mark("cpu_setup")
+                    cpu_replay = CPUReplay(
+                        episodes, workers, args.out, args.source_root
+                    )
+                    result.update(workers=workers, cpu_benchmark=True)
+                    action = cpu_replay.run
+                else:
 
-            reference = None
+                    def action():
+                        return replay(episodes)
+
+            references = {}
             result["setup_seconds"] = perf_counter() - started
             write_json(args.out / "result.json", result)
             for index in range(args.warmup + args.repeat):
@@ -289,9 +401,22 @@ def main():
                 if counters:
                     counters.cai_profile_reset()
                 tick = perf_counter()
-                outcome = action()
+                outcome = (
+                    action(warmup=phase == "warmup")
+                    if args.phase == "collection"
+                    else action()
+                )
                 elapsed = perf_counter() - tick
-                seconds = outcome.get("timings", {}).get("collection_seconds", elapsed)
+                if cpu_replay:
+                    monitor.mark("verification")
+                    tick = perf_counter()
+                    outcome = cpu_replay.verify(outcome)
+                    outcome["timings"] = {"cpu_seconds": elapsed}
+                    elapsed += perf_counter() - tick
+                timings = outcome.get("timings", {})
+                seconds = timings.get(
+                    "collection_seconds", timings.get("cpu_seconds", elapsed)
+                )
                 # FP32 heads can round differently when asynchronous batching
                 # changes shape. Keep hashes/deviations, require exact commands.
                 signature = {
@@ -299,11 +424,11 @@ def main():
                     for k, v in outcome.items()
                     if k.endswith("hash") and k != "behavior_hash"
                 }
-                if reference is not None and reference != signature:
+                if phase in references and references[phase] != signature:
                     raise AssertionError(
                         "Repeated workload changed commands, behavior or results"
                     )
-                reference = signature
+                references[phase] = signature
                 trial = {
                     "seconds": seconds,
                     "verification_seconds": elapsed - seconds,
@@ -334,6 +459,8 @@ def main():
         finally:
             if collector:
                 collector.close()
+            if cpu_replay:
+                cpu_replay.close(terminate=sys.exc_info()[0] is not None)
             monitor.mark("finished")
     if any(file_sha256(path) != sha for path, sha in before.items()):
         raise AssertionError("Profiling modified a protected input/run state")

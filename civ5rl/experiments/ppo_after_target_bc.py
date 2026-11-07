@@ -444,21 +444,26 @@ def train(config, plan, out, device, runtime_path=None):
             "cpu_workers",
             "worker_reply_size",
             "num_envs",
+            "collection_scheduler",
+            "inference_min_batch",
+            "inference_wait_seconds",
         }:
-            raise ValueError(
-                "Runtime config supports cpu_workers, worker_reply_size and num_envs"
-            )
+            raise ValueError("Unsupported Collection runtime option")
         collection_workers = runtime["cpu_workers"]
         reply_size = runtime["worker_reply_size"]
         num_envs = runtime.get("num_envs", config["collection"]["num_envs"])
+        scheduler = runtime.get("collection_scheduler", "ready")
         if (
             type(collection_workers) is not int
             or collection_workers < 1
             or type(num_envs) is not int
             or num_envs < 1
-            or num_envs % collection_workers
+            or collection_workers > num_envs
+            or (scheduler != "streaming" and num_envs % collection_workers)
             or type(reply_size) is not int
-            or not 1 <= reply_size <= num_envs // collection_workers
+            or not 1
+            <= reply_size
+            <= (num_envs + collection_workers - 1) // collection_workers
         ):
             raise ValueError(
                 "Runtime workers/reply size must fit the environment count"
@@ -468,13 +473,17 @@ def train(config, plan, out, device, runtime_path=None):
             {
                 "collection_workers": collection_workers,
                 "num_envs": num_envs,
-                "envs_per_worker": num_envs // collection_workers,
+                "envs_per_worker": (num_envs + collection_workers - 1)
+                // collection_workers,
                 "worker_reply_size": reply_size,
                 "runtime_config": str(runtime_path),
                 "runtime_config_sha256": file_sha256(runtime_path),
                 "ppo_pinned_replay": True,
                 "pinned_replay_limit_bytes": DEFAULT_PINNED_REPLAY_BYTES,
-                "inference_coalescing": False,
+                "collection_scheduler": scheduler,
+                "inference_min_batch": runtime.get("inference_min_batch", 0),
+                "inference_wait_seconds": runtime.get("inference_wait_seconds", 0),
+                "inference_coalescing": runtime.get("inference_wait_seconds", 0) > 0,
             },
         )
         with (
@@ -487,6 +496,9 @@ def train(config, plan, out, device, runtime_path=None):
                 cpu_workers=collection_workers,
                 reply_size=reply_size,
                 num_envs=num_envs,
+                collection_scheduler=scheduler,
+                inference_min_batch=runtime.get("inference_min_batch", 0),
+                inference_wait_seconds=runtime.get("inference_wait_seconds", 0),
             ) as collector,
         ):
             while not state["stop_reason"]:
@@ -511,6 +523,12 @@ def train(config, plan, out, device, runtime_path=None):
                         deadline=deadline,
                         max_decisions=config["experiment"]["decisions"]
                         - state["decisions"],
+                        episode_length_hint=(
+                            state["rollout_summary"]["decisions"]
+                            / max(1, state["rollout_summary"]["episodes"])
+                            if state.get("rollout_summary")
+                            else None
+                        ),
                     )
                     if not state["critic_complete"]:
                         critic_started = perf_counter()

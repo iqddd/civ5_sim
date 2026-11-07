@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, NotRequired, NamedTuple, TypedDict
+from typing import TYPE_CHECKING, Any, NamedTuple, NotRequired, TypedDict
 
 if TYPE_CHECKING:
     import numpy as np
@@ -124,6 +124,8 @@ class WorkerPayload(TypedDict):
     items: NotRequired[list[WorkerStepItem]]
     published_at: NotRequired[float]
     worker_request_seconds: NotRequired[float]
+    worker_request_slices: NotRequired[int]
+    worker_request_slice_max_seconds: NotRequired[float]
 
 
 class Episode(TypedDict):

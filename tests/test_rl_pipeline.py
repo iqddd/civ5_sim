@@ -95,12 +95,20 @@ class PipelineTests(unittest.TestCase):
                         ("ready", 1, True, None),
                         ("ready", 1, True, 4),
                         ("ready", 1, True, 3),
+                        ("streaming", 1, True, 3),
+                        ("streaming", 2, True, 2),
                     ]
                     if variant == "C"
-                    else [("ready", 0, True, None), ("ready", 1, False, None)]
+                    else [
+                        ("ready", 0, True, None),
+                        ("ready", 1, False, None),
+                        ("streaming", 1, False, 3),
+                    ]
                 )
                 for scheduler, reply_size, worker_encoding, workers in modes:
-                    config["performance"]["collection_scheduler"] = scheduler
+                    config["performance"]["collection_scheduler"] = (
+                        "ready" if scheduler == "streaming" else scheduler
+                    )
                     config["performance"]["worker_reply_size"] = reply_size
                     config["performance"]["worker_encoding"] = worker_encoding
                     with Collector(
@@ -110,7 +118,10 @@ class PipelineTests(unittest.TestCase):
                         Path(tmp),
                         cpu_workers=workers,
                         reply_size=reply_size,
-                        num_envs=6 if workers == 3 else None,
+                        num_envs=5
+                        if scheduler == "streaming"
+                        else (6 if workers == 3 else None),
+                        collection_scheduler=scheduler,
                     ) as c:
                         if workers is not None:
                             c.inference_min_batch = 4
@@ -190,6 +201,171 @@ class PipelineTests(unittest.TestCase):
                                 np.testing.assert_array_equal(
                                     getattr(a, key), getattr(b, key)
                                 )
+
+    def test_training_tail_wave_preserves_complete_episode_prefix_and_history(self):
+        # Fixed-case checks miss training-only overcollection and stale GRU state
+        # when a reduced final wave is followed by another collect on the same slots.
+        from civ5rl.provenance import bound_cases, case_manifest
+
+        config = load_config("configs/rl-v1-throughput.json")
+        manifest = case_manifest(
+            self.specs(8), source="test", split="train", namespace="unit_test"
+        )
+        specs = bound_cases(manifest)
+        policy = Policy("C").eval()
+
+        class Factory:
+            def __init__(self):
+                self.issued = []
+
+            def make(self, episode_id, stage):
+                self.issued.append(episode_id)
+                return specs[episode_id]
+
+            def validate_specs(self, values):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for scheduler, reply_size in (("barrier", 0), ("ready", 0), ("ready", 1)):
+                with self.subTest(scheduler=scheduler, reply_size=reply_size):
+                    factory = Factory()
+                    with Collector(
+                        config,
+                        factory,
+                        "cpu",
+                        Path(tmp),
+                        num_envs=6,
+                        cpu_workers=3,
+                        reply_size=reply_size,
+                        collection_scheduler=scheduler,
+                    ) as collector:
+                        reference, _, _ = collector.collect(
+                            policy,
+                            None,
+                            0,
+                            fixed_specs=specs,
+                            trusted_manifest=manifest,
+                        )
+                        target = sum(len(ep["chosen"]) for ep in reference[:6]) + 1
+                        episodes, following, timing = collector.collect(
+                            policy, None, 0, max_decisions=target, episode_length_hint=1
+                        )
+                        repeated, repeated_next, repeated_timing = collector.collect(
+                            policy, None, following, max_decisions=1
+                        )
+                    self.assertEqual(timing["wave_sizes"], [6, 1])
+                    self.assertEqual(timing["target_decisions"], target)
+                    self.assertEqual(following, 7)
+                    self.assertEqual(repeated_next, 8)
+                    self.assertEqual(repeated_timing["wave_sizes"], [1])
+                    self.assertEqual(factory.issued, list(range(8)))
+                    self.assertEqual(
+                        timing["rollout_overshoot"],
+                        sum(len(ep["chosen"]) for ep in episodes) - target,
+                    )
+                    for actual, expected in zip(episodes + repeated, reference):
+                        self.assertEqual(
+                            actual["joint_commands"], expected["joint_commands"]
+                        )
+                        self.assertIn("result", actual)
+                        self.assertIsNone(actual["old_hidden"][0])
+                        for before, after in zip(
+                            actual["old_hidden"][1:], expected["old_hidden"][1:]
+                        ):
+                            np.testing.assert_allclose(
+                                before, after, rtol=1e-5, atol=1e-5
+                            )
+
+    def test_streaming_budget_drains_every_started_episode(self):
+        # Dropping slow episodes biases the rollout, while stale slot history
+        # can silently train PPO on another episode's recurrent state.
+        from time import perf_counter
+
+        config = load_config("configs/rl-v1-throughput.json")
+        specs = self.specs(40)
+
+        class Factory:
+            def make(self, episode_id, stage):
+                return specs[episode_id]
+
+            def validate_specs(self, values):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = Policy("C").eval()
+            with Collector(
+                config,
+                Factory(),
+                "cpu",
+                Path(tmp),
+                num_envs=5,
+                cpu_workers=2,
+                reply_size=1,
+                collection_scheduler="streaming",
+            ) as collector:
+                empty, following, _ = collector.collect(
+                    policy,
+                    None,
+                    0,
+                    deadline=perf_counter() - 1,
+                )
+                self.assertEqual((empty, following), ([], 0))
+                episodes, following, timing = collector.collect(
+                    policy,
+                    None,
+                    0,
+                    max_decisions=12,
+                    episode_length_hint=1,
+                )
+        self.assertEqual(
+            [ep["spec"]["episode_id"] for ep in episodes], list(range(following))
+        )
+        self.assertEqual(len(episodes), timing["admitted_episodes"])
+        self.assertGreaterEqual(sum(len(ep["chosen"]) for ep in episodes), 12)
+        self.assertEqual(timing["admission_stop_reason"], "target")
+        for episode in episodes:
+            self.assertIn("result", episode)
+            if episode["old_hidden"]:
+                self.assertIsNone(episode["old_hidden"][0])
+
+    def test_large_streaming_refills_preserve_all_episode_histories(self):
+        # Large scenario refills and replies can fill both directions of a Pipe.
+        # The former deadlock only appears with several slots on one worker.
+        from civ5rl.provenance import bound_cases, case_manifest
+
+        specs = self.specs(40)
+        manifest = case_manifest(
+            specs, source="test", split="train", namespace="unit_test"
+        )
+        specs = bound_cases(manifest)
+        config = load_config("configs/rl-v1-throughput.json")
+        policy = Policy("A").eval()
+        results = []
+        with tempfile.TemporaryDirectory() as tmp:
+            for scheduler in ("ready", "streaming"):
+                with Collector(
+                    config,
+                    None,
+                    "cpu",
+                    Path(tmp),
+                    num_envs=16,
+                    cpu_workers=1,
+                    reply_size=1,
+                    collection_scheduler=scheduler,
+                ) as collector:
+                    episodes, following, _ = collector.collect(
+                        policy,
+                        None,
+                        0,
+                        fixed_specs=specs,
+                        trusted_manifest=manifest,
+                    )
+                self.assertEqual(following, 40)
+                self.assertEqual(
+                    [ep["spec"]["episode_id"] for ep in episodes], list(range(40))
+                )
+                results.append([ep["joint_commands"] for ep in episodes])
+        self.assertEqual(*results)
 
     def test_container_cpu_limits_include_ancestors_and_fractional_quota(self):
         # Host CPU counts can silently choose an unusable parallelism in Docker.
