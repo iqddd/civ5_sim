@@ -90,6 +90,8 @@ class DecisionEnv:
         self._pending_attack = None
         self.diagnostic_events = []
         self._step_before = None
+        self.collection_diagnostics = None
+        self.diagnostic_key = None
 
     def prepare(self, action):
         self._pending_attack = None
@@ -169,7 +171,10 @@ class DecisionEnv:
             obs = self.battle.observe(1 - self.side)
             actions = tuple(self.battle.available_actions())
             start = perf_counter()
-            if callable(getattr(self.opponent, "act_with_planning", None)):
+            diag = self.collection_diagnostics
+            cp = callable(getattr(self.opponent, "act_with_planning", None))
+            clock = diag.begin() if diag else None
+            if cp:
                 from civ5sim.combat_ai import CallPlanningServices, PlanningState
 
                 planning = CallPlanningServices(
@@ -186,6 +191,12 @@ class DecisionEnv:
                     planning.expire()
             else:
                 action = self.opponent.act(obs, actions)
+            if diag:
+                diag.end(
+                    "cp_decision" if cp else "opponent_decision",
+                    clock,
+                    event={"key": self.diagnostic_key},
+                )
             self._drain_opponent()
             self.timings["opponent_seconds"] += perf_counter() - start
             if action not in actions:
@@ -198,7 +209,10 @@ class DecisionEnv:
             callback = getattr(self.opponent, "on_action_result", None)
             if callable(getattr(self.opponent, "act_with_planning", None)) and callback:
                 start = perf_counter()
+                clock = diag.begin() if diag else None
                 callback(action, result, self.battle.observe(1 - self.side))
+                if diag:
+                    diag.end("cp_callback", clock, event={"key": self.diagnostic_key})
                 self.timings["opponent_seconds"] += perf_counter() - start
                 self._drain_opponent()
             return None

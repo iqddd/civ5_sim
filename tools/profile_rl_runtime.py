@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import statistics
 import subprocess
 import sys
@@ -125,6 +126,19 @@ def warmup_indices(episodes, count):
     return sorted(selected)
 
 
+class CollectionMonitor:
+    """Keep short warmup samples out of the measured Collection phase."""
+
+    def __init__(self, monitor, warmup):
+        self.monitor = monitor
+        self.warmup = warmup
+
+    def mark(self, phase, **state):
+        if self.warmup and phase == "collection":
+            phase = "warmup"
+        self.monitor.mark(phase, **state)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=("cpu", "collection"))
@@ -151,6 +165,15 @@ def main():
     parser.add_argument("--reference-trace", type=Path)
     parser.add_argument("--native-library", type=Path)
     parser.add_argument("--python-profile", action="store_true")
+    parser.add_argument("--collection-diagnostics", action="store_true")
+    parser.add_argument(
+        "--warmup-workers",
+        action="store_true",
+        help="Execute one temporary CP command in every worker",
+    )
+    parser.add_argument(
+        "--process-priority", choices=("normal", "above_normal"), default="normal"
+    )
     parser.add_argument(
         "--cpu-benchmark",
         action="store_true",
@@ -158,6 +181,18 @@ def main():
     )
     parser.add_argument("--cpu-history-reference", type=Path)
     args = parser.parse_args()
+    worker_priority = None
+    if os.name == "nt":
+        import psutil
+
+        worker_priority = (
+            psutil.ABOVE_NORMAL_PRIORITY_CLASS
+            if args.process_priority == "above_normal"
+            else psutil.NORMAL_PRIORITY_CLASS
+        )
+        psutil.Process().nice(worker_priority)
+    elif args.process_priority == "above_normal":
+        parser.error("Above Normal process priority requires Windows")
     started = perf_counter()
     if (
         min(args.episodes, args.repeat) < 1
@@ -214,6 +249,7 @@ def main():
         "warmup_repeats": args.warmup,
         "warmup_trials": [],
         "trials": [],
+        "process_priority": args.process_priority,
     }
     result["source_commit"] = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=args.source_root, text=True
@@ -269,7 +305,13 @@ def main():
                 if args.reply_size is not None:
                     runtime["reply_size"] = args.reply_size
                 collector = Collector(
-                    config, None, "cuda", args.out / "errors", **runtime
+                    config,
+                    None,
+                    "cuda",
+                    args.out / "errors",
+                    collection_diagnostics=args.collection_diagnostics,
+                    worker_priority=worker_priority,
+                    **runtime,
                 )
                 result.update(
                     workers=len(collector.workers),
@@ -281,7 +323,45 @@ def main():
                     GPU=torch.cuda.get_device_name(),
                     torch=torch.__version__,
                 )
+                if worker_priority is not None:
+                    priorities = {
+                        str(process.pid): int(psutil.Process(process.pid).nice())
+                        for _, process in collector.workers
+                    }
+                    result["worker_priorities"] = priorities
+                    result["parent_priority"] = int(psutil.Process().nice())
+                    if any(
+                        value != int(worker_priority) for value in priorities.values()
+                    ):
+                        raise RuntimeError(
+                            "A worker did not receive the requested process priority"
+                        )
+                if args.warmup_workers:
+                    monitor.mark("warmup")
+                    tick = perf_counter()
+                    for connection, _ in collector.workers:
+                        connection.send(("warmup", warmup_specs[0]))
+                    acknowledgements = []
+                    for connection, process in collector.workers:
+                        if not connection.poll(300):
+                            raise TimeoutError(
+                                "Worker warmup acknowledgement timed out"
+                            )
+                        kind, acknowledgement = connection.recv()
+                        if (
+                            kind != "warmup"
+                            or acknowledgement.get("pid") != process.pid
+                            or acknowledgement.get("cp_calls") != 1
+                        ):
+                            raise RuntimeError(
+                                f"Invalid worker warmup: {acknowledgement}"
+                            )
+                        acknowledgements.append(acknowledgement)
+                    result["worker_warmup"] = acknowledgements
+                    result["worker_warmup_seconds"] = perf_counter() - tick
+                    monitor.mark("setup")
                 reference_trace = None
+                diagnostic_index = 0
                 if args.reference_trace:
                     import numpy as np
 
@@ -291,7 +371,7 @@ def main():
                         }
 
                 def action(*, warmup=False):
-                    nonlocal reference_trace
+                    nonlocal reference_trace, diagnostic_index
                     import numpy as np
 
                     with CompilationClock() as compiler:
@@ -300,6 +380,7 @@ def main():
                             policy,
                             None,
                             0,
+                            monitor=CollectionMonitor(monitor, warmup),
                             fixed_specs=warmup_specs if warmup else specs,
                             trusted_manifest=warmup_manifest if warmup else manifest,
                         )
@@ -307,6 +388,12 @@ def main():
                         b - a for a, b in compiler.intervals
                     )
                     monitor.mark("verification")
+                    diagnostic = timings.pop("diagnostics", None)
+                    diagnostic_file = None
+                    if diagnostic is not None:
+                        diagnostic_file = f"diagnostics-{diagnostic_index:03d}.json"
+                        diagnostic_index += 1
+                        write_json(args.out / diagnostic_file, diagnostic)
                     trace = {}
                     for name in ("old_log_probs", "old_hidden", "old_value"):
                         parts = [
@@ -347,6 +434,7 @@ def main():
                         "positions": sum(len(ep["chosen"]) for ep in values),
                         "behavior_hash": behavior_hash(values),
                         "max_behavior_deviation": errors,
+                        "diagnostics_file": diagnostic_file,
                         "timings": timings,
                     }
             else:

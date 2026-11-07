@@ -1,0 +1,358 @@
+"""Frozen 200-case A/B/C/C/B/A comparison, bounded to 900 seconds."""
+
+import argparse
+import hashlib
+import json
+import shutil
+import statistics
+import subprocess
+import sys
+from pathlib import Path
+from time import perf_counter
+
+import psutil
+from tune_rl_collection import collection_resources, stop_tree
+
+ROOT = Path(__file__).resolve().parents[1]
+ORDER = ("A", "B", "C", "C", "B", "A")
+MODES = {"A": ("ready", 8), "B": ("streaming", 8), "C": ("streaming", 80)}
+
+
+def read(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def sha(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--series-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--deadline", type=float, help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    started = perf_counter()
+    deadline = args.deadline if args.series_worker else started + 900
+    if not args.series_worker:
+        # An independent watchdog also bounds verification, hashing and report
+        # writing, not just the individual Collection subprocesses.
+        psutil.Process().nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--out",
+                str(args.out),
+                "--series-worker",
+                "--deadline",
+                str(deadline - 12),
+            ],
+            cwd=ROOT,
+            creationflags=subprocess.ABOVE_NORMAL_PRIORITY_CLASS,
+        )
+        try:
+            process.wait(timeout=max(0.01, deadline - perf_counter() - 12))
+        except BaseException as exc:
+            stop_tree(process)
+            out = args.out.resolve()
+            if out.exists():
+                path = out / "summary.json"
+                try:
+                    data = read(path)
+                except (OSError, json.JSONDecodeError):
+                    data = {"rows": []}
+                data.update(
+                    complete=False,
+                    error=repr(exc),
+                    budget_seconds=900,
+                    elapsed_seconds=perf_counter() - started,
+                )
+                path.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                with (out / "report.md").open("a", encoding="utf-8") as report:
+                    report.write(
+                        "\nСерия остановлена внешним ограничителем; результат неполный.\n"
+                    )
+            raise
+        if process.returncode:
+            raise SystemExit(process.returncode)
+        path = args.out.resolve() / "summary.json"
+        data = read(path)
+        data["total_elapsed_seconds"] = perf_counter() - started
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        return
+    import numpy as np
+
+    out = args.out.resolve()
+    out.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(__file__, out / "run_series.py")
+    old = (
+        ROOT / "artifacts/benchmarks/windows-streaming-refill-200/streaming-80-primary"
+    )
+    carrier = ROOT / "artifacts/benchmarks/windows-ready-80-200/case-specs-only.pt"
+    config = ROOT / "artifacts/benchmarks/combat-cp-v1/config.json"
+    checkpoint = ROOT / "artifacts/benchmarks/combat-cp-v1/checkpoint.pt"
+    reference = read(old / "result.json")
+    rows = []
+    summary = {
+        "order": ORDER,
+        "budget_seconds": 900,
+        "rows": rows,
+        "complete": False,
+        "envs": 80,
+        "reply_size": 1,
+        "priority": "ABOVE_NORMAL",
+        "inference_min_batch": 0,
+        "inference_wait_seconds": 0,
+        "diagnostics": False,
+        "etw": False,
+    }
+
+    def save():
+        summary["elapsed_seconds"] = perf_counter() - started
+        lines = [
+            "# Ready / Streaming: сопоставимая серия",
+            "",
+            (
+                "Прежние 200 случаев; Above Normal; batching 0/0; reply=1. "
+                "Каждый worker выполняет один CP-вызов до короткого GPU-прогрева. "
+                "ETW и подробная диагностика выключены."
+            ),
+            "",
+            "| Запуск | Scheduler | Workers | Collection, с | Batch | Inference-вызовы | CPU, лог. ядер | Peak RSS, GiB |",
+            "|---|---|---:|---:|---:|---:|---:|---:|",
+        ]
+        for r in rows:
+            resources = r["resources"]
+            cpu = resources["cpu_tree_percent_mean"] / 100
+            rss = resources["ram_tree_rss_bytes_peak"] / 2**30
+            lines.append(
+                f"| {r['label']} | {r['scheduler']} | {r['workers']} | "
+                f"{r['seconds']:.3f} | {r['batch']:.2f} | {r['inference_calls']} | "
+                f"{cpu:.2f} | {rss:.2f} |"
+            )
+        medians = {
+            mode: statistics.median(r["seconds"] for r in rows if r["mode"] == mode)
+            for mode in MODES
+            if sum(r["mode"] == mode for r in rows) == 2
+        }
+        summary["medians_seconds"] = medians
+        if len(medians) == 3:
+            gain = 100 * (1 - medians["B"] / medians["A"])
+            retained = 100 * medians["C"] / medians["B"]
+            summary.update(
+                streaming8_reduction_percent=gain,
+                streaming8_retained_speed_percent=retained,
+            )
+            lines += [
+                "",
+                f"Медианы: A={medians['A']:.3f} с; B={medians['B']:.3f} с; C={medians['C']:.3f} с.",
+                (
+                    f"B сокращает время A на {gain:.2f}%. "
+                    f"При 8 workers сохраняется {retained:.2f}% скорости streaming с 80 workers."
+                ),
+            ]
+        lines += [
+            "",
+            "| Запуск | Подготовка, с* | Прогрев всех workers, с | Короткий Collection-прогрев, с |",
+            "|---|---:|---:|---:|",
+        ]
+        for r in rows:
+            lines.append(
+                f"| {r['label']} | {r['setup_seconds']:.3f} | "
+                f"{r['worker_warmup_seconds']:.3f} | {r['warmup_seconds']:.3f} |"
+            )
+        lines += [
+            "",
+            "*Подготовка включает отдельный прогрев workers; эти интервалы не следует складывать.",
+            (
+                "CPU — средняя загрузка дерева процессов, делённая на 100%; "
+                "RSS может повторно учитывать разделяемые страницы. "
+                "Два повтора не подтверждают статистическую устойчивость. "
+                "Проверка таймеров отложена."
+            ),
+            "",
+            "Серия завершена." if summary["complete"] else "Серия не завершена.",
+        ]
+        if "error" in summary:
+            lines += ["", f"Причина: {summary['error']}"]
+        (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        # Include derived comparisons in the machine-readable artifact too.
+        (out / "summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+
+    protected = {}
+
+    def verify_files():
+        for filename, expected in protected.items():
+            if sha(Path(filename)) != expected:
+                raise AssertionError(f"Input or source changed: {filename}")
+
+    try:
+        for path in (carrier, config, checkpoint):
+            if sha(path) != reference["protected_inputs"][str(path)]:
+                raise ValueError(f"Frozen input changed: {path}")
+        if sha(ROOT / "build/combat_ai.dll") != reference["native_library_sha256"]:
+            raise ValueError("Native library changed")
+        paths = [
+            carrier,
+            config,
+            checkpoint,
+            ROOT / "build/combat_ai.dll",
+            old / "result.json",
+            old / "trace.npz",
+            ROOT / "artifacts/rl/ppo-after-target-bc/state.json",
+            ROOT / "artifacts/rl/ppo-after-target-bc/status.json",
+            ROOT / "artifacts/rl/ppo-after-target-bc/rollouts/latest.pt",
+            ROOT / "configs/rl-ppo-after-target-bc-runtime.json",
+        ]
+        paths += [
+            p
+            for directory in ("civ5rl", "civ5sim", "tools")
+            for p in (ROOT / directory).rglob("*.py")
+        ]
+        protected.update({str(p): sha(p) for p in paths if p.exists()})
+        summary["protected_inputs_and_sources"] = protected
+        psutil.Process().nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+        for index, mode in enumerate(ORDER, 1):
+            verify_files()
+            remaining = deadline - perf_counter() - 15
+            if remaining <= 0:
+                raise TimeoutError("Series budget exhausted before next launch")
+            scheduler, workers = MODES[mode]
+            label = f"{index:02d}-{mode}-{scheduler}-w{workers}"
+            directory = out / label
+            command = [
+                sys.executable,
+                str(ROOT / "tools/profile_rl_runtime.py"),
+                "collection",
+                "--config",
+                str(config),
+                "--checkpoint",
+                str(checkpoint),
+                "--rollout",
+                str(carrier),
+                "--out",
+                str(directory),
+                "--episodes",
+                "200",
+                "--repeat",
+                "1",
+                "--warmup",
+                "1",
+                "--warmup-episodes",
+                "8",
+                "--warmup-workers",
+                "--workers",
+                str(workers),
+                "--envs",
+                "80",
+                "--reply-size",
+                "1",
+                "--scheduler",
+                scheduler,
+                "--inference-min-batch",
+                "0",
+                "--inference-wait-seconds",
+                "0",
+                "--process-priority",
+                "above_normal",
+                "--reference-trace",
+                str(old / "trace.npz"),
+            ]
+            print(
+                f"{label}: starting; {remaining:.1f}s available before cleanup reserve",
+                flush=True,
+            )
+            with (out / f"{label}.log").open("w", encoding="utf-8") as log:
+                process = subprocess.Popen(
+                    command,
+                    cwd=ROOT,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    creationflags=subprocess.ABOVE_NORMAL_PRIORITY_CLASS,
+                )
+                try:
+                    process.wait(timeout=max(0.01, deadline - perf_counter() - 15))
+                except BaseException:
+                    stop_tree(process)
+                    raise
+                if process.returncode:
+                    raise RuntimeError(f"{label} failed; see {log.name}")
+            result = read(directory / "result.json")
+            trial = result["trials"][0]
+            for key in ("commands_hash", "results_hash", "positions", "commands"):
+                if trial[key] != reference["trials"][0][key]:
+                    raise AssertionError(f"{label}: changed {key}")
+            if result["native_library_sha256"] != reference["native_library_sha256"]:
+                raise AssertionError("Native library changed")
+            if result["warmup_case_indices"] != [0, 2, 6, 25, 50, 75, 100, 125]:
+                raise AssertionError("GPU warmup cases changed")
+            pids = set(result["worker_priorities"])
+            acknowledgements = result["worker_warmup"]
+            if (
+                len(acknowledgements) != workers
+                or len(pids) != workers
+                or {str(a["pid"]) for a in acknowledgements} != pids
+                or any(a["cp_calls"] != 1 for a in acknowledgements)
+            ):
+                raise AssertionError("Not every worker completed CP warmup")
+            priority = int(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+            if result["parent_priority"] != priority or any(
+                v != priority for v in result["worker_priorities"].values()
+            ):
+                raise AssertionError("Incorrect process priority")
+            with (
+                np.load(old / "trace.npz") as expected,
+                np.load(directory / "trace.npz") as actual,
+            ):
+                for name in expected.files:
+                    np.testing.assert_allclose(
+                        actual[name], expected[name], rtol=1e-5, atol=1e-5
+                    )
+            rows.append(
+                {
+                    "label": label,
+                    "mode": mode,
+                    "scheduler": scheduler,
+                    "workers": workers,
+                    "seconds": trial["seconds"],
+                    "batch": trial["timings"]["inference_batch_mean"],
+                    "inference_calls": trial["timings"]["inference_batches"],
+                    "resources": collection_resources(directory / "resources.jsonl"),
+                    "setup_seconds": result["setup_seconds"],
+                    "worker_warmup_seconds": result["worker_warmup_seconds"],
+                    "warmup_seconds": result["warmup_trials"][0]["seconds"],
+                    "timings": trial["timings"],
+                    "verified": True,
+                }
+            )
+            verify_files()
+            if perf_counter() > deadline:
+                raise TimeoutError("Series budget exhausted during verification")
+            save()
+            print(f"{label}: Collection={trial['seconds']:.3f}s; verified", flush=True)
+        summary["complete"] = True
+    except BaseException as exc:
+        summary["error"] = repr(exc)
+        raise
+    finally:
+        try:
+            verify_files()
+        except BaseException as exc:
+            summary.update(complete=False, error=repr(exc))
+            raise
+        finally:
+            save()
+    print(out / "report.md", flush=True)
+
+
+if __name__ == "__main__":
+    main()

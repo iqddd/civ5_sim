@@ -46,6 +46,29 @@ class _WorkerRuntime:
                 )
         self.previous = [None] * len(self.envs)
 
+    def warmup(self, spec: ScenarioSpec):
+        """Exercise CP once in an owned temporary episode, outside collection."""
+        from copy import deepcopy
+
+        spec = deepcopy(spec)
+        spec["learner_side"] = 1  # Initial side zero belongs to CP in this episode.
+        started = perf_counter()
+        env = DecisionEnv(spec)
+        try:
+            if not callable(getattr(env.opponent, "act_with_planning", None)):
+                raise TypeError("Worker warmup requires a CP opponent")
+            env.request_slice()
+            if env.commands != 1:
+                raise RuntimeError("Worker warmup did not execute one CP command")
+            calls = env.commands
+        finally:
+            env.close()
+        return {
+            "pid": os.getpid(),
+            "cp_calls": calls,
+            "seconds": perf_counter() - started,
+        }
+
     def assign(self, slot: int, spec: ScenarioSpec, variant):
         if self.envs[slot] is not None:
             self.envs[slot].close()

@@ -119,9 +119,10 @@ class PipelineTests(unittest.TestCase):
                         cpu_workers=workers,
                         reply_size=reply_size,
                         num_envs=5
-                        if scheduler == "streaming"
-                        else (6 if workers == 3 else None),
+                        if scheduler == "streaming" or workers == 3
+                        else None,
                         collection_scheduler=scheduler,
+                        collection_diagnostics=scheduler == "streaming",
                     ) as c:
                         if workers is not None:
                             c.inference_min_batch = 4
@@ -133,6 +134,19 @@ class PipelineTests(unittest.TestCase):
                             fixed_specs=specs,
                             trusted_manifest=manifest,
                         )
+                        if scheduler == "streaming":
+                            diagnostic = _times["diagnostics"]
+                            self.assertEqual(
+                                diagnostic["metrics"]["action_transport"]["count"],
+                                sum(len(ep["chosen"]) for ep in episodes),
+                            )
+                            self.assertEqual(
+                                diagnostic["receiver"]["gauges"][
+                                    "received_unaccepted_observations"
+                                ]["final"],
+                                0,
+                            )
+                            c.collection_diagnostics = False
                         # A single-slot wave leaves whole workers idle; the next
                         # full wave must reset all slots and recurrent histories.
                         short_manifest = case_manifest(
@@ -149,6 +163,8 @@ class PipelineTests(unittest.TestCase):
                             fixed_specs=short_specs,
                             trusted_manifest=short_manifest,
                         )
+                        if scheduler == "streaming":
+                            c.collection_diagnostics = True
                         repeated, repeated_next, _ = c.collect(
                             policy,
                             None,

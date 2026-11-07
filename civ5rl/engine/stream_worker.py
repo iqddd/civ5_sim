@@ -18,6 +18,11 @@ def worker(connection, profile_path=None, shared_descriptor=None):
         nonlocal wave_id, reply_size
         if kind == "close":
             return False
+        if kind == "warmup":
+            if pending or any(offered):
+                raise RuntimeError("Warmup requires an idle worker")
+            connection.send(("warmup", runtime.warmup(payload)))
+            return True
         if kind == "reset":
             if pending or any(offered):
                 raise RuntimeError("Reset before all episode replies completed")
@@ -69,6 +74,8 @@ def worker(connection, profile_path=None, shared_descriptor=None):
                 running = command(*connection.recv())
             if not running:
                 break
+            if not pending:
+                continue
             items = []
             encoding_seconds = request_seconds = 0.0
             for _ in range(min(reply_size, len(pending))):
@@ -99,7 +106,7 @@ def worker(connection, profile_path=None, shared_descriptor=None):
                 )
     except EOFError:
         pass
-    except BaseException:
+    except BaseException:  # noqa: BLE001 -- propagate worker failures to parent
         runtime.send_error()
     finally:
         runtime.close()

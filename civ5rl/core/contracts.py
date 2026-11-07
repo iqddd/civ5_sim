@@ -115,6 +115,7 @@ class WorkerStepItem(NamedTuple):
     generation: int
     state: WorkerState
     completed_at: float
+    diagnostics: dict[str, Any] | None = None
 
 
 class WorkerPayload(TypedDict):

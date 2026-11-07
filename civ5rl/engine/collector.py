@@ -111,6 +111,8 @@ class Collector:
         collection_scheduler=None,
         inference_min_batch=None,
         inference_wait_seconds=None,
+        collection_diagnostics=False,
+        worker_priority=None,
     ):
         from civ5rl.provenance.validation import validate_config
 
@@ -119,12 +121,16 @@ class Collector:
         self.error_dir = error_dir
         self.workers = []
         self.shared = []
+        self.collection_diagnostics = collection_diagnostics
+        self._diagnostics = None
         performance = config.get("performance", {})
         self.scheduler = collection_scheduler or performance.get(
             "collection_scheduler", "barrier"
         )
         if self.scheduler not in ("barrier", "ready", "streaming"):
             raise ValueError("Unknown collection scheduler")
+        if collection_diagnostics and self.scheduler != "streaming":
+            raise ValueError("Collection diagnostics currently require streaming")
         worker_count = (
             config["collection"]["cpu_workers"] if cpu_workers is None else cpu_workers
         )
@@ -137,9 +143,8 @@ class Collector:
             or type(self.num_envs) is not int
             or self.num_envs < 1
             or worker_count > self.num_envs
-            or (self.scheduler != "streaming" and self.num_envs % worker_count)
         ):
-            raise ValueError("Collection workers must divide the environment count")
+            raise ValueError("Collection workers must fit the environment count")
         quotient, remainder = divmod(self.num_envs, worker_count)
         self.worker_capacities = [
             quotient + (w < remainder) for w in range(worker_count)
@@ -149,6 +154,10 @@ class Collector:
             for w, capacity in enumerate(self.worker_capacities)
             for slot in range(capacity)
         ]
+        self._global_slots = {
+            location: i for i, location in enumerate(self.slot_locations)
+        }
+        self.worker_offsets = [self._global_slots[w, 0] for w in range(worker_count)]
         self.envs_per_worker = max(self.worker_capacities)
         self.reply_size = config.get("performance", {}).get("worker_reply_size", 0)
         if cpu_workers is not None or num_envs is not None:
@@ -233,6 +242,10 @@ class Collector:
                         daemon=True,
                     )
                     process.start()
+                    if worker_priority is not None:
+                        import psutil
+
+                        psutil.Process(process.pid).nice(worker_priority)
                     self.workers.append((parent, process))
                     parent = process = None  # ownership transferred
                 finally:
@@ -281,7 +294,7 @@ class Collector:
         for w in ready:
             payload = self._receive_one(w)
             times["worker_encoding_seconds"] += payload["worker_encoding_seconds"]
-            offset = w * self.envs_per_worker
+            offset = self.worker_offsets[w]
             for j, state in enumerate(payload["states"]):
                 states[offset + j] = state
                 refreshed.append(offset + j)
@@ -296,6 +309,19 @@ class Collector:
 
         from civ5rl.core.model import batch_inputs
 
+        diag = self._diagnostics
+        clock = diag.begin() if diag else None
+        if diag:
+            for slot in live:
+                request = diag.requests[slot]
+                request["inference_prepare_ns"] = clock[0]
+                diag.add(
+                    "observation_to_inference_prepare",
+                    clock[0] - request["observation_ready_ns"],
+                )
+                diag.add(
+                    "accepted_to_inference_prepare", clock[0] - request["accepted_ns"]
+                )
         start = perf_counter()
         encoded = [
             self.shared[self.slot_locations[i][0]].read(
@@ -313,18 +339,46 @@ class Collector:
             ),
         )
         times["encoding_seconds"] += perf_counter() - start
+        if diag:
+            diag.end("inference_prepare_h2d", clock)
         start = perf_counter()
         with torch.no_grad():
             if policy.spatial_cuda_graphs:
                 torch.compiler.cudagraph_mark_step_begin()
             slots = torch.tensor(live, device=self.device)
             h = hidden.index_select(1, slots) if hidden is not None else None
+            clock = diag.begin() if diag else None
+            cuda_events = None
+            if diag and str(self.device).startswith("cuda"):
+                cuda_events = (
+                    torch.cuda.Event(enable_timing=True),
+                    torch.cuda.Event(enable_timing=True),
+                )
+                cuda_events[0].record()
             logits, critic_values, next_hidden = policy(batch, h)
             pieces = [logits.log_softmax(-1), critic_values[:, None]]
             if h is not None:
                 pieces.append(h[0])
             # One D2H synchronization per inference batch, including diagnostic h.
-            host = torch.cat(pieces, -1).cpu().numpy()
+            output = torch.cat(pieces, -1)
+            if diag:
+                if cuda_events:
+                    cuda_events[1].record()
+                diag.end("forward_submit_and_output", clock)
+                for slot in live:
+                    diag.requests[slot]["forward_submit_ns"] = clock[0]
+                clock = diag.begin()
+            host = output.cpu().numpy()
+            if diag:
+                at = diag.end("blocking_result_to_cpu", clock)
+                for slot in live:
+                    diag.requests[slot]["host_result_ns"] = at
+                if cuda_events:
+                    # The existing blocking D2H already completed these events.
+                    diag.add(
+                        "cuda_forward_and_output.stream",
+                        round(cuda_events[0].elapsed_time(cuda_events[1]) * 1e6),
+                    )
             action_width = logits.shape[1]
             log_probs = host[:, :action_width]
             cpu_critic_values = host[:, action_width]
@@ -342,6 +396,8 @@ class Collector:
         states, builders, encoders = wave.states, wave.builders, wave.encoders
         pending, rngs = wave.pending, wave.rngs
         wave_decisions = 0
+        diag = self._diagnostics
+        clock = diag.begin() if diag else None
         dispatch = [[] for _ in self.workers]
         for j, i in enumerate(live):
             state = states[i]
@@ -362,12 +418,37 @@ class Collector:
             item = WorkerCommand(slot, generation, action)
             dispatch[worker].append(item)
             wave_decisions += 1
+        if diag:
+            diag.end("select_and_record_actions", clock)
         for w in ready:
             if dispatch[w]:
                 payload = dispatch[w]
                 if wave.generations is not None:
                     payload = {"wave": wave.wave_id, "commands": payload}
+                if diag:
+                    requests = [
+                        diag.requests.pop(self._global_slots[w, command.slot])
+                        for command in dispatch[w]
+                    ]
+                    clock = diag.begin()
+                    payload["diagnostic_sent_ns"] = clock[0]
                 self.workers[w][0].send(("step", payload))
+                if diag:
+                    diag.end("parent_action_send", clock)
+                    for request in requests:
+                        diag.add(
+                            "host_result_to_action_send",
+                            clock[0] - request["host_result_ns"],
+                        )
+                        diag.sample(
+                            dict(
+                                kind="request",
+                                **request,
+                                action_sent_ns=clock[0],
+                                worker=w,
+                                worker_pid=self.workers[w][1].pid,
+                            )
+                        )
                 if wave.generations is None:
                     pending.add(w)
         return wave_decisions
@@ -403,15 +484,14 @@ class Collector:
         )
         self._wave_id += 1
         for w, (conn, _) in enumerate(self.workers):
-            if w * self.envs_per_worker >= len(specs):
+            offset = self.worker_offsets[w]
+            if offset >= len(specs):
                 break
             conn.send(
                 (
                     "reset",
                     {
-                        "specs": specs[
-                            w * self.envs_per_worker : (w + 1) * self.envs_per_worker
-                        ],
+                        "specs": specs[offset : offset + self.worker_capacities[w]],
                         "variant": policy.variant,
                         "wave": self._wave_id,
                         "reply_size": self.reply_size,
@@ -454,9 +534,9 @@ class Collector:
                             generation = item.generation
                             state = item.state
                             at = item.completed_at
-                            i = w * self.envs_per_worker + slot
+                            i = self.worker_offsets[w] + slot
                             if (
-                                not 0 <= slot < self.envs_per_worker
+                                not 0 <= slot < self.worker_capacities[w]
                                 or i >= len(wave.states)
                                 or generation != wave.generations[i] + 1
                                 or wave.completed_at[i] is not None
@@ -569,7 +649,7 @@ class Collector:
             if not math.isfinite(episode_length_hint) or episode_length_hint <= 0:
                 raise ValueError("episode_length_hint must be positive and finite")
         num_envs = self.num_envs
-        if num_envs != len(self.workers) * self.envs_per_worker:
+        if num_envs != sum(self.worker_capacities):
             raise ValueError("Worker/env count mismatch")
         fixed_offset = 0
         wave_sizes = []
@@ -602,11 +682,11 @@ class Collector:
                 *self._start_wave(specs, policy, reuse_encoded, worker_encoding),
                 completed_at=[None] * len(specs),
                 states=[None] * len(specs),
-                pending=set(
-                    range(
-                        (len(specs) + self.envs_per_worker - 1) // self.envs_per_worker
-                    )
-                ),
+                pending={
+                    w
+                    for w, offset in enumerate(self.worker_offsets)
+                    if offset < len(specs)
+                },
             )
             if self.reply_size:
                 self._partial_wave(policy, wave, worker_encoding, times)
