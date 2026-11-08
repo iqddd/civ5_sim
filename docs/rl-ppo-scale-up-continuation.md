@@ -25,7 +25,7 @@
 
 ## Выполнение и сохранение
 
-Конфиг `configs/rl-ppo-scale-up-continuation.json`, CLI `tools/run_ppo_scale_up.py --config ...`, результаты `artifacts/rl/ppo-scale-up-continuation/`. Родительский опыт не изменять.
+Конфиг `configs/rl-ppo-scale-up-continuation.json`, CLI `tools/run_ppo.py --config ...`, результаты `artifacts/rl/ppo-scale-up-continuation/`. Родительский опыт не изменять.
 
 Vast: `create --profile 4090 --parallel 2`, стандартные параметры профиля. Один снимок кода, минимальные входы и один run.json; durable remote-python-ssh с attach после обрыва. Перед запуском проверить загрузку и training streams, выполнить несколько Linux native replay-проверок. Full suite, resume-тесты и неизменённые rollback/CP-тесты не повторять.
 

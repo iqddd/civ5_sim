@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import statistics
 import subprocess
 import sys
@@ -12,9 +11,13 @@ from pathlib import Path
 from time import perf_counter
 
 import psutil
-from tune_rl_collection import collection_resources, stop_tree
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from tools._resources import collection_resources
+from tools._process import stop_tree
+
 ORDER = ("A", "B", "C", "C", "B", "A")
 MODES = {"A": ("ready", 8), "B": ("streaming", 8), "C": ("streaming", 80)}
 PRIORITY = int(psutil.ABOVE_NORMAL_PRIORITY_CLASS) if os.name == "nt" else 0
@@ -123,7 +126,6 @@ def main():
 
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=False)
-    shutil.copy2(__file__, out / "run_series.py")
     old = (
         ROOT / "artifacts/benchmarks/windows-streaming-refill-200/streaming-80-primary"
     )
@@ -137,6 +139,10 @@ def main():
     native_sha = sha(native)
     rows = []
     summary = {
+        "entrypoint": {
+            "path": Path(__file__).resolve().relative_to(ROOT).as_posix(),
+            "sha256": sha(Path(__file__).resolve()),
+        },
         "order": order,
         "modes": modes,
         "budget_seconds": 900,

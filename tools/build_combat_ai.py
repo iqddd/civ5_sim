@@ -5,10 +5,13 @@ The resulting planner does not link to the combat DLL or GameCore.
 """
 
 import os
-import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from tools._build_common import compile_shared
 
 
 def build(*, profile=False, dll_only=False):
@@ -41,86 +44,19 @@ def build(*, profile=False, dll_only=False):
     )
     include = source.parent
     library_name = "combat_ai_profile" if profile else "combat_ai"
-    profile_flags = "/DCAI_PROFILE " if profile else ""
-    if os.name == "nt":
-        vswhere = Path(
-            "C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-        )
-        vs = subprocess.check_output(
-            [
-                str(vswhere),
-                "-latest",
-                "-products",
-                "*",
-                "-requires",
-                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-                "-property",
-                "installationPath",
-            ],
-            text=True,
-        ).strip()
-        if not vs:
-            raise RuntimeError("Visual Studio C++ x64 Build Tools are required")
-        vcvars = Path(vs) / "VC/Auxiliary/Build/vcvars64.bat"
-        command = (
-            f'@call "{vcvars}" >nul\n'
-            f'@cl /nologo /std:c++17 /EHsc /O2 /LD /utf-8 /W4 {profile_flags}/I"{include}" /I"{out}" '
-            + " ".join(f'"{p}"' for p in [source, check, *common, *planner_sources])
-            + f' /link /OUT:{library_name}.dll /IMPLIB:{library_name}.lib\n@if errorlevel 1 exit /b %errorlevel%\n'
-            + f'@cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W4 /I"{include}" /I"{out}" '
-            + " ".join(f'"{p}"' for p in test_sources)
-            + ' /link /OUT:combat_ai_model_test.exe\n'
-            + '@if errorlevel 1 exit /b %errorlevel%\n'
-            + f'@cl /nologo /std:c++17 /EHsc /O2 /utf-8 /W4 /I"{include}" /I"{out}" '
-            + " ".join(f'"{p}"' for p in planner_tests)
-            + ' /link /OUT:combat_ai_planner_test.exe\n'
-        )
-        if dll_only:
-            command = command[:command.index("@cl", command.index("@cl") + 1)]
-        script = "compile_combat_ai_profile.cmd" if profile else "compile_combat_ai.cmd"
-        (out / script).write_text(command, encoding="utf-8")
-        subprocess.run(["cmd", "/c", script], cwd=out, check=True)
-    else:
-        subprocess.run(
-            [
-                "c++",
-                "-std=c++17",
-                "-O3",
-                "-fPIC",
-                "-shared",
-                "-Wall",
-                "-Wextra",
-                *(["-DCAI_PROFILE"] if profile else []),
-                "-I",
-                str(include),
-                "-I",
-                str(out),
-                str(source),
-                str(check),
-                *(str(p) for p in common),
-                *(str(p) for p in planner_sources),
-                "-o",
-                str(out / f"lib{library_name}.so"),
-            ],
-            check=True,
-        )
-        if dll_only:
-            print(f"Built {library_name}")
-            return
-        subprocess.run(
-            ["c++", "-std=c++17", "-O3", "-Wall", "-Wextra",
-             "-I", str(include), "-I", str(out),
-             *(str(p) for p in planner_tests),
-             "-o", str(out / "combat_ai_planner_test")],
-            check=True,
-        )
-        subprocess.run(
-            ["c++", "-std=c++17", "-O3", "-Wall", "-Wextra",
-             "-I", str(include), "-I", str(out),
-             *(str(p) for p in test_sources),
-             "-o", str(out / "combat_ai_model_test")],
-            check=True,
-        )
+    windows = os.name == "nt"
+    library = library_name + ".dll" if windows else "lib" + library_name + ".so"
+    suffix = ".exe" if windows else ""
+    executables = [] if dll_only else [
+        (out / ("combat_ai_model_test" + suffix), test_sources),
+        (out / ("combat_ai_planner_test" + suffix), planner_tests),
+    ]
+    compile_shared(
+        [source, check, *common, *planner_sources], out / library,
+        include_dirs=[include, out], defines=["CAI_PROFILE"] if profile else [],
+        executables=executables,
+        script_name="compile_combat_ai_profile.cmd" if profile else "compile_combat_ai.cmd",
+    )
     print(f"Built {library_name}" + (" and native checks" if not dll_only else ""))
 
 

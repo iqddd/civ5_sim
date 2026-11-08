@@ -5,71 +5,35 @@
 [Инвентарь инструментов](tools/README.md): общие команды в `tools/`,
 скрипты завершённых опытов — в `tools/archive/`.
 
-## RL-01: обучение агента
+## RL: обучение и операции
 
-Короткий диагностический цикл атак: [протокол D0/D1](docs/rl-diagnostic-protocol.md).
-Отдельная проверка выбора одного решающего действия:
-[D0-one-decision](docs/rl-d0-one-decision-protocol.md), запуск
-`tools/archive/run_rl_diagnostic.py --config configs/rl-diagnostic-one-decision.json`;
-результаты — `artifacts/rl/diagnostic-one-decision/report.md`.
-Отдельный [D1 с контролем PPO после каждого шага Adam](docs/rl-d1-transfer-protocol.md):
-`tools/archive/run_rl_diagnostic.py --config configs/rl-diagnostic-d1.json`;
-продолжение — та же команда с `--resume`, результаты — `artifacts/rl/diagnostic-d1/report.md`.
-Запуск: `tools/archive/run_rl_diagnostic.py`; продолжение — та же команда с `--resume`.
-Результаты — `artifacts/rl/diagnostic-results/report.md`. Подготовка без обучения:
-`tools/archive/run_rl_diagnostic.py --prepare-only`. Максимум два seed, 4+8 updates и
-30 минут обучения на seed; переходы только по заранее заданным dev-критериям.
-Команда не продолжает прежний пилот и не открывает финальные test-наборы.
+Реализация находится в модульном `civ5rl`; окружение обучения устанавливается
+из `requirements-rl.txt`. Обычный симулятор не импортирует PyTorch.
+Текущие [архитектура](docs/rl-architecture.md),
+[операции](docs/rl-operations.md) и [журнал экспериментов](docs/experiment-ledger.md)
+описывают поддерживаемые протоколы, CLI и результаты.
 
-Реализация: `civ5rl`, постановка — [RL-01](docs/rl-v1-spec.md),
-параметры — [конфигурация](configs/rl-v1.json). Отдельное окружение обучения
-устанавливается из `requirements-rl.txt`; обычный симулятор не импортирует PyTorch.
+- `tools/run_cp_imitation.py` — подготовка корпуса через `prepare-corpus` и фазы BC по конфигурации.
+- `tools/run_ppo.py` — единый PPO CLI с обязательным `--config`; pause/resume для поддерживаемых target-протоколов.
+- `tools/ctl_rl.py` — управление поддерживаемыми запусками, аудит, срезы, сравнение и performance.
+- `tools/bench_rl.py` — replay или полный цикл на фиксированных входах.
+- `tools/profile_rl_runtime.py` и `tools/tune_rl_collection.py` — профилирование и подбор collection.
+
+Подготовка корпуса без обучения требует явных путей и конфигурации генерации:
 
 ```powershell
-.venv\Scripts\python.exe tools\prepare_rl.py
-.venv\Scripts\python.exe tools\control_rl.py status --out artifacts\rl\training-result
-.venv\Scripts\python.exe tools\report_rl.py artifacts\rl\training-result
+.venv/Scripts/python.exe tools/run_cp_imitation.py prepare-corpus --config configs/rl-v1.json --out artifacts/rl/corpus --game "E:/civ5/Sid Meier's Civilization V" --workers 4
 ```
 
-Артефакты и сборки локальные: `artifacts/` и `build/` полностью исключены из Git.
-[Восстановленный минимум и расположение архивов](docs/local-artifacts.md);
-[локальный индекс результатов](artifacts/rl/README.md).
-Текущая конфигурация производительного сбора — `configs/rl-v1-throughput.json`.
-Для новых запусков указывайте отдельный `--out`; существующий результат защищён
-от перезаписи без явного resume.
+Старый общий пайплайн RL-01 удалён вместе с его отдельными CLI и архивным
+запускателем пилота. Историческая спецификация и диагностические протоколы
+остаются в документации; они не являются командами нового запуска.
+Сохранённые checkpoints и паспорта не переписываются ради нового кода.
 
-Полная последовательность smoke → benchmark → pilot → memory-dev:
-`tools/archive/run_rl01.py --out artifacts/rl-next-experiment`.
-Продолжение: `train_rl.py --phase pilot --out <тот же каталог> --resume <checkpoint.pt>`.
-Для фонового пилота: `tools/control_rl.py pause --out <каталог>` запрашивает
-остановку после сохранения текущего PPO update; `status` показывает состояние,
-`resume` продолжает из последнего checkpoint в фоне. Для вывода в текущую
-консоль добавьте `--foreground`. Сохраняются model, Adam, RNG и счётчики;
-`run-status.json` содержит PID/фазу, `latest.json` — последний целый checkpoint.
-При аварийном завершении теряется только незавершённое обновление.
-Агент в обычном JSON матча: `"rl:E:/civ5_sim/artifacts/rl/training-result/checkpoints/<checkpoint>.pt"`.
-Реплеи открываются через `tools/view_combat.py`.
-
-Во время обучения и оценки `resources.jsonl` раз в секунду записывает CPU/RAM
-системы и дерева процессов, VRAM, GPU Core Load, Memory Controller Load и мощность
-платы относительно штатного power limit. GPU-источник — NVIDIA NVML;
-WDDM D3D Usage не используется. Определения, единицы, недоступные поля и
-агрегаты сохранены рядом в `resources-schema.json` и `resources-summary.json`.
-GPU-показатели относятся ко всей плате. Test и diagnostic-test заблокированы
-в pilot; используются только validation и memory-dev.
-
-В RL-01 v1.4 включены `torch.compile(dynamic=True)` для энкодера/голов и AMP
-BF16 для GEMM четырёх hex-блоков. Входная projection, context и policy/value
-heads, GRU, её память, loss, веса и Adam остаются FP32 для устойчивого replay.
-PPO по-прежнему обновляется по 8 chunks, теперь в одном
-microbatch; rollout переиспользуется из VRAM. Нужен native BF16 и пакет
-`triton-windows` на Windows; CPU reference исполняется в eager FP32.
-`tools/profile_rl.py` сохраняет фиксированный rollout и cProfile workers;
-`tools/tune_rl.py --mode compiled --amp-bf16 --microbatch 8 --rollout <rollout.pt> --checkpoint <соответствующий-checkpoint.pt> --out <каталог>`
-сравнивает исполнение на тех же данных. Холодная компиляция учитывается отдельно.
-BF16 replay проверяется по полным записанным распределениям команд (KL и total
-variation); исходные old_logp не подменяются. Узкая миграция audit-ревизии
-сохраняет model/Adam/RNG и фиксирует lineage; обычный resume остаётся строгим.
+Артефакты и сборки локальные: `artifacts/` и `build/` исключены из Git.
+В `artifacts/` сохраняются данные, checkpoints, логи, метрики, графики и отчёты.
+Исходники инструментов там не создаются. GPU-телеметрия использует NVIDIA NVML;
+правила её интерпретации приведены в операторском справочнике.
 
 Генерация Пангеи, сохранение ландшафта, отбор участков 16×16 и локальный просмотрщик. Добавлено отдельное нативное ядро боя CP Only для воинов, лучников, лучников на колесницах, копейщиков и всадников: [правила, Python API и сценарии](docs/combat/combat.md).
 

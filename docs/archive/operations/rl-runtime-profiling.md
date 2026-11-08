@@ -224,7 +224,12 @@ Collection, решениями/с и фактическим размером/п�
 
 ## Сравнение машин: CP Serial, CP Parallel и Collection
 
-`tools/benchmark_rl_machine.py` запускает три отдельных бенчмарка без обучения.
+`tools/benchmark_rl_machine.py` отключён до доработки: все его собственные
+функции и CLI вызывают `NotImplementedError`. Серия v1 закрыта. Для подбора
+runtime используется `tools/tune_rl_collection.py`; команды benchmark ниже
+сохранены как история прежней методики.
+
+Прежняя реализация запускала три отдельных бенчмарка без обучения.
 CP Serial выполняет фиксированные бои в одном процессе, CP Parallel подбирает
 число CPU workers для тех же боёв. Collection использует существующий подборщик
 env/workers/reply и замороженные веса. Общего среднего балла нет: для аренды
@@ -413,7 +418,7 @@ CPU-порций, длительность завершения активных
 Для сопоставления ready 80/8/1 и streaming 80/8/1, 80/80/1 используйте:
 
 ```powershell
-.\.venv\Scripts\python.exe .\tools\compare_ready_streaming.py `
+.\.venv\Scripts\python.exe .\tools\archive\compare_ready_streaming.py `
   --out ("artifacts/benchmarks/ready-streaming-abc-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 ```
 
@@ -480,7 +485,7 @@ Count/sum/min/max точные для измеренных участков. CPU
 только при явном вызове**:
 
 ```powershell
-.venv/Scripts/python.exe tools/diagnose_rl_collection.py `
+.venv/Scripts/python.exe tools/archive/diagnose_rl_collection.py `
   --out artifacts/benchmarks/collector-diagnostics-12-80
 ```
 
@@ -505,7 +510,7 @@ peak RSS дерева. Это не доказательство эквивале
 эффект (CP wall/CPU, простой при pending-работе, очередь родителя или выигрыш 80):
 
 ```powershell
-.venv/Scripts/python.exe tools/diagnose_rl_collection.py `
+.venv/Scripts/python.exe tools/archive/diagnose_rl_collection.py `
   --out artifacts/benchmarks/collector-diagnostics-etw `
   --trace-reason "Необъяснённый разрыв CP wall/CPU"
 ```
@@ -540,7 +545,7 @@ Collector/Profiler теперь допускают неравномерное р
 
 ```powershell
 Set-Location E:\civ5_sim
-.\.venv\Scripts\python.exe .\tools\diagnose_rl_collection.py `
+.\.venv\Scripts\python.exe .\tools\archive\diagnose_rl_collection.py `
   --out ("artifacts/benchmarks/windows-receiver-etw-" + (Get-Date -Format "yyyyMMdd-HHmmss")) `
   --budget-seconds 300 `
   --trace-reason "Receiver delays: 12 versus 80 workers; batched Windows waits"

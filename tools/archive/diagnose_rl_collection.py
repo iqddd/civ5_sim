@@ -16,9 +16,12 @@ from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
-from tune_rl_collection import collection_resources, stop_tree
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 
-ROOT = Path(__file__).resolve().parents[1]
+from tools._resources import collection_resources
+from tools._process import stop_tree
+
 MODES = {
     "B0": (12, 0, 0),
     "B1": (12, 8, 0.005),

@@ -1,13 +1,14 @@
 """Owned ctypes handles for the SDK fractal and its shared map RNG."""
 
 import ctypes as C
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_library():
-    path = ROOT / "build/fractal.dll"
+    path = ROOT / "build" / ("fractal.dll" if os.name == "nt" else "libfractal.so")
     if not path.exists():
         raise RuntimeError("Run python tools/build_native.py first")
     lib = C.CDLL(str(path))

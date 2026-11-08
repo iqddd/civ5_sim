@@ -72,7 +72,7 @@ def benchmark(package, *, repeats=5, limit=24):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("package", type=Path)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--out", "--output", dest="output", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--limit", type=int, default=24)
     args = parser.parse_args()

@@ -44,8 +44,9 @@ Update 4 выделить в отчёте, если достигнут. D1, seed
 .venv\Scripts\python.exe tools/archive/run_rl_diagnostic.py --config configs/rl-diagnostic-one-decision.json --resume
 ```
 
-Результаты — `artifacts/rl/diagnostic-one-decision/`. Пауза/продолжение также
-поддерживаются `tools/control_rl.py` с `--out` на каталог нового seed-17.
+Результаты — `artifacts/rl/diagnostic-one-decision/`. Прежний `control_rl.py`
+удалён. Архивный runner принимает мягкую остановку через SIGINT и продолжает
+свою suite через показанный выше `--resume`.
 Сохраняются модель/Adam/RNG/счётчики, pending evaluation, метрики и телеметрия.
 
 Перед запуском проверить: выстрел +1, остальные команды 0; нет ответа врага

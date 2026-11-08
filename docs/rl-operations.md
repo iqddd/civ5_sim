@@ -6,6 +6,19 @@
 модели ищите в [журнале](experiment-ledger.md), устройство паспортов — в
 [архитектуре](rl-architecture.md#паспорта-исходники-и-resume).
 
+Общий пайплайн RL-01 и его отдельные CLI обучения, управления, оценки,
+профилирования и отчётов удалены. Текущие BC/PPO runners исполняют фазы своих
+протоколов; они не являются способом возобновить старый пилот с изменённым кодом.
+Для генерации корпуса служит отдельная фаза без обучения:
+
+```powershell
+python tools/run_cp_imitation.py prepare-corpus --config configs/rl-v1.json --out CORPUS_OUT --game GAME_DIRECTORY --workers 4
+```
+
+Она использует `corpus.parent_worlds` и параметры генерации из конфигурации,
+не запускает BC/PPO и не создаёт модель. Остальные фазы BC используют уже
+подготовленный corpus manifest.
+
 ## Анализ сохранённого запуска
 
 ```powershell
@@ -57,7 +70,7 @@ python tools/ctl_rl.py close --run RUN --reason "Research stopped at saved bound
 PPO resume удаляет запрос и продолжает сохранённые model/Adam/RNG/счётчики.
 У imitation нет общего безопасного pause-resume; специализированный старый
 input-fix restart нельзя считать таким продолжением. У target-scale PPO
-есть также собственные `pause`/`resume` в `tools/run_ppo_scale_up.py`.
+есть также собственные `pause`/`resume` в `tools/run_ppo.py`.
 Поддержку нужно выбирать по runner, а не только по наличию файла запроса.
 
 `wait-and-finalize` ждёт lock/status с конечным timeout и пишет производный

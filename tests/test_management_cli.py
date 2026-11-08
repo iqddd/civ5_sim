@@ -104,7 +104,7 @@ class ManagementTests(unittest.TestCase):
             ):
                 self.assertEqual(worker.main(), 7)
             command = execute.call_args.args[0]
-            self.assertEqual(command[1:3], ["tools/run_ppo_scale_up.py", "resume"])
+            self.assertEqual(command[1:3], ["tools/run_ppo.py", "resume"])
             self.assertEqual(execute.call_count, 1)
             for name, value in frozen.items():
                 self.assertEqual((run / name).read_bytes(), value)

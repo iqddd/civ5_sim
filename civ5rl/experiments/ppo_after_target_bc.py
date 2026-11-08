@@ -337,7 +337,7 @@ def initialize(config, out):
             for name in (
                 "civ5rl/experiments/ppo_after_target_bc.py",
                 "civ5rl/protocols/ppo_after_target_bc.py",
-                "tools/run_ppo_scale_up.py",
+                "tools/run_ppo.py",
             )
         },
         "source_commit": __import__("subprocess")

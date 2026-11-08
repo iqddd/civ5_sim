@@ -135,7 +135,7 @@ log-probabilities уже описывают распределение при T 
 Локальная проверка одного полного обновления сохраняется отдельно:
 
 ```powershell
-.venv/Scripts/python.exe tools/run_ppo_scale_up.py run --config configs/rl-ppo-target-bc-t05.json --out artifacts/rl/ppo-target-bc-t05-local-check --runtime-config artifacts/rl/ppo-target-bc-t05-launch/local-runtime.json --device cuda --max-updates 1
+.venv/Scripts/python.exe tools/run_ppo.py run --config configs/rl-ppo-target-bc-t05.json --out artifacts/rl/ppo-target-bc-t05-local-check --runtime-config artifacts/rl/ppo-target-bc-t05-launch/local-runtime.json --device cuda --max-updates 1
 ```
 
 `--max-updates` — операционная пауза на сохранённой границе без изменения

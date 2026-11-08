@@ -107,8 +107,8 @@ updates. В каждом rollout не менее 8192 решений с заве
 `python tools/archive/run_rl_diagnostic.py`; продолжение после прерывания:
 `python tools/archive/run_rl_diagnostic.py --resume`. Для подготовки только сценариев
 использовать `--prepare-only`. Все материалы — `artifacts/rl/diagnostic-results`.
-Остановка активного seed: `tools/control_rl.py pause --out <каталог seed>`;
-`resume` с тем же каталогом продолжает диагностическую suite.
+Прежний `control_rl.py` удалён. Архивный runner принимает мягкую остановку
+через SIGINT; его собственный `--resume` продолжает диагностическую suite.
 
 На ступень фиксируются 64 dev-расстановки и отдельные 128 train-расстановок.
 Admission не использует результаты policy. D0 проверяет все 1200 допустимых

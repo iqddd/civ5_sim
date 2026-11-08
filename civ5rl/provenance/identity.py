@@ -31,7 +31,11 @@ def is_readonly_source(path):
                     "tools/build_",
                 )
             )
-            or name == "tools/tactical_corpus.py"
+            or name in (
+                "tools/tactical_corpus.py",
+                "tools/_build_common.py",
+                "tools/_imitation_benchmark.py",
+            )
         )
     return False
 

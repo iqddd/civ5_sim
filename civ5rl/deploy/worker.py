@@ -99,7 +99,7 @@ def main():
                 )
             command = [
                 python,
-                "tools/run_ppo_scale_up.py",
+                "tools/run_ppo.py",
                 mode,
                 "--config",
                 request["config"],

@@ -169,11 +169,15 @@ def resume(source, boundary, *, search_config=None, diagnostics="off"):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
-    parser.add_argument("output", type=Path)
+    parser.add_argument("output", type=Path, nargs="?", help="Output directory (or use --out)")
+    parser.add_argument("--out", "--output", dest="output_option", type=Path)
     parser.add_argument("--after", type=int, required=True)
     parser.add_argument("--search-config", type=Path, required=True)
     parser.add_argument("--diagnostics", choices=("off", "compact", "full"), default="off")
     args = parser.parse_args()
+    if (args.output is None) == (args.output_option is None):
+        parser.error("provide exactly one output: positional directory or --out/--output")
+    args.output = args.output or args.output_option
     if args.output.exists():
         raise ValueError("Use a new output directory; existing replays are never replaced")
     settings = read(args.search_config)

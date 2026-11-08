@@ -204,6 +204,9 @@ Core, engine, protocols, simulator/map/native, provenance и смешанные 
 остаются закреплены. `experiments/evaluation.py` исполняет матчи и закреплён;
 чистый анализ сохранённых результатов вынесен в `reporting/evaluation_audit.py`.
 Training/data/match/build entrypoints также входят в execution identity.
+Из tools helpers отдельно закреплены `_build_common.py` и
+`_imitation_benchmark.py`: первый меняет сборку, второй создаёт демонстрации,
+используемые при обучении. Чистые измерительные helpers остаются вне identity.
 `passport_artifacts` не возвращает read-only файл в исполняемую роль.
 
 Редактирование или перенос текущего Markdown сами по себе не блокируют

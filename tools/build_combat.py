@@ -14,8 +14,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
-from build_native import extract
+sys.path.insert(0, str(ROOT))
+from tools._build_common import compile_shared, extract_cpp_function
 
 
 def build(cp, game):
@@ -35,7 +35,7 @@ def build(cp, game):
     plot = read(sdk / "CvPlot.cpp")
     read(sdk / "CvPlot.h")  # getVisibilityCount: CORE_DELAYED_VISIBILITY.
     targeting = read(sdk / "CvTargeting.cpp")
-    sight = extract(plot, "void CvPlot::changeAdjacentSight(")
+    sight = extract_cpp_function(plot, "void CvPlot::changeAdjacentSight(")
     ray = targeting[targeting.index("static int ms_LookBackX") :]
     (out / "cp_geometry.inc").write_text(sight + "\n" + ray, encoding="utf-8")
     for name in (
@@ -171,7 +171,7 @@ def build(cp, game):
     (out / "combat_rules.h").write_text(header, encoding="utf-8")
     # An isolated oracle compiles the actual CP damage function, independently
     # of the standalone implementation. This is a test export, never in hot paths.
-    reference = extract(
+    reference = extract_cpp_function(
         read(sdk / "CvUnitCombat.cpp"), "int CvUnitCombat::DoDamageMath("
     )
     reference = reference.replace("CvUnitCombat::DoDamageMath", "reference_damage")
@@ -185,55 +185,12 @@ def build(cp, game):
     oracle += '\n#ifdef _WIN32\n#define API extern "C" __declspec(dllexport)\n#else\n#define API extern "C"\n#endif\n'
     oracle += "API int cp_reference_damage(int a,int d,int roll) { return reference_damage(a,d,2400,1200,true,roll,0)/100; }\n"
     (out / "combat_reference.cpp").write_text(oracle, encoding="utf-8")
-    if os.name == "nt":
-        vswhere = Path(
-            "C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-        )
-        vs = subprocess.check_output(
-            [
-                str(vswhere),
-                "-latest",
-                "-products",
-                "*",
-                "-requires",
-                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-                "-property",
-                "installationPath",
-            ],
-            text=True,
-        ).strip()
-        if not vs:
-            raise RuntimeError("Visual Studio C++ x64 Build Tools are required")
-        vcvars = Path(vs) / "VC/Auxiliary/Build/vcvars64.bat"
-        command = (
-            f'@call "{vcvars}" >nul\n@cl /nologo /std:c++17 /EHsc /O2 /LD /utf-8 /W4 '
-            f'/I"{out}" "{ROOT / "native/combat.cpp"}" "{ROOT / "native/combat_state.cpp"}" "{ROOT / "native/geometry.cpp"}" '
-            "combat_reference.cpp "
-            "/link /OUT:combat.dll\n"
-        )
-        (out / "compile_combat.cmd").write_text(command, encoding="utf-8")
-        subprocess.run(["cmd", "/c", "compile_combat.cmd"], cwd=out, check=True)
-    else:
-        subprocess.run(
-            [
-                "c++",
-                "-std=c++17",
-                "-O3",
-                "-fPIC",
-                "-shared",
-                "-Wall",
-                "-Wextra",
-                "-I",
-                str(out),
-                str(ROOT / "native/combat.cpp"),
-                str(ROOT / "native/combat_state.cpp"),
-                str(ROOT / "native/geometry.cpp"),
-                str(out / "combat_reference.cpp"),
-                "-o",
-                str(out / "libcombat.so"),
-            ],
-            check=True,
-        )
+    library = "combat.dll" if os.name == "nt" else "libcombat.so"
+    compile_shared(
+        [ROOT / "native/combat.cpp", ROOT / "native/combat_state.cpp",
+         ROOT / "native/geometry.cpp", out / "combat_reference.cpp"],
+        out / library, include_dirs=[out], script_name="compile_combat.cmd",
+    )
     print(f"Built combat kernel; rules {fingerprint[:16]}; constants {constants}")
 
 

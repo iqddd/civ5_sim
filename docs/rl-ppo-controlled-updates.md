@@ -4,8 +4,9 @@
 > Это условия отдельного этапа, а не актуальный общий справочник; наличие плана не доказывает запуск.
 > Проверенные статусы и ограничения: [журнал](experiment-ledger.md); текущее устройство: [справочник](rl-architecture.md).
 
-2026-11-05. Отдельный протокол после ppo-after-imitation. Реализация:
-`tools/run_ppo_controlled_updates.py`, конфигурация:
+2026-11-05. Отдельный протокол после ppo-after-imitation. Текущий общий CLI:
+`python tools/run_ppo.py <phase> --config configs/rl-ppo-controlled-updates.json`.
+Отдельная дублирующая обёртка `run_ppo_controlled_updates.py` удалена. Конфигурация:
 `configs/rl-ppo-controlled-updates.json`. Статус и результаты запуска:
 `artifacts/rl/ppo-controlled-updates/`.
 

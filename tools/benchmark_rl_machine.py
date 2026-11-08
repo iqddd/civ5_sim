@@ -1,4 +1,11 @@
-"""Prepare a fixed CP/Collection workload and compare machines without training."""
+"""Machine benchmark disabled pending rework; all entrypoints raise NotImplementedError."""
+
+# TODO: Rework this benchmark before enabling any of its functions. The v1
+# series is closed. Separate runtime tuning from final machine measurements,
+# agree on the fixed workload/refill behavior, validate tuner completion and
+# GPU identity, and separate execution provenance from measurement provenance.
+# The former implementation is retained below for that rework, but every
+# module-defined entrypoint (including helpers and the CLI) is disabled.
 
 import argparse
 import hashlib
@@ -14,16 +21,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 
-from rl_collection_hardware import hardware
-from tune_rl_collection import (
-    _json,
-    _sha,
-    collection_resources,
-    initial_candidates,
-    stop_tree,
-)
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from tools.rl_collection_hardware import hardware
+from tools._common import write_json, file_sha256
+from tools._resources import collection_resources
+from tools._collection_tuning import initial_candidates
+from tools._process import stop_tree
+
 METHOD = "cp-collection-v1"
 TOOLS = (
     "benchmark_rl_machine.py",
@@ -33,23 +39,32 @@ TOOLS = (
     "rl_collection_hardware.py",
 )
 
+_REWORK_REASON = (
+    "benchmark_rl_machine requires rework and is disabled. "
+    "Use tools/tune_rl_collection.py for runtime tuning."
+)
+
 
 def read(path):
+    raise NotImplementedError(_REWORK_REASON)
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def fingerprint(value):
+    raise NotImplementedError(_REWORK_REASON)
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
 
 
 def text_sha(path):
+    raise NotImplementedError(_REWORK_REASON)
     # Git checkouts can use CRLF on Windows and LF on Linux.
     return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def source_hashes():
+    raise NotImplementedError(_REWORK_REASON)
     paths = [
         p
         for directory in ("civ5rl", "civ5sim", "native")
@@ -72,10 +87,12 @@ def source_hashes():
 
 
 def tool_hashes():
+    raise NotImplementedError(_REWORK_REASON)
     return {name: text_sha(ROOT / "tools" / name) for name in TOOLS}
 
 
 def chosen_collection(summary):
+    raise NotImplementedError(_REWORK_REASON)
     return next(
         (r for r in summary["results"] if r["candidate"] == summary["recommended"]),
         None,
@@ -83,12 +100,14 @@ def chosen_collection(summary):
 
 
 def collection_trials(summary, row):
+    raise NotImplementedError(_REWORK_REASON)
     if summary.get("selection_trials") == "all":
         return row["trials"]
     return row["confirmations"] or row["trials"]
 
 
 def validate_collection(summary, manifest):
+    raise NotImplementedError(_REWORK_REASON)
     if summary["episodes"] != manifest["episodes"]:
         raise ValueError("Collection used a different number of episodes")
     protected = set(summary["protected_inputs"].values())
@@ -114,6 +133,7 @@ def validate_collection(summary, manifest):
 
 
 def prepare(args):
+    raise NotImplementedError(_REWORK_REASON)
     sys.path.insert(0, str(ROOT))
     from civ5rl.config import load_config
     from civ5rl.experiments.ppo_artifacts import load_rollout
@@ -129,7 +149,7 @@ def prepare(args):
     # Keep original serialization; the fixed prefix is part of the manifest.
     shutil.copyfile(args.rollout, args.out / "rollout.pt")
     shutil.copyfile(args.checkpoint, args.out / "checkpoint.pt")
-    _json(args.out / "config.json", load_config(args.config))
+    write_json(args.out / "config.json", load_config(args.config))
     coverage = {}
     for label, extract in {
         "map_sizes": lambda ep: (
@@ -174,11 +194,11 @@ def prepare(args):
             ),
         },
         "files": {
-            name: _sha(args.out / name)
+            name: file_sha256(args.out / name)
             for name in ("config.json", "rollout.pt", "checkpoint.pt")
         },
         "config_input_hashes": sorted(
-            {_sha(args.config), text_sha(args.config), _sha(args.out / "config.json")}
+            {file_sha256(args.config), text_sha(args.config), file_sha256(args.out / "config.json")}
         ),
         "execution_sources": source_hashes(),
         "measurement_tools": tool_hashes(),
@@ -190,14 +210,14 @@ def prepare(args):
         row, signature = validate_collection(reference, manifest)
         manifest["collection_signature"] = signature
         manifest["collection_reference"] = {
-            "summary_sha256": _sha(args.collection_reference),
+            "summary_sha256": file_sha256(args.collection_reference),
             "median_seconds": row["median_seconds"],
             "preliminary": reference["preliminary"],
             "candidate": reference["recommended"],
         }
         manifest["collection_GPU_class"] = reference["hardware"].get("GPUs")
     manifest["workload_id"] = fingerprint(manifest)
-    _json(args.out / "manifest.json", manifest)
+    write_json(args.out / "manifest.json", manifest)
     print(
         json.dumps(
             {
@@ -211,6 +231,7 @@ def prepare(args):
 
 
 def verify_bundle(bundle):
+    raise NotImplementedError(_REWORK_REASON)
     manifest = read(bundle / "manifest.json")
     if manifest["method"] != METHOD:
         raise ValueError("Unsupported benchmark method")
@@ -220,7 +241,7 @@ def verify_bundle(bundle):
     ):
         raise ValueError("Bundle manifest was modified")
     for name, expected in manifest["files"].items():
-        if _sha(bundle / name) != expected:
+        if file_sha256(bundle / name) != expected:
             raise ValueError(f"Bundle file changed: {name}")
     if source_hashes() != manifest["execution_sources"]:
         raise ValueError("Execution sources differ; prepare a new workload version")
@@ -230,6 +251,7 @@ def verify_bundle(bundle):
 
 
 def summarize(trials, units, unit_name):
+    raise NotImplementedError(_REWORK_REASON)
     times = [t["seconds"] for t in trials]
     median = statistics.median(times)
     return {
@@ -244,6 +266,7 @@ def summarize(trials, units, unit_name):
 
 
 def run(args):
+    raise NotImplementedError(_REWORK_REASON)
     started = perf_counter()
     deadline = started + args.budget_seconds
     manifest = verify_bundle(args.bundle)
@@ -317,7 +340,7 @@ def run(args):
         report["preliminary"] = len(scores) < 3 or any(
             row["preliminary"] for row in scores.values()
         )
-        _json(args.out / "summary.json", report)
+        write_json(args.out / "summary.json", report)
         lines = [
             f"# {manifest['name']} — {args.machine_label or machine['CPU']}",
             "",
@@ -534,7 +557,7 @@ def run(args):
         if args.reuse_collection:
             collection = read(args.reuse_collection)
             frozen = manifest.get("collection_reference", {})
-            if _sha(args.reuse_collection) != frozen.get("summary_sha256"):
+            if file_sha256(args.reuse_collection) != frozen.get("summary_sha256"):
                 raise ValueError("Only the frozen Collection reference may be reused")
             for field in ("CPU", "cpu_affinity", "effective_cpu_budget", "platform"):
                 if collection["hardware"][field] != machine[field]:
@@ -605,7 +628,7 @@ def run(args):
                 args.price_per_hour * 1e6 / (3600 * result["decisions_per_second"])
             )
         report["benchmarks"]["collection"] = result
-        _json(args.out / "recommended-runtime.json", result["runtime"])
+        write_json(args.out / "recommended-runtime.json", result["runtime"])
     finally:
         try:
             verify_bundle(args.bundle)
@@ -616,6 +639,7 @@ def run(args):
 
 
 def compare(args):
+    raise NotImplementedError(_REWORK_REASON)
     reports = [read(path) for path in args.summaries]
     if len({r["workload_id"] for r in reports}) != 1:
         raise ValueError("Cannot compare different workload versions")
@@ -656,7 +680,7 @@ def compare(args):
         )
         rows.append(row)
     args.out.mkdir(parents=True, exist_ok=True)
-    _json(
+    write_json(
         args.out / "comparison.json",
         {"workload_id": baseline["workload_id"], "machines": rows},
     )
@@ -687,6 +711,7 @@ def compare(args):
 
 
 def main():
+    raise NotImplementedError(_REWORK_REASON)
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     create = sub.add_parser(

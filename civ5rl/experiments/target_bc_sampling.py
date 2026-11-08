@@ -46,7 +46,7 @@ def execution_identity():
         for package in ("civ5rl", "civ5sim", "civ5map")
         for p in (ROOT / package).rglob("*.py")
     ]
-    names.append(ROOT / "tools/evaluate_target_bc_sampling.py")
+    names.append(ROOT / "tools/archive/evaluate_target_bc_sampling.py")
     suffixes = (
         ("combat.dll", "combat_ai.dll")
         if sys.platform == "win32"

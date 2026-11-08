@@ -5,7 +5,7 @@
 > Проверенные статусы и ограничения: [журнал](experiment-ledger.md); текущее устройство: [справочник](rl-architecture.md).
 
 2026-11-05. Протокол ограниченного опыта. Конфигурация:
-`configs/rl-ppo-after-imitation.json`; CLI: `tools/run_ppo_after_imitation.py`
+`configs/rl-ppo-after-imitation.json`; CLI: `tools/run_ppo.py`
 с фазами prepare/train/evaluate/report/run. Результаты:
 `artifacts/rl/ppo-after-imitation/`. Итоговый статус отражается в локальном отчёте.
 

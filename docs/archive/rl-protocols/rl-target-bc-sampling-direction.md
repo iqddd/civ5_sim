@@ -112,9 +112,9 @@ manifest, mode/T, evaluator и seeds в небольшом run.json. Новый 
 Из корня проекта, в локальном Python-окружении:
 
 ```powershell
-.venv/Scripts/python.exe tools/evaluate_target_bc_sampling.py check
-.venv/Scripts/python.exe tools/evaluate_target_bc_sampling.py run
-.venv/Scripts/python.exe tools/evaluate_target_bc_sampling.py report
+.venv/Scripts/python.exe tools/archive/evaluate_target_bc_sampling.py check
+.venv/Scripts/python.exe tools/archive/evaluate_target_bc_sampling.py run
+.venv/Scripts/python.exe tools/archive/evaluate_target_bc_sampling.py report
 ```
 
 `check` проверяет входы и три сохранённых BC-logits без новых боёв. До первого

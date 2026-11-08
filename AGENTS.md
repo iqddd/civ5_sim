@@ -16,7 +16,7 @@
 
 - `artifacts/` is only for data, checkpoints, logs, JSON metrics, plots, and Markdown reports. It is an output/evidence directory, not a source-code directory.
 - Do not create `.py` files or other executable helpers under `artifacts/`, including experiment-specific audit, benchmark, packaging, or reporting scripts. Existing historical scripts do not justify adding more; do not alter frozen evidence merely to enforce this layout.
-- All new logic for auditing, benchmarking, Vast.ai packaging, or report generation must be exposed as a reusable subcommand of a CLI in `tools/`, except for the temporary scenarios described below. Extend an appropriate existing CLI rather than creating a separate helper for each run. Shared implementation may live in the appropriate project package; invoke it through the CLI.
+- All new logic for auditing, benchmarking, Vast.ai packaging, or report generation must be exposed as a reusable subcommand of a CLI in `tools/`, except for the temporary scenarios described below. Extend an appropriate existing CLI rather than creating a separate helper for each run. Shared implementation for these tools belongs under `tools/`; do not move it into training packages. For performance tooling, `civ5rl` only records low-level runtime data consumed by tools.
 - The only exception is a narrow, one-off scenario for a specific experiment: its script may live in `.tmp/`. Assume `.tmp/` can be cleared at any time. No durable workflow, resume path, or reproducibility claim may depend on its contents; save final data and reports in `artifacts/`.
 - If a temporary scenario becomes useful again, move its reusable logic into the normal package/`tools/` CLI structure rather than keeping a growing collection of temporary scripts.
 

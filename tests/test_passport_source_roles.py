@@ -25,7 +25,9 @@ class PassportSourceRoleTests(unittest.TestCase):
             "civ5rl/provenance/audit.py": "audit = 1\n",
             "tools/report_rl.py": "plot = 1\n",
             "tools/ctl_rl.py": "audit = 1\n",
-            "tools/run_ppo_scale_up.py": "training = 1\n",
+            "tools/run_ppo.py": "training = 1\n",
+            "tools/_build_common.py": "compiler = 1\n",
+            "tools/_imitation_benchmark.py": "demonstrations = 1\n",
             "tests/test_loss.py": "test = 1\n",
         }
         for name, text in names.items():
@@ -51,7 +53,9 @@ class PassportSourceRoleTests(unittest.TestCase):
                 "civ5rl/protocols/corpus.py",
                 "native/combat.cpp",
                 "civ5rl/experiments/evaluation.py",
-                "tools/run_ppo_scale_up.py",
+                "tools/run_ppo.py",
+                "tools/_build_common.py",
+                "tools/_imitation_benchmark.py",
             }
             self.assertEqual(files, protected)
             legacy = {

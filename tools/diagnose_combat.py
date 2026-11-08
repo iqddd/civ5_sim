@@ -253,7 +253,7 @@ def main():
     parser.add_argument("--repeat", action="store_true")
     parser.add_argument("--alternative", type=Path, help="JSON array of simulator commands")
     parser.add_argument("--reply", choices=("greedy",))
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--out", "--output", dest="output", type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists():
         parser.error("Output must be a new directory")

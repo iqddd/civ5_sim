@@ -3,7 +3,6 @@
 import argparse
 import json
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -12,6 +11,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+from tools._process import run_bounded
 
 from civ5sim import MatchConfig, run_match
 from civ5sim.agents import load_agent
@@ -31,40 +32,6 @@ from civ5sim.evaluation import (
     write_json,
     write_report,
 )
-
-
-def run_bounded(command, timeout):
-    """Kill the entire worker tree, including Windows venv redirectors."""
-    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               text=True, start_new_session=os.name != "nt")
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        try:
-            if os.name == "nt":
-                killed = subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                                        capture_output=True, check=False, timeout=5)
-                if killed.returncode and process.poll() is None:
-                    raise OSError(f"taskkill failed: {killed.stderr!r}")
-            else:
-                os.killpg(process.pid, signal.SIGKILL)
-            process.communicate(timeout=5)
-        except (OSError, subprocess.TimeoutExpired) as cleanup:
-            if process.poll() is None:
-                process.kill()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    pass
-            # Abort the benchmark: an unconfirmed tree termination invalidates
-            # subsequent latency samples. Avoid Popen.__exit__'s unbounded wait.
-            raise WorkerCleanupError(f"Could not confirm worker-tree termination: {cleanup}") from cleanup
-        raise
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-
-
-class WorkerCleanupError(Exception):
-    """Fatal benchmark error: do not continue timing with a surviving worker."""
 
 
 def worker(args, suite):

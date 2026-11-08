@@ -26,7 +26,7 @@ PPO сохраняет behavior replay перед каждым rollout update и
 
 Отчёт включает исходный перенос, динамику, срезы, дополнительный paired bootstrap (10 000, seed 20261103, parent-world), контроль старого навыка, урон/потери/длительность/причины ничьих, бюджет и NVML. Первые три штатных rollout дают ETA. Сохранять initial, лучший, последний, оценённые checkpoints и последние две границы, первый/последний компактные rollout, метрики попыток и ошибки; проверить характерные реплеи.
 
-Результаты — artifacts/rl/ppo-target-scale. CLI: tools/run_ppo_scale_up.py с --config configs/rl-ppo-target-scale.json, фазы prepare/train/evaluate/report/run. Никакой аренды, других seeds, подбора параметров, нового BC, закрытого test или автоматического продления. Full suite, resume-тесты и неизменённые rollback/CP-проверки не повторять. Применять GPU-политику AGENTS без отдельной кампании оптимизации.
+Результаты — artifacts/rl/ppo-target-scale. CLI: tools/run_ppo.py с --config configs/rl-ppo-target-scale.json, фазы prepare/train/evaluate/report/run. Никакой аренды, других seeds, подбора параметров, нового BC, закрытого test или автоматического продления. Full suite, resume-тесты и неизменённые rollback/CP-проверки не повторять. Применять GPU-политику AGENTS без отдельной кампании оптимизации.
 
 ## Пауза и перенос на RTX 4090
 

@@ -26,7 +26,7 @@ from civ5sim import Battle
 from civ5sim import combat_ai as ai
 from civ5sim.engine import UNIT_TYPES, digest
 from civ5sim.evaluation import process_memory, synthetic_map, write_json
-from tools.benchmark_combat_ai import run_bounded
+from tools._process import run_bounded
 from tools.tactical_corpus import fresh_cases, replay_plan
 
 DEFAULT_OUT = ROOT / "artifacts/combat-ai/storage-transfer-20261102"

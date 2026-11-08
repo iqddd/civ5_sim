@@ -11,7 +11,8 @@ from pathlib import Path
 from time import perf_counter
 
 ROOT = Path(__file__).resolve().parents[1]
-from rl_collection_hardware import hardware
+sys.path.insert(0, str(ROOT))
+from tools.rl_collection_hardware import hardware
 
 
 def behavior_hash(episodes):
@@ -489,7 +490,7 @@ def main():
                     }
             else:
                 if args.cpu_benchmark:
-                    from rl_cpu_replay import CPUReplay
+                    from tools.rl_cpu_replay import CPUReplay
 
                     monitor.mark("verification")
                     tick = perf_counter()

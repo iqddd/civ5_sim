@@ -4,21 +4,14 @@ import argparse
 import hashlib
 import json
 import re
-import subprocess
+import os
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
-
-def extract(text, signature):
-    start = text.index(signature)
-    opening = text.index("{", start)
-    depth = 1
-    end = opening + 1
-    while depth:
-        depth += (text[end] == "{") - (text[end] == "}")
-        end += 1
-    return text[start:end]
+from tools._build_common import compile_shared, extract_cpp_function
 
 
 def build(sdk):
@@ -67,13 +60,17 @@ public:
 """
     utils = "\n".join(
         [
-            extract(source["CvGameCoreUtils.h"], "inline int xToHexspaceX("),
-            extract(source["CvGameCoreUtils.h"], "inline int hexDistance("),
-            extract(source["CvGameCoreUtils.cpp"], "DirectionTypes estimateDirection("),
+            extract_cpp_function(source["CvGameCoreUtils.h"], "inline int xToHexspaceX("),
+            extract_cpp_function(source["CvGameCoreUtils.h"], "inline int hexDistance("),
+            extract_cpp_function(source["CvGameCoreUtils.cpp"], "DirectionTypes estimateDirection("),
         ]
     )
     exports = """
+#ifdef _WIN32
 #define API extern "C" __declspec(dllexport)
+#else
+#define API extern "C"
+#endif
 API CvRandom* rng_new(uint32_t seed) { return new CvRandom(seed); }
 API void rng_free(CvRandom* r) { delete r; }
 API int rng_get(CvRandom* r, int n) { return r->get((unsigned short)n, "standalone"); }
@@ -88,30 +85,8 @@ API void frac_ridges(CvFractal* f,CvRandom* r,int n,int flags,int a,int b) { f->
     (out / "fractal.cpp").write_text(
         prelude + utils + "\n" + header + "\n" + cpp + exports, encoding="utf-8"
     )
-    vswhere = Path(
-        "C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-    )
-    vs = subprocess.check_output(
-        [
-            str(vswhere),
-            "-latest",
-            "-products",
-            "*",
-            "-requires",
-            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-            "-property",
-            "installationPath",
-        ],
-        text=True,
-    ).strip()
-    if not vs:
-        raise RuntimeError("Visual Studio C++ x64 build tools are required")
-    vcvars = Path(vs) / "VC/Auxiliary/Build/vcvars64.bat"
-    (out / "compile.cmd").write_text(
-        f'@call "{vcvars}" >nul\n@cl /nologo /std:c++17 /EHsc /O2 /LD /utf-8 fractal.cpp /link /OUT:fractal.dll\n',
-        encoding="utf-8",
-    )
-    subprocess.run(["cmd", "/c", "compile.cmd"], cwd=out, check=True)
+    library = "fractal.dll" if os.name == "nt" else "libfractal.so"
+    compile_shared([out / "fractal.cpp"], out / library, script_name="compile.cmd")
     manifest = {
         "sdk": str(sdk.resolve()),
         "sources": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths},

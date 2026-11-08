@@ -99,7 +99,7 @@ def main():
     restore = sub.add_parser("restore")
     restore.add_argument("manifest", type=Path)
     restore.add_argument("original_path", help="Path recorded in the evidence manifest")
-    restore.add_argument("--output", type=Path, required=True)
+    restore.add_argument("--out", "--output", dest="output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "verify":
         result = verify_manifest(args.manifest)
