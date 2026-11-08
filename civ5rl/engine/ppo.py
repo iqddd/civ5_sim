@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from civ5rl.core.context import context_from_spec
+from civ5rl.core.distributions import policy_logits
 from civ5rl.core.model import batch_inputs, distribution_stats
 from civ5rl.core.observation import ObservationEncoder
 from civ5rl.engine.constants import DEFAULT_PREFIX_BLOCK_SIZE
@@ -64,8 +65,9 @@ def objective(
     *,
     clip_ratio=0.2,
     value_coefficient=0.5,
+    temperature=1.0,
 ):
-    logp, entropy, normalized_entropy = distribution_stats(logits, indices)
+    logp, entropy, normalized_entropy = distribution_stats(policy_logits(logits, temperature), indices)
     ratio = (logp - old_logp).exp()
     policy = -torch.minimum(
         ratio * advantages, ratio.clamp(1 - clip_ratio, 1 + clip_ratio) * advantages

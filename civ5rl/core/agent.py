@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from civ5rl.core.contracts import AgentContext
+from civ5rl.core.distributions import policy_logits, validate_temperature
 from civ5rl.core.model import Policy, batch_inputs
 from civ5rl.core.observation import ObservationEncoder, ordered_actions
 from civ5rl.core.variants import PolicyVariant
@@ -15,10 +16,8 @@ from civ5rl.provenance.common import choose
 
 def action_probabilities(logits, temperature=1.0):
     """Keep the T=1 FP32 softmax path; temperature never changes legal masks."""
-    if not math.isfinite(temperature) or temperature <= 0:
-        raise ValueError("Temperature must be finite and positive")
-    logits = logits.float()
-    return (logits if temperature == 1 else logits / temperature).softmax(-1)
+    validate_temperature(temperature)
+    return policy_logits(logits, temperature).softmax(-1)
 
 
 class RLAgent:

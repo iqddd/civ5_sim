@@ -7,7 +7,12 @@ KIND = "rl01.ppo_after_target_bc"
 
 
 def validate_profile(config):
-    expected = resolve_config(ROOT / "configs/rl-ppo-after-target-bc.json")
+    profile = (
+        "rl-ppo-target-bc-t05.json"
+        if config.get("policy_temperature", 1) == 0.5
+        else "rl-ppo-after-target-bc.json"
+    )
+    expected = resolve_config(ROOT / "configs" / profile)
     if config != expected:
         raise ValueError(
             "Configuration differs from the fixed PPO-after-target-BC profile"

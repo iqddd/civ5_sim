@@ -768,6 +768,13 @@ def evaluate(config, out, parent, data, manifest, workers):
 def run(phase, config, out, workers, device):
     if phase not in ("prepare", "collect", "train", "evaluate", "report"):
         raise ValueError("Unsupported expanded-data phase")
+    if phase == "report" and (out / "passport.json").exists():
+        manifest = read_json(out / "manifest.json")
+        checkpoint.verify_frozen_passport(out, config=config, manifest=manifest)
+        return report(
+            config, out, ROOT / config["more_data"]["parent_run"],
+            ROOT / config["more_data"]["data_run"], manifest,
+        )
     parent, data, manifest, identity = initialize(config, out)
     start = perf_counter()
     try:

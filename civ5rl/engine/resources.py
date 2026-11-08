@@ -7,6 +7,7 @@ import time
 from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
+from uuid import uuid4
 
 import psutil
 
@@ -38,10 +39,34 @@ class ResourceMonitor:
         self.summary = {}
         self.samples = 0
         self.gpu_index = gpu_index
+        self.session_id = uuid4().hex
+        self.phase_stream = None
 
     def mark(self, phase, **state):
         with self.lock:
+            keys = ("phase", "rollout", "update", "epoch")
+            previous = tuple(self.state.get(key) for key in keys)
             self.state.update(phase=phase, **state)
+            # Collection reports decision progress very frequently. Only write
+            # phase/cycle transitions; progress remains in the sampled state.
+            if tuple(self.state.get(key) for key in keys) != previous:
+                self._phase_event()
+
+    def _phase_event(self):
+        if self.phase_stream is not None:
+            self.phase_stream.write(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "session_id": self.session_id,
+                        "timestamp_utc": datetime.now(UTC).isoformat(),
+                        "elapsed_seconds": time.monotonic() - self.started,
+                        **self.state,
+                    },
+                    allow_nan=False,
+                )
+                + "\n"
+            )
 
     def _query(self, name, function):
         try:
@@ -65,6 +90,11 @@ class ResourceMonitor:
         self.stream = (self.directory / "resources.jsonl").open(
             "a", encoding="utf-8", buffering=1
         )
+        self.phase_stream = (self.directory / "phases.jsonl").open(
+            "a", encoding="utf-8", buffering=1
+        )
+        with self.lock:
+            self._phase_event()
         metadata = {
             "schema": 1,
             "gpu_source": "NVIDIA NVML",
@@ -77,6 +107,7 @@ class ResourceMonitor:
             "interval_seconds": self.interval,
             "logical_cpus": psutil.cpu_count(),
             "unavailable": "null plus errors; no D3D fallback",
+            "phase_events": "phases.jsonl: exact monotonic transitions per session",
         }
         if self.gpu:
             nvml = self.nvml
@@ -112,6 +143,7 @@ class ResourceMonitor:
             "schema": 1,
             "timestamp_utc": datetime.now(UTC).isoformat(),
             "elapsed_seconds": time.monotonic() - self.started,
+            "session_id": self.session_id,
             **state,
             "cpu_system_percent": psutil.cpu_percent(None),
             "cpu_tree_percent": cpu,
@@ -189,6 +221,11 @@ class ResourceMonitor:
     def close(self):
         self.stop_event.set()
         self.thread.join(timeout=10)
+        with self.lock:
+            self.state.update(phase="stopped")
+            self._phase_event()
+            self.phase_stream.close()
+            self.phase_stream = None
         self.stream.close()
         write_json(
             self.directory / "resources-summary.json",
@@ -209,6 +246,61 @@ class ResourceMonitor:
 
     def __exit__(self, *_):
         self.close()
+
+
+def integrate_gpu_interval(samples, start_elapsed, stop_elapsed, *, session_id,
+                           sample_interval=1.0, phase_events=None, active_phase=None):
+    """Integrate sample-and-hold NVML load in one session's elapsed clock.
+
+    Bounds and phase events use seconds since ResourceMonitor.start(), not UTC,
+    perf_counter, or an absolute monotonic timestamp. Never bridge a session,
+    missing value, or sampling gap. Events split samples at exact transitions;
+    absent events, sampled phase labels give approximate boundaries.
+    """
+    if stop_elapsed <= start_elapsed or sample_interval <= 0:
+        raise ValueError("Expected positive interval and sample interval")
+    rows = list(samples)
+    events = sorted(
+        (e for e in (phase_events or []) if e.get("session_id") == session_id),
+        key=lambda e: e["elapsed_seconds"],
+    )
+    covered = busy = 0.0
+    for a, b in pairwise(rows):
+        if a.get("session_id") != session_id or b.get("session_id") != session_id:
+            continue
+        left, right = a["elapsed_seconds"], b["elapsed_seconds"]
+        if not 0 < right - left <= max(5, 3 * sample_interval):
+            continue
+        value = a.get("gpu_core_load_percent")
+        if value is None:
+            continue
+        low, high = max(left, start_elapsed), min(right, stop_elapsed)
+        if high <= low:
+            continue
+        points = [low, *(e["elapsed_seconds"] for e in events
+                         if low < e["elapsed_seconds"] < high), high]
+        for begin, end in pairwise(points):
+            preceding = [e for e in events if e["elapsed_seconds"] <= begin]
+            phase = preceding[-1]["phase"] if preceding else (
+                None if events else a.get("phase")
+            )
+            if active_phase is not None and phase != active_phase:
+                continue
+            duration = end - begin
+            covered += duration
+            busy += duration * value / 100
+    duration = stop_elapsed - start_elapsed
+    return {
+        "interval_seconds": duration,
+        "covered_seconds": covered,
+        # This denominator includes any phases filtered out by active_phase.
+        "coverage_fraction": covered / duration,
+        "coverage_denominator": "entire_query_interval_including_excluded_phases",
+        "estimated_busy_seconds": busy if covered else None,
+        "estimated_idle_seconds": covered - busy if covered else None,
+        "gpu_core_load_percent_mean": 100 * busy / covered if covered else None,
+        "phase_boundaries": "events" if events else "sampled",
+    }
 
 
 def analyze_telemetry(jsonl_path, active_phase="iterative_training", window=60):

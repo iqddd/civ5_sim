@@ -53,7 +53,7 @@ def current_parent_lineage(parent, config, manifest, allowed, *, same_corpus=Fal
 
 
 def verify_existing_run(out, config, current):
-    identity = read_json(out / "passport.json")
+    identity = checkpoint.verify_frozen_passport(out, config=config)
     if read_json(
         out / "resolved-config.json"
     ) != config or not checkpoint.same_execution_identity(identity, current):

@@ -1083,6 +1083,11 @@ def report(config, out, parent):
 def run(phase, config, out, workers, device, cycle=None):
     if workers != 4:
         raise ValueError("Own-state protocol requires four workers")
+    if phase == "report" and (out / "passport.json").exists():
+        checkpoint.verify_frozen_passport(
+            out, config=config, manifest=read_json(out / "manifest.json")
+        )
+        return report(config, out, ROOT / config["own_states"]["parent_run"])
     parent, plan, identity = initialize(config, out)
     if phase in ("collect", "train", "evaluate") and cycle not in (1, 2):
         raise ValueError("Own-state phase requires --cycle 1 or 2")

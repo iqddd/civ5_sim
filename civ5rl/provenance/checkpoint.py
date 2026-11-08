@@ -10,12 +10,12 @@ import zipfile
 from pathlib import Path
 
 from civ5rl.provenance.common import ROOT, write_json
-from civ5rl.provenance.identity import execution_identity
+from civ5rl.provenance.identity import execution_identity, is_readonly_source
 from civ5rl.provenance.rng import capture_rng, restore_rng
 
 
 def same_execution_identity(left, right):
-    """Keep Markdown in snapshots, but compare executable experiment identity."""
+    """Compare execution identity, ignoring documentation and read-only tooling."""
 
     left = {**left, "source_hashes": left.get("source_hashes", {})}
     right = {**right, "source_hashes": right.get("source_hashes", {})}
@@ -42,7 +42,7 @@ DEFAULT_ARTIFACT_GLOBS = (
 
 
 def artifact_sources(config):
-    """Discover the default snapshot and optional workspace-relative artifacts."""
+    """Discover execution sources; read-only tooling never pins a training run."""
     extra = config.get("passport_artifacts", [])
     if not isinstance(extra, list) or not all(isinstance(p, str) for p in extra):
         raise ValueError("passport_artifacts must be a list of relative glob patterns")
@@ -56,7 +56,8 @@ def artifact_sources(config):
             if path.is_file():
                 if not path.resolve().is_relative_to(ROOT.resolve()):
                     raise ValueError("Passport artifact resolves outside the workspace")
-                sources.add(path)
+                if not is_readonly_source(path.relative_to(ROOT).as_posix()):
+                    sources.add(path)
     return sorted(sources, key=lambda p: p.relative_to(ROOT).as_posix())
 
 
@@ -87,6 +88,9 @@ def passport(directory, config, manifest):
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
         ).strip(),
         "source_hashes": hashes,
+        "config_hash": hashlib.sha256(
+            json.dumps(config, sort_keys=True).encode()
+        ).hexdigest(),
         "corpus_hash": hashlib.sha256(
             json.dumps(manifest, sort_keys=True).encode()
         ).hexdigest(),
@@ -109,6 +113,67 @@ def passport(directory, config, manifest):
         encoding="utf-8",
     )
     return value
+
+
+def verify_frozen_passport(directory, *, config=None, manifest=None):
+    """Verify saved provenance without importing or hashing the working tree.
+
+    All archived hashes are checked, including reporting files in old passports.
+    Historical passports/archives are never rewritten to match today's policy.
+    This establishes artifact integrity, not permission to resume on new code.
+    """
+    directory = Path(directory)
+    saved_config = json.loads(
+        (directory / "resolved-config.json").read_text(encoding="utf-8")
+    )
+    corpus_path = directory / "corpus-manifest.json"
+    if not corpus_path.exists():
+        # Some historical runs retained only manifest.json. It is acceptable
+        # only if its complete content matches the passport's corpus digest.
+        corpus_path = directory / "manifest.json"
+    saved_manifest = json.loads(corpus_path.read_text(encoding="utf-8"))
+    identity = json.loads((directory / "passport.json").read_text(encoding="utf-8"))
+    if (
+        "config_hash" in identity
+        and identity["config_hash"]
+        != hashlib.sha256(json.dumps(saved_config, sort_keys=True).encode()).hexdigest()
+    ):
+        raise ValueError("Saved configuration hash differs")
+    if config is not None and config != saved_config:
+        raise ValueError("Saved experiment configuration differs")
+    if manifest is not None and manifest != saved_manifest:
+        raise ValueError("Saved experiment manifest differs")
+    corpus_hash = hashlib.sha256(
+        json.dumps(saved_manifest, sort_keys=True).encode()
+    ).hexdigest()
+    if identity["corpus_hash"] != corpus_hash:
+        raise ValueError("Saved corpus manifest hash differs")
+    expected = identity["source_hashes"]
+    with zipfile.ZipFile(directory / "sources.zip") as archive:
+        members = archive.infolist()
+        names = [item.filename for item in members]
+        if len(names) != len(set(names)) or set(names) != set(expected):
+            raise ValueError("Saved source archive membership differs")
+        for name in names:
+            if "\\" in name or Path(name).is_absolute() or ".." in Path(name).parts:
+                raise ValueError("Unsafe path in saved source archive")
+            with archive.open(name) as stream:
+                checksum = hashlib.file_digest(stream, "sha256").hexdigest()
+            if checksum != expected[name]:
+                raise ValueError(f"Saved source archive corrupted: {name}")
+    return identity
+
+
+def verify_execution_passport(directory, config, manifest):
+    """Check frozen evidence first, then require the current execution identity."""
+    import tempfile
+
+    frozen = verify_frozen_passport(directory, config=config, manifest=manifest)
+    with tempfile.TemporaryDirectory(prefix="civ5-identity-") as temporary:
+        current = passport(temporary, config, manifest)
+    if not same_execution_identity(frozen, current):
+        raise ValueError("Training source/corpus/environment identity changed")
+    return frozen
 
 
 def save(path, policy, optimizer, state, shuffle_rng, config, identity):

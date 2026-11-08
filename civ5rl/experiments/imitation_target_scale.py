@@ -18,7 +18,7 @@ import torch
 from torch.nn import functional as F
 
 from civ5rl.config import load_config as resolve_config
-from civ5rl.engine.control import RunLock
+from civ5rl.engine.control import RunLock, assert_not_closed, pause_due
 from civ5rl.engine.imitation import decision_indices, label_minibatches
 from civ5rl.engine.imitation_performance import backward_minibatch_async
 from civ5rl.engine.imitation_stream import PreparedDemonstrations, prepare_inputs
@@ -404,6 +404,12 @@ def train(config,plan,out):
             write_json(out/'training.json',{'status':'running','epochs':history,'Adam_steps':steps,
                 'free_labels_processed':labels,'active_seconds':clock.seconds(),'latest':last_path,
                 'cache':cache.statistics(),'microbatch':selected})
+            if completed and records and pause_due(out,'epoch',epoch):
+                write_json(out/'training.json',{'status':'paused','epochs':history,'Adam_steps':steps,
+                    'free_labels_processed':labels,'active_seconds':clock.seconds(),'latest':last_path})
+                write_json(out/'status.json',{'status':'paused','checkpoint':last_path})
+                cache.clear();fixed.clear()
+                return
             if terminal:break
         # A budget boundary between epochs must also evaluate the last changed policy.
         if steps:
@@ -523,6 +529,10 @@ def run(phase,config,out,workers,device):
     if workers!=4 or device!='cuda':raise ValueError('This experiment uses four CPU workers and local CUDA')
     if phase not in ('prepare','collect','train','evaluate','report','run'):raise ValueError('Unsupported target BC phase')
     with RunLock(out):
+        if phase in ('train','run'):assert_not_closed(out)
+        if (phase in ('train','run') and (out/'training.json').exists()
+                and read_json(out/'training.json').get('status')=='paused'):
+            raise ValueError('Paused BC boundary needs an explicit restart procedure; automatic resume is unavailable')
         try:
             plan=prepare(config,out)
             if (out/'status.json').exists() and read_json(out/'status.json')['status']=='complete':
@@ -533,6 +543,7 @@ def run(phase,config,out,workers,device):
                 write_json(out/'status.json',{'status':'collection_complete'})
             if phase in ('train','run'):
                 write_json(out/'status.json',{'status':'training'});train(config,plan,out)
+                if read_json(out/'status.json')['status']=='paused':return
                 write_json(out/'status.json',{'status':'training_complete'})
             if phase in ('evaluate','run'):
                 write_json(out/'status.json',{'status':'evaluating'});evaluate(config,plan,out)

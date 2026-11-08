@@ -18,6 +18,7 @@ from civ5rl.core.contracts import (
     WorkerPayload,
     WorkerState,
 )
+from civ5rl.core.distributions import policy_logits, validate_temperature
 from civ5rl.core.observation import ObservationEncoder
 from civ5rl.engine.worker import worker as _worker
 from civ5rl.provenance.common import choose
@@ -28,10 +29,11 @@ WORKER_TIMEOUT_SECONDS = 300
 class EpisodeBuilder:
     """Accumulate one episode while preserving the learner's dictionary format."""
 
-    def __init__(self, spec: ScenarioSpec, variant, reuse_encoded, hidden_size):
+    def __init__(self, spec: ScenarioSpec, variant, reuse_encoded, hidden_size, temperature=1.0):
         self.reuse_encoded = reuse_encoded
         self.hidden_size = hidden_size
         self.episode: Episode = {
+            "policy_temperature": temperature,
             "spec": spec,
             "observations": [],
             "actions": [],
@@ -118,6 +120,7 @@ class Collector:
 
         validate_config(config)
         self.config, self.factory, self.device = config, factory, device
+        self.temperature = validate_temperature(config.get("policy_temperature", 1.0))
         self.error_dir = error_dir
         self.workers = []
         self.shared = []
@@ -356,7 +359,7 @@ class Collector:
                 )
                 cuda_events[0].record()
             logits, critic_values, next_hidden = policy(batch, h)
-            pieces = [logits.log_softmax(-1), critic_values[:, None]]
+            pieces = [policy_logits(logits, self.temperature).log_softmax(-1), critic_values[:, None]]
             if h is not None:
                 pieces.append(h[0])
             # One D2H synchronization per inference batch, including diagnostic h.
@@ -462,6 +465,7 @@ class Collector:
                 policy.variant,
                 reuse_encoded,
                 policy.hidden_size if policy.is_recurrent else 0,
+                self.temperature,
             )
             for s in specs
         ]

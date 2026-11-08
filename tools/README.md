@@ -40,6 +40,14 @@ Python-инструментов и `combat_viewer.html`, ресурс просм
 дублирующий скрипт в `tools/` не нужен. `combat_viewer.html` загружается
 `view_combat.py`, поэтому остаётся рядом с ним.
 
+## Управление опытами
+
+| Инструмент | Назначение |
+|---|---|
+| [ctl_rl.py](ctl_rl.py) | Основной CLI управления и анализа сохранённых опытов: snapshot, performance, audit, compare, request-pause, close, wait-and-finalize. |
+| [remote_rl.py](remote_rl.py) | Зафиксированный deployment на готовом инстансе: package, launch, status, pull. Аренда остаётся во внешнем навыке Vast.ai. |
+| [bench_rl.py](bench_rl.py) | Benchmark пайплайна и replay ABBA с `--compare-git-rev`. |
+
 ## Подготовка, обучение и оценка RL/BC
 
 | Инструмент | Назначение |

@@ -1,0 +1,12 @@
+{
+  "base_config": "configs/rl-ppo-after-target-bc.json",
+  "kind": "rl01.ppo_after_target_bc",
+  "output": "artifacts/rl/ppo-target-bc-t05",
+  "policy_temperature": 0.5,
+  "experiment": {
+    "training_namespace": "ppo_target_bc_t05_train_v1",
+    "shuffle_namespace": "ppo_target_bc_t05_shuffle_v1",
+    "critic_namespace": "ppo_target_bc_t05_critic_v1",
+    "protocol": "docs/rl-ppo-target-bc-t05-direction.md"
+  }
+}

@@ -15,7 +15,13 @@ from torch.nn import functional as F
 from civ5rl.core.model import batch_inputs
 from civ5rl.engine.collector import Collector
 from civ5rl.engine.constants import DEFAULT_PINNED_REPLAY_BYTES
-from civ5rl.engine.control import RunLock
+from civ5rl.engine.control import (
+    RunLock,
+    assert_not_closed,
+    pause_due,
+    target_bc_evaluation_due,
+)
+from civ5rl.engine.performance import performance_markdown, summarize_performance
 from civ5rl.engine.ppo import encode_episode, targets, update
 from civ5rl.engine.ppo_fast import BatchedBackend
 from civ5rl.engine.resources import ResourceMonitor
@@ -65,6 +71,7 @@ def critic_statistics(predictions, returns):
         "prediction_mean": float(predictions.mean()),
         "return_mean": float(returns.mean()),
         "mse": float(np.mean(residual**2)),
+        "constant_return_mean_mse": float(np.mean((returns - returns.mean())**2)),
         "explained_variance": float(1 - residual.var() / variance)
         if variance > 0
         else None,
@@ -417,10 +424,8 @@ def skipped_metrics(reason):
     }
 
 
-def train(config, plan, out, device, runtime_path=None):
+def train(config, plan, out, device, runtime_path=None, max_updates=None):
     state = read_json(out / "state.json")
-    if state["stop_reason"]:
-        return
     configure(17, device)
     record = read_json(out / "run.json")
     identity = {"run_id": record["run_id"]}
@@ -429,11 +434,40 @@ def train(config, plan, out, device, runtime_path=None):
     try:
         policy = make_policy(config, device)
         optimizer = optimizer_for(policy, config, device)
-        checkpoint.restore(
+        restored = checkpoint.restore(
             out / state["latest"], policy, optimizer, shuffle, config, identity
         )
-        if not state["evaluated"]:
+        for key in ("phase", "latest", "rollouts", "updates", "decisions", "optimizer_steps", "attempted_steps", "rejected_steps"):
+            if restored.get(key) != state.get(key):
+                raise ValueError(f"Saved checkpoint and state disagree on {key}")
+        due = target_bc_evaluation_due(config, state, current_policy_hash=policy_hash(policy.state_dict()))
+        if state["phase"] != "collect":
+            ledger = out / "updates.jsonl"
+            committed = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()] if ledger.exists() else []
+            previous = {**state, "decisions": committed[-1]["total_decisions"] if committed else 0}
+            if target_bc_evaluation_due(config, previous, current_policy_hash=policy_hash(policy.state_dict())):
+                raise ValueError("Cannot recover earlier development evaluation from a pending PPO boundary")
+            # A milestone crossed by the pending rollout is evaluated only after PPO.
+            due = False
+        if due:
+            if state["rollouts"]:
+                rows = [json.loads(line) for line in (out / "updates.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+                if (not rows or rows[-1].get("rollout") != state["rollouts"]
+                        or rows[-1].get("total_decisions") != state["decisions"]):
+                    raise ValueError("Cannot recover development evaluation: update ledger and checkpoint disagree")
+                if not state["evaluated"]:
+                    raise ValueError("Cannot recover initial development evaluation from a later checkpoint")
+                pending = [point for point in config["experiment"]["milestones"]
+                           if point <= state["decisions"] and str(point) not in state["development_points"]]
+                if any(row.get("total_decisions", 0) >= point
+                       for point in pending for row in rows[:-1]):
+                    raise ValueError("Cannot recover development evaluation: milestone was crossed before the latest checkpoint")
             development(config, plan, out, state, shuffle, clock)
+        if pause_due(out, "update", state["updates"], at_boundary=state["phase"] == "collect"):
+            write_json(out / "status.json", {"status": "paused", "checkpoint": state["latest"]})
+            return
+        if state["stop_reason"]:
+            return
         factory = TargetFactory(config, plan["base"])
         # Runtime capacity can change rollout boundaries; record it separately.
         runtime_path = Path(
@@ -503,11 +537,14 @@ def train(config, plan, out, device, runtime_path=None):
         ):
             while not state["stop_reason"]:
                 critic_started = perf_counter() if state["phase"] == "critic" else None
+                if max_updates is not None and state["updates"] >= max_updates:
+                    write_json(out / "status.json", {"status": "paused", "reason": "max_updates"})
+                    return
                 deadline = clock.deadline(config)
                 if perf_counter() >= deadline:
                     state["stop_reason"] = "active_time_limit"
                     break
-                if (out / "pause.request").exists():
+                if pause_due(out, "update", state["updates"], at_boundary=state["phase"] == "collect"):
                     write_json(out / "status.json", {"status": "paused"})
                     return
                 if state["phase"] == "collect":
@@ -610,6 +647,7 @@ def train(config, plan, out, device, runtime_path=None):
 
                     with CompilationClock() as compiler:
                         compiler.monitor = monitor
+                        operation_started = perf_counter()
                         metrics = update(
                             policy,
                             optimizer,
@@ -622,8 +660,14 @@ def train(config, plan, out, device, runtime_path=None):
                             on_step=inspect_step,
                             _backend=partial(BatchedBackend, pinned_replay=True),
                         )
+                        operation_ended = perf_counter()
                     metrics["runtime_compilation_seconds"] = sum(
                         b - a for a, b in compiler.intervals
+                    )
+                    metrics["operation_seconds"] = operation_ended - operation_started
+                    metrics["operation_without_compilation_seconds"] = (
+                        metrics["operation_seconds"]
+                        - compiler.seconds(operation_started, operation_ended)
                     )
                     metrics["PPO_skipped"] = False
                     record_optimization(state, metrics, config)
@@ -676,8 +720,14 @@ def train(config, plan, out, device, runtime_path=None):
                 if due or (state["stop_reason"] and changed):
                     monitor.mark("evaluation")
                     development(config, plan, out, state, shuffle, clock)
+                if pause_due(out, "update", state["updates"]):
+                    write_json(out / "status.json", {"status": "paused", "checkpoint": state["latest"]})
+                    return
                 prune_checkpoints(out, state)
                 clock.progress()
+                if max_updates is not None and state["updates"] >= max_updates and not state["stop_reason"]:
+                    write_json(out / "status.json", {"status": "paused", "reason": "max_updates"})
+                    return
             if policy_hash(policy.state_dict()) not in state["evaluated"]:
                 development(config, plan, out, state, shuffle, clock)
             clock.progress()
@@ -725,7 +775,7 @@ def report(config, out):
         "",
         f"Статус: {state['stop_reason'] or state['phase']}; решения {state['decisions']}; active {state['active_seconds']:.2f} с.",
         f"Sampling rollouts {state['rollouts']}; PPO updates {state['updates']}; accepted/rejected Adam {state['optimizer_steps']}/{state['rejected_steps']}.",
-        "Локальная RTX 4060 Ti; 16 сред / 4 workers / microbatch 8; обычный CP; reward 1/0/0.",
+        f"GPU {read_json(out / 'run.json')['GPU']}; T={config.get('policy_temperature', 1)}; microbatch {config['ppo']['sequences_per_microbatch']}; обычный CP; reward 1/0/0.",
         "",
         "| Решения | Checkpoint | W/D/L development |",
         "|---:|---|---|",
@@ -736,7 +786,16 @@ def report(config, out):
             f"| {point['decisions']} | {point['checkpoint']} | {summary['W']}/{summary['D']}/{summary['L']} |"
         )
     lines += ["", f"Выбор: {state['best']}."]
+    if (out / "runtime.json").exists():
+        lines += ["", "Runtime: " + json.dumps(read_json(out / "runtime.json"), ensure_ascii=False)]
     if (out / "updates.jsonl").exists():
+        for name, last in (("performance", None), ("performance-last10", 10)):
+            performance = summarize_performance(out, last=last)
+            write_json(out / f"{name}.json", performance)
+            (out / f"{name}.md").write_text(
+                performance_markdown(performance), encoding="utf-8"
+            )
+        lines += ["", "Performance: [all cycles](performance.md), [last 10](performance-last10.md)."]
         rows = [
             json.loads(line)
             for line in (out / "updates.jsonl").read_text().splitlines()
@@ -782,14 +841,18 @@ def report(config, out):
     (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run(phase, config, out, device, runtime_path=None):
+def run(phase, config, out, device, runtime_path=None, max_updates=None):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     validate_profile(config)
+    if max_updates is not None and (type(max_updates) is not int or max_updates < 1):
+        raise ValueError("max_updates must be a positive operational limit")
     if phase == "pause":
         (out / "pause.request").write_text("pause requested\n", encoding="utf-8")
         return
     with RunLock(out):
+        if phase in ("train", "run", "resume"):
+            assert_not_closed(out)
         try:
             if phase == "resume":
                 (out / "pause.request").unlink(missing_ok=True)
@@ -800,8 +863,8 @@ def run(phase, config, out, device, runtime_path=None):
             plan = read_json(out / "manifest.json")
             if phase in ("train", "run", "resume"):
                 write_json(out / "status.json", {"status": "training"})
-                train(config, plan, out, device, runtime_path=runtime_path)
-                if (out / "pause.request").exists():
+                train(config, plan, out, device, runtime_path=runtime_path, max_updates=max_updates)
+                if read_json(out / "status.json").get("status") == "paused":
                     report(config, out)
                     return
             if phase in ("evaluate", "run", "resume"):

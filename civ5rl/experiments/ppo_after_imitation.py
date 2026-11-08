@@ -75,17 +75,17 @@ def execution_identity(config, plan):
         return checkpoint.passport(tmp, config, plan)
 
 
-def check_identity(config, out):
-    validate_config(config)
+def check_identity(config, out, *, for_execution=False):
+    """Validate frozen artifacts for analysis; opt in to live-code checks to run."""
+    out = Path(out)
     plan = read_json(out / "manifest.json")
     if digest({k: v for k, v in plan.items() if k != "hash"}) != plan["hash"]:
         raise ValueError("Manifest changed")
-    if read_json(out / "resolved-config.json") != config:
-        raise ValueError("Configuration changed")
-    if not checkpoint.same_execution_identity(
-        read_json(out / "passport.json"), execution_identity(config, plan)
-    ):
-        raise ValueError("Source/corpus/environment identity changed")
+    if not for_execution:
+        checkpoint.verify_frozen_passport(out, config=config, manifest=plan)
+        return plan
+    validate_config(config)
+    checkpoint.verify_execution_passport(out, config, plan)
     if (
         file_hash(ROOT / config["experiment"]["parent"])
         != config["experiment"]["parent_sha256"]
@@ -107,7 +107,7 @@ def check_identity(config, out):
 def prepare(config, out):
     validate_config(config)
     if (out / "passport.json").exists():
-        return check_identity(config, out)
+        return check_identity(config, out, for_execution=True)
     configure(17, "cuda" if torch.cuda.is_available() else "cpu")
     out.mkdir(parents=True, exist_ok=True)
     if (
@@ -992,7 +992,9 @@ def run(phase, config, out, device):
         try:
             if phase == "prepare":
                 return prepare(config, out)
-            plan = check_identity(config, out)
+            plan = check_identity(
+                config, out, for_execution=phase in ("train", "evaluate", "run")
+            )
             if phase in ("train", "run"):
                 train(config, plan, out, device)
             if phase in ("evaluate", "run"):

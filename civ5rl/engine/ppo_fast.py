@@ -6,6 +6,11 @@ from typing import NamedTuple
 import numpy as np
 import torch
 
+from civ5rl.core.distributions import (
+    policy_logits,
+    require_rollout_temperature,
+    validate_temperature,
+)
 from civ5rl.core.schema import MIN_FREE_ACTIONS
 from civ5rl.engine.constants import (
     DEFAULT_GPU_RESERVE_BYTES,
@@ -372,7 +377,8 @@ def _replay_groups(cache, sequences_per_batch):
 
 
 @torch.no_grad()
-def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=False):
+def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=False, temperature=1.0):
+    require_rollout_temperature(cache.episodes, temperature)
     device = cache.device
     totals = torch.zeros(len(_ReplaySums._fields), device=device)
     maximum = torch.zeros((), device=device)
@@ -395,6 +401,7 @@ def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=Fa
                 lengths,
                 None if hidden is None else hidden.index_select(1, slots),
             )
+            logits = policy_logits(logits, temperature)
             if hidden is not None:
                 hidden.index_copy_(1, slots, last)
             sums, max_error = runner(
@@ -487,6 +494,8 @@ class BatchedBackend:
             monitor,
         )
         options = config.get("performance", {})
+        self.temperature = validate_temperature(config.get("policy_temperature", 1.0))
+        require_rollout_temperature(episodes, self.temperature)
         tick = perf_counter()
         batched = force_batched or options.get("batched_ppo", False)
         self.cache = RolloutCache(
@@ -527,7 +536,7 @@ class BatchedBackend:
         if self.monitor:
             self.monitor.mark("behavior_replay")
         self.replay = measure_replay(
-            self.policy, self.cache, self.kl_batch, full_distribution=True
+            self.policy, self.cache, self.kl_batch, full_distribution=True, temperature=self.temperature
         )
         pre_kl, pre_error = self.replay["sampled_kl"], self.replay["max_logp_error"]
         self.replay_tolerance = validate_behavior_replay(
@@ -576,6 +585,7 @@ class BatchedBackend:
                 entropy_coefficient,
                 clip_ratio=self.config["ppo"]["clip_ratio"],
                 value_coefficient=self.config["ppo"]["value_coefficient"],
+                temperature=self.temperature,
             )
             finite &= torch.isfinite(loss.detach())
             valid_tokens = sum(lengths)
@@ -597,7 +607,7 @@ class BatchedBackend:
         if exact and not self.cache.has_behavior_distribution:
             raise ValueError("Controlled PPO requires behavior distributions")
         self.last_replay = measure_replay(
-            self.policy, self.cache, self.kl_batch, full_distribution=exact
+            self.policy, self.cache, self.kl_batch, full_distribution=exact, temperature=self.temperature
         )
         if exact:
             return self.last_replay["full_kl_free"]

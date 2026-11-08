@@ -137,6 +137,7 @@ class Episode(TypedDict):
     old_logp: list[float]
     old_log_probs: list[np.ndarray]
     old_value: list[float]
+    policy_temperature: NotRequired[float]
     old_hidden: NotRequired[list[np.ndarray | None]]
     decision_metrics: list[dict[str, str | bool | float]]
     encoded: NotRequired[list[Encoded]]

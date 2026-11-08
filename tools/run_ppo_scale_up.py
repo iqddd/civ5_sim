@@ -17,6 +17,14 @@ def main():
     parser.add_argument("--config", default="configs/rl-ppo-scale-up.json")
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
+        "--max-updates",
+        type=int,
+        help="Pause after this many completed PPO updates; does not change the scientific budget",
+    )
+    parser.add_argument(
+        "--out", type=Path, help="Isolated output for a bounded local verification run"
+    )
+    parser.add_argument(
         "--runtime-config", type=Path, help="Machine settings for PPO after target BC"
     )
     args = parser.parse_args()
@@ -39,13 +47,18 @@ def main():
     config = load_config(ROOT / args.config)
     if args.runtime_config is not None and kind != "rl01.ppo_after_target_bc":
         parser.error("--runtime-config applies to PPO after target BC")
+    if (
+        args.max_updates is not None or args.out is not None
+    ) and kind != "rl01.ppo_after_target_bc":
+        parser.error("--max-updates/--out apply to PPO after target BC")
     if kind == "rl01.ppo_after_target_bc":
         run(
             args.phase,
             config,
-            ROOT / config["output"],
+            args.out or ROOT / config["output"],
             args.device,
             runtime_path=args.runtime_config,
+            max_updates=args.max_updates,
         )
     else:
         run(args.phase, config, ROOT / config["output"], args.device)

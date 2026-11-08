@@ -478,6 +478,11 @@ def evaluate(config, out, parent, manifest, workers):
 def run(phase, config, out, workers, device):
     if phase not in ("prepare", "train", "evaluate", "report"):
         raise ValueError("Continuation does not allow collection or benchmark")
+    if phase == "report" and (out / "passport.json").exists():
+        checkpoint.verify_frozen_passport(
+            out, config=config, manifest=read_json(out / "manifest.json")
+        )
+        return report(config, out, ROOT / config["continuation"]["parent_run"])
     parent, manifest, identity = initialize(config, out)
     started = perf_counter()
     try:

@@ -21,7 +21,7 @@ from civ5rl.core.context import context_from_spec
 from civ5rl.core.model import batch_inputs
 from civ5rl.core.observation import ObservationEncoder
 from civ5rl.engine.collector import Collector
-from civ5rl.engine.control import RunLock
+from civ5rl.engine.control import RunLock, assert_not_closed
 from civ5rl.engine.ppo import update
 from civ5rl.engine.ppo import encode_episode
 from civ5rl.engine.ppo_fast import BatchedBackend
@@ -297,11 +297,22 @@ def evaluation_task(task):
 def evaluate(config,plan,out,path,purpose):
     fingerprint=policy_hash(torch.load(out/path,map_location='cpu',weights_only=False)['model'])
     cache=read_json(out/'evaluations.json') if (out/'evaluations.json').exists() else {}
-    key=purpose+':'+fingerprint
+    import platform
+    import inspect
+    import civ5rl.core.agent as agent_module
+    from civ5sim.combat_ai import LIBRARY_PATH
+    evaluator = digest({'platform':platform.platform(), 'torch':torch.__version__,
+        'play_case':inspect.getsource(play_case), 'agent':file_sha256(Path(agent_module.__file__)),
+        'match':file_sha256(ROOT/'civ5sim/match.py'), 'cp':file_sha256(ROOT/'civ5sim/cp_agent.py'),
+        'model':file_sha256(ROOT/'civ5rl/core/model.py'), 'observation':file_sha256(ROOT/'civ5rl/core/observation.py'),
+        'planner':file_sha256(LIBRARY_PATH),
+        'kernel':file_sha256(ROOT/'build'/('combat.dll' if sys.platform=='win32' else 'libcombat.so'))})
+    key=digest({'purpose':purpose,'policy':fingerprint,'mode':'argmax','temperature':config.get('policy_temperature',1.0),
+        'cases':[c['case_hash'] for c in plan[purpose]], 'evaluator':evaluator, 'search':config['teacher_search']})
     if key in cache:return cache[key]
     cases=plan[purpose]
     started=perf_counter()
-    relative=f'evaluation/{purpose}/{fingerprint[:16]}/argmax/cp'
+    relative=f'evaluation/{purpose}/{fingerprint[:16]}/{key[:16]}/argmax/cp'
     directory=out/relative
     with pool(4) as executor:
         tasks=[(config,case,str(out/path),str(directory/f"case-{case['case_id']:03}-side-{case['learner_side']}"))
@@ -417,6 +428,7 @@ def run(phase,config,out,device):
     if (out/'resolved-config.json').exists():config=read_json(out/'resolved-config.json')
     validate_profile(config)
     with RunLock(out):
+        if phase in ('train','run','resume'):assert_not_closed(out)
         try:
             if phase=='resume':
                 (out/'pause.request').unlink(missing_ok=True)

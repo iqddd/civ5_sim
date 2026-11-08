@@ -304,6 +304,7 @@ def _collect_streaming(
                 policy.variant,
                 reuse_encoded,
                 policy.hidden_size if policy.is_recurrent else 0,
+                collector.temperature,
             )
             wave.encoders[slot] = (
                 None
