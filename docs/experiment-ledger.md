@@ -1,0 +1,55 @@
+# Журнал экспериментов
+
+Сводка доступных свидетельств на **8 ноября 2026 года**. Это индекс истории,
+не назначение следующих запусков. Конфиги и артефакты указаны относительно
+корня репозитория. W/D/L — победы/ничьи/поражения learner против обычного
+stateful CP, если не оговорено иначе. Ничья не считается победой.
+Development, additional validation, sampling и argmax нельзя объединять в
+одну метрику; additional/confirmation validation не являются закрытым test.
+
+## Цепочка RL
+
+В столбце «Родитель» сокращён префикс `artifacts/rl/`; имена конфигов находятся
+в `configs/`. Родительские пути описывают сохранённую lineage, а не обещают
+наличие весов на диске: ранние D0/D1 и BC checkpoints локально отсутствуют. Для завершённых опытов числа сверены с доступными сохранёнными
+отчётами; это вычитка результатов, а не повторный научный аудит всех артефактов.
+
+| Этап | Конфиг | Родитель / старт | Статус и главный результат | Артефакт и протокол |
+|---|---|---|---|---|
+| D0, общая диагностика | `rl-diagnostic.json` | Начальная сеть | Локальный отчёт не найден; проверенного W/D/L здесь нет | `artifacts/rl/diagnostic-results/`; [протокол](rl-diagnostic-protocol.md) |
+| D0, одно решение | `rl-diagnostic-one-decision.json` | `diagnostic-results/seed-17/checkpoints/initial.pt` | Локальный отчёт не найден; наличие протокола не доказывает завершение | `artifacts/rl/diagnostic-one-decision/`; [протокол](rl-d0-one-decision-protocol.md) |
+| D1, перенос | `rl-diagnostic-d1.json` | `diagnostic-one-decision/seed-17/checkpoints/update-000006.pt` | Локальный отчёт не найден; позднее направление сообщает ноль training-побед, это не итоговый evaluation W/D/L | `artifacts/rl/diagnostic-d1/`; [протокол](rl-d1-transfer-protocol.md) |
+| D0-M, несколько выстрелов | `rl-diagnostic-multishot.json`; спецификация `rl-diagnostic-multishot.spec.json` | Тот же D0 checkpoint | Зафиксированная спецификация; локальный итог не найден | `artifacts/rl/diagnostic-multishot/`; [протокол](rl-multishot-protocol.md) |
+| BC 10×10 | `rl-cp-imitation.json` | Новая Policy C, seed 17; свой `initial.pt` | Завершён, epoch 03; sampling T=1, validation 64: **0/4/60** | [Отчёт](../artifacts/rl/cp-imitation/report.md); [подготовка](archive/rl-protocols/rl-cp-imitation.md), [полный этап](archive/rl-protocols/rl-cp-imitation-next-step.md) |
+| BC continuation | `rl-cp-imitation-continuation.json` | `cp-imitation/checkpoints/epoch-03.pt` | Plateau на epoch 50, выбран epoch 30; sampling 64: **5/18/41**, argmax **10/12/42** | [Отчёт](../artifacts/rl/cp-imitation-continuation/report.md); [протокол](archive/rl-protocols/rl-cp-imitation-continuation.md) |
+| BC more-data | `rl-cp-imitation-more-data.json` | `cp-imitation-continuation/checkpoints/best.pt` (epoch 30) | Завершён, выбран epoch 10; sampling 64: **5/14/45**, argmax **10/26/28** | [Отчёт](../artifacts/rl/cp-imitation-more-data/report.md); [протокол](archive/rl-protocols/rl-cp-imitation-more-data.md) |
+| BC own-states | `rl-cp-imitation-own-states.json` | `cp-imitation-more-data/checkpoints/best.pt` (epoch 10) | Два цикла, выбран cycle 02 step 500; sampling 64: **2/32/30**, argmax **18/26/20**. Основной sampling-прирост не доказан | [Отчёт](../artifacts/rl/cp-imitation-own-states/report.md); [протокол](archive/rl-protocols/rl-cp-imitation-own-states.md) |
+| PPO after-imitation | `rl-ppo-after-imitation.json` | `cp-imitation-own-states/cycle-02/checkpoints/step-0500.pt` | Decision limit; выбранный argmax additional 256: **51/81/124**, равен baseline | [Отчёт](../artifacts/rl/ppo-after-imitation/report.md); [протокол](rl-ppo-after-imitation.md) |
+| PPO controlled updates | `rl-ppo-controlled-updates.json` | `ppo-after-imitation/checkpoints/initial.pt`, не конечный PPO | Decision limit, выбран update 43; argmax additional 256: **91/46/119** против **51/81/124**, paired CI прироста [+9,4; +21,9] п.п. | [Отчёт](../artifacts/rl/ppo-controlled-updates/report.md); [протокол](rl-ppo-controlled-updates.md) |
+| PPO scale-up | `rl-ppo-scale-up.json` | `ppo-controlled-updates/checkpoints/update-0043.pt` | Завершён, выбран update 361; argmax additional 256: **117/26/113** против **91/46/119** | [Отчёт](../artifacts/rl/ppo-scale-up/report.md); [протокол](rl-ppo-scale-up.md) |
+| PPO scale-up continuation | `rl-ppo-scale-up-continuation.json` | `ppo-scale-up/checkpoints/update-0361.pt` | Завершён, выбран update 759; argmax additional 256: **141/25/90** против **117/26/113** | [Отчёт](../artifacts/rl/ppo-scale-up-continuation/report.md); [протокол](rl-ppo-scale-up-continuation.md) |
+| PPO target-scale | `rl-ppo-target-scale.json` | `ppo-scale-up-continuation/checkpoints/update-0759.pt` | Остановлен пользователем; сохранён update 242, новый кандидат не выбран. Development argmax 128: initial **1/12/115**, update 206 **1/17/110** | [Отчёт](../artifacts/rl/ppo-target-scale/report.md); [протокол](archive/rl-protocols/rl-ppo-target-scale.md) |
+| BC target-scale | `rl-cp-imitation-target-scale.json` | `ppo-scale-up-continuation/checkpoints/update-0759.pt` | Завершён, epoch 10; argmax development 128: **27/33/68**; additional 256: **45/71/140** против **4/39/213** | [Отчёт](../artifacts/rl/cp-imitation-target-scale/report.md); [протокол](archive/rl-protocols/rl-cp-imitation-target-scale.md) |
+| PPO after-target-BC, T=1 | `rl-ppo-after-target-bc.json` | `cp-imitation-target-scale/checkpoints/epoch-10.pt` | **Свидетельства расходятся:** локальный status/state — paused, 54 073 решения; исторический sampling-протокол говорит об остановке на 530 088. Исходный development **27/33/68**; финал не установлен | [Локальный отчёт](../artifacts/rl/ppo-after-target-bc/report.md); [условия](rl-ppo-after-target-bc-direction.md), [поздняя запись](archive/rl-protocols/rl-target-bc-sampling-direction.md) |
+| Sampling исходного target BC | `rl-target-bc-sampling.json` | Тот же BC epoch 10, без обучения | Development 128 на режим: argmax **27/33/68**, T=1 **1/17/110**, T=0,5 **13/31/84** | [Отчёт](../artifacts/rl/target-bc-sampling/report.md); [протокол](archive/rl-protocols/rl-target-bc-sampling-direction.md) |
+| PPO target-BC T=0,5 | `rl-ppo-target-bc-t05.json` | Исходный target BC epoch 10, новый PPO Adam | Decision limit, выбран update 37; argmax development **32/34/62**, additional 256 **53/76/127** против **45/71/140**; CI [−3,91; +11,33] п.п., положительный прирост не подтверждён | [Отчёт ревью](../artifacts/rl/ppo-target-bc-t05/review-20261108/report.md); [протокол](rl-ppo-target-bc-t05-direction.md) |
+
+Сила на целевых картах 10/12/16 с армиями 5–13 не следует из побед на 10×10.
+Выбор по development и проверка additional отражают процедуру конкретного
+протокола, а не независимое закрытое подтверждение обобщения.
+Таблица сохраняет результаты до последующих изменений кода; она не обещает
+воспроизведение нынешним evaluator без проверки паспортов и платформы.
+
+## Combat AI и отдельные исследования
+
+| Исследование | Установленное свидетельство | Где читать |
+|---|---|---|
+| Варианты поиска, 2 ноября | 49 входов; distant26 base 17,355 с, distance-view 7,461 с, area-strict-bundle 0,442 с. Некоторые варианты меняли результат; это не доказательство силы AI | [Отчёт](../artifacts/combat-ai/experiments-v1/report.md); [архив исследования](archive/combat-ai/combat-ai-experiments.md) |
+| Перенос хранения | 1 прогрев + 5 замеров, исторический ABI 5 и нулевая история урона. Изменения эвристик смешаны с хранением; RSS — high-water процесса | [Отчёт](../artifacts/combat-ai/storage-transfer-20261102/report.md); [карта переноса](combat-ai/combat-ai-cp-transfer.md) |
+| APPROACH / локальные цели | Один переигранный матч; HP greedy/CP 399/0 → 259/0. Остальные 63 не запускались; общей оценки силы/ускорения нет | [Отчёт](../artifacts/combat-ai/approach-local-targets-20261103/report.md); [история](archive/combat-ai/combat-ai-port-plan.md) |
+| CP reset study | Самостоятельный протокол сравнения stateful/stateless CP. По наличию документа итог не установлен | [Протокол](cp-reset-study.md) |
+
+Полный список исторических документов, включая планы и дисковые инвентаризации,
+находится в [архивном индексе](archive/README.md). Протоколы со стабильными
+путями остаются вне архива там, где их читает конфигурация или код; это не
+делает их действующим общим руководством.

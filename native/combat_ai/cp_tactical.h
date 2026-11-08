@@ -1,6 +1,6 @@
 #pragma once
 // Supported land-combat branches of the pinned CP Only CvTacticalPosition.
-// Source mapping and engine-query adaptations: docs/combat-ai-cp-transfer.md.
+// Source mapping and engine-query adaptations: docs/combat-ai/combat-ai-cp-transfer.md.
 #include "planner.h"
 #include <map>
 #include <array>

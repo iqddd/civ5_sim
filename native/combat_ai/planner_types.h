@@ -49,7 +49,7 @@ template<class Index, class Value> class IndexedValues {
 template<class T> using SlotValues = IndexedValues<SlotIdx,T>;
 template<class T> using UnitValues = IndexedValues<UnitId,T>;
 
-// Contract: docs/combat-ai-contract.md#slot-states.
+// Contract: docs/combat-ai/combat-ai-contract.md#slot-states.
 enum class SlotState : uint8_t {
   Pending = 0,
   Finished = 1,

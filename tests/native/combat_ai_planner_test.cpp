@@ -735,7 +735,7 @@ void planner_blocked_handoff() {
   CHECK(after->state().units[5].hp==0);
 }
 void planner_combo_contacts() {
-  // Contract: docs/combat-ai-contract.md#restart and #combo-invariants.
+  // Contract: docs/combat-ai/combat-ai-contract.md#restart and #combo-invariants.
   Fixture f; f.w=10; f.h=7; f.tiles.resize(70); f.fog=1;
   f.add(0,0,46); f.add(4,0,42); f.add(0,1,24); f.start();
   CHECK(!f.visibility[24]);
@@ -794,7 +794,7 @@ void apply_contract_action(Fixture& fixture, TacticalFixture& context,
         " unit="+std::to_string(unit)+" tile="+std::to_string(tile));
 }
 void contract_continuation() {
-  // Contract: docs/combat-ai-contract.md#continuation and #restart.
+  // Contract: docs/combat-ai/combat-ai-contract.md#continuation and #restart.
   for (bool enemy_contact : {false,true}) {
     Fixture f;
     f.w=12; f.h=5; f.tiles.resize(60); f.fog=1;
@@ -840,7 +840,7 @@ void contract_continuation() {
   CHECK(fought.position.move_flags[SlotIdx{0}]==MoveFlag::None);
 }
 void contract_plan_acceptance() {
-  // Contract: docs/combat-ai-contract.md#plan-acceptance.
+  // Contract: docs/combat-ai/combat-ai-contract.md#plan-acceptance.
   // A generous risk budget isolates the formation/attack predicate.
   for (bool worsened : {false,true}) {
     Fixture f;
@@ -897,7 +897,7 @@ void contract_plan_acceptance() {
   CHECK(!discovered.tactics->evaluate_final_position(discovered.position).accepted);
 }
 void contract_early_finish() {
-  // Contract: docs/combat-ai-contract.md#early-finish and #slot-states.
+  // Contract: docs/combat-ai/combat-ai-contract.md#early-finish and #slot-states.
   Fixture f;
   f.w=16; f.h=1; f.tiles.resize(16);
   f.config.risk_budget_base=0; f.config.risk_budget_per_kill=0;
@@ -931,7 +931,7 @@ void contract_early_finish() {
   CHECK(after->state().units[3].hp>0 && after->state().units[4].hp==0);
 }
 void contract_combo_invariants() {
-  // Contract: docs/combat-ai-contract.md#combo-invariants.
+  // Contract: docs/combat-ai/combat-ai-contract.md#combo-invariants.
   Fixture f;
   f.add(4,0,16); f.start();
   TacticalFixture context(f,18);
@@ -953,7 +953,7 @@ void contract_combo_invariants() {
   }
 }
 void contract_search_budgets() {
-  // Contract: docs/combat-ai-contract.md#search-budgets.
+  // Contract: docs/combat-ai/combat-ai-contract.md#search-budgets.
   // First child kills the only target while the root has been removed from
   // the otherwise empty queue. Hitting max_completed still exhausts the budget.
   Fixture f;
@@ -966,7 +966,7 @@ void contract_search_budgets() {
   CHECK(f.replay(plan)->state().units[1].hp==0);
 }
 void contract_move_destinations() {
-  // Contract: docs/combat-ai-contract.md#combo-invariants.
+  // Contract: docs/combat-ai/combat-ai-contract.md#combo-invariants.
   // Exercise both stationary paths: FINISH_TEMP and ranged attacks, then
   // repeat on a moved branch rather than checking only the initial tile.
   for (int type=0; type<5; ++type) for (int fog : {0,1})
@@ -1007,7 +1007,7 @@ void contract_move_destinations() {
     }
 }
 void contract_swap_equivalence() {
-  // Contract: docs/combat-ai-contract.md#candidate-order.
+  // Contract: docs/combat-ai/combat-ai-contract.md#candidate-order.
   Fixture f;
   f.add(1,0,16,50); f.add(3,0,15); f.add(0,1,17,50);
   f.corridor({15,16,17}); f.start();
@@ -1068,7 +1068,7 @@ void contract_swap_equivalence() {
   CHECK(workspace.equivalent.size()==2); // Neither orientation may be lost.
 }
 void contract_combo_mode() {
-  // Contract: docs/combat-ai-contract.md#combo-invariants.
+  // Contract: docs/combat-ai/combat-ai-contract.md#combo-invariants.
 #if defined(CAI_CP_COMBOS) && CAI_CP_COMBOS == 0
   constexpr bool enabled=false;
 #else
@@ -1101,7 +1101,7 @@ void contract_combo_mode() {
   CHECK(paired==enabled);
 }
 void cp_hypothetical_flanking() {
-  // Contract: docs/combat-ai-contract.md#hypothetical-flanking.
+  // Contract: docs/combat-ai/combat-ai-contract.md#hypothetical-flanking.
   // Check actual occupancy, not a prescribed plan or an assumed optimal move.
   for (int scenario : {0,1,2}) {
     Fixture f;

@@ -1,5 +1,9 @@
 # D1 transfer — optimization revision 1
 
+> Исторический протокол / исходная спецификация. Путь сохранён: документ используется конфигурацией или кодом.
+> Это условия отдельного этапа, а не актуальный общий справочник; наличие плана не доказывает запуск.
+> Проверенные статусы и ограничения: [журнал](experiment-ledger.md); текущее устройство: [справочник](rl-architecture.md).
+
 Frozen before training. Seed 17 only. Results: `artifacts/rl/diagnostic-d1/`.
 
 ## Initialization and cases

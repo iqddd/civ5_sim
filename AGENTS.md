@@ -1,3 +1,25 @@
+## Required reading
+
+- Read `docs/README.md` before starting work, then read the relevant documents linked there. It is the entry point for current contracts, operating procedures, and experiment history.
+
+## Documentation policy
+
+- `docs/` is the durable reference for how the project works and how to operate it: current contracts, architecture, reusable procedures, and a compact experiment ledger. It is not a workspace for generated reports, run logs, debugging diaries, or scratch plans.
+- Update the relevant existing document when behavior changes. Rewrite the affected rule in place; do not accumulate dated updates or version appendices that contradict earlier text.
+- Before creating a document, check whether its content belongs in an existing reference. Add a separate document only for a distinct, durable purpose; avoid duplicate descriptions and one document per run or investigation.
+- Keep experiment results and detailed run reports in `artifacts/`. Add concise status, configuration, parent, result, and report links to `docs/experiment-ledger.md` instead of copying reports into `docs/`.
+- Use `docs/archive/` only for historical protocols or investigations worth retaining for reproducibility or provenance. Archiving is not a reason to preserve every scratch note. Clearly distinguish proposals, completed runs, and unverified historical claims.
+- Before moving documentation, check configuration, code, test, and Markdown references to its path and anchors. Preserve required input paths unless their consumers are deliberately updated; do not rewrite frozen passports or source archives to accommodate a move.
+- Keep `docs/README.md` current when adding, moving, or retiring documents. Preserve its list format: filename/link followed by a concise 10–20-word abstract. Keep the index in English.
+
+## Artifacts and temporary scripts
+
+- `artifacts/` is only for data, checkpoints, logs, JSON metrics, plots, and Markdown reports. It is an output/evidence directory, not a source-code directory.
+- Do not create `.py` files or other executable helpers under `artifacts/`, including experiment-specific audit, benchmark, packaging, or reporting scripts. Existing historical scripts do not justify adding more; do not alter frozen evidence merely to enforce this layout.
+- All new logic for auditing, benchmarking, Vast.ai packaging, or report generation must be exposed as a reusable subcommand of a CLI in `tools/`, except for the temporary scenarios described below. Extend an appropriate existing CLI rather than creating a separate helper for each run. Shared implementation may live in the appropriate project package; invoke it through the CLI.
+- The only exception is a narrow, one-off scenario for a specific experiment: its script may live in `.tmp/`. Assume `.tmp/` can be cleared at any time. No durable workflow, resume path, or reproducibility claim may depend on its contents; save final data and reports in `artifacts/`.
+- If a temporary scenario becomes useful again, move its reusable logic into the normal package/`tools/` CLI structure rather than keeping a growing collection of temporary scripts.
+
 ## Testing policy
 
 This is a single-developer research project. Prioritize experiment progress and clear implementation over comprehensive test coverage. Accept reasonable risk; do not apply production or enterprise testing standards by default.

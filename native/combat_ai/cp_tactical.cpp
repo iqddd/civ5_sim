@@ -36,7 +36,7 @@ constexpr int kFogDefaultDanger = 1;
 // agreed midpoint of CP's 0..10 offense scale, rather than its lower bound.
 constexpr int kDefaultOffenseFlavor = 5;
 constexpr int kMinHpForTacticalSearch = 50 - 2 * kDefaultOffenseFlavor;
-// Contract: docs/combat-ai-contract.md#early-finish.
+// Contract: docs/combat-ai/combat-ai-contract.md#early-finish.
 // CvTacticalAI.cpp:addFinishMovesIfAcceptable: reward an untouched unit left
 // available after early completion. This is a CP score, not a movement cost.
 constexpr int kUntouchedEarlyFinishBonus = 123;
@@ -422,7 +422,7 @@ CpMove CpTactics::attack(const TacticalPosition &position, const CpBoard &board,
   }
   int dealt = forecast.damage, received = forecast.retaliation;
   if (!ranged(now.type)) {
-    // Contract: docs/combat-ai-contract.md#hypothetical-flanking.
+    // Contract: docs/combat-ai/combat-ai-contract.md#hypothetical-flanking.
     // Unlike CP:6743/8006, exclude the attacker only if board() counted it.
     // The hypothetical origin `from` has not changed the board's occupancy.
     bool attacker_counted = board.plots[now.tile].valid && adapter.distance(now.tile, enemy_unit.tile) == 1;
@@ -636,7 +636,7 @@ std::vector<CpMove> CpTactics::preferred(const TacticalPosition &position, const
         moves.push_back(move);
       }
     } else {
-      // Contract: docs/combat-ai-contract.md#continuation.
+      // Contract: docs/combat-ai/combat-ai-contract.md#continuation.
       if (position.move_flags[slot] != MoveFlag::None || board.plots[tile].end) {
         if (trace) trace->event("continuation_rejected", {{"unit",now.id},{"tile",tile},
             {"move_flag",int(position.move_flags[slot])},{"plot_end",board.plots[tile].end}});
@@ -821,7 +821,7 @@ std::vector<CpCombo> CpTactics::candidates(const TacticalPosition &position, boo
   std::stable_sort(overall.begin(), overall.end(), better);
   std::vector<CpCombo> result;
   auto add = [&](CpMove first, std::optional<CpMove> second = std::nullopt) {
-    // Contract: docs/combat-ai-contract.md#combo-invariants.
+    // Contract: docs/combat-ai/combat-ai-contract.md#combo-invariants.
     // A supplied second action must survive intact, never silently disappear.
     CpCombo combo{{first}, first.score};
     if (second) {
@@ -896,7 +896,7 @@ std::vector<CpCombo> CpTactics::candidates(const TacticalPosition &position, boo
         }
       }
   }
-  // Contract: docs/combat-ai-contract.md#candidate-order; score orders candidates,
+  // Contract: docs/combat-ai/combat-ai-contract.md#candidate-order; score orders candidates,
   // while the executor's caller accumulates rank excluding finish/block records.
   std::stable_sort(result.begin(), result.end(),
                    [](const CpCombo &left, const CpCombo &right) { return left.score > right.score; });
@@ -926,7 +926,7 @@ FinalEvaluation CpTactics::evaluate_final_position(const TacticalPosition &posit
     UnitId unit_id = selected.unit_at(slot);
     const auto &unit = current_unit(current, slot);
     const auto &original = root_unit(slot);
-    // Contract: docs/combat-ai-contract.md#slot-states.
+    // Contract: docs/combat-ai/combat-ai-contract.md#slot-states.
     if (position.slot_states[slot] == SlotState::ExcludedAtRoot || original.moves <= 0 || original.waiting) {
       if (trace) trace->event("end_skip_root", {{"unit",unit.id}});
       continue;
@@ -945,7 +945,7 @@ FinalEvaluation CpTactics::evaluate_final_position(const TacticalPosition &posit
     }
     if (position.slot_states[slot] == SlotState::Pending) {
       if (trace) trace->event("end_skip_pending", {{"unit",unit.id},{"touched",position.touched[slot]}});
-      // Contract: docs/combat-ai-contract.md#early-finish. Acted Pending units
+      // Contract: docs/combat-ai/combat-ai-contract.md#early-finish. Acted Pending units
       // are also handed back without end-position evaluation, but earn no bonus.
       if (!position.touched[slot])
         evaluation.score += kUntouchedEarlyFinishBonus;
@@ -979,7 +979,7 @@ FinalEvaluation CpTactics::evaluate_final_position(const TacticalPosition &posit
   }
 
   bool attacked = has_attack_assignment(position);
-  // Contract: docs/combat-ai-contract.md#plan-acceptance.
+  // Contract: docs/combat-ai/combat-ai-contract.md#plan-acceptance.
   bool improved = !position.killed.empty() || position.discovered ||
                   (!current.enemies.empty() ? (positive_changes > negative_changes ||
                                                (positive_changes == negative_changes && attacked))

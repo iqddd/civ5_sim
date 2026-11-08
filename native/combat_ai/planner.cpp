@@ -1,5 +1,5 @@
 // Local CP tactical search, adapted from CvTacticalAI.cpp:6634-10594.
-// Current behavior: docs/combat-ai-contract.md; CP mapping: combat-ai-cp-transfer.md.
+// Current behavior: docs/combat-ai/combat-ai-contract.md; CP mapping: combat-ai-cp-transfer.md.
 #include "planner.h"
 #include "cp_tactical.h"
 #include "storage_metrics.h"
@@ -18,7 +18,7 @@ void require_invariant(bool condition, const char* message) {
 }
 
 void set_swap_reverse_score(TacticalPosition& child, const CpMove& move) {
-  // Contract: docs/combat-ai-contract.md#combo-invariants.
+  // Contract: docs/combat-ai/combat-ai-contract.md#combo-invariants.
   require_invariant(child.assignments.size() >= 2,"swap reverse without a swap");
   const auto& forward = child.assignments[child.assignments.size()-2];
   auto& reverse = child.assignments.back();
@@ -69,7 +69,7 @@ bool has_attack_assignment(const TacticalPosition& position) {
 
 std::vector<int32_t> search_position_key(const TacticalPosition& position,
     const TacticalView& view, int32_t side, const SelectedUnits& selected) {
-  // Contract: docs/combat-ai-contract.md#candidate-order.
+  // Contract: docs/combat-ai/combat-ai-contract.md#candidate-order.
   std::vector<int32_t> result;
   for (const auto& unit : view.units) {
     if (unit.side != side && !view.visibility[unit.tile]) continue;
@@ -97,7 +97,7 @@ std::vector<int32_t> search_position_key(const TacticalPosition& position,
 }
 
 bool terminal_position(const TacticalPosition& position, const std::vector<int32_t>& initial_enemy_ids) {
-  // Contract: docs/combat-ai-contract.md#early-finish.
+  // Contract: docs/combat-ai/combat-ai-contract.md#early-finish.
   bool all_finished = std::all_of(position.slot_states.begin(),position.slot_states.end(),
       [](SlotState state) { return state != SlotState::Pending; });
   if (all_finished) return true;
@@ -151,7 +151,7 @@ bool CandidateExecutor::apply_command(TacticalPosition& child, Command command, 
     }
     child.attack_score += score;
   }
-  // Contract: docs/combat-ai-contract.md#continuation.
+  // Contract: docs/combat-ai/combat-ai-contract.md#continuation.
   child.move_flags[slot] = command.kind == SWAP ? MoveFlag::Swapped :
                            command.kind == MOVE ? MoveFlag::Moved : MoveFlag::None;
   child.last_kill[slot] = killed_unit >= 0;
@@ -197,7 +197,7 @@ bool CandidateExecutor::apply_command(TacticalPosition& child, Command command, 
         observer = UnitId{partner_id};
       child.restart_source = observer;
     }
-    // Contract: docs/combat-ai-contract.md#continuation and #restart.
+    // Contract: docs/combat-ai/combat-ai-contract.md#continuation and #restart.
     // Empty newly-visible plots extend the area but do not reset ordinary moves.
     child.discovered = child.discovered || enemy_contact;
     if (enemy_contact && command.kind == MOVE) child.move_flags[slot] = MoveFlag::None;
@@ -207,7 +207,7 @@ bool CandidateExecutor::apply_command(TacticalPosition& child, Command command, 
 }
 
 bool CandidateExecutor::apply(TacticalPosition& child, const CpCombo& candidate) {
-  // Contract: docs/combat-ai-contract.md#combo-invariants.
+  // Contract: docs/combat-ai/combat-ai-contract.md#combo-invariants.
   using namespace combat_rules;
   require_invariant(!candidate.moves.empty() && candidate.moves.size() <= 2,"invalid combo size");
   require_invariant(!child.restart_source,"unflushed contact in parent position");
@@ -249,7 +249,7 @@ bool CandidateExecutor::apply(TacticalPosition& child, const CpCombo& candidate)
     if (move.kind == CP_FORCED) child.move_flags[slot] = MoveFlag::None;
   }
 
-  // Contract: docs/combat-ai-contract.md#restart.
+  // Contract: docs/combat-ai/combat-ai-contract.md#restart.
   // CP makeNextAssignments appends RESTART after both actions. Preserve atomic
   // order, but record the first actual observer rather than an arbitrary anchor.
   if (child.restart_source) {
@@ -334,7 +334,7 @@ class Search {
     return left > right;
   }
   void record_completion(int32_t position_index, int32_t score) {
-    // Contract: docs/combat-ai-contract.md#search-budgets.
+    // Contract: docs/combat-ai/combat-ai-contract.md#search-budgets.
     work.trace.event("completion", {{"score",score},{"previous_best",best_score}});
     ++stats.completed;
     if (best_position < 0 || score > best_score) {
@@ -497,7 +497,7 @@ class Search {
           ++stats.pruned;
           continue;
         }
-        // Contract: docs/combat-ai-contract.md#candidate-order.
+        // Contract: docs/combat-ai/combat-ai-contract.md#candidate-order.
         child->rank = parent.rank;
         for (const auto& move : candidate.moves)
           if (move.kind != CP_BLOCKED && move.kind != CP_FINISH_TEMP) child->rank += move.score;

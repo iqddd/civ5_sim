@@ -463,7 +463,7 @@ class Adapter final : public RulesAdapter {
     bool ranged_attack = is_ranged(attacker_unit);
     // Fix the original CP argument mix-up (CvTacticalAI.cpp:6228/6230):
     // iExtraDefenderDamage belongs to the defender in both attack modes.
-    // Contract: docs/combat-ai-contract.md#extra-defender-damage.
+    // Contract: docs/combat-ai/combat-ai-contract.md#extra-defender-damage.
     // Same five-type strength service/constants as State::strengths, with
     // explicit assumed coordinates and CP's preview damage convention. Keep
     // this query inside the AI: it does not change the kernel rules passport.
