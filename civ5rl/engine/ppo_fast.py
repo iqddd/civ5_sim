@@ -155,8 +155,11 @@ class RolloutCache(SequenceBuffer):
         self.resident_bytes = sum(
             v.numel() * v.element_size() for v in (self.data or {}).values()
         ) + sum(v.numel() * v.element_size() for v in self.labels.values())
+        self.spatial_cell_padding = 0
         self.replay_inputs = False
         self._replay_plan = None
+        self._pinned_plan = None
+        self._replay_h2d_stream = None
         self._replay_sums_runner = None
         self._pinned_replay = None
         self.pinned_replay_bytes = 0
@@ -185,13 +188,96 @@ class RolloutCache(SequenceBuffer):
             self._pinned_replay = {}
             self._pinned_replay_limit = limit_bytes
 
+    def _build_pinned_plan(self, sequences_per_batch, *, cpu_groups=None):
+        if cpu_groups is None:
+            cpu_groups, _ = self._collect_cpu_replay_groups(sequences_per_batch)
+        pinned_groups = []
+        for group_size, parts in cpu_groups:
+            pinned_parts = []
+            for key, data, labels, lengths, slots, free_count, part_bytes in parts:
+                is_pinned = False
+                if (
+                    self._pinned_replay is not None
+                    and self.pinned_replay_bytes + part_bytes <= self._pinned_replay_limit
+                ):
+                    data = {k: v.pin_memory() for k, v in data.items()}
+                    labels = {k: v.pin_memory() for k, v in labels.items()}
+                    if slots is not None:
+                        slots = slots.pin_memory()
+                    self._pinned_replay[key] = data, labels, lengths
+                    self.pinned_replay_bytes += part_bytes
+                    is_pinned = True
+                pinned_parts.append(
+                    (data, labels, lengths, slots, free_count, is_pinned)
+                )
+            pinned_groups.append((group_size, pinned_parts))
+        self._pinned_plan = (sequences_per_batch, pinned_groups)
+        return pinned_groups
+
+    def _collect_cpu_replay_groups(self, sequences_per_batch):
+        cpu_groups = []
+        total_bytes = 0
+        for group_size, specs in _replay_group_specs(self, sequences_per_batch):
+            parts = []
+            for spans, slots_list, free_count in specs:
+                data, labels, lengths = self.batch(
+                    spans, device="cpu", min_cells=self.spatial_cell_padding
+                )
+                slots = (
+                    None
+                    if slots_list is None
+                    else torch.tensor(slots_list, dtype=torch.long)
+                )
+                part_bytes = sum(
+                    t.numel() * t.element_size()
+                    for t in (
+                        *data.values(),
+                        *labels.values(),
+                        *((slots,) if slots is not None else ()),
+                    )
+                )
+                total_bytes += part_bytes
+                parts.append(
+                    (tuple(spans), data, labels, lengths, slots, free_count, part_bytes)
+                )
+            cpu_groups.append((group_size, parts))
+        return cpu_groups, total_bytes
+
+    def stage_gpu_replay(
+        self, sequences_per_batch=8, *, reserve_bytes=2 * DEFAULT_GPU_RESERVE_BYTES
+    ):
+        """Stage pre-packed immutable replay parts in VRAM when reserve permits."""
+        if not str(self.device).startswith("cuda"):
+            return
+        if self._replay_plan is not None and self._replay_plan[0] == sequences_per_batch:
+            return
+        cpu_groups, total_bytes = self._collect_cpu_replay_groups(sequences_per_batch)
+        free, _ = torch.cuda.mem_get_info(self.device)
+        if free >= total_bytes + reserve_bytes:
+            gpu_groups = []
+            for group_size, parts in cpu_groups:
+                gpu_parts = []
+                for _, data, labels, lengths, slots, free_count, _ in parts:
+                    gpu_data = {k: v.to(self.device) for k, v in data.items()}
+                    gpu_labels = {k: v.to(self.device) for k, v in labels.items()}
+                    gpu_slots = None if slots is None else slots.to(self.device)
+                    gpu_parts.append((gpu_data, gpu_labels, lengths, gpu_slots, free_count))
+                gpu_groups.append((group_size, gpu_parts))
+            self._replay_plan = (sequences_per_batch, gpu_groups)
+            self.replay_inputs = True
+            return
+        if self._pinned_replay is not None:
+            self._build_pinned_plan(sequences_per_batch, cpu_groups=cpu_groups)
+
     def replay_batch(self, spans):
         if self._pinned_replay is None:
-            return self.batch(spans)
+            return self.batch(spans, min_cells=self.spatial_cell_padding)
         key = tuple(spans)
         part = self._pinned_replay.get(key)
         if part is None:
-            data, labels, lengths = self.batch(spans, device="cpu")
+            data, labels, lengths = self.batch(
+                spans, device="cpu", min_cells=self.spatial_cell_padding
+            )
             size = sum(
                 v.numel() * v.element_size() for v in (*data.values(), *labels.values())
             )
@@ -209,7 +295,7 @@ class RolloutCache(SequenceBuffer):
             lengths,
         )
 
-    def batch(self, spans, *, device=None, include_behavior=True):
+    def batch(self, spans, *, device=None, include_behavior=True, min_cells=0):
         device = self.device if device is None else device
         indices = (
             torch.tensor(
@@ -225,7 +311,19 @@ class RolloutCache(SequenceBuffer):
             if self.cpu_labels
             else self.indices(spans)
         )
-        data = self.gather_inputs(spans, indices, device=device)
+        data = self.gather_inputs(spans, indices, device=device, min_cells=min_cells)
+        if min_cells and "cells" in data and data["cells"].shape[1] < min_cells:
+            extra = min_cells - data["cells"].shape[1]
+            data = {
+                **data,
+                "cells": torch.nn.functional.pad(data["cells"], (0, 0, 0, extra)),
+                "neighbors": torch.nn.functional.pad(
+                    data["neighbors"], (0, 0, 0, extra), value=-1
+                ),
+                "cell_mask": torch.nn.functional.pad(
+                    data["cell_mask"], (0, extra), value=False
+                ),
+            }
         selected = indices.cpu() if self.cpu_labels else indices
         labels = {
             k: v.index_select(0, selected).to(device)
@@ -325,37 +423,128 @@ def _replay_sums(logits, value, indices, old_logp, returns, action_mask):
     return torch.stack(sums), delta.abs().max()
 
 
-def _replay_parts(cache, episodes):
-    max_length = max(len(cache.encoded[episode]) for episode in episodes)
-    for offset in range(0, max_length, DEFAULT_PREFIX_BLOCK_SIZE):
-        active = [
-            (slot, episode)
-            for slot, episode in enumerate(episodes)
-            if len(cache.encoded[episode]) > offset
-        ]
-        spans = [
-            Span(
-                episode,
-                offset,
-                min(offset + DEFAULT_PREFIX_BLOCK_SIZE, len(cache.encoded[episode])),
+def _part_free_count(cache, spans):
+    return sum(
+        int(
+            (
+                cache.action_counts[
+                    int(cache.offsets[span.episode]) + span.start : int(
+                        cache.offsets[span.episode]
+                    )
+                    + span.stop
+                ]
+                >= MIN_FREE_ACTIONS
+            ).sum()
+        )
+        for span in spans
+    )
+
+
+def _replay_group_specs(cache, sequences_per_batch):
+    for first in range(0, len(cache.episodes), sequences_per_batch):
+        episodes = list(
+            range(first, min(first + sequences_per_batch, len(cache.episodes)))
+        )
+        group_size = len(episodes)
+        max_length = max(len(cache.encoded[episode]) for episode in episodes)
+        specs = []
+        for offset in range(0, max_length, DEFAULT_PREFIX_BLOCK_SIZE):
+            active = [
+                (slot, episode)
+                for slot, episode in enumerate(episodes)
+                if len(cache.encoded[episode]) > offset
+            ]
+            spans = [
+                Span(
+                    episode,
+                    offset,
+                    min(
+                        offset + DEFAULT_PREFIX_BLOCK_SIZE,
+                        len(cache.encoded[episode]),
+                    ),
+                )
+                for _, episode in active
+            ]
+            slots_list = (
+                None if len(active) == group_size else [slot for slot, _ in active]
             )
-            for _, episode in active
-        ]
-        batch, labels, lengths = cache.replay_batch(spans)
-        slots = torch.tensor([slot for slot, _ in active], device=cache.device)
-        free_count = sum(
-            int(
+            specs.append((spans, slots_list, _part_free_count(cache, spans)))
+        yield group_size, specs
+
+
+def _stream_pinned_groups(cache, pinned_groups, *, count_hits):
+    if cache._replay_h2d_stream is None:
+        cache._replay_h2d_stream = torch.cuda.Stream(device=cache.device)
+    h2d_stream = cache._replay_h2d_stream
+    default_stream = torch.cuda.current_stream(cache.device)
+    flat = [part for _, g_parts in pinned_groups for part in g_parts]
+
+    def _enqueue(part):
+        cpu_data, cpu_labels, lengths, cpu_slots, free_count, is_pinned = part
+        h2d_stream.wait_stream(default_stream)
+        with torch.cuda.stream(h2d_stream):
+            gpu_data = {
+                k: v.to(cache.device, non_blocking=is_pinned)
+                for k, v in cpu_data.items()
+            }
+            gpu_labels = {
+                k: v.to(cache.device, non_blocking=is_pinned)
+                for k, v in cpu_labels.items()
+            }
+            gpu_slots = (
+                None
+                if cpu_slots is None
+                else cpu_slots.to(cache.device, non_blocking=is_pinned)
+            )
+            done = torch.cuda.Event()
+            done.record(h2d_stream)
+        return gpu_data, gpu_labels, lengths, gpu_slots, free_count, is_pinned, done
+
+    state = {"idx": 0, "inflight": _enqueue(flat[0]) if flat else None}
+    for group_size, g_parts in pinned_groups:
+        def _iter_group(num_parts=len(g_parts)):
+            for _ in range(num_parts):
+                cur = state["inflight"]
+                nxt_idx = state["idx"] + 1
+                state["idx"] = nxt_idx
+                state["inflight"] = (
+                    _enqueue(flat[nxt_idx]) if nxt_idx < len(flat) else None
+                )
                 (
-                    cache.action_counts[
-                        int(cache.offsets[span.episode]) + span.start : int(
-                            cache.offsets[span.episode]
-                        )
-                        + span.stop
-                    ]
-                    >= MIN_FREE_ACTIONS
-                ).sum()
-            )
-            for span in spans
+                    gpu_data,
+                    gpu_labels,
+                    lengths,
+                    gpu_slots,
+                    free_count,
+                    is_pinned,
+                    done,
+                ) = cur
+                default_stream.wait_event(done)
+                for t in (*gpu_data.values(), *gpu_labels.values()):
+                    t.record_stream(default_stream)
+                if gpu_slots is not None:
+                    gpu_slots.record_stream(default_stream)
+                if count_hits and is_pinned:
+                    cache.pinned_replay_hits += 1
+                yield gpu_data, gpu_labels, lengths, gpu_slots, free_count
+
+        yield group_size, _iter_group()
+
+
+def _replay_parts(cache, specs):
+    min_cells = getattr(cache, "spatial_cell_padding", 0)
+    has_replay_batch = hasattr(cache, "replay_batch")
+    for spans, slots_list, free_count in specs:
+        if has_replay_batch:
+            batch, labels, lengths = cache.replay_batch(spans)
+        elif min_cells:
+            batch, labels, lengths = cache.batch(spans, min_cells=min_cells)
+        else:
+            batch, labels, lengths = cache.batch(spans)
+        slots = (
+            None
+            if slots_list is None
+            else torch.tensor(slots_list, dtype=torch.long, device=cache.device)
         )
         yield batch, labels, lengths, slots, free_count
 
@@ -366,23 +555,27 @@ def _replay_groups(cache, sequences_per_batch):
     if previous is not None and previous[0] == sequences_per_batch:
         yield from previous[1]
         return
+    if getattr(cache, "_pinned_replay", None) is not None and hasattr(
+        cache, "_build_pinned_plan"
+    ):
+        pinned = getattr(cache, "_pinned_plan", None)
+        if pinned is not None and pinned[0] == sequences_per_batch:
+            yield from _stream_pinned_groups(cache, pinned[1], count_hits=True)
+            return
+        groups = cache._build_pinned_plan(sequences_per_batch)
+        yield from _stream_pinned_groups(cache, groups, count_hits=False)
+        return
+    cache_inputs = bool(getattr(cache, "replay_inputs", False))
     plan = []
-    for first in range(0, len(cache.episodes), sequences_per_batch):
-        episodes = list(
-            range(first, min(first + sequences_per_batch, len(cache.episodes)))
-        )
-        parts = _replay_parts(cache, episodes)
-        if not getattr(cache, "cpu_labels", False):
+    for group_size, specs in _replay_group_specs(cache, sequences_per_batch):
+        parts = _replay_parts(cache, specs)
+        if cache_inputs or not getattr(cache, "cpu_labels", False):
             parts = list(parts)
-        group = len(episodes), parts
-        if getattr(cache, "replay_inputs", False) and not getattr(
-            cache, "cpu_labels", False
-        ):
+        group = group_size, parts
+        if cache_inputs:
             plan.append(group)
         yield group
-    if getattr(cache, "replay_inputs", False) and not getattr(
-        cache, "cpu_labels", False
-    ):
+    if cache_inputs:
         cache._replay_plan = sequences_per_batch, plan
 
 
@@ -406,14 +599,22 @@ def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=Fa
         for batch, labels, lengths, slots, part_free in parts:
             if policy.spatial_cuda_graphs:
                 torch.compiler.cudagraph_mark_step_begin()
+            part_hidden = (
+                None
+                if hidden is None
+                else (hidden if slots is None else hidden.index_select(1, slots))
+            )
             logits, value, last = policy.forward_sequences(
                 batch,
                 lengths,
-                None if hidden is None else hidden.index_select(1, slots),
+                part_hidden,
             )
             logits = policy_logits(logits, temperature)
             if hidden is not None:
-                hidden.index_copy_(1, slots, last)
+                if slots is None:
+                    hidden.copy_(last)
+                else:
+                    hidden.index_copy_(1, slots, last)
             sums, max_error = runner(
                 logits,
                 value,
@@ -515,9 +716,10 @@ class BatchedBackend:
             resident=options.get("resident_rollout", True) if batched else False,
             cpu_labels=options.get("cpu_rollout_labels", False),
         )
-        if str(device).startswith("cuda"):
-            torch.cuda.synchronize()
-        self.cache_seconds = perf_counter() - tick
+        self.cache.spatial_cell_padding = int(
+            getattr(policy, "spatial_cell_padding", 0) or 0
+        )
+        self.kl_batch = options.get("kl_sequences_per_batch", 8)
         if str(device).startswith("cuda") and options.get(
             "ppo_optimized_inputs", False
         ):
@@ -527,7 +729,11 @@ class BatchedBackend:
             self.cache.enable_cached_replay()
         if pinned_replay or options.get("ppo_pinned_replay", False):
             self.cache.enable_pinned_replay()
-        self.kl_batch = options.get("kl_sequences_per_batch", 8)
+            if str(device).startswith("cuda"):
+                self.cache.stage_gpu_replay(self.kl_batch)
+        if str(device).startswith("cuda"):
+            torch.cuda.synchronize()
+        self.cache_seconds = perf_counter() - tick
         self.names = (
             "policy_loss",
             "value_loss",
@@ -668,7 +874,11 @@ class BatchedBackend:
                     else []
                 )
                 for data, labels, _, slots, _ in parts
-                for tensor in (*data.values(), *labels.values(), slots)
+                for tensor in (
+                    *data.values(),
+                    *labels.values(),
+                    *((slots,) if slots is not None else ()),
+                )
             ),
             "microbatch_sequences": self.micro_chunks,
         }

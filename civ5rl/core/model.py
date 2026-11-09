@@ -27,11 +27,13 @@ from civ5rl.core.variants import PolicyVariant
 GRU_GATES = 3
 
 
-def batch_inputs(items, device, *, non_blocking=False, spatial_only=False):
+def batch_inputs(
+    items, device, *, non_blocking=False, spatial_only=False, min_cells=0
+):
     if not items or any(len(item.cells) == 0 for item in items):
         raise ValueError("Each batch item must contain at least one cell")
     batch_size = len(items)
-    num_cells = max(len(item.cells) for item in items)
+    num_cells = max(min_cells, max(len(item.cells) for item in items))
     cells = np.zeros((batch_size, num_cells, TILE_DIM), np.float32)
     masks = np.zeros((batch_size, num_cells), bool)
     neighbors = np.full((batch_size, num_cells, HEX_DIRECTIONS), -1, np.int64)

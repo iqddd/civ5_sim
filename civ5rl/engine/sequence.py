@@ -111,7 +111,7 @@ class SequenceBuffer:
             data[key] = data[key][:, :width].contiguous()
         return data
 
-    def gather_inputs(self, spans, indices=None, *, device=None):
+    def gather_inputs(self, spans, indices=None, *, device=None, min_cells=0):
         if self.data is None:
             return batch_inputs(
                 [
@@ -121,6 +121,7 @@ class SequenceBuffer:
                 ],
                 self.device if device is None else device,
                 non_blocking=True,
+                min_cells=min_cells,
             )
         if indices is None:
             indices = self.indices(spans)
