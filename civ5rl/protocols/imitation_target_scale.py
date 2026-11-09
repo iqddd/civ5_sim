@@ -16,6 +16,8 @@ from civ5rl.protocols.imitation import (
 from civ5rl.provenance.common import write_json
 
 KIND = "rl01.cp_imitation_target_scale"
+MORE_DATA_KIND = "rl01.cp_imitation_target_more_data"
+SUPPORTED_KINDS = (KIND, MORE_DATA_KIND)
 
 
 def match_task(task):
@@ -23,7 +25,8 @@ def match_task(task):
     directory = Path(destination)
     directory.mkdir(parents=True, exist_ok=True)
     if (
-        case["source"] != KIND
+        case["source"] not in SUPPORTED_KINDS
+        or case["source"] != config.get("kind")
         or case["split"] != "train"
         or case["case_hash"] != self_digest(case)
     ):
@@ -65,6 +68,8 @@ def match_task(task):
                     "labels": sum(masks),
                     "positions": len(masks),
                     "supervised": masks,
+                    "map_size": case["map_size"],
+                    "army_size": case["army_size"],
                 }
             )
         result = {

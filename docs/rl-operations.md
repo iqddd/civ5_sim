@@ -1,6 +1,6 @@
 # Работа с RL-запусками
 
-Сверено с CLI и реализацией 8 ноября 2026 года. Команды выполняются из корня
+Сверено с CLI и реализацией 9 ноября 2026 года. Команды выполняются из корня
 репозитория в окружении опыта. `RUN`, `CONFIG`, `CHECKPOINT`, `ROLLOUT` и
 `OUT` ниже — подставляемые пути. Условия обучения, parent и критерии выбора
 модели ищите в [журнале](experiment-ledger.md), устройство паспортов — в
@@ -28,12 +28,11 @@ python tools/ctl_rl.py snapshot --run RUN --out OUT --block-size 5 --last 20
 python tools/ctl_rl.py performance --run RUN --last 10
 ```
 
-`audit` проверяет замороженный паспорт/архив, транзакционный PPO ledger,
+`audit` проверяет замороженный паспорт/архив, транзакционный PPO или BC ledger,
 CPU checkpoint/Adam/RNG, полноту сохранённых оценок и W/D/L, парное сравнение.
 Он не сравнивает текущее рабочее дерево. Для старого паспорта без hash
 resolved config выводит `config_hash_verified: false`; недоступные проверки
-не объявляются пройденными. Deployment passport отмечается отдельно от
-паспорта runner. Проверка архива не доказывает корректность всех результатов.
+не объявляются пройденными. Проверка архива не доказывает корректность всех результатов.
 
 Для стабильного аудита удерживается существующий writer lock. Работающий
 writer или отсутствие lock дают `incomplete`; для текущего среза есть
@@ -62,16 +61,18 @@ python tools/ctl_rl.py close --run RUN --reason "Research stopped at saved bound
 ```
 
 Запрос — порог в `pause.request`, не сигнал процессу. PPO-after-target-BC
-поддерживает update boundary; target-scale imitation — полностью сохранённую
-эпоху. Неподдерживаемые сочетания отклоняются. Плановая оценка на границе
-заканчивается до паузы; дополнительная final evaluation ради паузы не запускается.
-Старый запущенный процесс не приобретает новые hooks от правки файлов.
+поддерживает update boundary; target-scale и target-more-data imitation —
+полностью сохранённую эпоху. Неподдерживаемые сочетания отклоняются. Плановая
+оценка на границе заканчивается до паузы; дополнительная final evaluation ради
+паузы не запускается. Старый запущенный процесс не приобретает новые hooks от правки файлов.
 
 PPO resume удаляет запрос и продолжает сохранённые model/Adam/RNG/счётчики.
-У imitation нет общего безопасного pause-resume; специализированный старый
-input-fix restart нельзя считать таким продолжением. У target-scale PPO
-есть также собственные `pause`/`resume` в `tools/run_ppo.py`.
-Поддержку нужно выбирать по runner, а не только по наличию файла запроса.
+Для `rl01.cp_imitation_target_more_data` фаза `tools/run_cp_imitation.py resume`
+безопасно продолжает завершённые волны сбора и состояние обучения (model, Adam,
+shuffle RNG, курсор batch и потраченный бюджет) без повтора принятых шагов и оценок;
+у ранних BC-протоколов общего pause-resume нет. У target-scale PPO есть также
+собственные `pause`/`resume` в `tools/run_ppo.py`. Поддержку нужно выбирать по runner,
+а не только по наличию файла запроса.
 
 `wait-and-finalize` ждёт lock/status с конечным timeout и пишет производный
 срез: статус paused/technical_error/closed_by_user сохраняется по смыслу.
@@ -173,7 +174,7 @@ Python profiling собирается отдельным проходом. Дл�
 
 Автоподбор streaming проверяет ёмкость, workers, reply и объединение inference;
 два финалиста подтверждаются чередующимися измерениями. При близости до 3%
-предпочтение отдаётся меньшему числу workers/сред и меньшему ожиданию/reply.
+предпотение отдаётся меньшему числу workers/сред и меньшему ожиданию/reply.
 По умолчанию общий бюджет 600 секунд включает подготовку/прогрев/компиляцию.
 Незавершённое подтверждение помечается preliminary; ошибки и несовпадения
 не заменяются удобным упрощённым вариантом.
@@ -192,18 +193,18 @@ rollout и фиксируются как условия исполнения.
 
 ## Удалённое исполнение
 
-`tools/remote_rl.py` работает с уже существующим инстансом. Аренда и выбор
-машины выполняются отдельно; по умолчанию проекта при создании Vast-инстанса
-готовятся два кандидата (`--parallel 2`).
+`tools/remote_rl.py` работает с уже существующим инстансом поверх `remote-python-ssh`.
+Аренда и выбор машины выполняются отдельно; по умолчанию проекта при создании
+Vast-инстанса готовятся два кандидата (`--parallel 2`).
 
 ```powershell
-python tools/remote_rl.py package --config configs/rl-ppo-target-bc-t05.json --out DEPLOYMENT --extra-input CASE_CARRIER.pt
-python tools/remote_rl.py launch --deployment DEPLOYMENT --mode tune --instance INSTANCE_JSON
-python tools/remote_rl.py pull --deployment DEPLOYMENT
-python tools/remote_rl.py launch --deployment DEPLOYMENT --mode run
-python tools/remote_rl.py status --deployment DEPLOYMENT
-python tools/remote_rl.py pull --deployment DEPLOYMENT --keep-instance
-python tools/remote_rl.py launch --deployment DEPLOYMENT --mode resume
+python tools/remote_rl.py package --config configs/rl-ppo-target-bc-t05.json --out artifacts/deployments/ppo-t05 --extra-input CASE_CARRIER.pt
+python tools/remote_rl.py launch --deployment artifacts/deployments/ppo-t05 --mode tune --instance INSTANCE_JSON
+python tools/remote_rl.py pull --deployment artifacts/deployments/ppo-t05
+python tools/remote_rl.py launch --deployment artifacts/deployments/ppo-t05 --mode run
+python tools/remote_rl.py status --deployment artifacts/deployments/ppo-t05
+python tools/remote_rl.py pull --deployment artifacts/deployments/ppo-t05 --keep-instance
+python tools/remote_rl.py launch --deployment artifacts/deployments/ppo-t05 --mode resume
 ```
 
 | Kind | run | tune | resume |
@@ -211,64 +212,44 @@ python tools/remote_rl.py launch --deployment DEPLOYMENT --mode resume
 | `rl01.ppo_after_target_bc` | Да | Да | Да |
 | `rl01.ppo_target_scale` | Да | Нет | Да |
 | `rl01.ppo_scale_up`, включая continuation | Да | Нет | Нет |
+| `rl01.cp_imitation_target_more_data` | Да | Нет | Да |
+| `rl01.cp_imitation_target_scale` | Да | Нет | Нет |
 
-BC не входит в этот интерфейс. Каталог package должен быть пустым.
-Для after-target-BC tune требуется ровно один явно добавленный `.pt` case
-carrier с нужными фиксированными случаями; расширение файла не доказывает
-его семантическую пригодность. Tune ограничен 600 секундами; перед run нужен
-подтверждённый comparable tune для точного package/config и его pull.
+Каталог `--out` (`DEPLOYMENT`) должен быть пустым и располагаться **вне** `config["output"]`
+(например, `artifacts/deployments/<name>`), так как сам `config["output"]` выступает
+основным синхронизируемым mirror-каталогом (`--local-sync-dir` <-> `--remote-sync-dir`).
+Перед `package` рабочее дерево Git должно быть чистым, а `HEAD` — отправлен в `origin` (`git push`).
 
-### Состав пакета и недостающие входы
+### Разделение зон (`repositories`, `inputs`, `mirror`, `scratch`)
 
-Упаковка не обходит транзитивно произвольные manifests. Она захватывает
-parent checkpoint/manifest, configs и открытые карты из выбранного manifest,
-но не гарантирует карты другого corpus manifest или исторический rollout,
-который runner читает отдельно. Для target-scale prepare нужны открытые карты
-`artifacts/rl/corpus/manifest.json`; target-scale и scale-up math check читают
-`artifacts/rl/ppo-controlled-updates/rollouts/first.pt`.
-До исправления упаковщика эти зависимости передаются явно. Для большого
-списка карт на Windows используйте тот же Python API внутри одного процесса:
-сотни `--extra-input` могут превысить предел длины командной строки.
-
-```powershell
-@'
-import json
-from pathlib import Path
-from civ5rl.deploy.operations import package
-corpus = json.loads(Path('artifacts/rl/corpus/manifest.json').read_text(encoding='utf-8'))
-extras = ['artifacts/rl/corpus/manifest.json', 'artifacts/rl/ppo-controlled-updates/rollouts/first.pt']
-extras += [m['path'] for m in corpus['maps'] if m['split'] in ('train', 'validation')]
-print(json.dumps(package('configs/rl-ppo-target-scale.json', 'DEPLOYMENT', extra_inputs=extras), indent=2))
-'@ | python -
-```
-
-Передать только manifest недостаточно. Дополнительные пути должны находиться
-в репозитории. Код сборщика входов исключает test splits при обходе manifest,
-но `source.zip` отдельно включает tracked/untracked non-ignored файлы;
-`extra_inputs` тоже может включить test. Поэтому общая гарантия «закрытые карты
-не попадут в пакет» из фильтра inputs.zip не следует: состав архивов нужно
-сверять до запуска. Эти ограничения описывают текущий код; документационная
-ревизия его не исправляет.
+1. **Код и зависимости (`prepare.json`)**: удалённая машина клонирует/обновляет публичный
+   GitHub-репозиторий на точном `HEAD`-коммите в `<remote_root>/civ5_sim`
+   (`execution_subdir: "civ5_sim"`), создаёт `<remote_root>/.venv` и ставит `requirements-rl.txt`.
+   На Linux `civ5rl/deploy/worker.py` автоматически собирает `build/libcombat.so` и
+   `build/libcombat_ai.so` через `--dll-only`, если библиотеки ещё не собраны.
+2. **Входные gitignored-файлы (`DEPLOYMENT/inputs/` -> `prepare.json` `sync`)**:
+   `package` отбирает только необходимые входы вне Git (`build/combat_rules.*`,
+   `build/cp_geometry.inc`, parent/reference checkpoints, открытые карты манифестов без
+   закрытых `test` splits, старый корпус для `cp_imitation_target_more_data` и явные
+   `--extra-input`) и раскладывает их по непересекающимся поддеревьям для одноразового
+   SHA-256-зеркалирования `prepare.sync`. Они не пересекаются с `config["output"]` и
+   не пересылаются обратно при `post-sync`.
+3. **Основной вывод опыта (`--local-sync-dir` <-> `--remote-sync-dir`)**: для `run`/`resume`
+   синхронизируется непосредственно `config["output"]` (для `tune` — `DEPLOYMENT/tuning`).
+   При `pull` (`--attach` + verified `post-sync`) результаты сразу попадают в `artifacts/rl/<run>`
+   без промежуточных `result.zip` и дублирующих копий.
+4. **Временный кэш (`CIV5RL_SCRATCH_DIR`)**: подготовленные `.npz` файлы BC (`prepared-inputs/`)
+   размещаются в `<remote_root>/scratch` вне синхронизируемых каталогов — они сохраняются
+   между `resume` на том же хосте и никогда не выгружаются при `post-sync`.
 
 ### Жизненный цикл deployment
 
-`INSTANCE_JSON` задаёт instance_id/id, host/SSH_host, port/SSH_port; credentials
-берутся из окружения SSH-инструмента, а не встраиваются в протокол. Инстанс
-после привязки не меняется. Fingerprint фиксирует sources/inputs, размеры,
-SHA-256 и членов архивов; Git bundle сохраняет base commit.
-Рабочие пути выводятся из fingerprint под `/workspace/civ5-runs/`.
+`INSTANCE_JSON` задаёт `instance_id`/`id`, `host`/`SSH_host`, `port`/`SSH_port`; credentials
+берутся из окружения SSH-инструмента. Инстанс после привязки не меняется. Повтор `launch`
+при активном job выполняет `--attach`; `resume` требует завершённого `pull` предыдущего
+шага (после которого локальный и удалённый `config["output"]` идентичны по SHA-256).
 
-Исполнение использует durable runner установленного remote-python-ssh skill,
-отдельный payload mirror и verified post-sync. Проект, venv и scientific output
-находятся вне этого mirror. Повтор launch присоединяется к связанному job;
-неопределённый старт восстанавливается по durable registry без слепого повтора.
-`resume` требует прежние sources/inputs и сохранённые model/Adam/RNG/budget
-на том же инстансе; локальные изменения поверх run не накладываются.
-
-`status` читает ограниченный срез. `pull` ждёт завершения активного job,
-проверяет transport/post-sync, operation token, ZIP safety и hashes перед
-извлечением. Scientific audit записывается отдельно от целостности транспорта.
-Повторный pull принимает идентичные файлы и отклоняет конфликтующие.
-Инстанс сохраняется по умолчанию; `pull --delete-instance` удаляет только
-привязанный ID после успешных обязательных проверок. Ошибки выгрузки/проверки
-не превращаются в успешную передачу или разрешение удалить машину.
+`status` читает ограниченный живой срез по SSH. `pull` дожидается завершения активного job,
+проверяет `execution` и `post-sync` без ошибок файлов, запускает научный `audit` напрямую
+на `config["output"]` и по умолчанию сохраняет инстанс; `--delete-instance` удаляет
+только привязанный ID после прохождения обязательных секций аудита.

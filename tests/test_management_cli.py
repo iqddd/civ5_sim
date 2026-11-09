@@ -5,13 +5,11 @@ import io
 import json
 import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from civ5rl.deploy import operations as remote
 from civ5rl.deploy import worker
-from civ5rl.deploy.remote import _sha, _validate_zip
 from civ5rl.engine.control import RunLock
 from civ5rl.reporting.operations import audit_run
 from tools.ctl_rl import main as ctl
@@ -29,12 +27,14 @@ class FakeTransport:
         self.starts = 0
         self.attaches = 0
         self.deletes = 0
+        self.last_args = None
 
     def validate_attach(self, deployment):
         if deployment["job"]["id"] != "fixture-job":
             raise ValueError("unrelated job")
 
     def invoke(self, instance, args):
+        self.last_args = args
         if "--attach" in args:
             self.attaches += 1
         else:
@@ -55,15 +55,14 @@ class FakeTransport:
 
 
 class ManagementTests(unittest.TestCase):
-    def test_resume_worker_preserves_saved_boundary_and_archives_runner_error(self):
-        # A source overlay or fresh initialization on resume could silently reset
-        # model/Adam/RNG/budget; test the real worker with only its runner replaced.
+    def test_resume_worker_preserves_saved_boundary_and_refuses_duplicate_run(self):
         with tempfile.TemporaryDirectory() as temp:
-            base = Path(temp)
-            payload = base / "payload"
-            payload.mkdir()
-            project = base / "project"
-            run = project / "artifacts/rl/fixed"
+            root = Path(temp)
+            write(
+                root / "configs/fixed.json",
+                {"kind": "rl01.ppo_target_scale", "output": "artifacts/rl/fixed"},
+            )
+            run = root / "artifacts/rl/fixed"
             run.mkdir(parents=True)
             frozen = {
                 "state.json": b'{"decisions":123,"active_seconds":42}',
@@ -72,135 +71,109 @@ class ManagementTests(unittest.TestCase):
             for name, value in frozen.items():
                 (run / name).parent.mkdir(parents=True, exist_ok=True)
                 (run / name).write_bytes(value)
-            write(run / "run.json", {"config": {"kind": "rl01.ppo_target_scale"}})
-            with zipfile.ZipFile(payload / "source.zip", "w") as archive:
-                archive.writestr("frozen.txt", "unchanged")
-            (project / "frozen.txt").write_text("unchanged")
-            transfer = {
-                "archives": {
-                    "source.zip": {"members": _validate_zip(payload / "source.zip")}
-                }
-            }
-            write(payload / "transfer.json", transfer)
-            write(base / "prepared.json", {"fingerprint": "fixture"})
-            write(base / "run-started.json", {"fingerprint": "fixture"})
-            request = {
-                "remote_project": str(project),
-                "output": "artifacts/rl/fixed",
-                "mode": "resume",
-                "kind": "rl01.ppo_target_scale",
-                "config": "configs/fixed.json",
-                "fingerprint": "fixture",
-                "operation": 1,
-                "fingerprints": {"source.zip": _sha(payload / "source.zip")},
-            }
-            write(payload / "request.json", request)
+
+            with self.assertRaises(ValueError):
+                worker.main(["--mode", "run", "--config", "configs/fixed.json"], root=root)
+
             with (
-                contextlib.chdir(base),
-                patch.object(worker.sys, "path", worker.sys.path.copy()),
+                patch.object(worker, "ensure_native_libraries"),
+                patch.object(worker, "hardware", return_value={"cpu": "test"}),
                 patch.object(
                     worker.subprocess, "run", return_value=Mock(returncode=7)
                 ) as execute,
             ):
-                self.assertEqual(worker.main(), 7)
+                code = worker.main(
+                    ["--mode", "resume", "--config", "configs/fixed.json"], root=root
+                )
+            self.assertEqual(code, 7)
             command = execute.call_args.args[0]
             self.assertEqual(command[1:3], ["tools/run_ppo.py", "resume"])
-            self.assertEqual(execute.call_count, 1)
             for name, value in frozen.items():
                 self.assertEqual((run / name).read_bytes(), value)
-            descriptor = json.loads((payload / "result.json").read_text())
-            self.assertEqual(descriptor["exit_code"], 7)
-            self.assertEqual(descriptor["operation"], 1)
-            self.assertEqual(descriptor["sha256"], _sha(payload / "result.zip"))
-            with zipfile.ZipFile(payload / "result.zip") as archive:
-                self.assertEqual(
-                    archive.read("run/checkpoints/latest.pt"),
-                    frozen["checkpoints/latest.pt"],
-                )
 
     def deployment(self, root, kind="rl01.ppo_after_target_bc"):
-        payload = root / "payload"
-        payload.mkdir()
-        write(payload / "transfer.json", {"archives": {}})
+        local_out = root / "local-run"
+        deploy = root / "deploy"
+        deploy.mkdir(parents=True, exist_ok=True)
+        write(deploy / "prepare.json", {"execution_subdir": "civ5_sim"})
+        write(
+            deploy / "inputs-manifest.json",
+            {"schema": 1, "output": "artifacts/rl/fixed", "groups": [], "staged_files": {}, "tracked_inputs": {}},
+        )
         record = {
+            "schema": 2,
             "kind": kind,
             "config": "configs/fixed.json",
             "output": "artifacts/rl/fixed",
+            "local_output": str(local_out),
             "resolved_config": {},
             "remote_root": "/workspace/civ5-runs/fixture",
-            "remote_project": "/workspace/civ5-runs/fixture/project",
+            "remote_project": "/workspace/civ5-runs/fixture/civ5_sim",
+            "remote_scratch": "/workspace/civ5-runs/fixture/scratch",
             "instance": {"instance_id": 123, "host": "example.invalid", "port": 22},
-            "fingerprints": {
-                "transfer.json": _sha(payload / "transfer.json"),
-                "source.zip": "frozen",
-            },
+            "prepare_sha256": remote._sha(deploy / "prepare.json"),
+            "inputs_manifest_sha256": remote._sha(deploy / "inputs-manifest.json"),
             "fingerprint": "fixture",
             "commit": "fixture",
+            "repo": "iqddd/civ5_sim",
+            "repo_name": "civ5_sim",
             "runtime": {"num_envs": 16},
             "tune": {"confirmed": True, "fingerprint": "fixture"},
             "tuning_rollout": "cases.pt",
             "operations": [],
             "job": None,
         }
-        # The test exercises orchestration, not archive generation (covered separately).
-        write(root / "deployment.json", record)
-        return FakeTransport(root)
+        write(deploy / "deployment.json", record)
+        return deploy, FakeTransport(deploy)
 
-    def test_repeat_launch_attaches_and_resume_uses_frozen_payload(self):
-        with (
-            tempfile.TemporaryDirectory() as temp,
-            patch.object(remote, "verify_package"),
-        ):
-            root = Path(temp)
-            transport = self.deployment(root)
-            remote.launch(root, "run", transport=transport)
-            remote.launch(root, "run", transport=transport)
+    def test_repeat_launch_attaches_and_resume_uses_split_mirror_and_scratch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            deploy, transport = self.deployment(Path(temp))
+            remote.launch(deploy, "run", transport=transport)
+            self.assertIn("--prepare", transport.last_args)
+            self.assertIn(
+                "--env",
+                transport.last_args,
+            )
+            self.assertIn(
+                "CIV5RL_SCRATCH_DIR=/workspace/civ5-runs/fixture/scratch",
+                transport.last_args,
+            )
+            remote.launch(deploy, "run", transport=transport)
             self.assertEqual((transport.starts, transport.attaches), (1, 1))
-            saved = json.loads((root / "deployment.json").read_text())
+            saved = json.loads((deploy / "deployment.json").read_text())
             job = saved["job"]
             write(
-                root / job["result"],
+                deploy / job["result"],
                 {"job_id": job["id"], "lifecycle": {"phase": "finalized"}},
             )
             saved["run_started"] = True
             saved["job"]["pulled"] = True
-            write(root / "deployment.json", saved)
-            remote.launch(root, "resume", transport=transport)
-            request = json.loads((root / "payload/request.json").read_text())
-            self.assertEqual(request["mode"], "resume")
-            self.assertEqual(request["runtime"], {"num_envs": 16})
+            write(deploy / "deployment.json", saved)
+            remote.launch(deploy, "resume", transport=transport)
+            self.assertIn("--script-arg=resume", transport.last_args)
             self.assertEqual(transport.starts, 2)
 
     def test_unsupported_and_failed_tuning_never_start_training(self):
-        with (
-            tempfile.TemporaryDirectory() as temp,
-            patch.object(remote, "verify_package"),
-        ):
-            root = Path(temp)
-            transport = self.deployment(root, "rl01.ppo_target_scale")
+        with tempfile.TemporaryDirectory() as temp:
+            deploy, transport = self.deployment(Path(temp), "rl01.ppo_target_scale")
             with self.assertRaises(ValueError):
-                remote.launch(root, "tune", transport=transport)
-            saved = json.loads((root / "deployment.json").read_text())
+                remote.launch(deploy, "tune", transport=transport)
+            saved = json.loads((deploy / "deployment.json").read_text())
             saved["kind"] = "rl01.ppo_after_target_bc"
             saved["tune"]["confirmed"] = False
-            write(root / "deployment.json", saved)
+            write(deploy / "deployment.json", saved)
             with self.assertRaises(ValueError):
-                remote.launch(root, "run", transport=transport)
+                remote.launch(deploy, "run", transport=transport)
             self.assertEqual(transport.starts, 0)
 
-    def test_pull_requires_final_transfer_hashes_and_checks_before_delete(self):
-        with (
-            tempfile.TemporaryDirectory() as temp,
-            patch.object(remote, "verify_package"),
-        ):
-            root = Path(temp)
-            transport = self.deployment(root)
-            remote.launch(root, "tune", transport=transport)
-            with self.assertRaises(ValueError):
-                remote.pull(root, delete_instance=True, transport=transport)
-            saved = json.loads((root / "deployment.json").read_text())
+    def test_pull_requires_verified_post_sync_and_checks_before_delete(self):
+        with tempfile.TemporaryDirectory() as temp:
+            deploy, transport = self.deployment(Path(temp))
+            remote.launch(deploy, "tune", transport=transport)
+            saved = json.loads((deploy / "deployment.json").read_text())
             write(
-                root / saved["job"]["result"],
+                deploy / saved["job"]["result"],
                 {
                     "job_id": "fixture-job",
                     "execution": {"status": "exited", "exit_code": 1},
@@ -209,38 +182,23 @@ class ManagementTests(unittest.TestCase):
                 },
             )
             with self.assertRaises(ValueError):
-                remote.pull(root, delete_instance=True, transport=transport)
-            result = json.loads((root / saved["job"]["result"]).read_text())
-            result["post_sync"]["status"] = "ok"
-            write(root / saved["job"]["result"], result)
-            archive = root / "payload/result.zip"
-            with zipfile.ZipFile(archive, "w") as stream:
-                stream.writestr(
-                    "tuning/summary.json",
-                    json.dumps(
-                        {"preliminary": True, "protected_inputs_unchanged": True}
-                    ),
-                )
-            descriptor = {
-                "fingerprint": "fixture",
-                "mode": "tune",
-                "operation": saved["job"]["operation"],
-                "prepared": True,
-                "exit_code": 1,
-                "bytes": archive.stat().st_size,
-                "sha256": "wrong",
-                "members": _validate_zip(archive),
-            }
-            write(root / "payload/result.json", descriptor)
-            with self.assertRaises(ValueError):
-                remote.pull(root, delete_instance=True, transport=transport)
-            descriptor["sha256"] = _sha(archive)
-            write(root / "payload/result.json", descriptor)
-            with self.assertRaises(ValueError):
-                remote.pull(root, delete_instance=True, transport=transport)
-            self.assertTrue(
-                (root / "results/fixture-job/tuning/summary.json").is_file()
+                remote.pull(deploy, delete_instance=True, transport=transport)
+
+            write(
+                deploy / "tuning/summary.json",
+                {"preliminary": True, "protected_inputs_unchanged": True},
             )
+            write(
+                deploy / saved["job"]["result"],
+                {
+                    "job_id": "fixture-job",
+                    "execution": {"status": "exited", "exit_code": 1},
+                    "lifecycle": {"phase": "finalized"},
+                    "post_sync": {"status": "ok", "file_errors": []},
+                },
+            )
+            with self.assertRaises(ValueError):
+                remote.pull(deploy, delete_instance=True, transport=transport)
             self.assertEqual(transport.deletes, 0)
 
     def test_active_and_historical_audits_never_claim_complete(self):
@@ -258,50 +216,34 @@ class ManagementTests(unittest.TestCase):
             )
 
     def test_verified_pull_keeps_instance_until_explicit_delete(self):
-        with (
-            tempfile.TemporaryDirectory() as temp,
-            patch.object(remote, "verify_package"),
-        ):
-            root = Path(temp)
-            transport = self.deployment(root)
-            remote.launch(root, "tune", transport=transport)
-            saved = json.loads((root / "deployment.json").read_text())
+        with tempfile.TemporaryDirectory() as temp:
+            deploy, transport = self.deployment(Path(temp))
+            remote.launch(deploy, "tune", transport=transport)
+            saved = json.loads((deploy / "deployment.json").read_text())
             write(
-                root / saved["job"]["result"],
+                deploy / "tuning/summary.json",
+                {"preliminary": False, "protected_inputs_unchanged": True},
+            )
+            write(deploy / "tuning/recommended-runtime.json", {"num_envs": 16})
+            write(
+                deploy / saved["job"]["result"],
                 {
                     "job_id": "fixture-job",
                     "execution": {"status": "exited", "exit_code": 0},
                     "lifecycle": {"phase": "finalized"},
-                    "post_sync": {"status": "ok"},
+                    "post_sync": {
+                        "status": "ok",
+                        "file_errors": [],
+                        "copied_files": 2,
+                        "verified_files": 2,
+                    },
                 },
             )
-            archive = root / "payload/result.zip"
-            with zipfile.ZipFile(archive, "w") as stream:
-                stream.writestr(
-                    "tuning/summary.json",
-                    json.dumps(
-                        {"preliminary": False, "protected_inputs_unchanged": True}
-                    ),
-                )
-                stream.writestr("tuning/recommended-runtime.json", '{"num_envs":16}')
-            write(
-                root / "payload/result.json",
-                {
-                    "fingerprint": "fixture",
-                    "mode": "tune",
-                    "operation": saved["job"]["operation"],
-                    "prepared": True,
-                    "exit_code": 0,
-                    "bytes": archive.stat().st_size,
-                    "sha256": _sha(archive),
-                    "members": _validate_zip(archive),
-                },
-            )
-            remote.pull(root, transport=transport)
+            remote.pull(deploy, transport=transport)
             self.assertEqual(transport.deletes, 0)
-            remote.pull(root, delete_instance=True, transport=transport)
+            remote.pull(deploy, delete_instance=True, transport=transport)
             self.assertEqual(transport.deletes, 1)
-            remote.pull(root, delete_instance=True, transport=transport)
+            remote.pull(deploy, delete_instance=True, transport=transport)
             self.assertEqual(transport.deletes, 1)
 
     def test_cli_routing_keeps_bootstrap_settings_and_explicit_delete(self):

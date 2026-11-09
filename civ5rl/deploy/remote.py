@@ -1,14 +1,12 @@
-"""Package and verify bounded remote experiment artifacts; no job supervision."""
+"""Stage gitignored experiment inputs and inspect live remote runs over SSH."""
 
 import hashlib
 import json
 import os
 import re
 import shlex
-import stat
+import shutil
 import subprocess
-import sys
-import zipfile
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,7 +25,9 @@ def _read(path):
 
 
 def _write(path, value):
-    Path(path).write_text(
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
@@ -101,16 +101,106 @@ def _resolve_config(root, name, stack=()):
     return inherited, [*files, name]
 
 
-def package_capsule(
-    config, out_dir, *, root=ROOT, manifest=None, parent=None, extra_inputs=()
+def _more_data_bc_inputs(root, cfg):
+    names = []
+    eval_ref = cfg.get("evaluation_reference")
+    if eval_ref:
+        names.append(eval_ref)
+    old_run = cfg.get("old_corpus_run")
+    if old_run:
+        old_root = root / old_run
+        for meta in (
+            "collection.json",
+            "manifest.json",
+            "run.json",
+            "resolved-config.json",
+            "evaluations.json",
+            "selection.json",
+            "confirmation.json",
+        ):
+            if (old_root / meta).is_file():
+                names.append(f"{old_run}/{meta}")
+        collection = _read(old_root / "collection.json")
+        for row in collection.get("matches", []):
+            match_id = int(row["match_id"])
+            prefix = f"{old_run}/data/match-{match_id:06d}"
+            for fname in (
+                "case.json",
+                "collection-metrics.json",
+                "demonstration-side-0.json.gz",
+                "demonstration-side-1.json.gz",
+            ):
+                names.append(f"{prefix}/{fname}")
+    ref_run = cfg.get("reference_run")
+    if ref_run:
+        ref_root = root / ref_run
+        for meta in (
+            "run.json",
+            "manifest.json",
+            "evaluations.json",
+            "selected.json",
+            "confirmation.json",
+        ):
+            if (ref_root / meta).is_file():
+                names.append(f"{ref_run}/{meta}")
+        bc_prefix = (cfg.get("parent_policy_hash") or "")[:16]
+        if bc_prefix and (ref_root / "evaluation/confirmation" / bc_prefix).is_dir():
+            for path in sorted(
+                (ref_root / "evaluation/confirmation" / bc_prefix).rglob("*")
+            ):
+                if path.is_file() and path.name in ("case.json", "metrics.json"):
+                    names.append(path.relative_to(root).as_posix())
+    return names
+
+
+def input_group(rel_posix, output_posix):
+    """Minimal off-spine directory prefix: pairwise disjoint and outside output."""
+    parts = PurePosixPath(rel_posix).parts
+    out_parts = PurePosixPath(output_posix).parts
+    if len(parts) < 2:
+        raise ValueError(f"Gitignored input must reside in a subdirectory: {rel_posix}")
+    if parts[: len(out_parts)] == out_parts:
+        raise ValueError(
+            f"Input overlaps experiment output {output_posix}: {rel_posix}"
+        )
+    for depth in range(1, len(parts)):
+        if parts[:depth] != out_parts[:depth]:
+            return "/".join(parts[:depth])
+    raise ValueError(
+        f"Input sits directly in an ancestor directory of {output_posix}: {rel_posix}"
+    )
+
+
+def _git_tracked_files(root):
+    raw = subprocess.check_output(["git", "ls-files", "-z"], cwd=root)
+    return {
+        PurePosixPath(os.fsdecode(item).replace("\\", "/")).as_posix()
+        for item in raw.split(b"\0")
+        if item
+    }
+
+
+def stage_inputs(
+    config,
+    inputs_dir,
+    *,
+    root=ROOT,
+    manifest=None,
+    parent=None,
+    extra_inputs=(),
 ):
+    """Stage gitignored read-only inputs into disjoint trees for prepare.json sync."""
     root = Path(root).resolve()
+    inputs_dir = Path(inputs_dir).resolve()
     config_name = _relative_file(root, config)
     raw, config_files = _resolve_config(root, config_name)
     cfg = raw.get("config", raw)
+    output_posix = PurePosixPath(str(cfg["output"]).replace("\\", "/")).as_posix()
     experiment = cfg.get("experiment", {})
-    parent = parent or experiment.get("parent")
-    manifest = manifest or experiment.get("parent_manifest")
+    parent = parent or cfg.get("parent") or experiment.get("parent")
+    manifest = (
+        manifest or cfg.get("target_manifest") or experiment.get("parent_manifest")
+    )
     if not parent or not manifest:
         raise ValueError(
             "Specify parent and manifest, or set experiment.parent and parent_manifest"
@@ -129,232 +219,47 @@ def package_capsule(
     corpus = experiment.get("corpus")
     if corpus:
         names.append(corpus)
+    if cfg.get("kind") == "rl01.cp_imitation_target_more_data":
+        names.extend(_more_data_bc_inputs(root, cfg))
+    if (
+        cfg.get("kind") in ("rl01.ppo_target_scale", "rl01.cp_imitation_target_scale")
+        and (root / "artifacts/rl/corpus/manifest.json").is_file()
+    ):
+        names.append("artifacts/rl/corpus/manifest.json")
+        names.extend(_open_maps(_read(root / "artifacts/rl/corpus/manifest.json")))
     names.extend(_open_maps(_read(root / _relative_file(root, manifest))))
-    inputs = sorted({_relative_file(root, name) for name in names})
-    tracked = subprocess.check_output(
-        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-        cwd=root,
-    )
-    sources = sorted(
-        {
-            _relative_file(root, os.fsdecode(name))
-            for name in tracked.split(b"\0")
-            if name and (root / os.fsdecode(name)).is_file()
-        }
-    )
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    archives = {}
-    for filename, paths in (("source.zip", sources), ("inputs.zip", inputs)):
-        dest = out / filename
-        members = {}
-        with zipfile.ZipFile(
-            dest, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
-        ) as archive:
-            for name in paths:
-                members[name] = _sha(root / name)
-                archive.write(root / name, name)
-        archives[filename] = {
-            "bytes": dest.stat().st_size,
-            "sha256": _sha(dest),
-            "members": members,
-        }
-    commit = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=root, text=True
-    ).strip()
-    transfer = {
-        "schema": 1,
-        "commit": commit,
-        "archives": archives,
-        "replays": [
-            n
-            for n in inputs
-            if Path(n).name.startswith("replay-") and n.endswith(".json")
-        ],
-    }
-    _write(out / "transfer.json", transfer)
-    return {
-        "commit": commit,
-        "archives": {
-            k: {"bytes": v["bytes"], "sha256": v["sha256"], "files": len(v["members"])}
-            for k, v in archives.items()
-        },
-    }
 
-
-def _members(archive):
-    seen = set()
-    folded = set()
-    components = {}
-    for info in archive.infolist():
-        name = info.filename
-        p = PurePosixPath(name)
-        mode = info.external_attr >> 16
-        if (
-            not name
-            or "\\" in name
-            or p.is_absolute()
-            or re.match(r"^[A-Za-z]:", name)
-            or any(part in ("..", ".") for part in name.split("/"))
-            or name in seen
-            or name.casefold().rstrip("/") in folded
-            or stat.S_ISLNK(mode)
-        ):
-            raise ValueError(f"Unsafe or duplicate ZIP member: {name!r}")
-        for part_index in range(1, len(p.parts) + 1):
-            prefix = "/".join(p.parts[:part_index])
-            previous = components.setdefault(prefix.casefold(), prefix)
-            if previous != prefix:
-                raise ValueError(f"Case-colliding ZIP paths: {previous!r}, {prefix!r}")
-        seen.add(name)
-        folded.add(name.casefold().rstrip("/"))
-        if not info.is_dir():
-            yield info
-
-
-def _validate_zip(path, expected=None):
-    files = {}
-    with zipfile.ZipFile(path) as archive:
-        for info in _members(archive):
-            h = hashlib.sha256()
-            with archive.open(info) as stream:
-                for block in iter(lambda: stream.read(1024 * 1024), b""):
-                    h.update(block)
-            files[info.filename] = h.hexdigest()
-    if expected is not None and files != expected:
-        raise ValueError(f"ZIP member hashes differ: {path}")
-    return files
-
-
-def safe_extract(archive_path, destination, *, expected=None, overwrite=False):
-    archive_path, dest_path = Path(archive_path), Path(destination).absolute()
-    for ancestor in (dest_path, *dest_path.parents):
-        if ancestor.is_symlink() or (
-            ancestor.exists()
-            and getattr(ancestor.lstat(), "st_file_attributes", 0) & 0x400
-        ):
-            raise ValueError(f"Symlink/reparse destination: {ancestor}")
-    dest = dest_path.resolve()
-    files = _validate_zip(archive_path, expected)
-    # Reject portable file/directory collisions before any output is created.
-    folded_files = {name.casefold() for name in files}
-    for name in files:
-        if any(
-            str(parent).casefold() in folded_files
-            for parent in PurePosixPath(name).parents
-            if str(parent) != "."
-        ):
-            raise ValueError(f"ZIP file is also a parent directory: {name}")
-    # All paths, symlinks and conflicts are checked before any output is created.
-    for name, digest in files.items():
-        path = dest.joinpath(*PurePosixPath(name).parts)
-        for ancestor in (path, *path.parents):
-            if ancestor == dest.parent:
-                break
-            if ancestor.is_symlink() or (
-                ancestor.exists()
-                and getattr(ancestor.lstat(), "st_file_attributes", 0) & 0x400
-            ):
-                raise ValueError(f"Symlink/reparse destination: {ancestor}")
-        if not path.resolve().is_relative_to(dest):
-            raise ValueError(f"Destination outside root: {name}")
-        if path.exists() and (
-            not path.is_file() or (_sha(path) != digest and not overwrite)
-        ):
-            raise ValueError(f"Conflicting destination: {path}")
-    dest.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive_path) as archive:
-        for name, digest in files.items():
-            path = dest.joinpath(*PurePosixPath(name).parts)
-            if path.is_file() and _sha(path) == digest:
-                continue
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(name) as source, path.open("wb") as target:
-                for block in iter(lambda: source.read(1024 * 1024), b""):
-                    target.write(block)
-            if _sha(path) != digest:
-                raise ValueError(f"Extracted file hash mismatch: {path}")
-    return files
-
-
-def bootstrap_linux_node(capsule_dir, project_dir):
-    if sys.platform != "linux":
-        raise RuntimeError("Bootstrap compilation requires Linux")
-    capsule, project = Path(capsule_dir), Path(project_dir)
-    transfer = _read(capsule / "transfer.json")
-    for name in ("source.zip", "inputs.zip"):
-        path, meta = capsule / name, transfer["archives"][name]
-        if path.stat().st_size != meta["bytes"] or _sha(path) != meta["sha256"]:
-            raise ValueError(f"Archive checksum/size differs: {name}")
-        _validate_zip(path, meta["members"])
-    # Build and replay in an isolated staging project before changing the destination.
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as tmp:
-        stage = Path(tmp) / "project"
-        for name in ("source.zip", "inputs.zip"):
-            safe_extract(
-                capsule / name, stage, expected=transfer["archives"][name]["members"]
+    resolved_inputs = sorted({_relative_file(root, name) for name in names})
+    tracked = _git_tracked_files(root)
+    tracked_inputs = {}
+    staged_files = {}
+    groups = set()
+    for name in resolved_inputs:
+        if name in tracked:
+            tracked_inputs[name] = _sha(root / name)
+            continue
+        group = input_group(name, output_posix)
+        if any(t == group or t.startswith(group + "/") for t in tracked):
+            raise ValueError(
+                f"Input sync group {group!r} overlaps git-tracked files; "
+                "commit the file or place gitignored inputs in an ignored directory"
             )
-        subprocess.run(
-            [
-                "c++",
-                "-std=c++17",
-                "-O3",
-                "-fPIC",
-                "-shared",
-                "-I",
-                "build",
-                "native/combat.cpp",
-                "native/combat_state.cpp",
-                "native/geometry.cpp",
-                "-o",
-                "build/libcombat.so",
-            ],
-            cwd=stage,
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            [sys.executable, "tools/build_combat_ai.py", "--dll-only"],
-            cwd=stage,
-            check=True,
-            capture_output=True,
-        )
-        replay_code = r"""
-import json, sys
-from dataclasses import asdict
-from pathlib import Path
-sys.path.insert(0, str(Path.cwd()))
-from civ5sim import Battle
-from civ5sim.engine import digest
-for name in json.load(sys.stdin):
-    replay = json.loads(Path(name).read_text())
-    with Battle(replay['initial']) as battle:
-        for step in replay['steps']:
-            if asdict(battle.step(step['action'])) != step['result'] or digest(battle.snapshot()) != step['state_sha256']:
-                raise ValueError('Replay diverged: ' + name)
-"""
-        subprocess.run(
-            [sys.executable, "-c", replay_code],
-            cwd=stage,
-            input=json.dumps(transfer.get("replays", [])),
-            text=True,
-            check=True,
-            capture_output=True,
-        )
-        merged = Path(tmp) / "merged.zip"
-        with zipfile.ZipFile(merged, "w") as z:
-            for path in sorted(stage.rglob("*")):
-                if path.is_file() and "__pycache__" not in path.parts:
-                    z.write(path, path.relative_to(stage).as_posix())
-        safe_extract(merged, project)
-    from tools.rl_collection_hardware import hardware
+        groups.add(group)
+        src = root / name
+        dst = inputs_dir / name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        digest = _sha(src)
+        if _sha(dst) != digest:
+            raise ValueError(f"Staged input hash mismatch: {name}")
+        staged_files[name] = digest
 
     return {
-        "hardware": hardware(),
-        "replays": transfer.get("replays", []),
-        "determinism_verified": bool(transfer.get("replays")),
+        "schema": 1,
+        "output": output_posix,
+        "groups": sorted(groups),
+        "staged_files": staged_files,
+        "tracked_inputs": tracked_inputs,
     }
 
 
@@ -364,7 +269,7 @@ p=json.load(sys.stdin); root=pathlib.Path(p['directory']); limit=p['tail']
 def read(name):
  q=root/name
  if not q.is_file(): return None
- if q.stat().st_size > 4*1024*1024: return {'error':'file exceeds 4 MiB'}
+ if q.stat().st_size > 16*1024*1024: return {'error':'file exceeds 16 MiB'}
  try: return json.loads(q.read_text())
  except (ValueError, OSError): return {'error':'unreadable JSON'}
 def tail(name):
@@ -383,15 +288,15 @@ def tail(name):
  return result
 state=read('state.json')
 if isinstance(state,dict):
- state={k:state.get(k) for k in ('rollouts','updates','decisions','optimizer_steps','attempted_steps','rejected_steps','active_seconds','evaluation_seconds','phase','stop_reason','baseline_wins','latest','best','development_points','rollout_summary','critic') if k in state}
-print(json.dumps({'status':read('status.json'),'state':state,'updates_tail':tail('updates.jsonl'),'resources_tail':tail('telemetry/resources.jsonl'),'selected':read('selected.json'),'evaluations':read('evaluations.json'),'development':read('development.json'),'confirmation':read('confirmation.json'),'performance':read('performance.json')}))
-"""
-_FINGERPRINT_CODE = r"""
-import hashlib,json,pathlib,sys
-p=pathlib.Path(json.load(sys.stdin)['path']); h=hashlib.sha256()
-with p.open('rb') as f:
- for b in iter(lambda:f.read(1048576),b''): h.update(b)
-print(json.dumps({'bytes':p.stat().st_size,'sha256':h.hexdigest()}))
+ state={k:state.get(k) for k in ('rollouts','updates','decisions','optimizer_steps','attempted_steps','rejected_steps','active_seconds','evaluation_seconds','phase','stop_reason','baseline_wins','latest','best','development_points','rollout_summary','critic','epoch','epoch_completed','batch_cursor','Adam_steps','free_labels_processed','epochs_history') if k in state}
+collection=read('collection.json')
+if isinstance(collection,dict):
+ collection={k:collection.get(k) for k in ('status','stop_reason','labels','new_labels','old_labels','positions','new_positions','old_positions','seconds','waves','completed_waves','eta_seconds','physical_repeats','new_matches_count','old_matches_count') if k in collection}
+training=read('training.json')
+if isinstance(training,dict):
+ training={k:training.get(k) for k in ('status','stop_reason','epochs','Adam_steps','free_labels_processed','active_seconds','latest','microbatch','value_head_unchanged','GPU_utilization_review') if k in training}
+resources=tail('telemetry/resources.jsonl') or tail('training-telemetry/resources.jsonl')
+print(json.dumps({'status':read('status.json'),'state':state,'collection':collection,'training':training,'updates_tail':tail('updates.jsonl'),'steps_tail':tail('steps.jsonl'),'resources_tail':resources,'selected':read('selected.json') or read('selection.json'),'evaluations':read('evaluations.json'),'development':read('development.json'),'confirmation':read('confirmation.json'),'performance':read('performance.json')}))
 """
 
 
@@ -490,70 +395,3 @@ def inspect_remote(instance_json, remote_run_dir, *, tail=3):
         _INSPECT_CODE,
         {"directory": _remote_path(remote_run_dir), "tail": tail},
     )
-
-
-def finalize_remote(
-    instance_json, remote_archive, output, *, overwrite=False, adam_offset=None
-):
-    connection = _connection(instance_json)
-    remote_archive = _remote_path(remote_archive)
-    before = _ssh_json(connection, _FINGERPRINT_CODE, {"path": remote_archive})
-    output = Path(output)
-    output.mkdir(parents=True, exist_ok=True)
-    partial = output.parent / (output.name + ".download.partial")
-    host, port, user, key = connection
-    command = [
-        "scp",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=15",
-        "-P",
-        str(port),
-        "-i",
-        key,
-        f"{user}@{host}:{shlex.quote(remote_archive)}",
-        str(partial),
-    ]
-    result = subprocess.run(command, capture_output=True, timeout=3600, check=False)
-    if result.returncode:
-        raise RuntimeError(
-            f"SCP failed (exit {result.returncode}); partial download retained"
-        )
-    after = _ssh_json(connection, _FINGERPRINT_CODE, {"path": remote_archive})
-    if (
-        before != after
-        or partial.stat().st_size != before["bytes"]
-        or _sha(partial) != before["sha256"]
-    ):
-        raise ValueError(
-            "Archive changed during transfer or local checksum/size differs"
-        )
-    members = _validate_zip(partial)
-    if "transfer-receipt.json" in members:
-        raise ValueError("Archive contains reserved transfer receipt")
-    receipt_path = output / "transfer-receipt.json"
-    if receipt_path.exists() and not overwrite:
-        previous = _read(receipt_path)
-        if previous.get("fingerprint") != before or previous.get("members") != members:
-            raise ValueError("Conflicting transfer receipt")
-    safe_extract(partial, output, expected=members, overwrite=overwrite)
-    audit = None
-    if adam_offset is not None:
-        from civ5rl.provenance.audit import verify_checkpoint_chain
-
-        audit = verify_checkpoint_chain(output, adam_offset=adam_offset)
-    receipt = {
-        "archive": remote_archive,
-        "fingerprint": before,
-        "members": members,
-        "checkpoint_audit": audit,
-    }
-    _write(receipt_path, receipt)
-    partial.unlink()
-    return {
-        "fingerprint": before,
-        "files": len(members),
-        "checkpoint_audit": audit,
-        "receipt": str(receipt_path),
-    }

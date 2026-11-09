@@ -14,7 +14,18 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "phase", choices=("prepare-corpus", "prepare", "benchmark", "collect", "train", "evaluate", "report", "run")
+        "phase",
+        choices=(
+            "prepare-corpus",
+            "prepare",
+            "benchmark",
+            "collect",
+            "train",
+            "evaluate",
+            "report",
+            "run",
+            "resume",
+        ),
     )
     parser.add_argument("--config", default="configs/rl-cp-imitation.json")
     parser.add_argument("--out", type=Path)
@@ -35,7 +46,9 @@ def main(argv=None):
             not isinstance(config.get("corpus"), dict)
             or "parent_worlds" not in config["corpus"]
         ):
-            parser.error("prepare-corpus requires corpus.parent_worlds generation settings in --config")
+            parser.error(
+                "prepare-corpus requires corpus.parent_worlds generation settings in --config"
+            )
         workers = 4 if args.workers is None else args.workers
         if workers < 1:
             parser.error("workers must be positive")
@@ -48,6 +61,7 @@ def main(argv=None):
     modules = {
         "rl01.cp_imitation": "imitation_base",
         "rl01.cp_imitation_target_scale": "imitation_target_scale",
+        "rl01.cp_imitation_target_more_data": "imitation_target_scale",
         "rl01.cp_imitation_own_states": "imitation_own_states",
         "rl01.cp_imitation_more_data": "imitation_more_data",
         "rl01.cp_imitation_continuation": "imitation_continuation",
@@ -57,15 +71,25 @@ def main(argv=None):
     if args.cycle is not None and kind != "rl01.cp_imitation_own_states":
         parser.error("--cycle applies only to own-state imitation")
     if args.phase == "run" and kind not in (
-        "rl01.cp_imitation_target_scale", "rl01.cp_imitation_own_states"
+        "rl01.cp_imitation_target_scale",
+        "rl01.cp_imitation_target_more_data",
+        "rl01.cp_imitation_own_states",
     ):
         parser.error("run applies only to target-scale or own-state imitation")
+    if args.phase == "resume" and kind not in (
+        "rl01.cp_imitation_target_scale",
+        "rl01.cp_imitation_target_more_data",
+    ):
+        parser.error("resume applies only to target-scale imitation")
     out = (args.out or Path(config["output"])).resolve()
     workers = config["workers"] if args.workers is None else args.workers
     if workers < 1:
         parser.error("workers must be positive")
     module = importlib.import_module("civ5rl.experiments." + modules[kind])
-    if kind == "rl01.cp_imitation_target_scale":
+    if kind in (
+        "rl01.cp_imitation_target_scale",
+        "rl01.cp_imitation_target_more_data",
+    ):
         config = module.load_config(args.config)
     if kind == "rl01.cp_imitation_own_states":
         return module.run(args.phase, config, out, workers, args.device, args.cycle)
@@ -76,15 +100,20 @@ def main(argv=None):
     if args.phase != "report":
         manifest, identity = module.initialize(config, out)
         if args.phase == "benchmark":
-            from tools._imitation_benchmark import benchmark, latency
             from tools._common import write_json
+            from tools._imitation_benchmark import benchmark, latency
 
             benchmark(config, manifest, out, workers)
             latency(config, out)
-            write_json(out / "status.json", {
-                "status": "benchmark_complete_stopped", "next": "review_cost_report",
-                "research_training_started": False, "full_evaluation_started": False,
-            })
+            write_json(
+                out / "status.json",
+                {
+                    "status": "benchmark_complete_stopped",
+                    "next": "review_cost_report",
+                    "research_training_started": False,
+                    "full_evaluation_started": False,
+                },
+            )
         elif args.phase == "collect":
             module.collect(config, manifest, out, workers)
         elif args.phase == "train":

@@ -187,11 +187,43 @@ def build(cp, game):
     (out / "combat_reference.cpp").write_text(oracle, encoding="utf-8")
     library = "combat.dll" if os.name == "nt" else "libcombat.so"
     compile_shared(
-        [ROOT / "native/combat.cpp", ROOT / "native/combat_state.cpp",
-         ROOT / "native/geometry.cpp", out / "combat_reference.cpp"],
-        out / library, include_dirs=[out], script_name="compile_combat.cmd",
+        [
+            ROOT / "native/combat.cpp",
+            ROOT / "native/combat_state.cpp",
+            ROOT / "native/geometry.cpp",
+            out / "combat_reference.cpp",
+        ],
+        out / library,
+        include_dirs=[out],
+        script_name="compile_combat.cmd",
     )
     print(f"Built combat kernel; rules {fingerprint[:16]}; constants {constants}")
+
+
+def build_library_only():
+    out = ROOT / "build"
+    missing = [
+        name
+        for name in ("combat_rules.h", "combat_rules.json", "cp_geometry.inc")
+        if not (out / name).is_file()
+    ]
+    if missing:
+        raise RuntimeError(
+            f"Missing prepared combat inputs: {', '.join(missing)}. "
+            "Run python tools/build_combat.py first."
+        )
+    library = "combat.dll" if os.name == "nt" else "libcombat.so"
+    sources = [
+        ROOT / "native/combat.cpp",
+        ROOT / "native/combat_state.cpp",
+        ROOT / "native/geometry.cpp",
+    ]
+    if (out / "combat_reference.cpp").is_file():
+        sources.append(out / "combat_reference.cpp")
+    compile_shared(
+        sources, out / library, include_dirs=[out], script_name="compile_combat.cmd"
+    )
+    print(f"Built {library}")
 
 
 if __name__ == "__main__":
@@ -200,5 +232,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--game", type=Path, default=Path("E:/civ5/Sid Meier's Civilization V")
     )
+    parser.add_argument(
+        "--dll-only",
+        action="store_true",
+        help="Build only the library from prepared headers",
+    )
     args = parser.parse_args()
-    build(args.cp.resolve(), args.game.resolve())
+    if args.dll_only:
+        build_library_only()
+    else:
+        build(args.cp.resolve(), args.game.resolve())

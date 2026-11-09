@@ -1,4 +1,4 @@
-"""Read-only checks of saved PPO ledgers and checkpoints."""
+"""Read-only checks of saved PPO and BC ledgers and checkpoints."""
 
 import hashlib
 import io
@@ -145,6 +145,54 @@ def verify_ppo_ledger(directory, *, offsets=None):
     }
 
 
+def verify_bc_ledger(directory):
+    """Check BC collection, steps.jsonl, state.json, and training.json accounting."""
+    directory = Path(directory)
+    state = read_json(directory / "state.json")
+    collection = read_json(directory / "collection.json")
+    if collection.get("status") != "complete":
+        raise ValueError("BC collection is not complete")
+    steps_path = directory / "steps.jsonl"
+    rows = (
+        [
+            json.loads(line)
+            for line in steps_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if steps_path.exists()
+        else []
+    )
+    for index, row in enumerate(rows, start=1):
+        if row.get("step") != index:
+            raise ValueError(f"Out-of-sequence BC step {row.get('step')} at line {index}")
+        if (
+            not math.isfinite(float(row.get("ce", float("nan"))))
+            or not math.isfinite(float(row.get("gradient_norm", float("nan"))))
+            or int(row.get("labels", 0)) <= 0
+        ):
+            raise ValueError(f"Invalid BC step record at step {index}")
+    total_steps = len(rows)
+    total_labels = sum(int(r["labels"]) for r in rows)
+    if state.get("Adam_steps") != total_steps:
+        raise ValueError("State Adam_steps differs from steps.jsonl count")
+    if state.get("free_labels_processed") != total_labels:
+        raise ValueError("State free_labels_processed differs from steps.jsonl sum")
+    if (directory / "training.json").exists():
+        training = read_json(directory / "training.json")
+        if training.get("Adam_steps") != total_steps:
+            raise ValueError("training.json Adam_steps differs from steps.jsonl")
+        if training.get("free_labels_processed") != total_labels:
+            raise ValueError(
+                "training.json free_labels_processed differs from steps.jsonl"
+            )
+    return {
+        "status": "verified",
+        "Adam_steps": total_steps,
+        "free_labels_processed": total_labels,
+        "corpus_labels": collection.get("labels"),
+    }
+
+
 def _equal(a, b):
     import torch
 
@@ -184,7 +232,11 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
     from civ5rl.core.model import Policy
 
     directory = Path(directory)
-    points = sorted((directory / "checkpoints").glob("*.pt"))
+    points = sorted(
+        p
+        for p in (directory / "checkpoints").glob("*.pt")
+        if not p.name.startswith("reference-")
+    )
     if not points:
         raise ValueError("No checkpoints")
     checked = []
@@ -227,13 +279,27 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
             torch.set_rng_state(caller_rng)
         policy.load_state_dict(value["model"], strict=True)
         parameters = list(policy.parameters())
+        non_value_ids = [
+            i
+            for i, (name, _) in enumerate(policy.named_parameters())
+            if not name.startswith("value.")
+        ]
         groups = value["optimizer"]["param_groups"]
         ids = [index for group in groups for index in group["params"]]
-        if len(groups) != 1 or ids != list(range(len(parameters))):
+        if len(groups) != 1 or ids not in (
+            list(range(len(parameters))),
+            non_value_ids,
+        ):
             raise ValueError(f"Expected one sequential Adam parameter group: {path}")
-        lookup = dict(zip(ids, parameters, strict=True))
+        if ids == non_value_ids:
+            lookup = dict(zip(range(len(non_value_ids)), [parameters[i] for i in non_value_ids], strict=True))
+        else:
+            lookup = dict(zip(ids, parameters, strict=True))
         cpu_groups = [
-            {"params": [lookup[index] for index in group["params"]]} for group in groups
+            {"params": [lookup[index] for index in group["params"]]}
+            if all(index in lookup for index in group["params"])
+            else {"params": [parameters[index] for index in group["params"]]}
+            for group in groups
         ]
         optimizer = torch.optim.Adam(cpu_groups, fused=False)
         optimizer.load_state_dict(value["optimizer"])
@@ -282,10 +348,17 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
                 raise ValueError(f"Invalid Adam step: {path}")
             steps.add(int(step))
         state = value["state"]
+        step_key = (
+            "optimizer_steps"
+            if "optimizer_steps" in state
+            else "Adam_steps"
+            if "Adam_steps" in state
+            else None
+        )
         if (
-            "optimizer_steps" in state
-            and (steps or adam_offset + state["optimizer_steps"])
-            and steps != {adam_offset + state["optimizer_steps"]}
+            step_key is not None
+            and (steps or adam_offset + state[step_key])
+            and steps != {adam_offset + state[step_key]}
         ):
             raise ValueError(f"Adam step counter mismatch: {path}: {steps}")
         checked.append(
@@ -315,6 +388,10 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
                 "updates",
                 "decisions",
                 "optimizer_steps",
+                "Adam_steps",
+                "epoch",
+                "epoch_completed",
+                "free_labels_processed",
                 "attempted_steps",
                 "rejected_steps",
                 "phase",
@@ -365,6 +442,7 @@ def write_artifact_hashes(directory, output):
         if (
             path.resolve() == output
             or "__pycache__" in relative.parts
+            or "prepared-inputs" in relative.parts
             or path.name in ("run.lock", "artifact-hashes.json")
             or path.suffix in (".tmp", ".log")
         ):

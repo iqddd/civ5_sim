@@ -1,6 +1,8 @@
-"""Declarative deployments using the installed SSH lifecycle and Vast adapters."""
+"""Declarative remote deployments using prepare.json and split input/output/scratch."""
 
+import hashlib
 import json
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -12,11 +14,9 @@ from civ5rl.deploy.remote import (
     _relative_file,
     _resolve_config,
     _sha,
-    _validate_zip,
     _write,
     inspect_remote,
-    package_capsule,
-    safe_extract,
+    stage_inputs,
 )
 from civ5rl.engine.control import RunLock
 
@@ -24,7 +24,12 @@ CAPABILITIES = {
     "rl01.ppo_after_target_bc": {"run", "tune", "resume"},
     "rl01.ppo_target_scale": {"run", "resume"},
     "rl01.ppo_scale_up": {"run"},
+    "rl01.cp_imitation_target_more_data": {"run", "resume"},
+    "rl01.cp_imitation_target_scale": {"run"},
 }
+
+SYNC_MAX_ENTRIES = 100000
+SYNC_MAX_MIB = 16384
 
 
 def _relative(name):
@@ -41,7 +46,6 @@ def _relative(name):
 
 def _instance(path):
     raw = _read(path)
-    # Deliberately whitelist non-secret fields; credentials are environment-only.
     host = raw.get("host") or raw.get("SSH_host")
     port = int(raw.get("port") or raw.get("SSH_port") or 22)
     identifier = raw.get("instance_id") or raw.get("id")
@@ -58,80 +62,180 @@ def _receipt(deployment, operation, **values):
     )
 
 
-def package(config, output, *, instance=None, extra_inputs=(), root=ROOT):
+def _github_repo(root, explicit=None):
+    raw = (
+        explicit
+        or subprocess.check_output(
+            ["git", "remote", "get-url", "origin"], cwd=root, text=True
+        ).strip()
+    )
+    match = re.match(
+        r"^(?:https://github\.com/|git@github\.com:)?([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$",
+        raw.strip(),
+    )
+    if not match:
+        raise ValueError(f"Unsupported GitHub repository specification: {raw!r}")
+    repo_spec = match.group(1)
+    repo_name = repo_spec.split("/", 1)[1]
+    return repo_spec, repo_name
+
+
+def _verify_git_state(root, *, verify_origin=True):
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True
+    ).strip()
+    if not verify_origin:
+        return commit
+    dirty = subprocess.check_output(
+        ["git", "status", "--porcelain"], cwd=root, text=True
+    ).strip()
+    if dirty:
+        raise ValueError(
+            "Working tree has uncommitted changes; commit and push before packaging:\n"
+            + dirty
+        )
+    branches = subprocess.check_output(
+        ["git", "branch", "-r", "--contains", commit], cwd=root, text=True
+    ).strip()
+    if not branches:
+        raise ValueError(
+            f"Commit {commit[:12]} is not pushed to origin; run git push before packaging"
+        )
+    return commit
+
+
+def package(
+    config,
+    output,
+    *,
+    instance=None,
+    extra_inputs=(),
+    root=ROOT,
+    repo=None,
+    verify_origin=True,
+):
     root, output = Path(root).resolve(), Path(output).resolve()
     if output.exists() and any(output.iterdir()):
         raise ValueError(
             "Deployment output must be empty; frozen packages are immutable"
         )
     name = _relative_file(root, config)
-    config, _ = _resolve_config(root, name)
-    if config.get("kind") not in CAPABILITIES:
+    resolved_config, _ = _resolve_config(root, name)
+    if resolved_config.get("kind") not in CAPABILITIES:
         raise ValueError("Unsupported remote experiment kind")
-    scientific_output = _relative(config["output"])
+    scientific_output = _relative(resolved_config["output"])
+    local_output = (root / scientific_output).resolve()
+    if output.is_relative_to(local_output) or local_output.is_relative_to(output):
+        raise ValueError(
+            "Deployment directory must stay outside the experiment output mirror: "
+            f"{local_output}"
+        )
+
     target = _instance(instance) if instance else None
     extras = [_relative_file(root, path) for path in extra_inputs]
+    commit = _verify_git_state(root, verify_origin=verify_origin)
+    repo_spec, repo_name = _github_repo(root, repo)
+
     output.mkdir(parents=True, exist_ok=True)
-    payload = output / "payload"
-    package_capsule(name, payload, root=root, extra_inputs=extras)
-    subprocess.run(
-        ["git", "bundle", "create", str(payload / "base.bundle"), "HEAD"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-    )
-    transfer = _read(payload / "transfer.json")
-    fingerprints = {
-        n: _sha(payload / n)
-        for n in ("source.zip", "inputs.zip", "transfer.json", "base.bundle")
-    }
-    import hashlib
+    inputs_dir = output / "inputs"
+    staged = stage_inputs(name, inputs_dir, root=root, extra_inputs=extras)
+    inputs_manifest_path = output / "inputs-manifest.json"
+    _write(inputs_manifest_path, staged)
 
     fingerprint = hashlib.sha256(
-        json.dumps(fingerprints, sort_keys=True).encode()
+        json.dumps(
+            {
+                "commit": commit,
+                "repo": repo_spec,
+                "config": name,
+                "staged_files": staged["staged_files"],
+                "tracked_inputs": staged["tracked_inputs"],
+            },
+            sort_keys=True,
+        ).encode()
     ).hexdigest()
-    remote_root = f"/workspace/civ5-runs/{fingerprint[:20]}"
+
+    prepare_spec = {
+        "execution_subdir": repo_name,
+        "revision": fingerprint,
+        "python": "3.13",
+        "repositories": [{"repo": repo_spec, "commit": commit}],
+        "requirements": [f"{repo_name}/requirements-rl.txt"],
+        "sync": [
+            {
+                "local": str((inputs_dir / group).resolve()),
+                "remote": f"{repo_name}/{group}",
+            }
+            for group in staged["groups"]
+        ],
+    }
+    prepare_path = output / "prepare.json"
+    _write(prepare_path, prepare_spec)
+
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", Path(scientific_output).name).strip("-")
+    remote_root = f"/workspace/civ5-runs/{slug}-{fingerprint[:12]}"
+    parent_checkpoint = resolved_config.get("parent") or resolved_config.get(
+        "experiment", {}
+    ).get("parent")
     carriers = [
-        name
-        for name in extras
-        if name.endswith(".pt") and name != config["experiment"]["parent"]
+        item
+        for item in extras
+        if item.endswith(".pt") and item != parent_checkpoint
     ]
     deployment = {
-        "schema": 1,
-        "kind": config["kind"],
+        "schema": 2,
+        "kind": resolved_config["kind"],
         "config": name,
-        "resolved_config": config,
-        "fingerprints": fingerprints,
+        "resolved_config": resolved_config,
+        "commit": commit,
+        "repo": repo_spec,
+        "repo_name": repo_name,
         "fingerprint": fingerprint,
-        "commit": transfer["commit"],
+        "prepare_sha256": _sha(prepare_path),
+        "inputs_manifest_sha256": _sha(inputs_manifest_path),
         "output": scientific_output,
+        "local_output": str(local_output),
         "remote_root": remote_root,
-        "remote_project": remote_root + "/project",
+        "remote_project": f"{remote_root}/{repo_name}",
+        "remote_scratch": f"{remote_root}/scratch",
         "instance": target,
         "tuning_rollout": carriers[0] if len(carriers) == 1 else None,
         "job": None,
         "runtime": None,
         "operations": [],
     }
-    _receipt(deployment, "package", status="complete")
+    _receipt(
+        deployment,
+        "package",
+        status="complete",
+        staged_groups=staged["groups"],
+        staged_files=len(staged["staged_files"]),
+    )
     _write(output / "deployment.json", deployment)
     return deployment
 
 
 def verify_package(directory, deployment):
-    payload = directory / "payload"
-    for name, digest in deployment["fingerprints"].items():
-        if _sha(payload / name) != digest:
-            raise ValueError(f"Frozen package changed: {name}")
-    transfer = _read(payload / "transfer.json")
-    for name, meta in transfer["archives"].items():
-        if (payload / name).stat().st_size != meta["bytes"]:
-            raise ValueError(f"Archive size differs: {name}")
-        _validate_zip(payload / name, meta["members"])
+    prepare_path = directory / "prepare.json"
+    manifest_path = directory / "inputs-manifest.json"
+    if _sha(prepare_path) != deployment["prepare_sha256"]:
+        raise ValueError("Frozen prepare.json changed")
+    if _sha(manifest_path) != deployment["inputs_manifest_sha256"]:
+        raise ValueError("Frozen inputs-manifest.json changed")
+    manifest = _read(manifest_path)
+    inputs_dir = directory / "inputs"
+    actual = {}
+    if inputs_dir.exists():
+        for path in sorted(inputs_dir.rglob("*")):
+            if path.is_file():
+                rel = path.relative_to(inputs_dir).as_posix()
+                actual[rel] = _sha(path)
+    if actual != manifest["staged_files"]:
+        raise ValueError("Staged input files differ from inputs-manifest.json")
 
 
 class Transport:
-    """Subprocess boundary, replaceable in offline checks; no supervisor of its own."""
+    """Subprocess boundary around remote-python-ssh and vastai-instance-manager."""
 
     def __init__(self):
         self.script = (
@@ -152,7 +256,6 @@ class Transport:
         return subprocess.run(command, check=False).returncode
 
     def validate_attach(self, deployment):
-        # Attach has no --job-id flag: ensure its current registry belongs to us.
         job = deployment["job"]
         current = Path.home() / ".cache/remote-python-ssh/current"
         for path in current.glob("*.json"):
@@ -187,7 +290,18 @@ def _job_result(directory, deployment):
 
 def _attach(directory, deployment, transport):
     transport.validate_attach(deployment)
-    code = transport.invoke(deployment["instance"], ["--attach"])
+    code = transport.invoke(
+        deployment["instance"],
+        [
+            "--attach",
+            "--sync-max-entries",
+            str(SYNC_MAX_ENTRIES),
+            "--sync-max-mib",
+            str(SYNC_MAX_MIB),
+            "--sync-max-destination-entries",
+            str(SYNC_MAX_ENTRIES),
+        ],
+    )
     result = _job_result(directory, deployment)
     if result.get("job_id") != deployment["job"].get("id"):
         raise ValueError("Attached job identity differs")
@@ -246,85 +360,92 @@ def launch(directory, mode, *, instance=None, transport=None):
                 raise ValueError(
                     "Confirmed comparable tuning of this exact package/config is required"
                 )
+
         sequence = len(deployment["operations"])
         job = {
             "mode": mode,
             "result": f"job-{sequence}.json",
             "id": None,
             "pulled": False,
+            "operation": sequence,
         }
         deployment["job"] = job
-        payload = directory / "payload"
-        # Only execution metadata enters the bounded mirror. No Python source copies.
-        request = {
-            k: deployment[k]
-            for k in (
-                "kind",
-                "config",
-                "resolved_config",
-                "output",
-                "remote_root",
-                "remote_project",
-                "fingerprints",
-                "fingerprint",
-                "commit",
-                "tuning_rollout",
+
+        if mode == "tune":
+            local_sync_dir = directory / "tuning"
+            local_sync_dir.mkdir(parents=True, exist_ok=True)
+            remote_sync_dir = deployment["remote_root"] + "/tuning"
+            worker_args = [
+                "--mode",
+                "tune",
+                "--config",
+                deployment["config"],
+                "--tuning-rollout",
+                deployment["tuning_rollout"],
+                "--tuning-dir",
+                remote_sync_dir,
+            ]
+        else:
+            local_sync_dir = Path(deployment["local_output"])
+            local_sync_dir.mkdir(parents=True, exist_ok=True)
+            remote_sync_dir = deployment["remote_project"] + "/" + deployment["output"]
+            worker_args = [
+                "--mode",
+                mode,
+                "--config",
+                deployment["config"],
+            ]
+            if deployment["kind"] == "rl01.ppo_after_target_bc":
+                worker_args += [
+                    "--runtime-config",
+                    deployment["remote_root"] + "/tuning/recommended-runtime.json",
+                ]
+
+        resolved_cfg = deployment["resolved_config"]
+        budget_seconds = int(
+            resolved_cfg.get("experiment", {}).get("active_seconds", 0)
+            or (
+                int(resolved_cfg.get("collection_seconds", 0))
+                + int(resolved_cfg.get("training_seconds", 0))
             )
-        }
-        request.update(mode=mode, operation=sequence, runtime=deployment.get("runtime"))
-        job["operation"] = sequence
-        _write(payload / "request.json", request)
-        _write(directory / "prepare.json", {"python": "3.13"})
-        # Upload only the frozen worker bytes, even if local tooling was edited meanwhile.
-        # The small bootstrap reads it from the verified package in memory.
-        bootstrap = (
-            "import hashlib,pathlib,zipfile; p=pathlib.Path('payload/source.zip'); "
-            f"assert hashlib.sha256(p.read_bytes()).hexdigest()=={deployment['fingerprints']['source.zip']!r}; "
-            "exec(compile(zipfile.ZipFile(p).read('civ5rl/deploy/worker.py'), '<frozen-rl-worker>', 'exec'))"
+            or 7200
         )
         args = [
+            "--prepare",
+            str(directory / "prepare.json"),
+            "--venv",
+            "auto",
             "--local-sync-dir",
-            str(payload),
+            str(local_sync_dir),
             "--remote-sync-dir",
-            deployment["remote_root"] + "/payload",
+            remote_sync_dir,
             "--remote-dir",
             deployment["remote_root"],
-            "--venv",
-            deployment["remote_root"] + "/.venv",
             "--sync-max-entries",
-            "20000",
+            str(SYNC_MAX_ENTRIES),
             "--sync-max-mib",
-            "16384",
+            str(SYNC_MAX_MIB),
+            "--sync-max-destination-entries",
+            str(SYNC_MAX_ENTRIES),
             "--timeout-sec",
-            str(
-                max(
-                    86400,
-                    int(
-                        deployment["resolved_config"]
-                        .get("experiment", {})
-                        .get("active_seconds", 7200)
-                    )
-                    * 10,
-                )
-            ),
-            "--remote-script=-c",
-            "--script-arg",
-            bootstrap,
+            str(max(86400, budget_seconds * 10)),
+            "--env",
+            f"CIV5RL_SCRATCH_DIR={deployment['remote_scratch']}",
+            "--remote-script",
+            "civ5rl/deploy/worker.py",
+            *[f"--script-arg={item}" for item in worker_args],
             "--local-output-file",
             str(directory / f"job-{sequence}.log"),
             "--result-json",
             str(directory / job["result"]),
             "--detach",
         ]
-        if not deployment.get("prepared"):
-            args += ["--prepare", str(directory / "prepare.json")]
         _receipt(deployment, "launch_intent", mode=mode)
         _write(directory / "deployment.json", deployment)
         code = transport.invoke(target, args)
         result = _job_result(directory, deployment)
         job["id"] = result.get("job_id")
         _receipt(deployment, "launch", mode=mode, returncode=code, job_id=job["id"])
-        # Keep uncertain intents. Never retry a start automatically after contact loss.
         _write(directory / "deployment.json", deployment)
         if code or not job["id"]:
             raise RuntimeError(
@@ -359,38 +480,28 @@ def pull(directory, *, delete_instance=False, transport=None):
         result = _job_result(directory, deployment)
         if result.get("lifecycle", {}).get("phase") != "finalized":
             result = _attach(directory, deployment, transport)
+        post_sync = result.get("post_sync", {})
+        execution = result.get("execution", {})
         if (
-            result.get("post_sync", {}).get("status") != "ok"
-            or result.get("execution", {}).get("status") != "exited"
+            post_sync.get("status") != "ok"
+            or post_sync.get("file_errors")
+            or execution.get("status") != "exited"
         ):
             raise ValueError("Execution/transport not finalized; instance retained")
         if result.get("job_id") != deployment["job"]["id"]:
             raise ValueError("Final transport metadata belongs to a different job")
-        payload = directory / "payload"
-        descriptor = _read(payload / "result.json")
-        if (
-            descriptor["fingerprint"] != deployment["fingerprint"]
-            or descriptor["mode"] != deployment["job"]["mode"]
-            or descriptor["operation"] != deployment["job"]["operation"]
-            or descriptor["exit_code"] != result.get("execution", {}).get("exit_code")
-        ):
-            raise ValueError("Result belongs to a different package/operation")
-        archive = payload / "result.zip"
-        if (
-            archive.stat().st_size != descriptor["bytes"]
-            or _sha(archive) != descriptor["sha256"]
-        ):
-            raise ValueError("Result size/SHA256 differs; instance retained")
-        destination = directory / "results" / deployment["job"]["id"]
-        safe_extract(archive, destination, expected=descriptor["members"])
-        if deployment["job"]["mode"] == "tune":
+
+        exit_code = execution.get("exit_code")
+        mode = deployment["job"]["mode"]
+        if mode == "tune":
+            destination = directory / "tuning"
             summary = (
-                _read(destination / "tuning/summary.json")
-                if (destination / "tuning/summary.json").exists()
+                _read(destination / "summary.json")
+                if (destination / "summary.json").exists()
                 else {}
             )
             confirmed = (
-                descriptor["exit_code"] == 0
+                exit_code == 0
                 and summary.get("preliminary") is False
                 and summary.get("protected_inputs_unchanged") is True
             )
@@ -399,43 +510,53 @@ def pull(directory, *, delete_instance=False, transport=None):
                 "fingerprint": deployment["fingerprint"],
             }
             deployment["runtime"] = (
-                _read(destination / "tuning/recommended-runtime.json")
-                if confirmed
+                _read(destination / "recommended-runtime.json")
+                if confirmed and (destination / "recommended-runtime.json").exists()
                 else None
             )
+            audit = None
         else:
             from civ5rl.reporting.operations import audit_run
 
+            destination = Path(deployment["local_output"])
             audit = audit_run(
-                destination / "run", directory / "audits" / deployment["job"]["id"]
+                destination, directory / "audits" / deployment["job"]["id"]
             )
-            deployment["run_started"] = (destination / "run/state.json").is_file()
-        deployment["prepared"] = descriptor["prepared"]
+            deployment["run_started"] = any(
+                (destination / name).is_file()
+                for name in ("state.json", "collection.json", "run.json")
+            )
+
         deployment["job"]["pulled"] = True
         receipt = {
             "status": "verified",
             "destination": str(destination),
-            "sha256": descriptor["sha256"],
-            "files": len(descriptor["members"]),
+            "copied_files": post_sync.get("copied_files", 0),
+            "verified_files": post_sync.get("verified_files", 0),
             "instance_deleted": bool(deployment.get("instance_deleted")),
-            "runner_exit_code": descriptor["exit_code"],
+            "runner_exit_code": exit_code,
         }
-        if deployment["job"]["mode"] != "tune":
+        if audit is not None:
             receipt["scientific_audit"] = audit["status"]
         _receipt(deployment, "pull", **receipt)
         _write(directory / "deployment.json", deployment)
+
         if delete_instance:
             if deployment.get("instance_deleted"):
                 return {**receipt, "instance_deleted": True}
-            if deployment["job"]["mode"] == "tune":
+            if mode == "tune":
                 mandatory_ok = deployment["tune"]["confirmed"]
             else:
-                mandatory_ok = all(
-                    audit["sections"].get(k, {}).get("status") == "passed"
-                    for k in ("passport", "ppo_ledger", "checkpoints_adam_rng")
-                ) and not any(
-                    section["status"] == "failed"
-                    for section in audit["sections"].values()
+                mandatory_ok = (
+                    exit_code == 0
+                    and all(
+                        audit["sections"].get(k, {}).get("status") == "passed"
+                        for k in ("passport", "ppo_ledger", "checkpoints_adam_rng")
+                    )
+                    and not any(
+                        section["status"] == "failed"
+                        for section in audit["sections"].values()
+                    )
                 )
             if not mandatory_ok:
                 raise ValueError(

@@ -8,7 +8,11 @@ from collections import Counter
 from pathlib import Path
 
 from civ5rl.engine.control import RunLock, target_bc_evaluation_due
-from civ5rl.provenance.audit import verify_checkpoint_chain, verify_ppo_ledger
+from civ5rl.provenance.audit import (
+    verify_bc_ledger,
+    verify_checkpoint_chain,
+    verify_ppo_ledger,
+)
 from civ5rl.provenance.checkpoint import verify_frozen_passport
 from civ5rl.provenance.common import write_json
 from civ5rl.reporting.evaluation_audit import (
@@ -61,6 +65,34 @@ def derived_output(directory, output):
     return output
 
 
+def _bc_evaluation_due(config, state, evaluations):
+    dev_points = [
+        v
+        for v in evaluations.values()
+        if isinstance(v, dict) and v.get("purpose") == "development"
+    ]
+    if not dev_points:
+        return True
+    milestones = config.get("evaluate_epochs", [2, 5, 10])
+    epochs_history = state.get("epochs_history", [])
+    completed_epochs = {
+        int(e["epoch"]) for e in epochs_history if e.get("completed")
+    }
+    evaluated_epochs = {
+        int(v.get("epoch", 0))
+        for v in dev_points
+        if int(v.get("Adam_steps", 0)) > 0
+    }
+    for m in milestones:
+        if m in completed_epochs and m not in evaluated_epochs:
+            return True
+    if state.get("stop_reason") and int(state.get("Adam_steps", 0)) > 0:
+        latest = state.get("latest")
+        if not any(v.get("checkpoint") == latest for v in dev_points):
+            return True
+    return False
+
+
 def _audit_stable(directory):
     sections = {}
 
@@ -84,6 +116,7 @@ def _audit_stable(directory):
             }
 
     run = _read(directory / "run.json", {})
+    config = run.get("config", _read(directory / "resolved-config.json", {}))
 
     def passport_check():
         if (directory / "passport.json").exists():
@@ -92,14 +125,21 @@ def _audit_stable(directory):
                 "scope": "frozen_passport",
                 "working_tree_compared": False,
             }
-        from hashlib import sha256
-
-        from civ5rl.deploy.remote import _validate_zip
+        import hashlib
+        import zipfile
 
         passport = _read(directory / "deployment-passport.json")
-        _validate_zip(directory / "deployment-sources.zip", passport["source_hashes"])
-        config_hash = sha256(
-            json.dumps(run["config"], sort_keys=True).encode()
+        expected = passport["source_hashes"]
+        with zipfile.ZipFile(directory / "deployment-sources.zip") as archive:
+            actual = {
+                info.filename: hashlib.sha256(archive.read(info)).hexdigest()
+                for info in archive.infolist()
+                if not info.is_dir()
+            }
+        if actual != expected:
+            raise ValueError("ZIP member hashes differ: deployment-sources.zip")
+        config_hash = hashlib.sha256(
+            json.dumps(config, sort_keys=True).encode()
         ).hexdigest()
         if config_hash != passport["config_hash"]:
             raise ValueError("Deployment configuration differs from saved run")
@@ -121,20 +161,33 @@ def _audit_stable(directory):
         else "No saved passport or frozen deployment archive",
     )
     kind = run.get("kind", "")
-    supported = kind in {
+    supported_ppo = kind in {
         "rl01.ppo_after_target_bc",
         "rl01.ppo_target_scale",
         "rl01.ppo_scale_up",
     }
-    check(
-        "ppo_ledger",
-        lambda: verify_ppo_ledger(directory),
-        None
-        if supported and (directory / "updates.jsonl").exists()
-        else "No supported PPO ledger schema; historical/BC accounting is not covered",
-    )
+    supported_bc = kind in {
+        "rl01.cp_imitation_target_more_data",
+        "rl01.cp_imitation_target_scale",
+    }
+    if supported_bc:
+        check(
+            "ppo_ledger",
+            lambda: verify_bc_ledger(directory),
+            None
+            if (directory / "state.json").exists()
+            and (directory / "collection.json").exists()
+            else "No saved BC state/collection ledger",
+        )
+    else:
+        check(
+            "ppo_ledger",
+            lambda: verify_ppo_ledger(directory),
+            None
+            if supported_ppo and (directory / "updates.jsonl").exists()
+            else "No supported PPO ledger schema; historical/BC accounting is not covered",
+        )
     # Continuations need independently established offsets; never guess them.
-    config = run.get("config", _read(directory / "resolved-config.json", {}))
     offset = run.get(
         "parent_Adam_counter",
         config.get("experiment", {}).get("parent_optimizer_steps", 0),
@@ -143,13 +196,14 @@ def _audit_stable(directory):
         "checkpoints_adam_rng",
         lambda: verify_checkpoint_chain(directory, adam_offset=offset),
         None
-        if supported and (directory / "checkpoints").exists()
-        else "No supported PPO checkpoint schema",
+        if (supported_ppo or supported_bc) and (directory / "checkpoints").exists()
+        else "No supported checkpoint schema",
     )
 
     evaluations = []
     state = _read(directory / "state.json", {})
-    candidates = [state.get("evaluated", {}), _read(directory / "evaluations.json", {})]
+    evals_dict = _read(directory / "evaluations.json", {})
+    candidates = [state.get("evaluated", {}), evals_dict]
     confirmation = _read(directory / "confirmation.json", {})
     candidates.append(confirmation)
 
@@ -193,13 +247,24 @@ def _audit_stable(directory):
         evaluation_check,
         None if evaluations else "No recognized saved evaluation directory references",
     )
-    check(
-        "scheduled_evaluations",
-        lambda: {"pending": target_bc_evaluation_due(config, state)},
-        None
-        if kind == "rl01.ppo_after_target_bc"
-        else "Historical scheduling protocol not covered; only referenced match artifacts were checked",
-    )
+    if kind == "rl01.ppo_after_target_bc":
+        check(
+            "scheduled_evaluations",
+            lambda: {"pending": target_bc_evaluation_due(config, state)},
+            None,
+        )
+    elif supported_bc:
+        check(
+            "scheduled_evaluations",
+            lambda: {"pending": _bc_evaluation_due(config, state, evals_dict)},
+            None,
+        )
+    else:
+        check(
+            "scheduled_evaluations",
+            lambda: None,
+            "Historical scheduling protocol not covered; only referenced match artifacts were checked",
+        )
     scheduled = sections["scheduled_evaluations"]
     if scheduled.get("result", {}).get("pending"):
         scheduled.update(
@@ -208,6 +273,8 @@ def _audit_stable(directory):
         )
 
     def confirmation_check():
+        if confirmation.get("status") == "not_run_no_development_improvement":
+            return {"status": "not_run_no_development_improvement"}
         before = confirmation["baseline"]["runs"]["argmax"]["cp"]
         after = confirmation["candidate"]["runs"]["argmax"]["cp"]
         settings = confirmation.get("comparison", {})
@@ -235,6 +302,7 @@ def _audit_stable(directory):
         confirmation_check,
         None
         if {"baseline", "candidate"} <= confirmation.keys()
+        or confirmation.get("status") == "not_run_no_development_improvement"
         else "No recognized paired confirmation; special historical analyses are not covered",
     )
     statuses = {value["status"] for value in sections.values()}

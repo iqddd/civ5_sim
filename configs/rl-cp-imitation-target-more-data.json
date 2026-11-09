@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "kind": "rl01.cp_imitation_target_more_data",
+  "base_config": "configs/rl-cp-imitation-target-scale.json",
+  "output": "artifacts/rl/cp-imitation-target-more-data",
+  "target_manifest": "artifacts/rl/cp-imitation-target-scale/manifest.json",
+  "parent": "artifacts/rl/cp-imitation-target-scale/checkpoints/epoch-10.pt",
+  "parent_sha256": "4677fa13b2ac7a84214c545a6b311fd68bc05b31b82fe00fbe63c8856fc6e985",
+  "parent_policy_hash": "0a45e67e3c8c69b5d5f4608287b6d0a4450a84280dd1b1fe08842a843b83de03",
+  "evaluation_reference": "artifacts/rl/ppo-target-bc-t05/checkpoints/update-0037.pt",
+  "evaluation_reference_sha256": "217bcf7726e390dc0ca5b8cc719414eb701d3a11dc969e335cd114c2d232b854",
+  "evaluation_reference_policy_hash": "1250fa4f5f0b7decad5fb520299c48f4927ebe76b085e5be3ef14ced97c83fb9",
+  "old_corpus_run": "artifacts/rl/cp-imitation-target-scale",
+  "reference_run": "artifacts/rl/ppo-target-bc-t05",
+  "seed": 17,
+  "workers": 4,
+  "training_labels": 800000,
+  "collection_seconds": 7200,
+  "training_seconds": 3600,
+  "epochs": 10,
+  "evaluate_epochs": [2, 5, 10],
+  "labels_per_minibatch": 1024,
+  "sequence_length": 128,
+  "microbatch_sequences": 8,
+  "max_gradient_norm": 0.5,
+  "cache_bytes": 4294967296,
+  "fixed_training_labels": 2000,
+  "experiment": {
+    "start_episode": 0,
+    "training_namespace": "cp_imitation_target_more_data_train_v1",
+    "shuffle_namespace": "cp_imitation_target_more_data_shuffle_v1"
+  },
+  "performance": {
+    "resident_rollout": false,
+    "spatial_cell_padding": 256
+  }
+}

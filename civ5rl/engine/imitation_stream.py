@@ -1,11 +1,12 @@
 """Bounded episode storage for BC; the existing sequence/loss math is unchanged."""
 
-import sys
 import os
+import sys
 from collections import Counter, OrderedDict
 from dataclasses import fields, is_dataclass
+from pathlib import Path
 from time import perf_counter
-from typing import NamedTuple, Literal, Any
+from typing import Any, Literal, NamedTuple
 
 import numpy as np
 import torch
@@ -16,14 +17,46 @@ from civ5rl.core.observation import Encoded
 from civ5rl.engine.constants import (
     DEFAULT_CPU_CACHE_BYTES,
     DEFAULT_PREFIX_BLOCK_SIZE,
-    PREPARED_VIEW_BYTES_PER_DECISION,
     PREPARED_FIXED_OVERHEAD_BYTES,
+    PREPARED_VIEW_BYTES_PER_DECISION,
 )
 from civ5rl.engine.imitation import decision_indices, encode_demonstration
 from civ5rl.engine.pool import pool
 from civ5rl.engine.spans import Span
 from civ5rl.protocols.imitation import load_episode
-from civ5rl.provenance.common import read_json, write_json
+from civ5rl.provenance.common import ROOT, read_json, write_json
+
+
+def _resolve_episode_path(root, path):
+    root = Path(root)
+    candidate = root / path
+    if candidate.is_file():
+        return candidate
+    fallback = ROOT / path
+    if fallback.is_file():
+        return fallback
+    return candidate
+
+
+def _entry_key(entry):
+    if "entry_id" in entry:
+        return (
+            entry["entry_id"],
+            entry.get("corpus_source"),
+            entry.get("match_id"),
+            entry.get("side"),
+            entry["path"],
+        )
+    return (entry["path"],)
+
+
+def _prepared_filename(index, entry):
+    if "corpus_source" in entry:
+        source = str(entry["corpus_source"])
+        match_id = int(entry["match_id"])
+        side = int(entry["side"])
+        return f"episode-{index:06d}-{source}-match-{match_id:06d}-side-{side}.npz"
+    return f"episode-{index:06d}.npz"
 
 
 def memory_bytes(value, seen=None):
@@ -70,7 +103,7 @@ class FileDemonstrations:
     """Only immutable public inputs are cached; never recurrent states."""
 
     def __init__(self, root, entries, device, limit_bytes=DEFAULT_CPU_CACHE_BYTES):
-        self.root, self.entries, self.device = root, entries, device
+        self.root, self.entries, self.device = Path(root), entries, device
         self.limit_bytes = limit_bytes
         self.masks = [e["supervised"] for e in entries]
         self.episodes, self.encoded = (
@@ -103,7 +136,9 @@ class FileDemonstrations:
         if cached is not None:
             return cached.payload, cached.encoded
         started = perf_counter()
-        episode = load_episode(self.root / self.entries[index]["path"])
+        episode = load_episode(
+            _resolve_episode_path(self.root, self.entries[index]["path"])
+        )
         self.counters["read_seconds"] += perf_counter() - started
         if len(episode["decisions"]) != len(self.masks[index]):
             raise ValueError("Episode length differs from collection index")
@@ -165,11 +200,13 @@ class FileDemonstrations:
 def prepare_episode(task):
     """Encode once; store fixed arrays and ragged legal-action arrays losslessly."""
     root, entry, destination = task
-    from pathlib import Path
-
     root, destination = Path(root), Path(destination)
     started = perf_counter()
-    episode = load_episode(root / entry["path"])
+    episode = load_episode(_resolve_episode_path(root, entry["path"]))
+    if "match_id" in entry and episode.get("match_id") != entry["match_id"]:
+        raise ValueError("Prepared episode match_id differs from collection entry")
+    if "side" in entry and episode.get("side") != entry["side"]:
+        raise ValueError("Prepared episode side differs from collection entry")
     encoded = encode_demonstration(episode)
     masks = np.asarray([r["supervised"] for r in episode["decisions"]], dtype=np.bool_)
     if masks.tolist() != entry["supervised"]:
@@ -214,30 +251,45 @@ def prepare_episode(task):
         + len(encoded) * PREPARED_VIEW_BYTES_PER_DECISION
         + PREPARED_FIXED_OVERHEAD_BYTES
     )
+    prepared_rel = (
+        destination.relative_to(root).as_posix()
+        if destination.is_relative_to(root)
+        else destination.name
+    )
     return {
         **entry,
-        "prepared": destination.relative_to(root).as_posix(),
+        "prepared": prepared_rel,
         "prepared_bytes": size,
         "preparation_seconds": perf_counter() - started,
     }
 
 
-def prepare_inputs(root, entries, workers=4):
+def _prepared_directory(root, scratch_dir=None):
+    root = Path(root)
+    override = scratch_dir or os.environ.get("CIV5RL_SCRATCH_DIR")
+    if override:
+        return Path(override) / root.resolve().name / "prepared-inputs"
+    return root / "prepared-inputs"
+
+
+def prepare_inputs(root, entries, workers=4, *, scratch_dir=None):
     """One bounded streaming preparation pass, never a second full CPU corpus."""
-    directory = root / "prepared-inputs"
+    root = Path(root)
+    directory = _prepared_directory(root, scratch_dir)
     index = directory / "index.json"
+    keys = [_entry_key(e) for e in entries]
+    if len(keys) != len(set(keys)):
+        raise ValueError("Duplicate episode entry keys in BC corpus")
     if index.exists():
         saved = read_json(index)
-        if saved["schema"] != 2 or [e["path"] for e in saved["entries"]] != [
-            e["path"] for e in entries
-        ]:
+        if saved["schema"] != 2 or [_entry_key(e) for e in saved["entries"]] != keys:
             raise ValueError("Prepared corpus differs")
         return saved
     started = perf_counter()
     prepared = []
     with pool(workers) as executor:
         tasks = [
-            (str(root), e, str(directory / f"episode-{i:06}.npz"))
+            (str(root), e, str(directory / _prepared_filename(i, e)))
             for i, e in enumerate(entries)
         ]
         # map's iterator is consumed as workers finish; only a few episodes are materialized per worker.
@@ -270,7 +322,9 @@ class RawEpisodeView:
     def __getitem__(self, index):
         if self.owner.raw_index != index:
             self.owner.raw_episode = load_episode(
-                self.owner.root / self.owner.entries[index]["path"]
+                _resolve_episode_path(
+                    self.owner.root, self.owner.entries[index]["path"]
+                )
             )
             self.owner.raw_index = index
         return self.owner.raw_episode
@@ -279,8 +333,17 @@ class RawEpisodeView:
 class PreparedDemonstrations(FileDemonstrations):
     """Same batch inputs, labels and prefixes; no JSON/encoder/size walk in training."""
 
-    def __init__(self, root, entries, device, limit_bytes=DEFAULT_CPU_CACHE_BYTES):
+    def __init__(
+        self,
+        root,
+        entries,
+        device,
+        limit_bytes=DEFAULT_CPU_CACHE_BYTES,
+        *,
+        scratch_dir=None,
+    ):
         super().__init__(root, entries, device, limit_bytes)
+        self.prepared_dir = _prepared_directory(root, scratch_dir)
         self.episodes = RawEpisodeView(self)
         self.raw_index = None
         self.raw_episode = None
@@ -290,9 +353,11 @@ class PreparedDemonstrations(FileDemonstrations):
         if cached is not None:
             return cached.payload, cached.encoded
         started = perf_counter()
-        with np.load(
-            self.root / self.entries[index]["prepared"], allow_pickle=False
-        ) as stored:
+        rel = self.entries[index]["prepared"]
+        npz_path = self.root / rel
+        if not npz_path.is_file():
+            npz_path = self.prepared_dir / Path(rel).name
+        with np.load(npz_path, allow_pickle=False) as stored:
             arrays = {k: stored[k] for k in stored.files}
         self.counters["prepared_read_seconds"] += perf_counter() - started
         offsets = arrays["offsets"]
