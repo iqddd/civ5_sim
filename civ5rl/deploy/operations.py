@@ -351,8 +351,13 @@ def launch(directory, mode, *, instance=None, transport=None):
             raise ValueError(
                 "Tune requires exactly one explicit case-carrier .pt via --extra-input"
             )
-        if mode == "resume" and not deployment.get("run_started"):
-            raise ValueError("Resume requires an existing remote run on this instance")
+        local_output_path = Path(deployment["local_output"])
+        local_has_progress = any(
+            (local_output_path / name).exists()
+            for name in ("state.json", "collection.json", "run.json")
+        )
+        if mode == "resume" and not (deployment.get("run_started") or local_has_progress):
+            raise ValueError("Resume requires an existing remote or local run")
         if (
             mode in ("run", "resume")
             and deployment["kind"] == "rl01.ppo_after_target_bc"

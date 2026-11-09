@@ -13,7 +13,7 @@
   "old_corpus_run": "artifacts/rl/cp-imitation-target-scale",
   "reference_run": "artifacts/rl/ppo-target-bc-t05",
   "seed": 17,
-  "workers": 8,
+  "workers": 10,
   "training_labels": 800000,
   "collection_seconds": 7200,
   "training_seconds": 3600,
