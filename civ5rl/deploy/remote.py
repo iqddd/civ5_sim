@@ -269,7 +269,7 @@ p=json.load(sys.stdin); root=pathlib.Path(p['directory']); limit=p['tail']
 def read(name):
  q=root/name
  if not q.is_file(): return None
- if q.stat().st_size > 16*1024*1024: return {'error':'file exceeds 16 MiB'}
+ if q.stat().st_size > 256*1024*1024: return {'error':'file exceeds 256 MiB'}
  try: return json.loads(q.read_text())
  except (ValueError, OSError): return {'error':'unreadable JSON'}
 def tail(name):

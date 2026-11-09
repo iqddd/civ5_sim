@@ -243,7 +243,7 @@ def prepare_episode(task):
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(".tmp")
     with temporary.open("wb") as stream:
-        np.savez(stream, **arrays)
+        np.savez_compressed(stream, **arrays)
     os.replace(temporary, destination)
     # Conservative array/view overhead is known without recursively walking Python objects.
     size = (

@@ -253,7 +253,9 @@ class Transport:
             str(instance["port"]),
             *args,
         ]
-        return subprocess.run(command, check=False).returncode
+        return subprocess.run(
+            command, stdin=subprocess.DEVNULL, check=False
+        ).returncode
 
     def validate_attach(self, deployment):
         job = deployment["job"]
@@ -334,13 +336,16 @@ def launch(directory, mode, *, instance=None, transport=None):
         verify_package(directory, deployment)
         if deployment.get("job"):
             previous = _job_result(directory, deployment)
-            if previous.get("lifecycle", {}).get("phase") != "finalized":
+            phase = previous.get("lifecycle", {}).get("phase")
+            if phase == "prelaunch_interrupted":
+                deployment["job"] = None
+            elif phase != "finalized":
                 return _attach(directory, deployment, transport)
-            if not deployment["job"].get("pulled"):
+            elif not deployment["job"].get("pulled"):
                 raise ValueError(
                     "Pull and verify the previous job before launching another operation"
                 )
-            if mode == "run" and deployment.get("run_started"):
+            elif mode == "run" and deployment.get("run_started"):
                 raise ValueError("Run already exists; use supported resume")
         if mode == "tune" and not deployment.get("tuning_rollout"):
             raise ValueError(
@@ -419,6 +424,7 @@ def launch(directory, mode, *, instance=None, transport=None):
             str(local_sync_dir),
             "--remote-sync-dir",
             remote_sync_dir,
+            *(["--no-pre-sync"] if mode == "resume" else []),
             "--remote-dir",
             deployment["remote_root"],
             "--sync-max-entries",
@@ -431,6 +437,8 @@ def launch(directory, mode, *, instance=None, transport=None):
             str(max(86400, budget_seconds * 10)),
             "--env",
             f"CIV5RL_SCRATCH_DIR={deployment['remote_scratch']}",
+            "--env",
+            f"MPLCONFIGDIR={deployment['remote_scratch']}/matplotlib",
             "--remote-script",
             "civ5rl/deploy/worker.py",
             *[f"--script-arg={item}" for item in worker_args],
