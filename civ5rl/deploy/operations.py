@@ -424,7 +424,6 @@ def launch(directory, mode, *, instance=None, transport=None):
             str(local_sync_dir),
             "--remote-sync-dir",
             remote_sync_dir,
-            *(["--no-pre-sync"] if mode == "resume" else []),
             "--remote-dir",
             deployment["remote_root"],
             "--sync-max-entries",

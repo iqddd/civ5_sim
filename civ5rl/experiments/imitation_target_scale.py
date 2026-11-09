@@ -80,7 +80,7 @@ def load_config(path):
     if (
         config["kind"] not in SUPPORTED_KINDS
         or config["seed"] != 17
-        or config["workers"] != 4
+        or config["workers"] not in (4, 8)
         or config["labels_per_minibatch"] != 1024
         or config["sequence_length"] != 128
     ):
@@ -2106,8 +2106,8 @@ def report(config, out):
 def run(phase, config, out, workers, device):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    if workers != 4 or device != "cuda":
-        raise ValueError("This experiment uses four CPU workers and CUDA")
+    if workers not in (4, 8) or device != "cuda":
+        raise ValueError("This experiment uses four or eight CPU workers and CUDA")
     if phase not in (
         "prepare",
         "collect",
