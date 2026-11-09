@@ -48,6 +48,8 @@ Before adding a test, identify the specific failure it catches and why a normal 
 ## GPU utilization policy
 
 - During sustained iterative data processing on the GPU, target GPU Core Load of at least 80%, averaged over 60 seconds within that iterative phase. Use NVIDIA NVML or an equivalent hardware metric; do not use Windows WDDM GPU D3D Usage as a substitute.
+- Treat NVML GPU Core Load >= 80% as necessary, not sufficient: a single-SM or serialized kernel (notably PyTorch deterministic sorted indexing_backward on high-fan-in gathers under 	orch.use_deterministic_algorithms(True)) can hold NVML Core Load near 100% while leaving most SMs idle and GPU power (% TDP) anomalously low. Cross-check Core Load against GPU power (% TDP), step wall time relative to model arithmetic, and a short Kineto kernel trace (	op_kernels) whenever verifying new or modified GPU code.
+- Identify bottlenecks from profiler/kernel traces, never from guesswork or component counts alone.
 - If the 60-second average is below 80%, investigate bottlenecks and optimization options. Continuing below this target requires an explicit, evidence-based explanation.
 - Evaluate each sustained iterative GPU phase separately if a run has several. The requirement does not apply to an iterative phase shorter than 10 minutes; total run wall time is not the criterion. Do not extend a short phase just to measure or raise utilization.
 - Exclude initial preparation, compilation, post-processing, CPU-only collection/evaluation, pauses, and other work outside iterative GPU data processing from both phase duration and utilization averages. Preserve the agreed experimental conditions when optimizing; do not silently change the model, precision, batch size, or training budget to raise utilization.
@@ -55,3 +57,9 @@ Before adding a test, identify the specific failure it catches and why a normal 
 ## Vast.ai machine selection
 
 - Unless explicitly agreed otherwise, search and prepare two parallel candidates (`--parallel 2`) when creating a Vast.ai instance. Keep the requested GPU profile and its other defaults unchanged.
+
+## Experiment planning and pre-launch checks
+
+- When proposing a new model component, state its expected computational cost and simpler alternatives.
+- Keep local pre-launch benchmarks short: measure warmup plus a handful of steps and a short Kineto trace (e.g., --warmup 3 --steps 5 --trace-steps 3) rather than hundreds of steps.
+- Before starting a full local or remote run, calculate steps_per_epoch * target_gpu_step_seconds * planned_epochs (or total planned updates) and compare it against 	raining_seconds. If the planned training volume does not fit within the time limit, report the numbers before launching rather than after.

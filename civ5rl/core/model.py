@@ -222,6 +222,23 @@ def unit_cell_mask_from_cells(
     return cell_mask & (own_present | enemy_present | contact_present)
 
 
+class BucketBias(torch.autograd.Function):
+    """table[:, buckets] with a dense deterministic backward (no sorted index_put)."""
+
+    @staticmethod
+    def forward(ctx, table, buckets):
+        ctx.save_for_backward(buckets)
+        ctx.num_buckets = table.shape[1]
+        return table[:, buckets]
+
+    @staticmethod
+    def backward(ctx, grad):
+        (buckets,) = ctx.saved_tensors
+        onehot = F.one_hot(buckets.reshape(-1), ctx.num_buckets).to(grad.dtype)
+        with torch.autocast(grad.device.type, enabled=False):
+            return grad.reshape(grad.shape[0], -1) @ onehot, None
+
+
 class CellUnitAttention(nn.Module):
     """Cross-attention from every map cell to all known unit cells with hex-distance bias."""
 
@@ -256,9 +273,9 @@ class CellUnitAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         with torch.autocast(x.device.type, enabled=False):
-            bias = self.distance_bias.float()[:, buckets.reshape(-1)].reshape(
-                self.num_heads, b, n, n
-            ).permute(1, 0, 2, 3)
+            bias = BucketBias.apply(self.distance_bias.float(), buckets).permute(
+                1, 0, 2, 3
+            )
             logits = torch.matmul(q.float(), k.float().transpose(-2, -1)) * self.scale + bias
             logits = logits.masked_fill(~unit_mask[:, None, None, :], -torch.inf)
             has_units = unit_mask.any(-1, keepdim=True)[:, None, :, None]

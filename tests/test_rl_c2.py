@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from civ5rl.core.model import (
+    BucketBias,
     Policy,
     batch_inputs,
     hex_distance_buckets_from_neighbors,
@@ -16,10 +17,12 @@ from civ5rl.core.model import (
 )
 from civ5rl.core.observation import (
     ObservationEncoder,
+    axial,
     convert_globals_time_to_c2,
     distance,
     ordered_actions,
 )
+from civ5map.runtime import distance as runtime_hex_distance
 from civ5rl.core.schema import GLOBAL
 from civ5rl.engine.imitation_stream import (
     PreparedDemonstrations,
@@ -222,6 +225,213 @@ class C2Tests(unittest.TestCase):
                             np.all(buckets[n_tiles:, :] == 0)
                             and np.all(buckets[:, n_tiles:] == 0)
                         )
+
+        # Also verify on real cropped corpus scenarios across sizes 10, 12, 16 and both parities (0 and 1).
+        target_manifest = read_json(
+            ROOT / "artifacts/rl/cp-imitation-target-scale/manifest.json"
+        )
+        seen_real = {}
+        for split_name in ("development", "confirmation", "training"):
+            for case in target_manifest.get(split_name, []):
+                sc = case.get("scenario")
+                if not sc:
+                    continue
+                m = sc["map"]
+                key = (int(m["width"]), int(m["row_parity"]))
+                if key not in seen_real and int(m["width"]) in (10, 12, 16):
+                    seen_real[key] = sc
+            if len(seen_real) == 6:
+                break
+        # If training cases in manifest store lazy world specs, materialize any missing (size, parity) from real worlds.
+        if len(seen_real) < 6:
+            from civ5map.maps import crop, load as load_map
+
+            corpus_manifest = read_json(ROOT / "artifacts/rl/corpus/manifest.json")
+            first_world_entry = next(
+                w for w in corpus_manifest["maps"] if w["split"] == "train"
+            )
+            world_map = load_map(ROOT / first_world_entry["path"])
+            for size in (10, 12, 16):
+                for parity in (0, 1):
+                    if (size, parity) in seen_real:
+                        continue
+                    y_crop = (
+                        0
+                        if (world_map["row_parity"] % 2) == parity
+                        else 1
+                    )
+                    cropped = crop(world_map, 2, y_crop, width=size, height=size)
+                    self.assertEqual(cropped["row_parity"], parity)
+                    passable_tiles = [
+                        idx
+                        for idx, t in enumerate(cropped["tiles"])
+                        if t["elevation"] not in ("mountain", "water")
+                    ]
+                    seen_real[(size, parity)] = {
+                        "schema": 1,
+                        "kind": "civ5sim.scenario",
+                        "map": cropped,
+                        "fog": True,
+                        "random_damage": True,
+                        "seed": 17,
+                        "active_side": 0,
+                        "units": [
+                            {"type": "warrior", "side": 0, "tile": passable_tiles[0]},
+                            {"type": "archer", "side": 1, "tile": passable_tiles[-1]},
+                        ],
+                    }
+
+        self.assertEqual(
+            set(seen_real.keys()),
+            {(10, 0), (10, 1), (12, 0), (12, 1), (16, 0), (16, 1)},
+        )
+        real_encoded = []
+        for (size, parity), sc in sorted(seen_real.items()):
+            m = sc["map"]
+            self.assertEqual((m["width"], m["height"], m["row_parity"]), (size, size, parity))
+            enc = ObservationEncoder(make_context(sc), "C2")
+            with Battle(sc) as b:
+                obs = b.observe(0)
+                actions = ordered_actions(b.available_actions())
+            step = enc.encode(obs, actions)
+            real_encoded.append((size, m, step))
+            inp = batch_inputs([step], "cpu", min_cells=256)
+            buckets = hex_distance_buckets_from_neighbors(
+                inp["neighbors"], inp["cell_mask"]
+            )[0].numpy()
+            n_tiles = size * size
+            expected = np.zeros((n_tiles, n_tiles), dtype=np.int64)
+            for i in range(n_tiles):
+                qi, ri = axial(m, i)
+                for j in range(n_tiles):
+                    qj, rj = axial(m, j)
+                    d_obs = distance(m, i, j)
+                    d_rt = runtime_hex_distance(qi - qj, ri - rj)
+                    self.assertEqual(d_obs, d_rt)
+                    expected[i, j] = min(d_obs, 15)
+            np.testing.assert_array_equal(buckets[:n_tiles, :n_tiles], expected)
+            if n_tiles < 256:
+                self.assertTrue(
+                    np.all(buckets[n_tiles:, :] == 0)
+                    and np.all(buckets[:, n_tiles:] == 0)
+                )
+
+        # Also verify mixed-size padded batch (10, 12, 16 with both parities together in one batch).
+        mixed_inp = batch_inputs([item[2] for item in real_encoded], "cpu", min_cells=256)
+        mixed_buckets = hex_distance_buckets_from_neighbors(
+            mixed_inp["neighbors"], mixed_inp["cell_mask"]
+        ).numpy()
+        for idx, (size, m, _) in enumerate(real_encoded):
+            n_tiles = size * size
+            for i in (0, 1, size - 1, size, n_tiles // 2, n_tiles - 1):
+                for j in (0, 1, size - 1, size, n_tiles // 2, n_tiles - 1):
+                    self.assertEqual(
+                        int(mixed_buckets[idx, i, j]), min(distance(m, i, j), 15)
+                    )
+
+    def test_bucket_bias_forward_exact_and_backward_equivalence_on_real_batch(self):
+        """BucketBias must match direct table[:, buckets] bitwise in forward and <=1e-5 rel in backward on real data."""
+        from civ5rl.protocols.imitation import load_episode
+
+        old_col = read_json(
+            ROOT / "artifacts/rl/cp-imitation-target-scale/collection.json"
+        )
+        encoded_steps = []
+        chosen_indices = []
+        for row in old_col["matches"][:4]:
+            mid = int(row["match_id"])
+            ep = load_episode(
+                ROOT
+                / f"artifacts/rl/cp-imitation-target-scale/data/match-{mid:06d}/demonstration-side-0.json.gz"
+            )
+            enc = ObservationEncoder(ep["context"], "C2")
+            for dec in ep["decisions"][:8]:
+                acts = [Action(**a) for a in dec["actions"]]
+                ordered = ordered_actions(acts)
+                chosen_act = acts[int(dec["chosen"])]
+                encoded_steps.append(enc.encode(dec["observation"], ordered))
+                chosen_indices.append(ordered.index(chosen_act))
+                enc.remember_action(chosen_act, dec["observation"])
+        self.assertGreaterEqual(len(encoded_steps), 16)
+
+        devices = ["cpu", *(["cuda"] if torch.cuda.is_available() else [])]
+        for dev in devices:
+            configure(17, dev)
+            batch = batch_inputs(encoded_steps[:16], dev, min_cells=256)
+            targets = torch.tensor(chosen_indices[:16], dtype=torch.long, device=dev)
+
+            pol_new = Policy("C2").to(dev)
+            with torch.no_grad():
+                pol_new.unit_attention.distance_bias.copy_(
+                    torch.linspace(-0.75, 0.85, pol_new.unit_attention.distance_bias.numel(), device=dev).reshape_as(
+                        pol_new.unit_attention.distance_bias
+                    )
+                )
+            pol_ref = Policy("C2").to(dev)
+            pol_ref.load_state_dict(pol_new.state_dict())
+
+            # Patch pol_ref's attention to use direct indexing instead of BucketBias.
+            def ref_forward_with_weights(x, cells, neighbors, cell_mask):
+                attn = pol_ref.unit_attention
+                b_sz, n_sz, _ = x.shape
+                unit_mask = unit_cell_mask_from_cells(cells, cell_mask)
+                buckets = hex_distance_buckets_from_neighbors(neighbors, cell_mask)
+                u = attn.norm(x)
+                q = attn.q_proj(u).reshape(b_sz, n_sz, attn.num_heads, attn.head_dim).transpose(1, 2)
+                k, v = attn.kv_proj(u).reshape(b_sz, n_sz, 2, attn.num_heads, attn.head_dim).unbind(2)
+                k, v = k.transpose(1, 2), v.transpose(1, 2)
+                with torch.autocast(x.device.type, enabled=False):
+                    bias = (
+                        attn.distance_bias.float()[:, buckets.reshape(-1)]
+                        .reshape(attn.num_heads, b_sz, n_sz, n_sz)
+                        .permute(1, 0, 2, 3)
+                    )
+                    logits = torch.matmul(q.float(), k.float().transpose(-2, -1)) * attn.scale + bias
+                    logits = logits.masked_fill(~unit_mask[:, None, None, :], -torch.inf)
+                    has_units = unit_mask.any(-1, keepdim=True)[:, None, :, None]
+                    safe_logits = torch.where(has_units, logits, 0.0)
+                    weights = torch.where(has_units, safe_logits.softmax(-1), 0.0)
+                    weights = weights * cell_mask[:, None, :, None]
+                    context = torch.matmul(weights, v.float())
+                merged = context.to(u.dtype).transpose(1, 2).reshape(b_sz, n_sz, pol_ref.hex_dim)
+                out = (x + attn.out_proj(merged)) * cell_mask.unsqueeze(-1)
+                return out, weights, unit_mask
+
+            pol_ref.unit_attention.forward_with_weights = ref_forward_with_weights
+
+            if dev == "cuda":
+                pol_new.enable_amp(True, spatial_batch_size=16)
+                pol_ref.enable_amp(True, spatial_batch_size=16)
+
+            logits_new, val_new, hid_new = pol_new.forward_sequences(batch, [8, 8])
+            logits_ref, val_ref, hid_ref = pol_ref.forward_sequences(batch, [8, 8])
+            self.assertTrue(torch.equal(logits_new, logits_ref))
+            self.assertTrue(torch.equal(val_new, val_ref))
+            self.assertTrue(torch.equal(hid_new, hid_ref))
+
+            loss_new = torch.nn.functional.cross_entropy(logits_new, targets)
+            loss_ref = torch.nn.functional.cross_entropy(logits_ref, targets)
+            self.assertTrue(torch.equal(loss_new, loss_ref))
+            loss_new.backward()
+            loss_ref.backward()
+
+            g_new = pol_new.unit_attention.distance_bias.grad
+            g_ref = pol_ref.unit_attention.distance_bias.grad
+            rel_err = float(
+                (g_new - g_ref).abs().max() / g_ref.abs().max().clamp_min(1e-12)
+            )
+            self.assertLess(rel_err, 1e-5, f"distance_bias grad rel_err={rel_err} on {dev}")
+            for (n1, p1), (n2, p2) in zip(
+                pol_new.named_parameters(), pol_ref.named_parameters(), strict=True
+            ):
+                self.assertEqual(n1, n2)
+                if n1 == "unit_attention.distance_bias" or p1.grad is None:
+                    continue
+                g_rel = float(
+                    (p1.grad - p2.grad).abs().max()
+                    / p2.grad.abs().max().clamp_min(1e-12)
+                )
+                self.assertLess(g_rel, 1e-6, f"grad mismatch on {n1} ({dev}): {g_rel}")
 
     def test_c2_bounded_time_encoding_and_lossless_npz_conversion(self):
         """C2 time encoding must stay in [0, 1] for max_rounds=30, 60, 100 and match converted C globals."""
