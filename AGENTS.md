@@ -2,6 +2,15 @@
 
 - Read `docs/README.md` before starting work, then read the relevant documents linked there. It is the entry point for current contracts, operating procedures, and experiment history.
 
+## Progress Updates in Long-Running Tasks
+
+1. **Cadence / Triggers:** Emit a visible message in chat at logical phase boundaries, whenever changing your plan or hypothesis, or whenever **more than 2–3 minutes** have elapsed since the last visible message (based on tool output timestamps `Created At` / `Completed At`) or **10–13 tool calls** have accumulated without visible text.
+2. **Content (1–2 short paragraphs):**
+   - What intermediate result or conclusion was reached in the current step;
+   - Key decisions or assumptions made (especially at branching points or trade-offs where the approach could drift off course);
+   - The immediate next step and why it is needed.
+3. **Surface Key Reasoning:** Do not keep pivotal trade-offs, blockers, or course corrections purely inside internal `Thinking` blocks — surface them in the visible response as work progresses so the tool execution log is broken up by clear status checkpoints.
+
 ## Documentation policy
 
 - `docs/` is the durable reference for how the project works and how to operate it: current contracts, architecture, reusable procedures, and a compact experiment ledger. It is not a workspace for generated reports, run logs, debugging diaries, or scratch plans.

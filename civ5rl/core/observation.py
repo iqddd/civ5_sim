@@ -284,15 +284,23 @@ class ObservationEncoder:
                 globals_[offset + UNIT_TYPES.index(kind)] += 1 / ROSTER_SCALE
         for contact in self.contacts.values():
             globals_[GLOBAL["contacts"].start + contact.type_index] += 1 / ROSTER_SCALE
+        if self.variant == PolicyVariant.CONTACTS_GRU_C2:
+            turn_feature = min(turn / (2 * MAX_ROUNDS_SCALE), 1.0)
+            max_rounds_feature = min(
+                max(0.0, (2 * self.max_rounds - turn) / (2 * MAX_ROUNDS_SCALE)), 1.0
+            )
+        else:
+            turn_feature = turn / (2 * self.max_rounds)
+            max_rounds_feature = self.max_rounds / MAX_ROUNDS_SCALE
         globals_[GLOBAL["turn"] :] = (
-            turn / (2 * self.max_rounds),
+            turn_feature,
             min(clock - self.last_clock, AGE_CAP) / AGE_CAP,
             self.last_turn != turn,
             self.map["width"] / MAX_MAP_AXIS,
             self.map["height"] / MAX_MAP_AXIS,
             self.side == 0,
             self.random_damage,
-            self.max_rounds / MAX_ROUNDS_SCALE,
+            max_rounds_feature,
         )
         return globals_
 
@@ -324,3 +332,17 @@ class ObservationEncoder:
                     / DISTANCE_SCALE,
                 )
         return sources, targets, features
+
+
+def convert_globals_time_to_c2(globals_array: np.ndarray) -> np.ndarray:
+    """Convert stored C globals time slots (turn/2M, M/60) to C2 bounded time slots."""
+    result = np.array(globals_array, dtype=np.float32, copy=True)
+    turn_idx = GLOBAL["turn"]
+    max_idx = GLOBAL["max_rounds"]
+    old_turn = result[..., turn_idx].astype(np.float64)
+    old_max = result[..., max_idx].astype(np.float64)
+    result[..., turn_idx] = np.minimum(old_turn * old_max, 1.0).astype(np.float32)
+    result[..., max_idx] = np.clip((1.0 - old_turn) * old_max, 0.0, 1.0).astype(
+        np.float32
+    )
+    return result

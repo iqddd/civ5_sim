@@ -14,6 +14,7 @@ from tools.rl_collection_hardware import hardware
 
 BC_KINDS = {
     "rl01.cp_imitation_target_more_data",
+    "rl01.cp_imitation_target_c2",
     "rl01.cp_imitation_target_scale",
 }
 

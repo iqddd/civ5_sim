@@ -17,7 +17,8 @@ from civ5rl.provenance.common import write_json
 
 KIND = "rl01.cp_imitation_target_scale"
 MORE_DATA_KIND = "rl01.cp_imitation_target_more_data"
-SUPPORTED_KINDS = (KIND, MORE_DATA_KIND)
+C2_KIND = "rl01.cp_imitation_target_c2"
+SUPPORTED_KINDS = (KIND, MORE_DATA_KIND, C2_KIND)
 
 
 def match_task(task):

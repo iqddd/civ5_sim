@@ -32,7 +32,8 @@ def load_policy(config, path, device):
     from civ5rl.core.model import Policy
 
     saved = torch.load(path, weights_only=False, map_location="cpu")
-    policy = Policy("C").to(device)
+    variant = saved.get("variant") or config.get("model", {}).get("variant", "C")
+    policy = Policy(variant).to(device)
     policy.load_state_dict(saved["model"])
     policy.spatial_cell_padding = config['performance'].get('spatial_cell_padding',0)
     policy.enable_amp(str(device).startswith("cuda"), spatial_batch_size=32)

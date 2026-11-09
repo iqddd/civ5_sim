@@ -69,7 +69,8 @@ def _bc_evaluation_due(config, state, evaluations):
     dev_points = [
         v
         for v in evaluations.values()
-        if isinstance(v, dict) and v.get("purpose") == "development"
+        if isinstance(v, dict)
+        and v.get("purpose") in ("development", "development_512")
     ]
     if not dev_points:
         return True
@@ -168,6 +169,7 @@ def _audit_stable(directory):
     }
     supported_bc = kind in {
         "rl01.cp_imitation_target_more_data",
+        "rl01.cp_imitation_target_c2",
         "rl01.cp_imitation_target_scale",
     }
     if supported_bc:
@@ -273,8 +275,11 @@ def _audit_stable(directory):
         )
 
     def confirmation_check():
-        if confirmation.get("status") == "not_run_no_development_improvement":
-            return {"status": "not_run_no_development_improvement"}
+        if confirmation.get("status") in (
+            "not_run_no_development_improvement",
+            "not_run_development_512_gate_not_met",
+        ):
+            return {"status": confirmation.get("status")}
         before = confirmation["baseline"]["runs"]["argmax"]["cp"]
         after = confirmation["candidate"]["runs"]["argmax"]["cp"]
         settings = confirmation.get("comparison", {})
@@ -302,7 +307,11 @@ def _audit_stable(directory):
         confirmation_check,
         None
         if {"baseline", "candidate"} <= confirmation.keys()
-        or confirmation.get("status") == "not_run_no_development_improvement"
+        or confirmation.get("status")
+        in (
+            "not_run_no_development_improvement",
+            "not_run_development_512_gate_not_met",
+        )
         else "No recognized paired confirmation; special historical analyses are not covered",
     )
     statuses = {value["status"] for value in sections.values()}

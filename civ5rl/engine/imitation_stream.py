@@ -13,7 +13,7 @@ import torch
 
 from civ5rl.core.encoded_layout import ENCODED_FIELDS
 from civ5rl.core.model import batch_inputs
-from civ5rl.core.observation import Encoded
+from civ5rl.core.observation import Encoded, convert_globals_time_to_c2
 from civ5rl.core.schema import (
     ACTION_DIM,
     GLOBAL_DIM,
@@ -21,6 +21,7 @@ from civ5rl.core.schema import (
     PREV_ACTION_DIM,
     TILE_DIM,
 )
+from civ5rl.core.variants import PolicyVariant
 from civ5rl.engine.constants import (
     DEFAULT_CPU_CACHE_BYTES,
     DEFAULT_PREFIX_BLOCK_SIZE,
@@ -386,8 +387,10 @@ class PreparedDemonstrations(FileDemonstrations):
         limit_bytes=DEFAULT_CPU_CACHE_BYTES,
         *,
         scratch_dir=None,
+        variant: PolicyVariant | str = PolicyVariant.CONTACTS_GRU,
     ):
         super().__init__(root, entries, device, limit_bytes)
+        self.variant = PolicyVariant(variant)
         self.prepared_dir = _prepared_directory(root, scratch_dir)
         self.episodes = RawEpisodeView(self)
         self.raw_index = None
@@ -420,6 +423,11 @@ class PreparedDemonstrations(FileDemonstrations):
         self.counters["prepared_read_seconds"] += elapsed
         if arrays["mask"].tolist() != self.masks[index]:
             raise ValueError("Prepared mask changed")
+        if self.variant == PolicyVariant.CONTACTS_GRU_C2:
+            arrays = {
+                **arrays,
+                "globals": convert_globals_time_to_c2(arrays["globals"]),
+            }
         size = self.entries[index]["prepared_bytes"]
         self._store(index, CacheRecord(arrays, None, size))
         self.counters["cache_misses"] += 1

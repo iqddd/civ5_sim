@@ -409,7 +409,12 @@ def run_bc_benchmark(args, parser):
     fixed_limit = min(config["cache_bytes"] // 16, 256 * 1024**2)
     cache_limit = config["cache_bytes"] - fixed_limit
     cache = PreparedDemonstrations(
-        run_dir, prepared_entries, args.device, cache_limit, scratch_dir=scratch_dir
+        run_dir,
+        prepared_entries,
+        args.device,
+        cache_limit,
+        scratch_dir=scratch_dir,
+        variant=policy.variant,
     )
     if not args.legacy_loop:
         cache.spatial_cell_padding = policy.spatial_cell_padding

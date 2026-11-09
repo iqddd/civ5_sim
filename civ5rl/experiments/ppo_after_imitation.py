@@ -215,10 +215,13 @@ def play_case(
     """Shared ordinary-match execution; protocol callers supply validated cases."""
     directory = Path(directory)
     configure(17, "cpu")
-    agent = RLAgent.from_checkpoint(
-        checkpoint_path, "cpu", mode, temperature=temperature,
-        collect_selection_metrics=collect_selection_metrics,
-    )
+    if checkpoint_path == "cp":
+        agent = CPAgent(search_config(config))
+    else:
+        agent = RLAgent.from_checkpoint(
+            checkpoint_path, "cpu", mode, temperature=temperature,
+            collect_selection_metrics=collect_selection_metrics,
+        )
     opponent = CPAgent(search_config(config)) if enemy == "cp" else "greedy"
     side = case["learner_side"]
     agents = [None, None]
@@ -246,6 +249,8 @@ def play_case(
         )
         raise
     finally:
+        if isinstance(agent, CPAgent):
+            agent.close()
         if isinstance(opponent, CPAgent):
             opponent.close()
     result = {

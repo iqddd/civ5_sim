@@ -41,14 +41,21 @@ from civ5rl.experiments.imitation_helpers import (
     pool,
     restore_rng,
 )
+from civ5rl.core.model import Policy
 from civ5rl.experiments.ppo_after_imitation import play_case, policy_hash
 from civ5rl.experiments.ppo_target_scale import evaluate as target_evaluate
 from civ5rl.protocols.imitation_target_scale import (
+    C2_KIND,
     MORE_DATA_KIND,
     SUPPORTED_KINDS,
     match_task,
 )
-from civ5rl.protocols.ppo_target_scale import TargetFactory
+from civ5rl.protocols.ppo_target_scale import (
+    HOLDOUT_WORLDS,
+    TargetFactory,
+    development_512_cases,
+    holdout_126_cases,
+)
 from civ5rl.provenance import checkpoint
 from civ5rl.provenance.common import (
     ROOT,
@@ -94,7 +101,7 @@ def load_config(path):
         "weight_decay": 0,
     }:
         raise ValueError("Unsupported target BC optimizer")
-    if config["kind"] == MORE_DATA_KIND:
+    if config["kind"] in (MORE_DATA_KIND, C2_KIND):
         for required in (
             "parent_policy_hash",
             "evaluation_reference",
@@ -105,6 +112,15 @@ def load_config(path):
         ):
             if not config.get(required):
                 raise ValueError(f"Missing required target-more-data key: {required}")
+    if config["kind"] == C2_KIND:
+        for required in (
+            "bc10_checkpoint",
+            "bc10_sha256",
+            "bc10_policy_hash",
+            "more_data_corpus_run",
+        ):
+            if not config.get(required):
+                raise ValueError(f"Missing required target-c2 key: {required}")
     return config
 
 
@@ -247,6 +263,73 @@ def _load_old_corpus(config, plan):
     }
 
 
+def _load_more_data_corpus(config, plan):
+    more_root = ROOT / config["more_data_corpus_run"]
+    more_collection_path = more_root / "collection.json"
+    if not more_collection_path.is_file():
+        raise ValueError("Missing more-data BC collection.json")
+    more_data = read_json(more_collection_path)
+    if more_data.get("status") != "complete" or more_data.get("new_labels") != 800333:
+        raise ValueError("Unexpected more-data BC collection status or label count")
+    new_matches = more_data.get("new_matches", [])
+    if len(new_matches) != 3020:
+        raise ValueError("Unexpected more-data BC match count")
+    entries = []
+    matches = []
+    for row in new_matches:
+        match_id = int(row["match_id"])
+        match_dir = more_root / f"data/match-{match_id:06d}"
+        case_path = match_dir / "case.json"
+        if not case_path.is_file():
+            raise ValueError(f"Missing more-data BC case.json: {case_path}")
+        case = read_json(case_path)
+        if (
+            case.get("split") != "train"
+            or case.get("parent_world") not in plan["base"]["worlds"]["training"]
+        ):
+            raise ValueError("More-data BC match world/split mismatch")
+        row_entries = []
+        for entry in row["entries"]:
+            rel_in_more = Path(entry["path"]).as_posix()
+            if Path(rel_in_more).is_absolute():
+                full_path = Path(rel_in_more)
+            else:
+                full_path = more_root / rel_in_more
+            if not full_path.is_file():
+                raise ValueError(f"Missing more-data demonstration file: {full_path}")
+            workspace_rel = full_path.resolve().relative_to(ROOT.resolve()).as_posix()
+            sha = entry.get("sha256") or file_sha256(full_path)
+            if file_sha256(full_path) != sha:
+                raise ValueError(f"Demonstration SHA256 mismatch: {full_path}")
+            formatted = _format_corpus_entry(
+                entry,
+                "new",
+                workspace_rel,
+                row["map_size"],
+                row["army_size"],
+                sha256=sha,
+            )
+            row_entries.append(formatted)
+            entries.append(formatted)
+        matches.append({**row, "corpus_source": "new", "entries": row_entries})
+    if sum(e["labels"] for e in entries) != 800333 or len(entries) != 6040:
+        raise ValueError("More-data BC entries label total or count mismatch")
+    fixed_keys = {_entry_lookup_key(e) for e in more_data.get("fixed_training", [])}
+    fixed_training = [e for e in entries if _entry_lookup_key(e) in fixed_keys]
+    if sum(e["labels"] for e in fixed_training) < config["fixed_training_labels"]:
+        raise ValueError("Fixed training subset from more-data corpus is incomplete")
+    return {
+        "labels": 800333,
+        "positions": sum(e["positions"] for e in entries),
+        "matches_count": len(matches),
+        "entries": entries,
+        "matches": matches,
+        "fixed_training": fixed_training,
+        "fixed_labels": sum(e["labels"] for e in fixed_training),
+        "coverage": more_data.get("coverage", {}),
+    }
+
+
 def prepare(config, out):
     kind = config["kind"]
     if (out / "run.json").exists():
@@ -255,7 +338,7 @@ def prepare(config, out):
         return read_json(out / "manifest.json")
     if file_sha256(ROOT / config["parent"]) != config["parent_sha256"]:
         raise ValueError("Wrong training parent checkpoint SHA256")
-    if kind == MORE_DATA_KIND:
+    if kind in (MORE_DATA_KIND, C2_KIND):
         if (
             file_sha256(ROOT / config["evaluation_reference"])
             != config["evaluation_reference_sha256"]
@@ -271,6 +354,14 @@ def prepare(config, out):
             != config["evaluation_reference_policy_hash"]
         ):
             raise ValueError("Wrong evaluation reference policy_hash")
+    if kind == C2_KIND:
+        if file_sha256(ROOT / config["bc10_checkpoint"]) != config["bc10_sha256"]:
+            raise ValueError("Wrong BC10 checkpoint SHA256")
+        bc10_state = torch.load(
+            ROOT / config["bc10_checkpoint"], map_location="cpu", weights_only=False
+        )
+        if policy_hash(bc10_state["model"]) != config["bc10_policy_hash"]:
+            raise ValueError("Wrong BC10 policy_hash")
     original = read_json(ROOT / config["target_manifest"])
     base = original["base"]
     worlds = base["worlds"]
@@ -285,6 +376,26 @@ def prepare(config, out):
         "development": original["development"],
         "confirmation": original["confirmation"],
     }
+    if kind == C2_KIND:
+        corpus_manifest = read_json(ROOT / "artifacts/rl/corpus/manifest.json")
+        plan["development_512"] = development_512_cases(
+            config,
+            base,
+            existing_cases=[*original["development"], *original["confirmation"]],
+        )
+        plan["holdout_126"] = holdout_126_cases(
+            config, corpus_manifest, training_worlds=worlds["training"]
+        )
+        if len(plan["development_512"]) != 512 or any(
+            c["split"] != "validation" or c["parent_world"] not in worlds["validation"]
+            for c in plan["development_512"]
+        ):
+            raise ValueError("Closed or incomplete development_512 cases")
+        if len(plan["holdout_126"]) != 126 or any(
+            c["split"] != "train" or c["parent_world"] not in HOLDOUT_WORLDS
+            for c in plan["holdout_126"]
+        ):
+            raise ValueError("Closed or incomplete holdout_126 cases")
     for purpose, count in (("development", 128), ("confirmation", 256)):
         if len(plan[purpose]) != count or any(
             c["split"] != "validation" or c["parent_world"] not in worlds["validation"]
@@ -310,20 +421,44 @@ def prepare(config, out):
             ROOT / config["base_config"],
         ]
     )
-    if (ROOT / "configs/rl-cp-imitation-target-more-data.json").is_file():
-        paths.add(ROOT / "configs/rl-cp-imitation-target-more-data.json")
+    for extra_cfg in (
+        "configs/rl-cp-imitation-target-more-data.json",
+        "configs/rl-cp-imitation-target-c2.json",
+    ):
+        if (ROOT / extra_cfg).is_file():
+            paths.add(ROOT / extra_cfg)
     with zipfile.ZipFile(out / "source.zip", "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(paths):
             if path.is_file():
                 archive.write(path, path.relative_to(ROOT).as_posix())
-    if kind == MORE_DATA_KIND:
+    if kind in (MORE_DATA_KIND, C2_KIND):
         checkpoint.passport(out, config, plan)
     configure(17, "cpu")
-    policy = load_policy(config, ROOT / config["parent"], "cpu")
     parent = torch.load(
         ROOT / config["parent"], map_location="cpu", weights_only=False
     )
-    assert_equal(policy.state_dict(), parent["model"])
+    if kind == C2_KIND:
+        if policy_hash(parent["model"]) != config["parent_policy_hash"]:
+            raise ValueError("BC-1M reference policy_hash differs")
+        policy = Policy("C2")
+        for parameter in policy.value.parameters():
+            parameter.requires_grad_(False)
+        (out / "checkpoints").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(
+            ROOT / config["bc10_checkpoint"],
+            out / "checkpoints/reference-bc-epoch-10.pt",
+        )
+        shutil.copy2(
+            ROOT / config["parent"],
+            out / "checkpoints/reference-bc-more-data-epoch-10.pt",
+        )
+        shutil.copy2(
+            ROOT / config["evaluation_reference"],
+            out / "checkpoints/reference-update-0037.pt",
+        )
+    else:
+        policy = load_policy(config, ROOT / config["parent"], "cpu")
+        assert_equal(policy.state_dict(), parent["model"])
     if kind == MORE_DATA_KIND:
         if policy_hash(policy.state_dict()) != config["parent_policy_hash"]:
             raise ValueError("Training parent policy_hash differs")
@@ -339,7 +474,8 @@ def prepare(config, out):
         "config": config,
         "parent": config["parent"],
         "parent_sha256": config["parent_sha256"],
-        "parent_model_equal": True,
+        "parent_model_equal": kind != C2_KIND,
+        "initialized_from_scratch": kind == C2_KIND,
         "new_Adam_empty": True,
         "seed": 17,
         "source_snapshot": file_sha256(out / "source.zip"),
@@ -352,7 +488,7 @@ def prepare(config, out):
         "native": _native_artifacts(),
         "run_id": digest({"config": config, "manifest": plan["hash"]})[:16],
     }
-    if kind == MORE_DATA_KIND:
+    if kind in (MORE_DATA_KIND, C2_KIND):
         run_record.update(
             parent_policy_hash=config["parent_policy_hash"],
             evaluation_reference=config["evaluation_reference"],
@@ -361,6 +497,14 @@ def prepare(config, out):
                 "evaluation_reference_policy_hash"
             ],
             old_corpus_run=config["old_corpus_run"],
+        )
+    if kind == C2_KIND:
+        run_record.update(
+            bc10_checkpoint=config["bc10_checkpoint"],
+            bc10_sha256=config["bc10_sha256"],
+            bc10_policy_hash=config["bc10_policy_hash"],
+            more_data_corpus_run=config["more_data_corpus_run"],
+            initial_policy_hash=policy_hash(policy.state_dict()),
         )
     write_json(out / "run.json", run_record)
     initial_state = {
@@ -438,8 +582,162 @@ def _restore_collection_progress(config, factory, out):
     return rows, labels, elapsed_offset, len(rows)
 
 
+def _collect_c2(config, plan, out):
+    if (out / "collection.json").exists():
+        saved = read_json(out / "collection.json")
+        if saved.get("status") == "complete":
+            return saved
+    old_corpus = _load_old_corpus(config, plan)
+    more_corpus = _load_more_data_corpus(config, plan)
+    holdout_cases = plan["holdout_126"]
+    holdout_rows = []
+    started = perf_counter()
+    with (
+        ResourceMonitor(out / "collection-telemetry") as monitor,
+        pool(config["workers"]) as executor,
+    ):
+        monitor.mark("CP_holdout_generation")
+        pending_jobs = []
+        for idx, case in enumerate(holdout_cases):
+            match_dir = out / f"holdout-data/match-{idx:06d}"
+            metrics_path = match_dir / "collection-metrics.json"
+            if (
+                metrics_path.is_file()
+                and (match_dir / "case.json").is_file()
+                and read_json(match_dir / "case.json") == case
+            ):
+                row = read_json(metrics_path)
+                holdout_rows.append((idx, row))
+            else:
+                pending_jobs.append((config, case, str(match_dir)))
+        for first in range(0, len(pending_jobs), config["workers"]):
+            wave = pending_jobs[first : first + config["workers"]]
+            completed = list(executor.map(match_task, wave))
+            for row in completed:
+                holdout_rows.append((int(row["match_id"]), row))
+            print(
+                f"Holdout CP--CP collection: {len(holdout_rows)}/{len(holdout_cases)} matches",
+                flush=True,
+            )
+    holdout_rows.sort(key=lambda item: item[0])
+    if [i for i, _ in holdout_rows] != list(range(len(holdout_cases))):
+        raise ValueError("Incomplete or out-of-order holdout match collection")
+    formatted_holdout_matches = []
+    holdout_entries = []
+    for idx, row in holdout_rows:
+        row = deepcopy(row)
+        row["corpus_source"] = "holdout"
+        row_entries = []
+        for entry in row["entries"]:
+            full_path = Path(entry["path"])
+            if not full_path.is_absolute():
+                full_path = out / full_path
+            if not full_path.is_file():
+                full_path = (
+                    out
+                    / f"holdout-data/match-{idx:06d}"
+                    / f"demonstration-side-{entry['side']}.json.gz"
+                )
+            rel_path = full_path.resolve().relative_to(out.resolve()).as_posix()
+            formatted = {
+                **entry,
+                "entry_id": f"holdout:match-{idx:06d}:side-{int(entry['side'])}",
+                "corpus_source": "holdout",
+                "match_id": idx,
+                "side": int(entry["side"]),
+                "path": rel_path,
+                "map_size": int(row["map_size"]),
+                "army_size": int(row["army_size"]),
+                "sha256": file_sha256(full_path),
+            }
+            row_entries.append(formatted)
+            holdout_entries.append(formatted)
+        row["entries"] = row_entries
+        formatted_holdout_matches.append(row)
+    holdout_elapsed = perf_counter() - started
+    combined_entries = [*old_corpus["entries"], *more_corpus["entries"]]
+    combined_matches = [*old_corpus["matches"], *more_corpus["matches"]]
+    total_labels = old_corpus["labels"] + more_corpus["labels"]
+    total_positions = old_corpus["positions"] + more_corpus["positions"]
+    if total_labels != 1000816 or len(combined_entries) != 7536:
+        raise ValueError("Combined 1M BC corpus label or entry count mismatch")
+    holdout_summary = {
+        "status": "complete",
+        "worlds": list(HOLDOUT_WORLDS),
+        "matches_count": len(formatted_holdout_matches),
+        "entries_count": len(holdout_entries),
+        "labels": sum(e["labels"] for e in holdout_entries),
+        "positions": sum(e["positions"] for e in holdout_entries),
+        "seconds": holdout_elapsed,
+        "entries": holdout_entries,
+        "matches": formatted_holdout_matches,
+    }
+    write_json(out / "holdout-collection.json", holdout_summary)
+    result = {
+        "status": "complete",
+        "stop_reason": "reused_combined_1m_corpus",
+        "labels": total_labels,
+        "old_labels": old_corpus["labels"],
+        "new_labels": more_corpus["labels"],
+        "old_fraction": old_corpus["labels"] / total_labels,
+        "new_fraction": more_corpus["labels"] / total_labels,
+        "label_overshoot": 0,
+        "seconds": holdout_elapsed,
+        "new_seconds": 0.0,
+        "holdout_seconds": holdout_elapsed,
+        "time_overshoot": 0.0,
+        "positions": total_positions,
+        "old_positions": old_corpus["positions"],
+        "new_positions": more_corpus["positions"],
+        "old_matches_count": old_corpus["matches_count"],
+        "new_matches_count": more_corpus["matches_count"],
+        "entries": combined_entries,
+        "matches": combined_matches,
+        "new_matches": more_corpus["matches"],
+        "fixed_training": more_corpus["fixed_training"],
+        "fixed_labels": more_corpus["fixed_labels"],
+        "holdout_training": holdout_entries,
+        "holdout_labels": holdout_summary["labels"],
+        "holdout_positions": holdout_summary["positions"],
+        "holdout_matches_count": holdout_summary["matches_count"],
+        "physical_repeats": 0,
+        "coverage": more_corpus["coverage"],
+    }
+    corpus_manifest = {
+        "schema": 1,
+        "kind": config["kind"],
+        "old_corpus_run": config["old_corpus_run"],
+        "more_data_corpus_run": config["more_data_corpus_run"],
+        "old_labels": old_corpus["labels"],
+        "new_labels": more_corpus["labels"],
+        "total_labels": total_labels,
+        "old_entries_count": len(old_corpus["entries"]),
+        "new_entries_count": len(more_corpus["entries"]),
+        "holdout_matches_count": holdout_summary["matches_count"],
+        "holdout_labels": holdout_summary["labels"],
+        "entries": [
+            {
+                "entry_id": e["entry_id"],
+                "corpus_source": e["corpus_source"],
+                "match_id": e["match_id"],
+                "side": e["side"],
+                "path": e["path"],
+                "sha256": e["sha256"],
+                "labels": e["labels"],
+                "positions": e["positions"],
+            }
+            for e in combined_entries
+        ],
+    }
+    write_json(out / "combined-corpus-manifest.json", corpus_manifest)
+    write_json(out / "collection.json", result)
+    return result
+
+
 def collect(config, plan, out):
     kind = config["kind"]
+    if kind == C2_KIND:
+        return _collect_c2(config, plan, out)
     factory = TargetFactory(config, plan["base"])
     restored, labels, elapsed_offset, index = _restore_collection_progress(
         config, factory, out
@@ -796,7 +1094,7 @@ def select_best_candidate(bc_baseline, ppo_reference, candidates):
 
 
 def baseline(config, plan, out):
-    if (out / "selection.json").exists():
+    if config["kind"] == C2_KIND or (out / "selection.json").exists():
         return
     if config["kind"] == MORE_DATA_KIND:
         ref_run = ROOT / config["reference_run"]
@@ -1045,11 +1343,13 @@ def train(config, plan, out, *, resume=False):
         training_state = read_json(out / "training.json")
         if training_state.get("status") == "complete":
             return
-        if kind != MORE_DATA_KIND and (not restart or restart.get("consumed")):
+        if kind not in (MORE_DATA_KIND, C2_KIND) and (
+            not restart or restart.get("consumed")
+        ):
             raise ValueError(
                 "Partial training exists; optimization must not repeat automatically"
             )
-        if kind == MORE_DATA_KIND and not resume:
+        if kind in (MORE_DATA_KIND, C2_KIND) and not resume:
             raise ValueError(
                 "Partial training exists; use explicit resume phase to continue"
             )
@@ -1058,12 +1358,21 @@ def train(config, plan, out, *, resume=False):
     data = read_json(out / "collection.json")
     if data["status"] != "complete":
         raise ValueError("Collection is incomplete")
+    all_entries = list(data["entries"])
+    if kind == C2_KIND and data.get("holdout_training"):
+        all_entries.extend(data["holdout_training"])
     input_preparation = prepare_inputs(
-        out, data["entries"], workers=config["workers"]
+        out, all_entries, workers=config["workers"]
     )
-    prepared_entries = input_preparation["entries"]
-    lookup = {_entry_lookup_key(e): e for e in prepared_entries}
+    prepared_all = input_preparation["entries"]
+    lookup = {_entry_lookup_key(e): e for e in prepared_all}
+    prepared_entries = [lookup[_entry_lookup_key(e)] for e in data["entries"]]
     fixed_entries = [lookup[_entry_lookup_key(e)] for e in data["fixed_training"]]
+    holdout_entries = (
+        [lookup[_entry_lookup_key(e)] for e in data["holdout_training"]]
+        if kind == C2_KIND and data.get("holdout_training")
+        else []
+    )
     configure(17, "cuda")
     shuffle = random.Random(
         seed_for(
@@ -1074,7 +1383,7 @@ def train(config, plan, out, *, resume=False):
         read_json(out / "state.json") if (out / "state.json").exists() else None
     )
     resuming_more_data = (
-        kind == MORE_DATA_KIND
+        kind in (MORE_DATA_KIND, C2_KIND)
         and state_record is not None
         and (
             resume
@@ -1095,12 +1404,28 @@ def train(config, plan, out, *, resume=False):
         out / "checkpoints/initial.pt", map_location="cpu", weights_only=False
     )
     fixed_limit = min(config["cache_bytes"] // 16, 256 * 1024**2)
+    holdout_limit = fixed_limit if holdout_entries else 0
     cache = PreparedDemonstrations(
-        out, prepared_entries, "cuda", config["cache_bytes"] - fixed_limit
+        out,
+        prepared_entries,
+        "cuda",
+        config["cache_bytes"] - fixed_limit - holdout_limit,
+        variant=policy.variant,
     )
-    fixed = PreparedDemonstrations(out, fixed_entries, "cuda", fixed_limit)
+    fixed = PreparedDemonstrations(
+        out, fixed_entries, "cuda", fixed_limit, variant=policy.variant
+    )
+    holdout = (
+        PreparedDemonstrations(
+            out, holdout_entries, "cuda", holdout_limit, variant=policy.variant
+        )
+        if holdout_entries
+        else None
+    )
     cache.spatial_cell_padding = policy.spatial_cell_padding
     fixed.spatial_cell_padding = policy.spatial_cell_padding
+    if holdout is not None:
+        holdout.spatial_cell_padding = policy.spatial_cell_padding
     chunks = cache.chunks()
     with (
         CompilationClock() as compilation,
@@ -1217,7 +1542,46 @@ def train(config, plan, out, *, resume=False):
             with isolated_rng(shuffle):
                 initial_metrics = fixed_metrics(policy, fixed, selected)
             write_json(out / "fixed-training-initial.json", initial_metrics)
-            if (out / "evaluations.json").exists() and (
+            if kind == C2_KIND and holdout is not None:
+                with isolated_rng(shuffle):
+                    initial_holdout = fixed_metrics(policy, holdout, selected)
+                write_json(out / "holdout-initial.json", initial_holdout)
+                if not (out / "baseline-offline-metrics.json").exists():
+                    fixed_c = PreparedDemonstrations(
+                        out, fixed_entries, "cuda", fixed_limit, variant="C"
+                    )
+                    holdout_c = PreparedDemonstrations(
+                        out, holdout_entries, "cuda", holdout_limit, variant="C"
+                    )
+                    baseline_offline = {}
+                    for ref_name, ref_rel in (
+                        ("bc10", "checkpoints/reference-bc-epoch-10.pt"),
+                        (
+                            "bc_more_data_epoch_10",
+                            "checkpoints/reference-bc-more-data-epoch-10.pt",
+                        ),
+                    ):
+                        ref_policy = load_policy(config, out / ref_rel, "cuda")
+                        fixed_c.spatial_cell_padding = ref_policy.spatial_cell_padding
+                        holdout_c.spatial_cell_padding = ref_policy.spatial_cell_padding
+                        with isolated_rng(shuffle):
+                            ref_fixed = fixed_metrics(ref_policy, fixed_c, selected)
+                            ref_holdout = fixed_metrics(ref_policy, holdout_c, selected)
+                        baseline_offline[ref_name] = {
+                            "checkpoint": ref_rel,
+                            "policy_hash": policy_hash(ref_policy.state_dict()),
+                            "fixed_training": ref_fixed,
+                            "holdout": ref_holdout,
+                        }
+                        del ref_policy
+                    fixed_c.clear()
+                    holdout_c.clear()
+                    del fixed_c, holdout_c
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    write_json(out / "baseline-offline-metrics.json", baseline_offline)
+                holdout.clear()
+            elif (out / "evaluations.json").exists() and (
                 out / "selection.json"
             ).exists():
                 evaluations = read_json(out / "evaluations.json")
@@ -1243,6 +1607,8 @@ def train(config, plan, out, *, resume=False):
                     write_json(out / "selection.json", selection)
         cache.counters.clear()
         fixed.clear()
+        if holdout is not None:
+            holdout.clear()
         origin_steps = int(saved["state"]["Adam_steps"])
         history = []
         start_epoch = 1
@@ -1373,7 +1739,8 @@ def train(config, plan, out, *, resume=False):
             saved_epoch = int(saved_state["epoch"])
             if saved_state["epoch_completed"]:
                 if (
-                    saved_epoch in config["evaluate_epochs"]
+                    kind != C2_KIND
+                    and saved_epoch in config["evaluate_epochs"]
                     and not config.get("skip_milestone_evaluations", False)
                 ):
                     monitor.mark("evaluation")
@@ -1563,16 +1930,28 @@ def train(config, plan, out, *, resume=False):
                 elif max_steps is not None and steps >= max_steps:
                     reason = "max_adam_steps"
             if records:
-                history.append(
-                    {
-                        "epoch": epoch,
-                        "completed": completed,
-                        "steps": len(records),
-                        "labels": sum(r["labels"] for r in records),
-                        "online_CE": sum(r["ce"] * r["labels"] for r in records)
-                        / sum(r["labels"] for r in records),
-                    }
-                )
+                epoch_entry = {
+                    "epoch": epoch,
+                    "completed": completed,
+                    "steps": len(records),
+                    "labels": sum(r["labels"] for r in records),
+                    "online_CE": sum(r["ce"] * r["labels"] for r in records)
+                    / sum(r["labels"] for r in records),
+                }
+                if kind == C2_KIND:
+                    monitor.mark("offline_metrics", epoch=epoch, Adam_steps=steps)
+                    with clock.pause(), isolated_rng(shuffle):
+                        epoch_entry["fixed_training"] = fixed_metrics(
+                            policy, fixed, selected
+                        )
+                        if holdout is not None:
+                            epoch_entry["holdout"] = fixed_metrics(
+                                policy, holdout, selected
+                            )
+                    fixed.clear()
+                    if holdout is not None:
+                        holdout.clear()
+                history.append(epoch_entry)
                 last_path = (
                     f"checkpoints/epoch-{epoch:02d}.pt"
                     if completed
@@ -1597,7 +1976,8 @@ def train(config, plan, out, *, resume=False):
                 completed and records and pause_due(out, "epoch", epoch)
             ):
                 if (
-                    completed
+                    kind != C2_KIND
+                    and completed
                     and records
                     and epoch in config["evaluate_epochs"]
                     and not config.get("skip_milestone_evaluations", False)
@@ -1634,6 +2014,8 @@ def train(config, plan, out, *, resume=False):
                 )
                 cache.clear()
                 fixed.clear()
+                if holdout is not None:
+                    holdout.clear()
                 return
             terminal = (
                 not completed
@@ -1647,7 +2029,8 @@ def train(config, plan, out, *, resume=False):
                     else "active_time_limit"
                 )
             if (
-                records
+                kind != C2_KIND
+                and records
                 and (epoch in config["evaluate_epochs"] or terminal)
                 and not config.get("skip_milestone_evaluations", False)
             ):
@@ -1690,7 +2073,11 @@ def train(config, plan, out, *, resume=False):
                 final_state["active_seconds"] = clock.seconds()
                 write_json(out / "state.json", final_state)
         # A budget boundary between epochs must also evaluate the last changed policy.
-        if steps and not config.get("skip_milestone_evaluations", False):
+        if (
+            kind != C2_KIND
+            and steps
+            and not config.get("skip_milestone_evaluations", False)
+        ):
             monitor.mark("evaluation")
             with clock.pause():
                 measure(
@@ -1761,12 +2148,308 @@ def _outcomes_from_dir(directory):
     return result, cases
 
 
+def _evaluate_c2(config, plan, out, training):
+    out = Path(out)
+    baseline_offline = (
+        read_json(out / "baseline-offline-metrics.json")
+        if (out / "baseline-offline-metrics.json").exists()
+        else {}
+    )
+    epoch_by_num = {int(e["epoch"]): e for e in training.get("epochs", [])}
+    evaluations = (
+        read_json(out / "evaluations.json")
+        if (out / "evaluations.json").exists()
+        else {}
+    )
+
+    def _run_dev512(path, role, *, epoch=0, steps=0, fixed_tr=None, holdout_tr=None):
+        point = target_evaluate(config, plan, out, path, "development_512")
+        point = {
+            **point,
+            "checkpoint": path,
+            "epoch": epoch,
+            "Adam_steps": steps,
+            "candidate_role": role,
+        }
+        if fixed_tr is not None:
+            point["fixed_training"] = fixed_tr
+        if holdout_tr is not None:
+            point["holdout"] = holdout_tr
+        evals = (
+            read_json(out / "evaluations.json")
+            if (out / "evaluations.json").exists()
+            else {}
+        )
+        evals["development_512:" + point["policy_hash"]] = point
+        write_json(out / "evaluations.json", evals)
+        return point
+
+    cp_point = _run_dev512("cp", "cp_mirror")
+    bc10_off = baseline_offline.get("bc10", {})
+    bc10_point = _run_dev512(
+        "checkpoints/reference-bc-epoch-10.pt",
+        "bc10_reference",
+        fixed_tr=bc10_off.get("fixed_training"),
+        holdout_tr=bc10_off.get("holdout"),
+    )
+    ppo37_point = _run_dev512(
+        "checkpoints/reference-update-0037.pt",
+        "ppo37_reference",
+    )
+    bc1m_off = baseline_offline.get("bc_more_data_epoch_10", {})
+    bc1m_point = _run_dev512(
+        "checkpoints/reference-bc-more-data-epoch-10.pt",
+        "bc_more_data_baseline",
+        fixed_tr=bc1m_off.get("fixed_training"),
+        holdout_tr=bc1m_off.get("holdout"),
+    )
+
+    c2_candidates = []
+    seen_paths = set()
+    milestone_paths = []
+    for e_num in config["evaluate_epochs"]:
+        rel = f"checkpoints/epoch-{int(e_num):02d}.pt"
+        if (out / rel).is_file():
+            milestone_paths.append((int(e_num), rel))
+    latest_rel = training.get("latest")
+    if latest_rel and (out / latest_rel).is_file():
+        last_epoch_num = (
+            int(training["epochs"][-1]["epoch"]) if training.get("epochs") else 0
+        )
+        if all(rel != latest_rel for _, rel in milestone_paths):
+            milestone_paths.append((last_epoch_num, latest_rel))
+
+    cum_steps = 0
+    steps_by_epoch = {}
+    for e_row in training.get("epochs", []):
+        cum_steps += int(e_row["steps"])
+        steps_by_epoch[int(e_row["epoch"])] = cum_steps
+
+    for e_num, rel in milestone_paths:
+        if rel in seen_paths:
+            continue
+        seen_paths.add(rel)
+        saved_ckpt = torch.load(out / rel, map_location="cpu", weights_only=False)
+        steps = int(
+            saved_ckpt.get("state", {}).get(
+                "Adam_steps", steps_by_epoch.get(e_num, 0)
+            )
+        )
+        e_info = epoch_by_num.get(e_num, {})
+        point = _run_dev512(
+            rel,
+            "c2_candidate",
+            epoch=e_num,
+            steps=steps,
+            fixed_tr=e_info.get("fixed_training"),
+            holdout_tr=e_info.get("holdout"),
+        )
+        c2_candidates.append(point)
+
+    if not c2_candidates:
+        raise ValueError("No C2 milestone checkpoints found to evaluate")
+
+    c2_candidates.sort(
+        key=lambda c: (int(c.get("Adam_steps", 0)), int(c.get("epoch", 0)))
+    )
+    best_c2 = None
+    best_c2_wins = -1
+    for cand in c2_candidates:
+        w = int(cand["runs"]["argmax"]["cp"]["summary"]["W"])
+        if w > best_c2_wins:
+            best_c2 = cand
+            best_c2_wins = w
+
+    best_c2_outcomes, cases_512 = _outcomes_from_dir(
+        out / best_c2["runs"]["argmax"]["cp"]["directory"]
+    )
+    bc1m_outcomes, bc1m_cases = _outcomes_from_dir(
+        out / bc1m_point["runs"]["argmax"]["cp"]["directory"]
+    )
+    ppo37_outcomes, ppo37_cases = _outcomes_from_dir(
+        out / ppo37_point["runs"]["argmax"]["cp"]["directory"]
+    )
+    bc10_outcomes, bc10_cases = _outcomes_from_dir(
+        out / bc10_point["runs"]["argmax"]["cp"]["directory"]
+    )
+    if (
+        cases_512 != bc1m_cases
+        or cases_512 != ppo37_cases
+        or cases_512 != bc10_cases
+    ):
+        raise ValueError("Unpaired Development-512 evaluations")
+
+    vs_bc1m = paired_world_bootstrap(
+        bc1m_outcomes,
+        best_c2_outcomes,
+        samples=10000,
+        seed=20261103,
+        cases=cases_512,
+        cases_per_world=32,
+    )
+    vs_ppo37 = paired_world_bootstrap(
+        ppo37_outcomes,
+        best_c2_outcomes,
+        samples=10000,
+        seed=20261103,
+        cases=cases_512,
+        cases_per_world=32,
+    )
+    vs_bc10 = paired_world_bootstrap(
+        bc10_outcomes,
+        best_c2_outcomes,
+        samples=10000,
+        seed=20261103,
+        cases=cases_512,
+        cases_per_world=32,
+    )
+    bc1m_wins = int(bc1m_point["runs"]["argmax"]["cp"]["summary"]["W"])
+    win_rate_delta = float(vs_bc1m["delta"])
+    ci_low = float(vs_bc1m["CI95"][0])
+    gate_passed = bool(win_rate_delta >= 0.05 and ci_low > 0.0)
+
+    selection = {
+        "purpose": "development_512",
+        "best": best_c2,
+        "best_wins": best_c2_wins,
+        "c2_candidates": c2_candidates,
+        "bc_more_data_baseline": bc1m_point,
+        "bc_more_data_wins": bc1m_wins,
+        "ppo37_reference": ppo37_point,
+        "ppo37_wins": int(ppo37_point["runs"]["argmax"]["cp"]["summary"]["W"]),
+        "bc10_reference": bc10_point,
+        "bc10_wins": int(bc10_point["runs"]["argmax"]["cp"]["summary"]["W"]),
+        "cp_mirror": cp_point,
+        "cp_mirror_wins": int(cp_point["runs"]["argmax"]["cp"]["summary"]["W"]),
+        "comparison_vs_bc_more_data": vs_bc1m,
+        "comparison_vs_ppo37": vs_ppo37,
+        "comparison_vs_bc10": vs_bc10,
+        "gate_criteria": {
+            "min_win_rate_delta": 0.05,
+            "min_ci95_low": 0.0,
+            "observed_win_rate_delta": win_rate_delta,
+            "observed_ci95_low": ci_low,
+            "gate_passed": gate_passed,
+        },
+    }
+    write_json(out / "selection.json", selection)
+
+    if not gate_passed:
+        write_json(
+            out / "confirmation.json",
+            {
+                "status": "not_run_development_512_gate_not_met",
+                "selected": best_c2,
+                "bc_more_data_baseline": bc1m_point,
+                "ppo37_reference": ppo37_point,
+                "comparison_vs_bc_more_data": vs_bc1m,
+                "comparison_vs_ppo37": vs_ppo37,
+                "gate_criteria": selection["gate_criteria"],
+            },
+        )
+        return
+
+    ref_run = ROOT / config["reference_run"]
+    old_run = ROOT / config["old_corpus_run"]
+    bc_hash = config["parent_policy_hash"]
+    ppo_hash = config["evaluation_reference_policy_hash"]
+
+    bc1m_conf = _try_reuse_saved_evaluation(
+        config,
+        plan,
+        out,
+        ref_run,
+        "checkpoints/reference-bc-more-data-epoch-10.pt",
+        bc_hash,
+        "confirmation",
+    ) or _try_reuse_saved_evaluation(
+        config,
+        plan,
+        out,
+        old_run,
+        "checkpoints/reference-bc-more-data-epoch-10.pt",
+        bc_hash,
+        "confirmation",
+    )
+    if bc1m_conf is None:
+        bc1m_conf = target_evaluate(
+            config,
+            plan,
+            out,
+            "checkpoints/reference-bc-more-data-epoch-10.pt",
+            "confirmation",
+        )
+        bc1m_conf["reused_saved_evaluation"] = False
+
+    ppo37_conf = _try_reuse_saved_evaluation(
+        config,
+        plan,
+        out,
+        ref_run,
+        "checkpoints/reference-update-0037.pt",
+        ppo_hash,
+        "confirmation",
+    )
+    if ppo37_conf is None:
+        ppo37_conf = target_evaluate(
+            config,
+            plan,
+            out,
+            "checkpoints/reference-update-0037.pt",
+            "confirmation",
+        )
+        ppo37_conf["reused_saved_evaluation"] = False
+
+    c2_conf = target_evaluate(config, plan, out, best_c2["checkpoint"], "confirmation")
+    bc1m_c_out, conf_cases = _outcomes_from_dir(
+        out / bc1m_conf["runs"]["argmax"]["cp"]["directory"]
+    )
+    ppo37_c_out, ppo_conf_cases = _outcomes_from_dir(
+        out / ppo37_conf["runs"]["argmax"]["cp"]["directory"]
+    )
+    c2_c_out, c2_conf_cases = _outcomes_from_dir(
+        out / c2_conf["runs"]["argmax"]["cp"]["directory"]
+    )
+    if conf_cases != c2_conf_cases or ppo_conf_cases != c2_conf_cases:
+        raise ValueError("Unpaired Additional-256 confirmation")
+    conf_vs_bc1m = paired_world_bootstrap(
+        bc1m_c_out,
+        c2_c_out,
+        samples=10000,
+        seed=20261103,
+        cases=conf_cases,
+        cases_per_world=16,
+    )
+    conf_vs_ppo37 = paired_world_bootstrap(
+        ppo37_c_out,
+        c2_c_out,
+        samples=10000,
+        seed=20261103,
+        cases=conf_cases,
+        cases_per_world=16,
+    )
+    write_json(
+        out / "confirmation.json",
+        {
+            "status": "complete",
+            "baseline": bc1m_conf,
+            "ppo37_reference": ppo37_conf,
+            "candidate": c2_conf,
+            "comparison": conf_vs_bc1m,
+            "comparison_vs_ppo37": conf_vs_ppo37,
+        },
+    )
+
+
 def evaluate(config, plan, out):
     if (out / "confirmation.json").exists():
         return
     training = read_json(out / "training.json")
     if training["status"] != "complete":
         raise ValueError("Training is incomplete")
+    if config["kind"] == C2_KIND:
+        _evaluate_c2(config, plan, out, training)
+        return
     selection = read_json(out / "selection.json")
     best = selection["best"]
     if config["kind"] == MORE_DATA_KIND:
@@ -1919,18 +2602,27 @@ def report(config, out):
         read_json(out / "status.json") if (out / "status.json").exists() else {}
     )
     gpu_name = run_info.get("GPU", "CUDA GPU")
-    title = (
-        "# Расширение корпуса и продолжение target BC (`cp-imitation-target-more-data`)"
-        if config["kind"] == MORE_DATA_KIND
-        else "# Имитация штатного CP на целевых армиях"
-    )
+    if config["kind"] == C2_KIND:
+        title = "# Архитектура C2: 8 hex-блоков и глобальное внимание к известным юнитам (`cp-imitation-target-c2`)"
+    elif config["kind"] == MORE_DATA_KIND:
+        title = "# Расширение корпуса и продолжение target BC (`cp-imitation-target-more-data`)"
+    else:
+        title = "# Имитация штатного CP на целевых армиях"
     lines = [
         title,
         "",
         f"Статус: {status_info}; GPU: {gpu_name}; seed 17.",
         "",
     ]
-    if config["kind"] == MORE_DATA_KIND:
+    if config["kind"] == C2_KIND:
+        lines.append(
+            f"Корпус: переиспользован объединённый корпус из {collection.get('labels')} свободных меток "
+            f"({collection.get('positions')} позиций; старых боёв {collection.get('old_matches_count')}, "
+            f"новых боёв {collection.get('new_matches_count')}); отложенный корпус Holdout-126: "
+            f"{collection.get('holdout_labels')} свободных меток ({collection.get('holdout_positions')} позиций, "
+            f"{collection.get('holdout_matches_count')} боёв на 7 мирах)."
+        )
+    elif config["kind"] == MORE_DATA_KIND:
         lines.append(
             f"Сбор: новых свободных меток {collection.get('new_labels')}, старых {collection.get('old_labels')}, "
             f"всего в объединённом корпусе {collection.get('labels')} свободных меток "
@@ -1953,38 +2645,64 @@ def report(config, out):
         f"обработано свободных меток {training.get('free_labels_processed')}; active {training.get('active_seconds')} с; "
         f"превышение {training.get('time_overshoot')} с; microbatch {training.get('microbatch')}.",
         "",
-        "| Эпоха | Adam steps | Checkpoint | W/D/L | Win rate | Fixed training CE / accuracy |",
-        "|---:|---:|---|---|---:|---|",
     ]
+    eval_purpose = "development_512" if config["kind"] == C2_KIND else "development"
+    if config["kind"] == C2_KIND:
+        lines += [
+            "| Роль | Эпоха | Adam steps | Checkpoint | W/D/L (512) | Win rate | Fixed training CE / acc | Holdout-126 CE / acc |",
+            "|---|---:|---:|---|---|---:|---|---|",
+        ]
+    else:
+        lines += [
+            "| Эпоха | Adam steps | Checkpoint | W/D/L | Win rate | Fixed training CE / accuracy |",
+            "|---:|---:|---|---|---:|---|",
+        ]
     if (out / "evaluations.json").exists():
-        points = [
+        seen_dirs = set()
+        raw_points = [
             p
             for p in read_json(out / "evaluations.json").values()
-            if isinstance(p, dict) and p.get("purpose") == "development"
+            if isinstance(p, dict) and p.get("purpose") == eval_purpose
         ]
-        points.sort(key=lambda p: (int(p.get("Adam_steps", 0)), int(p.get("epoch", 0)), str(p.get("checkpoint", ""))))
+        raw_points.sort(
+            key=lambda p: (1 if p.get("candidate_role") else 0), reverse=True
+        )
+        points = []
+        for p in raw_points:
+            d = p.get("runs", {}).get("argmax", {}).get("cp", {}).get("directory")
+            if d and d not in seen_dirs:
+                seen_dirs.add(d)
+                points.append(p)
+        points.sort(
+            key=lambda p: (
+                int(p.get("Adam_steps", 0)),
+                int(p.get("epoch", 0)),
+                str(p.get("checkpoint", "")),
+            )
+        )
         for point in points:
             summary = point["runs"]["argmax"]["cp"]["summary"]
-            metric = point.get("fixed_training", {})
-            lines.append(
-                f"| {point.get('epoch', 0)} | {point.get('Adam_steps', 0)} | {point['checkpoint']} | "
-                f"{summary['W']}/{summary['D']}/{summary['L']} | {summary['win_rate']:.2%} | "
-                f"{metric.get('ce')} / {metric.get('accuracy')} |"
-            )
+            metric = point.get("fixed_training") or {}
+            if config["kind"] == C2_KIND:
+                hold = point.get("holdout") or {}
+                lines.append(
+                    f"| {point.get('candidate_role', '')} | {point.get('epoch', 0)} | {point.get('Adam_steps', 0)} | {point['checkpoint']} | "
+                    f"{summary['W']}/{summary['D']}/{summary['L']} | {summary['win_rate']:.2%} | "
+                    f"{metric.get('ce')} / {metric.get('accuracy')} | {hold.get('ce')} / {hold.get('accuracy')} |"
+                )
+            else:
+                lines.append(
+                    f"| {point.get('epoch', 0)} | {point.get('Adam_steps', 0)} | {point['checkpoint']} | "
+                    f"{summary['W']}/{summary['D']}/{summary['L']} | {summary['win_rate']:.2%} | "
+                    f"{metric.get('ce')} / {metric.get('accuracy')} |"
+                )
     lines += [
-        "",
-        "Выбор только по development-победам; при равенстве baseline предпочтительнее нового кандидата, "
-        "между baseline — PPO update 37, между новыми checkpoint — более ранний.",
         "",
         "Selection: " + json.dumps(selection, ensure_ascii=False),
         "",
         "Value head неизменна: "
         + str(training.get("value_head_unchanged"))
         + ". Общий encoder менялся; калибровка critic не сохраняется.",
-        "",
-        "Диагностическая CE/accuracy измеряется на фиксированном training-поднаборе, не на holdout.",
-        "",
-        "PPO, подбор температуры, подготовка critic, второй seed, закрытый test и автоматическое продление бюджетов не запускались.",
     ]
     if (out / "confirmation.json").exists():
         lines += [
@@ -2027,22 +2745,38 @@ def report(config, out):
             "Расстановки map/army/contact (новый сбор): " + json.dumps(strata),
         ]
     if training.get("epochs"):
-        lines += [
-            "",
-            "## Обучение",
-            "",
-            "| Эпоха | Полная | Свободные метки | Adam steps | Online CE |",
-            "|---:|---|---:|---:|---:|",
-        ]
-        for epoch in training["epochs"]:
-            lines.append(
-                f"| {epoch['epoch']} | {epoch['completed']} | {epoch['labels']} | {epoch['steps']} | {epoch['online_CE']} |"
-            )
+        if config["kind"] == C2_KIND:
+            lines += [
+                "",
+                "## Обучение по эпохам",
+                "",
+                "| Эпоха | Полная | Свободные метки | Adam steps | Online CE | Fixed-training CE / acc | Holdout-126 CE / acc |",
+                "|---:|---|---:|---:|---:|---|---|",
+            ]
+            for epoch in training["epochs"]:
+                ft = epoch.get("fixed_training") or {}
+                ho = epoch.get("holdout") or {}
+                lines.append(
+                    f"| {epoch['epoch']} | {epoch['completed']} | {epoch['labels']} | {epoch['steps']} | {epoch['online_CE']} | "
+                    f"{ft.get('ce')} / {ft.get('accuracy')} | {ho.get('ce')} / {ho.get('accuracy')} |"
+                )
+        else:
+            lines += [
+                "",
+                "## Обучение",
+                "",
+                "| Эпоха | Полная | Свободные метки | Adam steps | Online CE |",
+                "|---:|---|---:|---:|---:|",
+            ]
+            for epoch in training["epochs"]:
+                lines.append(
+                    f"| {epoch['epoch']} | {epoch['completed']} | {epoch['labels']} | {epoch['steps']} | {epoch['online_CE']} |"
+                )
         lines += [
             "",
             "История/prefix и кеш: " + json.dumps(training.get("cache", {})),
             "",
-            "Online CE усредняется по меткам при изменявшихся весах. Fixed training CE в таблице оценок измеряется при фиксированных весах.",
+            "Online CE усредняется по меткам при изменявшихся весах. Fixed training CE измеряется при фиксированных весах.",
         ]
     if (out / "training-telemetry/resources.jsonl").exists():
         analysis = analyze_telemetry(out / "training-telemetry/resources.jsonl")
@@ -2070,28 +2804,50 @@ def report(config, out):
         points = [
             p
             for p in read_json(out / "evaluations.json").values()
-            if isinstance(p, dict) and p.get("purpose") == "development"
+            if isinstance(p, dict) and p.get("purpose") == eval_purpose
         ]
+        if config["kind"] == C2_KIND:
+            points = [
+                p for p in points if p.get("candidate_role") == "c2_candidate"
+            ]
         points.sort(key=lambda p: int(p.get("Adam_steps", 0)))
-        fig, axes = plt.subplots(1, 2, figsize=(10, 4), layout="constrained")
-        axes[0].plot(
-            [p.get("Adam_steps", 0) for p in points],
-            [100 * p["runs"]["argmax"]["cp"]["summary"]["win_rate"] for p in points],
-            marker="o",
-        )
-        axes[0].set(xlabel="BC Adam steps", ylabel="Development argmax wins vs CP, %")
-        metrics = [p for p in points if p.get("fixed_training")]
-        axes[1].plot(
-            [p.get("Adam_steps", 0) for p in metrics],
-            [p["fixed_training"]["ce"] for p in metrics],
-            marker="o",
-        )
-        axes[1].set(xlabel="BC Adam steps", ylabel="Fixed training CE (not holdout)")
-        for ax in axes:
-            ax.grid(alpha=0.25)
-        fig.savefig(out / "learning-curves.png", dpi=150)
-        plt.close(fig)
-        lines += ["", "![Кривые](learning-curves.png)"]
+        if points:
+            fig, axes = plt.subplots(1, 2, figsize=(10, 4), layout="constrained")
+            axes[0].plot(
+                [p.get("Adam_steps", 0) for p in points],
+                [
+                    100 * p["runs"]["argmax"]["cp"]["summary"]["win_rate"]
+                    for p in points
+                ],
+                marker="o",
+            )
+            axes[0].set(
+                xlabel="BC Adam steps",
+                ylabel=f"{eval_purpose} argmax wins vs CP, %",
+            )
+            metrics = [p for p in points if p.get("fixed_training")]
+            if metrics:
+                axes[1].plot(
+                    [p.get("Adam_steps", 0) for p in metrics],
+                    [p["fixed_training"]["ce"] for p in metrics],
+                    marker="o",
+                    label="Fixed training CE",
+                )
+            holdout_pts = [p for p in points if p.get("holdout")]
+            if holdout_pts:
+                axes[1].plot(
+                    [p.get("Adam_steps", 0) for p in holdout_pts],
+                    [p["holdout"]["ce"] for p in holdout_pts],
+                    marker="s",
+                    label="Holdout-126 CE",
+                )
+                axes[1].legend()
+            axes[1].set(xlabel="BC Adam steps", ylabel="Offline CE")
+            for ax in axes:
+                ax.grid(alpha=0.25)
+            fig.savefig(out / "learning-curves.png", dpi=150)
+            plt.close(fig)
+            lines += ["", "![Кривые](learning-curves.png)"]
     (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -2110,8 +2866,10 @@ def run(phase, config, out, workers, device):
         "resume",
     ):
         raise ValueError("Unsupported target BC phase")
-    if phase == "resume" and config["kind"] != MORE_DATA_KIND:
-        raise ValueError("resume phase is supported only for rl01.cp_imitation_target_more_data")
+    if phase == "resume" and config["kind"] not in (MORE_DATA_KIND, C2_KIND):
+        raise ValueError(
+            "resume phase is supported only for rl01.cp_imitation_target_more_data and rl01.cp_imitation_target_c2"
+        )
     with RunLock(out):
         if phase in ("train", "run", "resume"):
             assert_not_closed(out)

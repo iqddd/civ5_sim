@@ -295,7 +295,8 @@ def evaluation_task(task):
 
 
 def evaluate(config,plan,out,path,purpose):
-    fingerprint=policy_hash(torch.load(out/path,map_location='cpu',weights_only=False)['model'])
+    fingerprint=('cp_mirror_'+digest(config['teacher_search'])[:32] if path=='cp'
+                 else policy_hash(torch.load(out/path,map_location='cpu',weights_only=False)['model']))
     cache=read_json(out/'evaluations.json') if (out/'evaluations.json').exists() else {}
     import platform
     import inspect
@@ -314,12 +315,14 @@ def evaluate(config,plan,out,path,purpose):
     started=perf_counter()
     relative=f'evaluation/{purpose}/{fingerprint[:16]}/{key[:16]}/argmax/cp'
     directory=out/relative
-    with pool(4) as executor:
-        tasks=[(config,case,str(out/path),str(directory/f"case-{case['case_id']:03}-side-{case['learner_side']}"))
+    workers=int(config.get('workers',4) or 4)
+    checkpoint_arg='cp' if path=='cp' else str(out/path)
+    with pool(workers) as executor:
+        tasks=[(config,case,checkpoint_arg,str(directory/f"case-{case['case_id']:03}-side-{case['learner_side']}"))
                for case in cases if not (directory/f"case-{case['case_id']:03}-side-{case['learner_side']}"/'metrics.json').exists()]
-        for first in range(0,len(tasks),4):
-            list(executor.map(evaluation_task,tasks[first:first+4]))
-            print(f'Evaluation {purpose}: {min(first+4,len(tasks))}/{len(tasks)} new matches',flush=True)
+        for first in range(0,len(tasks),workers):
+            list(executor.map(evaluation_task,tasks[first:first+workers]))
+            print(f'Evaluation {purpose}: {min(first+workers,len(tasks))}/{len(tasks)} new matches',flush=True)
     summary=match_summary(directory,len(cases))
     rows=[read_json(p) for p in directory.glob('*/metrics.json')]
     slices={}

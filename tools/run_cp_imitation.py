@@ -62,6 +62,7 @@ def main(argv=None):
         "rl01.cp_imitation": "imitation_base",
         "rl01.cp_imitation_target_scale": "imitation_target_scale",
         "rl01.cp_imitation_target_more_data": "imitation_target_scale",
+        "rl01.cp_imitation_target_c2": "imitation_target_scale",
         "rl01.cp_imitation_own_states": "imitation_own_states",
         "rl01.cp_imitation_more_data": "imitation_more_data",
         "rl01.cp_imitation_continuation": "imitation_continuation",
@@ -73,12 +74,14 @@ def main(argv=None):
     if args.phase == "run" and kind not in (
         "rl01.cp_imitation_target_scale",
         "rl01.cp_imitation_target_more_data",
+        "rl01.cp_imitation_target_c2",
         "rl01.cp_imitation_own_states",
     ):
         parser.error("run applies only to target-scale or own-state imitation")
     if args.phase == "resume" and kind not in (
         "rl01.cp_imitation_target_scale",
         "rl01.cp_imitation_target_more_data",
+        "rl01.cp_imitation_target_c2",
     ):
         parser.error("resume applies only to target-scale imitation")
     out = (args.out or Path(config["output"])).resolve()
@@ -89,6 +92,7 @@ def main(argv=None):
     if kind in (
         "rl01.cp_imitation_target_scale",
         "rl01.cp_imitation_target_more_data",
+        "rl01.cp_imitation_target_c2",
     ):
         config = module.load_config(args.config)
     if kind == "rl01.cp_imitation_own_states":

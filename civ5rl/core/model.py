@@ -10,6 +10,9 @@ from torch.nn import functional as F
 from civ5rl.core.schema import (
     ACTION_DIM,
     ACTION_INPUT_DIM,
+    C2_ATTN_HEADS,
+    C2_DISTANCE_BUCKETS,
+    C2_HEX_BLOCKS,
     CONTEXT_INPUT_DIM,
     HEX_BLOCKS,
     HEX_DIM,
@@ -19,10 +22,11 @@ from civ5rl.core.schema import (
     MEMORY_MLP_DIM,
     OPPOSITE_HEX_OFFSET,
     SELF_AND_HEX_DIRECTIONS,
+    TILE,
     TILE_DIM,
 )
 from civ5rl.core.spatial import iter_spatial_blocks
-from civ5rl.core.variants import PolicyVariant
+from civ5rl.core.variants import RECURRENT_VARIANTS, PolicyVariant
 
 GRU_GATES = 3
 
@@ -185,6 +189,92 @@ class HexBlock(nn.Module):
         return (u + self.mlp(self.norm2(u))) * mask.unsqueeze(-1)
 
 
+def hex_distance_buckets_from_neighbors(
+    neighbors: torch.Tensor,
+    cell_mask: torch.Tensor,
+    num_buckets: int = C2_DISTANCE_BUCKETS,
+) -> torch.Tensor:
+    """Exact pairwise hex distance buckets 0..num_buckets-1 from the neighbors graph."""
+    b, n, _ = neighbors.shape
+    row_parity = (neighbors[:, 0, 5] >= 0).long()
+    w = torch.where(
+        neighbors[:, 0, 5] >= 0, neighbors[:, 0, 5], neighbors[:, 0, 0]
+    ).clamp_min(2)
+    idx = torch.arange(n, device=neighbors.device, dtype=torch.long)[None, :]
+    x = idx % w[:, None]
+    y = idx // w[:, None]
+    r = y + row_parity[:, None]
+    q = x - ((r - (r & 1)) >> 1)
+    dq = q[:, :, None] - q[:, None, :]
+    dr = r[:, :, None] - r[:, None, :]
+    dist = (dq.abs() + dr.abs() + (dq + dr).abs()) >> 1
+    valid_pairs = cell_mask[:, :, None] & cell_mask[:, None, :]
+    return torch.where(valid_pairs, dist.clamp(0, num_buckets - 1), 0)
+
+
+def unit_cell_mask_from_cells(
+    cells: torch.Tensor, cell_mask: torch.Tensor
+) -> torch.Tensor:
+    """Public unit cells: own alive units, visible enemies, or remembered contacts."""
+    own_present = (cells[..., TILE["own_type"]] > 0).any(-1)
+    enemy_present = (cells[..., TILE["enemy_type"]] > 0).any(-1)
+    contact_present = (cells[..., TILE["contact_count"]] > 0).any(-1)
+    return cell_mask & (own_present | enemy_present | contact_present)
+
+
+class CellUnitAttention(nn.Module):
+    """Cross-attention from every map cell to all known unit cells with hex-distance bias."""
+
+    def __init__(self):
+        super().__init__()
+        self.num_heads = C2_ATTN_HEADS
+        self.head_dim = HEX_DIM // C2_ATTN_HEADS
+        self.scale = self.head_dim**-0.5
+        self.norm = nn.LayerNorm(HEX_DIM, eps=1e-5)
+        self.q_proj = nn.Linear(HEX_DIM, HEX_DIM)
+        self.kv_proj = nn.Linear(HEX_DIM, 2 * HEX_DIM)
+        self.out_proj = nn.Linear(HEX_DIM, HEX_DIM)
+        self.distance_bias = nn.Parameter(
+            torch.zeros(C2_ATTN_HEADS, C2_DISTANCE_BUCKETS)
+        )
+
+    def forward_with_weights(self, x, cells, neighbors, cell_mask):
+        b, n, _ = x.shape
+        unit_mask = unit_cell_mask_from_cells(cells, cell_mask)
+        buckets = hex_distance_buckets_from_neighbors(neighbors, cell_mask)
+        u = self.norm(x)
+        q = (
+            self.q_proj(u)
+            .reshape(b, n, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )
+        k, v = (
+            self.kv_proj(u)
+            .reshape(b, n, 2, self.num_heads, self.head_dim)
+            .unbind(2)
+        )
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        with torch.autocast(x.device.type, enabled=False):
+            bias = self.distance_bias.float()[:, buckets.reshape(-1)].reshape(
+                self.num_heads, b, n, n
+            ).permute(1, 0, 2, 3)
+            logits = torch.matmul(q.float(), k.float().transpose(-2, -1)) * self.scale + bias
+            logits = logits.masked_fill(~unit_mask[:, None, None, :], -torch.inf)
+            has_units = unit_mask.any(-1, keepdim=True)[:, None, :, None]
+            safe_logits = torch.where(has_units, logits, 0.0)
+            weights = torch.where(has_units, safe_logits.softmax(-1), 0.0)
+            weights = weights * cell_mask[:, None, :, None]
+            context = torch.matmul(weights, v.float())
+        merged = context.to(u.dtype).transpose(1, 2).reshape(b, n, HEX_DIM)
+        out = (x + self.out_proj(merged)) * cell_mask.unsqueeze(-1)
+        return out, weights, unit_mask
+
+    def forward(self, x, cells, neighbors, cell_mask):
+        out, _, _ = self.forward_with_weights(x, cells, neighbors, cell_mask)
+        return out
+
+
 class Policy(nn.Module):
     def __init__(self, variant: PolicyVariant | str = PolicyVariant.CONTACTS_GRU):
         super().__init__()
@@ -192,7 +282,17 @@ class Policy(nn.Module):
         self.hex_dim = HEX_DIM
         self.hidden_size = HIDDEN_SIZE
         self.projection = nn.Linear(TILE_DIM, HEX_DIM)
-        self.blocks = nn.ModuleList([HexBlock() for _ in range(HEX_BLOCKS)])
+        num_blocks = (
+            C2_HEX_BLOCKS
+            if self.variant == PolicyVariant.CONTACTS_GRU_C2
+            else HEX_BLOCKS
+        )
+        self.blocks = nn.ModuleList([HexBlock() for _ in range(num_blocks)])
+        self.unit_attention = (
+            CellUnitAttention()
+            if self.variant == PolicyVariant.CONTACTS_GRU_C2
+            else None
+        )
         self.context = nn.Sequential(
             nn.Linear(CONTEXT_INPUT_DIM, HIDDEN_SIZE),
             nn.GELU(),
@@ -201,7 +301,7 @@ class Policy(nn.Module):
         )
         self.memory = (
             nn.GRU(HIDDEN_SIZE, HIDDEN_SIZE)
-            if self.variant == PolicyVariant.CONTACTS_GRU
+            if self.variant in RECURRENT_VARIANTS
             else nn.Sequential(
                 nn.Linear(HIDDEN_SIZE, MEMORY_MLP_DIM),
                 nn.GELU(),
@@ -231,7 +331,7 @@ class Policy(nn.Module):
 
     @property
     def is_recurrent(self) -> bool:
-        return self.variant == PolicyVariant.CONTACTS_GRU
+        return self.variant in RECURRENT_VARIANTS
 
     def enable_amp(self, enabled=True, *, spatial_batch_size=0):
         if enabled and (
@@ -348,7 +448,9 @@ class Policy(nn.Module):
             parameters = tuple(
                 p
                 for name, p in self.named_parameters()
-                if name.startswith(("projection.", "blocks.", "context."))
+                if name.startswith(
+                    ("projection.", "blocks.", "unit_attention.", "context.")
+                )
                 and p.requires_grad
             )
             return CoalescedSpatial.apply(self, batch, *parameters)
@@ -407,12 +509,12 @@ class Policy(nn.Module):
             raise ValueError(
                 "Sequence lengths must be positive and sum to the batch size"
             )
-        if self.variant == PolicyVariant.CONTACTS_GRU:
+        if self.variant in RECURRENT_VARIANTS:
             self._check_hidden(hidden, len(lengths))
 
     def sequence_memory(self, context_embedding, lengths, hidden=None):
         self._check_sequences(len(context_embedding), lengths, hidden)
-        if self.variant != PolicyVariant.CONTACTS_GRU:
+        if self.variant not in RECURRENT_VARIANTS:
             with self.autocast(context_embedding):
                 return self.memory(context_embedding).float(), None
         # CUDA autocast can select FP16 for cuDNN RNN even inside BF16 autocast.
@@ -446,7 +548,7 @@ class Policy(nn.Module):
             elif isinstance(module, HexBlock):
                 for w in module.weight:
                     nn.init.xavier_uniform_(w)
-        if self.variant == PolicyVariant.CONTACTS_GRU:
+        if self.variant in RECURRENT_VARIANTS:
             nn.init.xavier_uniform_(self.memory.weight_ih_l0)
             for w in self.memory.weight_hh_l0.chunk(GRU_GATES):
                 nn.init.orthogonal_(w)
@@ -469,6 +571,20 @@ class Policy(nn.Module):
                 x = checkpoint(block, x, batch["neighbors"], mask, use_reentrant=False)
             else:
                 x = block(x, batch["neighbors"], mask)
+        if self.unit_attention is not None:
+            if self.activation_checkpointing and torch.is_grad_enabled():
+                from torch.utils.checkpoint import checkpoint
+
+                x = checkpoint(
+                    self.unit_attention,
+                    x,
+                    batch["cells"],
+                    batch["neighbors"],
+                    mask,
+                    use_reentrant=False,
+                )
+            else:
+                x = self.unit_attention(x, batch["cells"], batch["neighbors"], mask)
         mean = x.sum(1) / mask.sum(1, keepdim=True)
         masked = x.masked_fill(~mask.unsqueeze(-1), -torch.inf)
         maximum = (
@@ -527,7 +643,7 @@ class Policy(nn.Module):
             )
 
     def forward(self, batch, hidden=None, *, sequence=False):
-        if self.variant != PolicyVariant.CONTACTS_GRU:
+        if self.variant not in RECURRENT_VARIANTS:
             return self.forward_sequences(batch, [len(batch["cells"])], hidden)
         self._check_hidden(hidden, 1 if sequence else len(batch["cells"]))
         x, context_embedding = self.encode_spatial(batch)

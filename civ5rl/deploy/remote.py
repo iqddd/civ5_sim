@@ -153,6 +153,40 @@ def _more_data_bc_inputs(root, cfg):
     return names
 
 
+def _c2_bc_inputs(root, cfg):
+    names = _more_data_bc_inputs(root, cfg)
+    bc10 = cfg.get("bc10_checkpoint")
+    if bc10:
+        names.append(bc10)
+    more_run = cfg.get("more_data_corpus_run")
+    if more_run:
+        more_root = root / more_run
+        for meta in (
+            "collection.json",
+            "combined-corpus-manifest.json",
+            "manifest.json",
+            "run.json",
+            "resolved-config.json",
+            "evaluations.json",
+            "selection.json",
+            "confirmation.json",
+        ):
+            if (more_root / meta).is_file():
+                names.append(f"{more_run}/{meta}")
+        collection = _read(more_root / "collection.json")
+        for row in collection.get("new_matches", []):
+            match_id = int(row["match_id"])
+            prefix = f"{more_run}/data/match-{match_id:06d}"
+            for fname in (
+                "case.json",
+                "collection-metrics.json",
+                "demonstration-side-0.json.gz",
+                "demonstration-side-1.json.gz",
+            ):
+                names.append(f"{prefix}/{fname}")
+    return names
+
+
 def input_group(rel_posix, output_posix):
     """Minimal off-spine directory prefix: pairwise disjoint and outside output."""
     parts = PurePosixPath(rel_posix).parts
@@ -221,8 +255,15 @@ def stage_inputs(
         names.append(corpus)
     if cfg.get("kind") == "rl01.cp_imitation_target_more_data":
         names.extend(_more_data_bc_inputs(root, cfg))
+    if cfg.get("kind") == "rl01.cp_imitation_target_c2":
+        names.extend(_c2_bc_inputs(root, cfg))
     if (
-        cfg.get("kind") in ("rl01.ppo_target_scale", "rl01.cp_imitation_target_scale")
+        cfg.get("kind")
+        in (
+            "rl01.ppo_target_scale",
+            "rl01.cp_imitation_target_scale",
+            "rl01.cp_imitation_target_c2",
+        )
         and (root / "artifacts/rl/corpus/manifest.json").is_file()
     ):
         names.append("artifacts/rl/corpus/manifest.json")

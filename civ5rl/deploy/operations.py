@@ -25,6 +25,7 @@ CAPABILITIES = {
     "rl01.ppo_target_scale": {"run", "resume"},
     "rl01.ppo_scale_up": {"run"},
     "rl01.cp_imitation_target_more_data": {"run", "resume"},
+    "rl01.cp_imitation_target_c2": {"run", "resume"},
     "rl01.cp_imitation_target_scale": {"run"},
 }
 

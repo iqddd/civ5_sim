@@ -396,3 +396,98 @@ def evaluation_cases(config, base):
                     cases.append(case)
         result[purpose] = cases
     return result
+
+
+HOLDOUT_WORLDS = (10015, 10051, 10040, 10053, 10041, 10038, 10047)
+
+
+def development_512_cases(config, base, *, existing_cases=()):
+    """Generate 512 validation cases (256 layouts x 2 sides), disjoint from existing sets."""
+    factory = TargetFactory(config, base)
+    used = {
+        own_state_physical_hash(c["scenario"]) for c in existing_cases if "scenario" in c
+    }
+    per_world = 16
+    shift = 12
+    cases = []
+    for wi, world in enumerate(base["worlds"]["validation"]):
+        for j in range(per_world):
+            cell = (wi * per_world + j + shift) % 9
+            size, category = SIZES[cell // 3], cell % 3
+            index = wi * per_world + j
+            spec = factory.case(
+                index,
+                world,
+                size,
+                category,
+                j % 2,
+                0,
+                "cp_imitation_target_c2_development_512_v1",
+                split="validation",
+                crop=(j + shift) % 4,
+            )
+            h = own_state_physical_hash(spec["scenario"])
+            if h in used:
+                raise ValueError("Duplicate target validation physical layout in development_512")
+            used.add(h)
+            for side in (0, 1):
+                case = {
+                    **deepcopy(spec),
+                    "case_id": index,
+                    "layout_id": index,
+                    "learner_side": side,
+                    "physical_hash": h,
+                }
+                case["case_hash"] = self_digest(case)
+                cases.append(case)
+    return cases
+
+
+def holdout_126_cases(config, corpus_manifest, *, training_worlds=()):
+    """Generate 126 balanced CP-CP holdout matches on the 7 offline-holdout worlds."""
+    if set(HOLDOUT_WORLDS) & set(training_worlds):
+        raise ValueError("Holdout worlds overlap training worlds")
+    holdout_maps = [
+        m
+        for m in corpus_manifest["maps"]
+        if m["split"] == "train" and m["parent_seed"] in HOLDOUT_WORLDS
+    ]
+    if len(holdout_maps) != len(HOLDOUT_WORLDS) * 12:
+        raise ValueError("Expected 84 crops across the 7 holdout worlds")
+    holdout_base = {
+        "worlds": {"training": list(HOLDOUT_WORLDS), "validation": []},
+        "maps": holdout_maps,
+        "hash": digest(holdout_maps),
+    }
+    factory = TargetFactory(config, holdout_base)
+    used = set()
+    cases = []
+    strata = list(itertools.product(SIZES, range(3), (False, True)))
+    for wi, world in enumerate(HOLDOUT_WORLDS):
+        for si, (size, category, contact) in enumerate(strata):
+            index = wi * len(strata) + si
+            spec = factory.case(
+                index,
+                world,
+                size,
+                category,
+                contact,
+                0,
+                "cp_imitation_target_c2_holdout_126_v1",
+                split="train",
+                crop=(wi + si) % 4,
+            )
+            h = own_state_physical_hash(spec["scenario"])
+            if h in used:
+                raise ValueError("Duplicate holdout physical layout")
+            used.add(h)
+            case = {
+                **deepcopy(spec),
+                "source": config["kind"],
+                "case_id": index,
+                "layout_id": index,
+                "physical_hash": h,
+            }
+            case["case_hash"] = self_digest(case)
+            cases.append(case)
+    return cases

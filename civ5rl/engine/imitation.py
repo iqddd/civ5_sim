@@ -29,8 +29,8 @@ def decision_indices(row):
     return teacher, executed
 
 
-def encode_demonstration(episode):
-    encoder = ObservationEncoder(episode["context"], PolicyVariant.CONTACTS_GRU)
+def encode_demonstration(episode, variant=PolicyVariant.CONTACTS_GRU):
+    encoder = ObservationEncoder(episode["context"], variant)
     encoded = []
     for row in episode["decisions"]:
         legal = tuple(Action(**a) for a in row["actions"])
