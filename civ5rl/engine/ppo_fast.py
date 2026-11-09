@@ -248,7 +248,8 @@ def prefixes(policy, cache, spans, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
     if not policy.is_recurrent:
         return None
     hidden = torch.zeros((1, len(spans), policy.hidden_size), device=cache.device)
-    for offset in range(0, max(start for _, start, _ in spans), block_size):
+    is_cuda = str(cache.device).startswith("cuda")
+    for offset in range(0, max((start for _, start, _ in spans), default=0), block_size):
         active = [
             (slot, episode, start)
             for slot, (episode, start, _) in enumerate(spans)
@@ -263,13 +264,22 @@ def prefixes(policy, cache, spans, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
             lengths = [span.length for span in subspans]
         else:
             batch, _, lengths = cache.batch(subspans)
-        slots = torch.tensor([slot for slot, _, _ in active], device=cache.device)
         if policy.spatial_cuda_graphs:
             torch.compiler.cudagraph_mark_step_begin()
-        last = policy.forward_sequences(
-            batch, lengths, hidden.index_select(1, slots), memory_only=True
-        )
-        hidden.index_copy_(1, slots, last)
+        if len(active) == len(spans):
+            hidden = policy.forward_sequences(
+                batch, lengths, hidden, memory_only=True
+            )
+        else:
+            slots = torch.tensor(
+                [slot for slot, _, _ in active],
+                dtype=torch.long,
+                pin_memory=is_cuda,
+            ).to(cache.device, non_blocking=is_cuda)
+            last = policy.forward_sequences(
+                batch, lengths, hidden.index_select(1, slots), memory_only=True
+            )
+            hidden.index_copy_(1, slots, last)
     return hidden
 
 

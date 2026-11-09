@@ -127,6 +127,7 @@ CPU-bound collection оптимизируют по времени одинако
 python tools/bench_rl.py replay --run RUN --compare-git-rev HEAD --out OUT
 python tools/bench_rl.py replay --config CONFIG --checkpoint CHECKPOINT --rollout ROLLOUT --device cpu --episode-limit 1 --warmup 1 --repeats 1 --out OUT
 python tools/bench_rl.py full-cycle --config CONFIG --checkpoint CHECKPOINT --rollout ROLLOUT --out OUT --repeats 3 --device cuda
+python tools/bench_rl.py bc --config CONFIG --checkpoint CHECKPOINT --scratch-dir .tmp/bc-bench --warmup 30 --steps 500 --trace-steps 10 --verify-parity --out OUT
 python tools/diagnose_cp_replay.py --rollout ROLLOUT --episode 0 --trace-from 100 --out OUT
 ```
 
@@ -148,6 +149,7 @@ Python/NumPy/Torch/CUDA RNG; optimizer не создаётся, новых ма�
 `full-cycle` действительно собирает данные и выполняет отбрасываемые updates.
 Нужен совместимый PPO boundary checkpoint с PPO Adam; BC Adam не сбрасывается
 молча. Входы защищаются hashes, состояния/RNG восстанавливаются между trials.
+`bc` прогревает компиляцию вне замеряемого окна, затем измеряет итеративное BC-обучение по NVML (`60s` и интеграл интервала), при `--trace-steps` сохраняет Chrome-трассу Kineto CPU+CUDA и сводку простоев/копирований, а при `--verify-parity` сверяет CE, норму градиента и обновлённые веса с синхронным baseline-циклом, не модифицируя каталог научного прогона.
 Для `--compare-git-rev` поддержан только replay. Диагностика CP воспроизводит
 сохранённый эпизод; `--trace-from` требует trace-enabled native library.
 Она сообщает mismatches и root checks; без этого флага доступна обычная сверка.

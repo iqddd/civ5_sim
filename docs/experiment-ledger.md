@@ -1,6 +1,6 @@
 # Журнал экспериментов
 
-Сводка доступных свидетельств на **8 ноября 2026 года**. Это индекс истории,
+Сводка доступных свидетельств на **9 ноября 2026 года**. Это индекс истории,
 не назначение следующих запусков. Конфиги и артефакты указаны относительно
 корня репозитория. W/D/L — победы/ничьи/поражения learner против обычного
 stateful CP, если не оговорено иначе. Ничья не считается победой.
@@ -33,6 +33,7 @@ Development, additional validation, sampling и argmax нельзя объеди
 | PPO after-target-BC, T=1 | `rl-ppo-after-target-bc.json` | `cp-imitation-target-scale/checkpoints/epoch-10.pt` | **Свидетельства расходятся:** локальный status/state — paused, 54 073 решения; исторический sampling-протокол говорит об остановке на 530 088. Исходный development **27/33/68**; финал не установлен | [Локальный отчёт](../artifacts/rl/ppo-after-target-bc/report.md); [условия](rl-ppo-after-target-bc-direction.md), [поздняя запись](archive/rl-protocols/rl-target-bc-sampling-direction.md) |
 | Sampling исходного target BC | `rl-target-bc-sampling.json` | Тот же BC epoch 10, без обучения | Development 128 на режим: argmax **27/33/68**, T=1 **1/17/110**, T=0,5 **13/31/84** | [Отчёт](../artifacts/rl/target-bc-sampling/report.md); [протокол](archive/rl-protocols/rl-target-bc-sampling-direction.md) |
 | PPO target-BC T=0,5 | `rl-ppo-target-bc-t05.json` | Исходный target BC epoch 10, новый PPO Adam | Decision limit, выбран update 37; argmax development **32/34/62**, additional 256 **53/76/127** против **45/71/140**; CI [−3,91; +11,33] п.п., положительный прирост не подтверждён | [Отчёт ревью](../artifacts/rl/ppo-target-bc-t05/review-20261108/report.md); [протокол](rl-ppo-target-bc-t05-direction.md) |
+| BC target more-data | `rl-cp-imitation-target-more-data.json` | `cp-imitation-target-scale/checkpoints/epoch-10.pt`, новый BC Adam; reference `ppo-target-bc-t05/checkpoints/update-0037.pt` | Завершён (1 000 816 свободных меток: 200 483 старых + 800 333 новых, 10 эпох / 9 780 шагов Adam); argmax development 128: epoch 02 **26/36/66**, epoch 05 **30/31/67**, epoch 10 **32/30/66** — сравнялся с PPO update 37 (**32/34/62**), по правилу равенства удержан reference, confirmation 256 не запускался | [Отчёт](../artifacts/rl/cp-imitation-target-more-data/report.md), [аудит](../artifacts/rl/cp-imitation-target-more-data/derived/audit/audit.md) |
 
 Сила на целевых картах 10/12/16 с армиями 5–13 не следует из побед на 10×10.
 Выбор по development и проверка additional отражают процедуру конкретного

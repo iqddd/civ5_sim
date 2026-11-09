@@ -376,17 +376,19 @@ class Policy(nn.Module):
     def _score_heads(self, batch, x, h):
         if self._heads_runner is None:
             return self.heads(batch, x, h)
-        num_rows, num_actions = len(x), batch["sources"].shape[1]
+        action_keys = ("sources", "targets", "action_features", "action_mask")
+        action_batch = {key: batch[key] for key in action_keys}
+        num_rows, num_actions = len(x), action_batch["sources"].shape[1]
         if num_rows == 1:
-            batch = _pad_singleton_rows(batch)
+            action_batch = _pad_singleton_rows(action_batch)
             x, h = _duplicate_singleton(x), _duplicate_singleton(h)
         if num_actions == 1:
-            batch = dict(batch)
-            for key in ("sources", "targets", "action_features", "action_mask"):
-                value = batch[key]
+            action_batch = dict(action_batch)
+            for key in action_keys:
+                value = action_batch[key]
                 fill = -1 if key in ("sources", "targets") else 0
-                batch[key] = torch.cat((value, torch.full_like(value, fill)), 1)
-        logits, value = self._heads_runner(batch, x, h)
+                action_batch[key] = torch.cat((value, torch.full_like(value, fill)), 1)
+        logits, value = self._heads_runner(action_batch, x, h)
         return logits[:num_rows, :num_actions], value[:num_rows]
 
     def _check_sequences(self, batch_size, lengths, hidden):

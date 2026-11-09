@@ -214,7 +214,10 @@ def full_cycle(args, parser, config, inputs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "phase", nargs="?", choices=("full-cycle", "replay"), default="full-cycle"
+        "phase",
+        nargs="?",
+        choices=("full-cycle", "replay", "bc"),
+        default="full-cycle",
     )
     parser.add_argument(
         "--run",
@@ -232,7 +235,10 @@ def main():
         help="Replay ABBA blocks or full-cycle measured trials",
     )
     parser.add_argument(
-        "--warmup", type=int, default=1, help="Replay warmup passes per implementation"
+        "--warmup",
+        type=int,
+        default=1,
+        help="Replay warmup passes per implementation (or BC warmup minibatches)",
     )
     parser.add_argument(
         "--compare-git-rev", help="Replay baseline: ppo_fast.py from this Git revision"
@@ -242,9 +248,61 @@ def main():
         type=int,
         help="Replay only: first N saved episodes, recorded in result",
     )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=450,
+        help="BC only: number of measured Adam steps",
+    )
+    parser.add_argument(
+        "--trace-steps",
+        type=int,
+        default=0,
+        help="BC only: post-measurement Kineto trace steps",
+    )
+    parser.add_argument(
+        "--scratch-dir",
+        type=Path,
+        help="BC only: scratch directory outside scientific run directory",
+    )
+    parser.add_argument(
+        "--prep-workers",
+        type=int,
+        help="BC only: worker processes for one-time prepared-inputs",
+    )
+    parser.add_argument(
+        "--cold-cache",
+        action="store_true",
+        help="BC only: clear CPU LRU episode cache before measured window",
+    )
+    parser.add_argument(
+        "--legacy-loop",
+        action="store_true",
+        help="BC only: force synchronous per-step baseline loop",
+    )
+    parser.add_argument(
+        "--verify-parity",
+        action="store_true",
+        help="BC only: verify CE, grad norm, and parameter parity vs legacy loop",
+    )
+    parser.add_argument(
+        "--parity-steps",
+        type=int,
+        default=8,
+        help="BC only: number of steps for parity verification",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=17)
     args = parser.parse_args()
+    if args.phase == "bc":
+        if args.config is None or args.checkpoint is None:
+            parser.error("bc benchmark requires --config and --checkpoint")
+        if args.steps < 1 or args.warmup < 0 or args.trace_steps < 0:
+            parser.error("bc --steps must be >= 1 and --warmup/--trace-steps >= 0")
+        from tools._bc_benchmark import run_bc_benchmark
+
+        run_bc_benchmark(args, parser)
+        return
     if (
         args.repeats < 1
         or args.warmup < 1

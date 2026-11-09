@@ -12,13 +12,13 @@
 - Before moving documentation, check configuration, code, test, and Markdown references to its path and anchors. Preserve required input paths unless their consumers are deliberately updated; do not rewrite frozen passports or source archives to accommodate a move.
 - Keep `docs/README.md` current when adding, moving, or retiring documents. Preserve its list format: filename/link followed by a concise 10–20-word abstract. Keep the index in English.
 
-## Artifacts and temporary scripts
+## Artifacts, tooling roles, and temporary scripts
 
 - `artifacts/` is only for data, checkpoints, logs, JSON metrics, plots, and Markdown reports. It is an output/evidence directory, not a source-code directory.
 - Do not create `.py` files or other executable helpers under `artifacts/`, including experiment-specific audit, benchmark, packaging, or reporting scripts. Existing historical scripts do not justify adding more; do not alter frozen evidence merely to enforce this layout.
-- All new logic for auditing, benchmarking, Vast.ai packaging, or report generation must be exposed as a reusable subcommand of a CLI in `tools/`, except for the temporary scenarios described below. Extend an appropriate existing CLI rather than creating a separate helper for each run. Shared implementation for these tools belongs under `tools/`; do not move it into training packages. For performance tooling, `civ5rl` only records low-level runtime data consumed by tools.
-- The only exception is a narrow, one-off scenario for a specific experiment: its script may live in `.tmp/`. Assume `.tmp/` can be cleared at any time. No durable workflow, resume path, or reproducibility claim may depend on its contents; save final data and reports in `artifacts/`.
-- If a temporary scenario becomes useful again, move its reusable logic into the normal package/`tools/` CLI structure rather than keeping a growing collection of temporary scripts.
+- Keep execution and measurement/operational code separated by passport role (`is_readonly_source` in `civ5rl/provenance/identity.py`). Execution modules (`civ5rl/core`, `civ5rl/engine`, `civ5rl/protocols`, `civ5rl/experiments`, simulator code, and training/collection/evaluation/build entrypoints) are hashed into execution passports: editing them changes `execution_identity` and blocks normal `resume` and lineage checks. Execution code should record only low-level runtime facts and telemetry, while shared logic for auditing, benchmarking, Vast.ai packaging, and reporting belongs in non-execution locations excluded from execution passports (`civ5rl/reporting/`, `civ5rl/deploy/`, non-execution modules in `tools/`, or a dedicated subpackage registered in `is_readonly_source`) so operational and measurement tooling can evolve without invalidating training passports.
+- Exploratory diagnostics, trace parsers, ad-hoc benchmarks, and one-off experiment helpers may live freely in `.tmp/`. Assume `.tmp/` can be cleared at any time: no durable workflow, resume path, or reproducibility claim may depend on its contents, and final data or reports belong in `artifacts/`.
+- When a diagnostic, benchmark, audit, packaging, or reporting workflow becomes repeatable across runs, promote it to a subcommand of an appropriate CLI in `tools/` (extending an existing CLI rather than creating per-run scripts) backed by passport-excluded modules instead of accumulating permanent scripts in `.tmp/`.
 
 ## Testing policy
 

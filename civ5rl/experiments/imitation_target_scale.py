@@ -3,7 +3,6 @@ import gc
 import inspect
 import io
 import json
-import math
 import platform
 import random
 import shutil
@@ -23,7 +22,10 @@ from torch.nn import functional as F
 from civ5rl.config import load_config as resolve_config
 from civ5rl.engine.control import RunLock, assert_not_closed, pause_due
 from civ5rl.engine.imitation import decision_indices, label_minibatches
-from civ5rl.engine.imitation_performance import backward_minibatch_async
+from civ5rl.engine.imitation_performance import (
+    backward_minibatch_async,
+    run_bc_minibatch_stream,
+)
 from civ5rl.engine.imitation_stream import PreparedDemonstrations, prepare_inputs
 from civ5rl.engine.ppo_fast import prefixes
 from civ5rl.engine.resources import ResourceMonitor, analyze_telemetry
@@ -1097,6 +1099,8 @@ def train(config, plan, out, *, resume=False):
         out, prepared_entries, "cuda", config["cache_bytes"] - fixed_limit
     )
     fixed = PreparedDemonstrations(out, fixed_entries, "cuda", fixed_limit)
+    cache.spatial_cell_padding = policy.spatial_cell_padding
+    fixed.spatial_cell_padding = policy.spatial_cell_padding
     chunks = cache.chunks()
     with (
         CompilationClock() as compilation,
@@ -1480,59 +1484,22 @@ def train(config, plan, out, *, resume=False):
                 batches = iter(label_minibatches(order, cache.masks))
             completed = True
             monitor.mark("iterative_training", epoch=epoch, Adam_steps=steps)
-            while True:
+            stop_hit = None
+
+            def _check_stop():
+                nonlocal stop_hit
                 if clock.seconds() >= config["training_seconds"]:
-                    completed = False
-                    reason = "active_time_limit"
-                    break
-                if max_steps is not None and steps >= max_steps:
-                    completed = False
-                    reason = "max_adam_steps"
-                    break
-                try:
-                    spans, n = next(batches)
-                except StopIteration:
-                    break
-                start = perf_counter()
-                before = dict(cache.counters)
-                ce, norm = bc_optimizer_step(
-                    policy,
-                    optimizer,
-                    backward,
-                    cache,
-                    spans,
-                    n,
-                    max_gradient_norm=0.5,
-                    asynchronous=True,
-                )
-                torch.cuda.synchronize()
-                ce = float(ce)
-                norm = float(norm)
-                if not math.isfinite(ce) or not math.isfinite(norm):
-                    raise FloatingPointError("Non-finite BC loss or gradient norm")
-                steps += 1
-                labels += n
+                    stop_hit = "active_time_limit"
+                    return stop_hit
+                return None
+
+            def _on_step(record, completed_steps):
+                nonlocal steps, labels, cursor, epoch_labels, utilization
+                steps = completed_steps
+                labels += record["labels"]
                 cursor += 1
-                epoch_labels += n
-                counters = {int(s["step"]) for s in optimizer.state.values()}
-                if counters != {steps}:
-                    raise ValueError("BC Adam counters differ from completed steps")
-                record = {
-                    "step": steps,
-                    "epoch": epoch,
-                    "labels": n,
-                    "ce": ce,
-                    "gradient_norm": norm,
-                    "seconds": perf_counter() - start,
-                    "prefix_positions": cache.counters["prefix_positions"]
-                    - before.get("prefix_positions", 0),
-                    "history_positions": cache.counters["history_positions"]
-                    - before.get("history_positions", 0),
-                    "compile_seconds": compilation.seconds(start, perf_counter()),
-                }
+                epoch_labels += record["labels"]
                 records.append(record)
-                with (out / "steps.jsonl").open("a", encoding="utf-8") as stream:
-                    stream.write(json.dumps(record) + "\n")
                 if steps == 1:
                     write_json(
                         out / "first-step-check.json",
@@ -1549,7 +1516,7 @@ def train(config, plan, out, *, resume=False):
                     )
                 if steps % 10 == 0:
                     print(
-                        f"BC epoch={epoch}, Adam={steps}, labels={labels}, CE={ce:.4f}, active={clock.seconds():.1f}s",
+                        f"BC epoch={epoch}, Adam={steps}, labels={labels}, CE={record['ce']:.4f}, active={clock.seconds():.1f}s",
                         flush=True,
                     )
                 if clock.seconds() >= 600 and utilization is None:
@@ -1568,8 +1535,33 @@ def train(config, plan, out, *, resume=False):
                         "continuation_reason": "Bounded CPU episode input, full current-weight GRU-prefix and small fixed spatial blocks constrain dispatch. Preserve the validated 1024-label objective and precision; no extra optimization campaign or artificial GPU load.",
                     }
                     write_json(out / "GPU-utilization-review.json", utilization)
-                if epoch_labels == data["labels"]:
-                    break
+
+            check_steps = {1}
+            if restart or resuming_more_data:
+                check_steps.add(origin_steps + 1)
+
+            run_bc_minibatch_stream(
+                policy=policy,
+                optimizer=optimizer,
+                cache=cache,
+                batches=batches,
+                micro_size=selected,
+                max_gradient_norm=0.5,
+                steps_log_path=out / "steps.jsonl",
+                compilation=compilation,
+                epoch=epoch,
+                initial_steps=steps,
+                max_steps=max_steps,
+                should_stop=_check_stop,
+                on_step_completed=_on_step,
+                check_counter_steps=check_steps,
+            )
+            if epoch_labels < data["labels"]:
+                completed = False
+                if stop_hit is not None:
+                    reason = stop_hit
+                elif max_steps is not None and steps >= max_steps:
+                    reason = "max_adam_steps"
             if records:
                 history.append(
                     {
