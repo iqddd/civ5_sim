@@ -254,7 +254,7 @@ class TargetFactory:
                 "scenario": scenario,
                 "armies": [roster, roster.copy()],
                 "learner_side": side,
-                "max_rounds": 30,
+                "max_rounds": int(self.config["environment"].get("max_rounds", 30)),
                 "max_calls_per_turn": self.config["environment"]["max_calls_per_turn"],
                 "opponent": "cp",
                 "opponent_search": deepcopy(self.config["teacher_search"]),

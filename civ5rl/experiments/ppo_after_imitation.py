@@ -240,7 +240,7 @@ def play_case(
             MatchConfig(
                 case["scenario"]["map"],
                 case["armies"],
-                30,
+                int(case["max_rounds"]),
                 max_calls_per_turn=config["environment"]["max_calls_per_turn"],
             ),
             agents,
