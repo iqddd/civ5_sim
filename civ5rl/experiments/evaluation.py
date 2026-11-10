@@ -1,6 +1,69 @@
 """Validation execution and replay verification; saved-result analysis is re-exported."""
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class MatchTask:
+    config: dict
+    manifest: dict
+    case: dict
+    output_dir: str
+    contender: Any
+    opponent: str
+    device: str = "cpu"
+
+    @property
+    def directory(self) -> str:
+        return self.output_dir
+
+    def __iter__(self):
+        yield self.config
+        yield self.manifest
+        yield self.case
+        yield self.output_dir
+        yield self.contender
+        yield self.opponent
+        yield self.device
+
+    def __getitem__(self, index: int):
+        return (
+            self.config,
+            self.manifest,
+            self.case,
+            self.output_dir,
+            self.contender,
+            self.opponent,
+            self.device,
+        )[index]
+
+    def __len__(self) -> int:
+        return 7
+
+    @classmethod
+    def from_task(cls, task: Any) -> "MatchTask":
+        if isinstance(task, cls):
+            return task
+        if isinstance(task, (tuple, list)) and len(task) == 7:
+            return cls(*task)
+        if (
+            hasattr(task, "config")
+            and hasattr(task, "case")
+            and (hasattr(task, "output_dir") or hasattr(task, "directory"))
+        ):
+            return cls(
+                config=task.config,
+                manifest=task.manifest,
+                case=task.case,
+                output_dir=getattr(task, "output_dir", None)
+                or getattr(task, "directory", None),
+                contender=task.contender,
+                opponent=task.opponent,
+                device=getattr(task, "device", "cpu"),
+            )
+        raise TypeError(f"Cannot coerce {type(task)} to MatchTask")
+
 
 from civ5rl.protocols.imitation import load_episode
 from civ5rl.provenance.common import ROOT, read_json
@@ -15,6 +78,7 @@ from civ5sim import Battle
 from civ5sim.engine import digest
 
 __all__ = [
+    "MatchTask",
     "clustered_paired_bootstrap",
     "compare_paired_directories",
     "load_eval_rows",
@@ -49,14 +113,14 @@ def run_validation_cases(
             )
             for enemy, directory in directories.items():
                 jobs.append(
-                    (
-                        config,
-                        manifest,
-                        case,
-                        str(directory / f"case-{case['case_id']:03}-side-{side}"),
-                        {"checkpoint": str(checkpoint), "mode": mode},
-                        enemy,
-                        "cpu",
+                    MatchTask(
+                        config=config,
+                        manifest=manifest,
+                        case=case,
+                        output_dir=str(directory / f"case-{case['case_id']:03}-side-{side}"),
+                        contender={"checkpoint": str(checkpoint), "mode": mode},
+                        opponent=enemy,
+                        device="cpu",
                     )
                 )
     with pool(workers) as executor:

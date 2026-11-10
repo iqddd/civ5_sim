@@ -22,6 +22,7 @@ from civ5rl.core.model import batch_inputs
 from civ5rl.core.observation import ObservationEncoder
 from civ5rl.engine.collector import Collector
 from civ5rl.engine.control import RunLock, assert_not_closed
+from civ5rl.engine.counters import TrainingCounters
 from civ5rl.engine.ppo import update
 from civ5rl.engine.ppo import encode_episode
 from civ5rl.engine.ppo_fast import BatchedBackend
@@ -259,7 +260,7 @@ def initialize(config, plan, out):
             if name and (ROOT/name).is_file(): archive.write(ROOT/name,name)
     record['source_snapshot']=file_sha256(out/'source.zip')
     record['run_id']=digest(record)
-    state={'updates':0,'accepted_updates':0,'attempted_steps':0,'rejected_steps':0,'optimizer_steps':0,
+    state={**TrainingCounters().to_state_dict(protocol=KIND),
            'origin_Adam_counter':45915,'decisions':0,'next_episode':350592,'zero_accepted_streak':0,
            'active_seconds':0.,'evaluation_seconds':0.,'preparation_seconds':0.,'evaluated':{},
            'latest':'checkpoints/initial.pt','pending_evaluation':True,

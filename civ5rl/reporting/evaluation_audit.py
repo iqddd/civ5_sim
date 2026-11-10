@@ -69,31 +69,96 @@ def outcome(metric):
     return "D" if winner is None else "W" if winner == side else "L"
 
 
-def load_eval_rows(directory, expected_n):
-    """Load complete saved matches, checking identity and cross-file consistency."""
-    directory = ROOT / Path(directory)
+def _extract_plan_keys(plan):
+    """Extract a set of (parent_world, case_id, learner_side) tuples from a plan."""
+    if isinstance(plan, dict):
+        if "cases" in plan:
+            source = plan["cases"]
+        elif "validation_cases" in plan:
+            source = plan["validation_cases"]
+        else:
+            source = plan
+    else:
+        source = plan
+
+    if isinstance(source, dict):
+        first_key = next(iter(source.keys()), None)
+        if (
+            first_key is not None
+            and isinstance(first_key, (tuple, list))
+            and len(first_key) == 3
+        ):
+            return {tuple(k) for k in source}
+        items = list(source.values())
+    elif isinstance(source, (list, tuple, set)):
+        items = list(source)
+    else:
+        raise TypeError(f"Unsupported plan type: {type(plan)}")
+
+    keys = set()
+    for item in items:
+        if isinstance(item, (tuple, list)) and len(item) == 3:
+            keys.add(tuple(item))
+        elif isinstance(item, dict):
+            pw = item.get("parent_world")
+            cid = item.get("case_id")
+            if pw is None or cid is None:
+                raise ValueError(f"Plan case missing parent_world or case_id: {item}")
+            if "learner_side" in item:
+                keys.add((pw, cid, item["learner_side"]))
+            elif "side" in item:
+                keys.add((pw, cid, item["side"]))
+            else:
+                keys.add((pw, cid, 0))
+                keys.add((pw, cid, 1))
+        else:
+            raise ValueError(f"Unrecognized plan case item: {item}")
+    return keys
+
+
+def load_eval_rows(directory, expected_n=None, *, plan=None, require_artifacts=True):
+    """Load complete saved matches, checking identity, plan, and cross-file consistency."""
+    directory = Path(directory)
+    if not directory.is_absolute():
+        directory = ROOT / directory
     rows = {}
     for match in sorted(p for p in directory.iterdir() if p.is_dir()):
+        if match.name.startswith((".", "__")):
+            continue
         required = (
-            "case.json",
-            "metrics.json",
-            "result.json",
-            "final.json",
-            "replay.json",
+            ("case.json", "metrics.json", "result.json", "final.json", "replay.json")
+            if require_artifacts
+            else ("case.json", "metrics.json")
         )
         if any(not (match / name).is_file() for name in required):
             raise ValueError(f"Missing evaluation artifact: {match}")
-        case, metric, result = (read_json(match / name) for name in required[:3])
-        # Parse the remaining artifacts too; a truncated file is not complete.
-        for name in required[3:]:
-            read_json(match / name)
-        if metric["status"] != "completed" or result["status"] != "completed":
+        case = read_json(match / "case.json")
+        metric = read_json(match / "metrics.json")
+        result = read_json(match / "result.json") if (match / "result.json").is_file() else None
+        if require_artifacts:
+            for name in ("final.json", "replay.json"):
+                read_json(match / name)
+        elif (match / "result.json").is_file():
+            for name in ("final.json", "replay.json"):
+                if (match / name).is_file():
+                    read_json(match / name)
+
+        if metric.get("status") != "completed":
             raise ValueError(f"Incomplete evaluation: {match}")
-        side, winner = metric["side"], metric["winner"]
+        if result is not None and result.get("status") != "completed":
+            raise ValueError(f"Incomplete evaluation: {match}")
+
+        side = metric["side"]
+        learner_side = case["learner_side"]
         outcome(metric)
+        if side != learner_side:
+            raise ValueError(
+                f"Inconsistent learner side: metric side {side} != case side {learner_side}"
+            )
+
+        winner = metric["winner"]
         if (
-            side != case["learner_side"]
-            or winner != result["winner"]
+            (result is not None and winner != result["winner"])
             or metric["case_id"] != case["case_id"]
             or metric["parent_world"] != case["parent_world"]
             or metric["case_hash"] != case["case_hash"]
@@ -101,12 +166,28 @@ def load_eval_rows(directory, expected_n):
             != digest({k: v for k, v in case.items() if k != "case_hash"})
         ):
             raise ValueError(f"Inconsistent evaluation identity/result: {match}")
-        key = (case["parent_world"], case["case_id"], side)
+
+        parent_world = case["parent_world"]
+        case_id = case["case_id"]
+        key = (parent_world, case_id, learner_side)
         if key in rows:
-            raise ValueError(f"Duplicate evaluation case: {key}")
+            raise ValueError(
+                f"Duplicate evaluation match: parent_world={parent_world}, case_id={case_id}, learner_side={learner_side}"
+            )
         rows[key] = (metric, case, match)
-    if len(rows) != expected_n:
-        raise ValueError(f"Expected {expected_n} evaluation cases, found {len(rows)}")
+
+    if plan is not None:
+        expected_keys = _extract_plan_keys(plan)
+        actual_keys = set(rows.keys())
+        if actual_keys != expected_keys:
+            missing = expected_keys - actual_keys
+            unexpected = actual_keys - expected_keys
+            raise ValueError(
+                f"Evaluation results do not match evaluation plan: missing={missing}, unexpected={unexpected}"
+            )
+
+    if expected_n is not None and len(rows) != expected_n:
+        raise ValueError(f"Expected {expected_n} matches, found {len(rows)}")
     return rows
 
 
@@ -162,8 +243,73 @@ def compare_paired_directories(
     before_path, after_path, *, samples, seed, require_artifacts=False
 ):
     """Read paired evaluations and return the historical tuple interface."""
-    before = load_eval_rows(before_path, 64)
-    after = load_eval_rows(after_path, 64)
+    before = load_eval_rows(
+        before_path, 64, require_artifacts=require_artifacts
+    )
+    after = load_eval_rows(
+        after_path, 64, require_artifacts=require_artifacts
+    )
     report = clustered_paired_bootstrap(before, after, samples=samples, seed=seed)
     slices = report.pop("slices")
     return report, slices, before, after
+
+
+def eval_wdl_summary(
+    rows_or_directory, expected_n=None, *, plan=None, require_artifacts=True
+):
+    """Compute W/D/L counts and win rate from loaded rows or an evaluation directory."""
+    if isinstance(rows_or_directory, (str, Path)):
+        rows = load_eval_rows(
+            rows_or_directory,
+            expected_n=expected_n,
+            plan=plan,
+            require_artifacts=require_artifacts,
+        )
+    else:
+        rows = rows_or_directory
+        if expected_n is not None and len(rows) != expected_n:
+            raise ValueError(f"Expected {expected_n} matches, found {len(rows)}")
+    counts = Counter(outcome(v[0]) for v in rows.values())
+    n = len(rows)
+    return {
+        "matches": n,
+        "W": counts["W"],
+        "D": counts["D"],
+        "L": counts["L"],
+        "win_rate": (counts["W"] / n) if n > 0 else 0.0,
+    }
+
+
+wdl_summary = eval_wdl_summary
+
+
+def eval_slices_summary(
+    rows_or_directory, expected_n=None, *, plan=None, require_artifacts=True
+):
+    """Compute placement and side slices from loaded rows or an evaluation directory."""
+    if isinstance(rows_or_directory, (str, Path)):
+        rows = load_eval_rows(
+            rows_or_directory,
+            expected_n=expected_n,
+            plan=plan,
+            require_artifacts=require_artifacts,
+        )
+    else:
+        rows = rows_or_directory
+        if expected_n is not None and len(rows) != expected_n:
+            raise ValueError(f"Expected {expected_n} matches, found {len(rows)}")
+    slices = {}
+    for name, predicate in (
+        ("contact", lambda k: rows[k][1].get("placement") == "contact"),
+        ("separated", lambda k: rows[k][1].get("placement") == "separated"),
+        ("side0", lambda k: k[2] == 0),
+        ("side1", lambda k: k[2] == 1),
+    ):
+        keys = [k for k in rows if predicate(k)]
+        outcomes = Counter(outcome(rows[k][0]) for k in keys)
+        slices[name] = {
+            "matches": len(keys),
+            "wins": sum(float(outcome(rows[k][0]) == "W") for k in keys),
+            "outcomes": {value: outcomes[value] for value in "WDL"},
+        }
+    return slices

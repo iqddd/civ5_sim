@@ -11,6 +11,7 @@ from time import perf_counter
 
 import torch
 
+from civ5rl.engine.counters import TrainingCounters
 from civ5rl.engine.imitation import DemonstrationCache, teacher_metrics
 from civ5rl.engine.imitation_performance import (
     ResidentDemonstrations,
@@ -52,9 +53,34 @@ from civ5rl.provenance.common import (
 from civ5rl.provenance.lineage import current_parent_lineage, verify_existing_run
 from civ5sim.engine import digest
 
+SAMPLER_AFTER_LAST_STEP = "sampler_after_last_step"
+SAMPLER_FROM_CHOSEN_CHECKPOINT = "sampler_from_chosen_checkpoint"
+
 
 def relative(path):
     return Path(path).resolve().relative_to(ROOT).as_posix()
+
+
+def check_intermediate_step(state, cycle, local_steps):
+    """Check if the selected best checkpoint is an intermediate step within a cycle.
+
+    When an intermediate step (e.g. step 400 out of 500) is selected as best:
+    - Model weights and optimizer state are restored from checkpoint step 400.
+    - Two sampler continuation boundaries are supported:
+        1. SAMPLER_AFTER_LAST_STEP: Sampler continues data stream forward from
+           after all completed work (step 500), avoiding duplicate presentations.
+        2. SAMPLER_FROM_CHOSEN_CHECKPOINT: Sampler rewinds to state saved in
+           the chosen checkpoint (step 400), matching policy update count.
+    """
+    best = state.get("best")
+    if not best:
+        return False, 0
+    chosen_step = best.get("step", 0)
+    best_cycle = best.get("cycle", cycle)
+    if best_cycle == cycle:
+        return (chosen_step < local_steps), chosen_step
+    cycle_steps = state.get("cycles", {}).get(str(best_cycle), {}).get("steps", local_steps)
+    return (chosen_step < cycle_steps), chosen_step
 
 
 def fingerprint(model):
@@ -139,7 +165,15 @@ def initialize(config, out):
         )
         write_json(
             out / "state.json",
-            {"steps_performed": 0, "training_seconds": 0.0, "cycles": {}, "best": None},
+            {
+                **TrainingCounters().to_state_dict(
+                    protocol=config.get("kind", "rl01.cp_imitation_own_states")
+                ),
+                "steps_performed": 0,
+                "training_seconds": 0.0,
+                "cycles": {},
+                "best": None,
+            },
         )
     for path in sorted(out.glob("*/collection.json")):
         collection = read_json(path)
@@ -149,13 +183,14 @@ def initialize(config, out):
     return parent, plan, read_json(out / "passport.json")
 
 
-def eta_decision(waves, target, elapsed, settings, previous_streak):
+def eta_decision(waves, target, elapsed, settings, previous_streak, *, budget=None):
     labels = sum(w["labels"] for w in waves)
     matches = sum(w["matches"] for w in waves)
+    effective_budget = budget if budget is not None else settings["collection_seconds"]
     if labels >= target:
-        return {"stop": False, "streak": 0, "quota_met": True}
+        return {"stop": False, "streak": 0, "quota_met": True, "budget": effective_budget}
     if matches < settings["eta_min_matches"] or elapsed < settings["eta_min_seconds"]:
-        return {"stop": False, "streak": 0, "eligible": False}
+        return {"stop": False, "streak": 0, "eligible": False, "budget": effective_budget}
     recent, count = [], 0
     for wave in reversed(waves):
         recent.append(wave)
@@ -167,18 +202,20 @@ def eta_decision(waves, target, elapsed, settings, previous_streak):
     fastest, slowest = max(overall, recent_rate), min(overall, recent_rate)
     stable = slowest > 0 and fastest / slowest <= settings["eta_rate_ratio"]
     eta = (target - labels) / fastest if fastest else None
-    exceeds = eta is None or elapsed + eta > settings["collection_seconds"]
+    exceeds = eta is None or elapsed + eta > effective_budget
     streak = previous_streak + 1 if stable and exceeds else 0
     return {
         "stop": streak >= settings["eta_streak"],
         "streak": streak,
         "eligible": True,
         "stable": stable,
+        "budget": effective_budget,
         "overall_labels_per_second": overall,
         "recent_labels_per_second": recent_rate,
         "remaining_eta_seconds": eta,
         "predicted_finish_seconds": elapsed + eta if eta is not None else None,
     }
+
 
 
 def collection_summary(rows, seconds, status, target, waves):
@@ -284,7 +321,7 @@ def collect_split(config, plan, out, split, behavior):
             labels += wave["labels"]
             index += 4
             eta = eta_decision(
-                waves, target, perf_counter() - started, settings, streak
+                waves, target, perf_counter() - started, settings, streak, budget=budget
             )
             streak = eta["streak"]
             wave["eta"] = eta
@@ -413,6 +450,9 @@ def train_cycle(config, plan, identity, out, cycle):
     if (directory / "training.json").exists():
         raise ValueError("Cycle training already recorded")
     state = read_json(out / "state.json")
+    protocol = config.get("kind", "rl01.cp_imitation_own_states")
+    counters = TrainingCounters.from_dict(state, protocol=protocol)
+    state.update(counters.to_state_dict(protocol=protocol))
     settings = config["own_states"]
     if state["training_seconds"] >= settings["training_seconds"]:
         return None
@@ -447,6 +487,71 @@ def train_cycle(config, plan, identity, out, cycle):
     base_counter = int(saved["state"]["Adam_steps"])
     if cycle == 1 and base_counter != 1580:
         raise ValueError("Wrong initial Adam counter")
+    chunks = cache.chunks()
+    old_rng = random.Random(seed_for(17, 0, "old_mixture", namespace="own_states"))
+    new_rng = random.Random(seed_for(17, 0, "new_mixture", namespace="own_states"))
+    old_stream = LabelStream(
+        [c for c in chunks if c[0] < len(old)], cache.masks, old_rng
+    )
+    new_stream = LabelStream(
+        [c for c in chunks if c[0] >= len(old)], cache.masks, new_rng
+    )
+    sampler_mode = config["own_states"].get(
+        "sampler_continuation_boundary",
+        config["own_states"].get("sampler_mode", SAMPLER_AFTER_LAST_STEP),
+    )
+    sampler_source = "initial_stream"
+    sampler_file = None
+    resumed_from = None
+    prev_cycle_str = str(cycle - 1)
+    prev_cycle_steps = state.get("cycles", {}).get(prev_cycle_str, {}).get("steps")
+    chosen_step = state["best"]["step"] if state.get("best") else 0
+    is_intermediate = bool(
+        prev_cycle_steps is not None and chosen_step < prev_cycle_steps
+    )
+
+    if cycle > 1:
+        if (
+            sampler_mode == SAMPLER_FROM_CHOSEN_CHECKPOINT
+            and "sampler" in saved.get("state", {})
+        ):
+            checkpoint_sampler = saved["state"]["sampler"]
+            old_stream.restore(checkpoint_sampler["old"])
+            new_rng.setstate(checkpoint_sampler["new"]["rng"])
+            sampler_source = "from_chosen_checkpoint"
+            sampler_mode = SAMPLER_FROM_CHOSEN_CHECKPOINT
+            sampler_file = relative(base_path)
+            resumed_from = base_path
+        else:
+            sampler_path = out / "sampler_after_last_step.pt"
+            if not sampler_path.exists():
+                sampler_path = out / "sampler.pt"
+            previous_streams = torch.load(
+                sampler_path, weights_only=False, map_location="cpu"
+            )
+            old_stream.restore(previous_streams["old"])
+            new_rng.setstate(previous_streams["new"]["rng"])
+            sampler_source = "after_last_step"
+            sampler_mode = SAMPLER_AFTER_LAST_STEP
+            sampler_file = sampler_path.name
+            resumed_from = sampler_path
+
+        print(
+            json.dumps(
+                {
+                    "event": "sampler_resumption",
+                    "cycle": cycle,
+                    "sampler_mode": sampler_mode,
+                    "sampler_source": sampler_source,
+                    "sampler_file": str(sampler_file),
+                    "resumed_from": str(resumed_from),
+                    "intermediate_step_selected": is_intermediate,
+                    "chosen_checkpoint_step": chosen_step,
+                }
+            ),
+            flush=True,
+        )
+
     write_json(
         directory / "initialization-check.json",
         {
@@ -458,24 +563,13 @@ def train_cycle(config, plan, identity, out, cycle):
             "new_free_labels": sum(
                 r["supervised"] for ep in new for r in ep["decisions"]
             ),
+            "sampler_mode": sampler_mode,
+            "sampler_source": sampler_source,
+            "sampler_file": str(sampler_file) if sampler_file else None,
+            "intermediate_step_selected": is_intermediate,
+            "chosen_checkpoint_step": chosen_step,
         },
     )
-    chunks = cache.chunks()
-    old_rng = random.Random(seed_for(17, 0, "old_mixture", namespace="own_states"))
-    new_rng = random.Random(seed_for(17, 0, "new_mixture", namespace="own_states"))
-    old_stream = LabelStream(
-        [c for c in chunks if c[0] < len(old)], cache.masks, old_rng
-    )
-    new_stream = LabelStream(
-        [c for c in chunks if c[0] >= len(old)], cache.masks, new_rng
-    )
-    if cycle == 2:
-        previous_streams = torch.load(
-            out / "sampler.pt", weights_only=False, map_location="cpu"
-        )
-        old_stream.restore(previous_streams["old"])
-        # Pool version changes: begin a uniform pass over both cycles, retaining RNG.
-        new_rng.setstate(previous_streams["new"]["rng"])
     streams = lambda: {"old": old_stream.state(), "new": new_stream.state()}
 
     def next_batch():
@@ -557,6 +651,12 @@ def train_cycle(config, plan, identity, out, cycle):
                 policy,
                 optimizer,
                 {
+                    **TrainingCounters(
+                        rollouts_collected=0,
+                        rollouts_with_accepted_steps=0,
+                        adam_steps_attempted=base_counter + local_steps,
+                        adam_steps_accepted=base_counter + local_steps,
+                    ).to_state_dict(protocol=protocol),
                     "cycle": cycle,
                     "cycle_step": local_steps,
                     "Adam_steps": base_counter + local_steps,
@@ -597,6 +697,7 @@ def train_cycle(config, plan, identity, out, cycle):
                 }
             write_json(directory / "measurements.json", measurements)
             write_json(out / "state.json", state)
+            torch.save(streams(), out / "sampler_after_last_step.pt")
             torch.save(streams(), out / "sampler.pt")
             print(
                 json.dumps(
@@ -634,6 +735,13 @@ def train_cycle(config, plan, identity, out, cycle):
             local_steps += 1
             state["steps_performed"] += 1
             state["training_seconds"] += seconds
+            step_counters = TrainingCounters(
+                rollouts_collected=0,
+                rollouts_with_accepted_steps=0,
+                adam_steps_attempted=state["steps_performed"],
+                adam_steps_accepted=state["steps_performed"],
+            )
+            state.update(step_counters.to_state_dict(protocol=protocol))
             if local_steps == 1:
                 if {int(s["step"]) for s in optimizer.state.values()} != {
                     base_counter + 1
@@ -683,6 +791,9 @@ def train_cycle(config, plan, identity, out, cycle):
         if local_steps and measurements[-1]["cycle_step"] != local_steps:
             save_candidate()
         frozen_value.verify()
+        is_intermediate_final, chosen_step_final = check_intermediate_step(
+            state, cycle, local_steps
+        )
         state["cycles"][str(cycle)] = {
             "steps": local_steps,
             "selected": dict(state["best"]),
@@ -706,9 +817,17 @@ def train_cycle(config, plan, identity, out, cycle):
             "presentations": local_steps * 1024,
             "new_pool_version": cycle,
             "new_pool_boundary": "fresh_uniform_pass_continued_RNG",
+            "sampler_mode": sampler_mode,
+            "sampler_source": sampler_source if cycle > 1 else "after_last_step",
+            "sampler_boundary": sampler_mode,
+            "sampler_file": "sampler_after_last_step.pt",
+            "sampler_after_last_step_saved": True,
+            "chosen_checkpoint_step": chosen_step_final,
+            "intermediate_step_selected": is_intermediate_final,
         }
         write_json(directory / "training.json", result)
         write_json(out / "state.json", state)
+        torch.save(streams(), out / "sampler_after_last_step.pt")
         torch.save(streams(), out / "sampler.pt")
     selected = cache = old_dev = new_dev = policy = optimizer = old = new = None
     frozen_value = None

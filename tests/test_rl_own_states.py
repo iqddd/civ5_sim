@@ -218,6 +218,9 @@ class OwnStateTests(unittest.TestCase):
             r = eta_decision(waves, 25000, 160.0, settings, streak)
             streak = r["streak"]
         self.assertTrue(r["stop"])
+        self.assertFalse(
+            eta_decision(waves, 25000, 160.0, settings, streak, budget=10000.0)["stop"]
+        )
         self.assertFalse(eta_decision(waves, 500, 160.0, settings, streak)["stop"])
         fast = [{"matches": 4, "labels": 1000, "seconds": 1.0} for _ in range(16)]
         self.assertEqual(eta_decision(fast, 25000, 60.0, settings, streak)["streak"], 0)

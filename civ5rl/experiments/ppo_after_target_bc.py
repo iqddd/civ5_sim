@@ -4,6 +4,8 @@ import gc
 import json
 import random
 import traceback
+from dataclasses import dataclass
+from enum import Enum
 from functools import partial
 from pathlib import Path
 from time import perf_counter
@@ -21,6 +23,7 @@ from civ5rl.engine.control import (
     pause_due,
     target_bc_evaluation_due,
 )
+from civ5rl.engine.counters import TrainingCounters
 from civ5rl.engine.performance import performance_markdown, summarize_performance
 from civ5rl.engine.ppo import encode_episode, targets, update
 from civ5rl.engine.ppo_fast import BatchedBackend
@@ -60,6 +63,128 @@ from civ5rl.provenance.common import (
     write_json,
 )
 from civ5sim.engine import digest
+
+
+class Phase(str, Enum):
+    COLLECT = "collect"
+    CRITIC = "critic"
+    PPO = "ppo"
+
+
+def heal_interrupted_update(out: Path, state: dict) -> bool:
+    """If pending_update is present and not flushed to updates.jsonl, flush it."""
+    out = Path(out)
+    pending = state.get("pending_update")
+    if not pending:
+        return False
+    ledger = out / "updates.jsonl"
+    committed = (
+        [
+            json.loads(line)
+            for line in ledger.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if ledger.is_file()
+        else []
+    )
+    healed = False
+    if not committed or committed[-1].get("rollout") != pending.get("rollout"):
+        with ledger.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(pending, allow_nan=False) + "\n")
+        healed = True
+    state.pop("pending_update", None)
+    write_json(out / "state.json", state)
+    return healed
+
+
+@dataclass
+class RolloutBoundary:
+    checkpoint: str
+    phase: Phase
+    rollout_number: int
+    pending_rollout: str | None = None
+    decisions: int = 0
+    optimizer_steps: int = 0
+
+    def __post_init__(self):
+        if isinstance(self.phase, str) and not isinstance(self.phase, Phase):
+            self.phase = Phase(self.phase)
+
+    @classmethod
+    def from_state(cls, state: dict) -> "RolloutBoundary":
+        raw_phase = state.get("phase", Phase.COLLECT)
+        phase = raw_phase if isinstance(raw_phase, Phase) else Phase(raw_phase)
+        counters = TrainingCounters.from_dict(state, protocol=KIND)
+        return cls(
+            checkpoint=state.get("checkpoint", state.get("latest", "")),
+            phase=phase,
+            rollout_number=state.get("rollout_number", counters.rollouts_collected),
+            pending_rollout=state.get("pending_rollout"),
+            decisions=state.get("decisions", 0),
+            optimizer_steps=state.get("optimizer_steps", counters.adam_steps_accepted),
+        )
+
+    def apply_to_state(self, state: dict) -> dict:
+        state["phase"] = self.phase.value if isinstance(self.phase, Phase) else str(self.phase)
+        state["latest"] = self.checkpoint
+        state["rollouts"] = self.rollout_number
+        state["rollouts_collected"] = self.rollout_number
+        state["pending_rollout"] = self.pending_rollout
+        state["decisions"] = self.decisions
+        state["optimizer_steps"] = self.optimizer_steps
+        state["adam_steps_accepted"] = self.optimizer_steps
+        if "adam_steps_attempted" not in state or state["adam_steps_attempted"] < self.optimizer_steps:
+            state["adam_steps_attempted"] = self.optimizer_steps
+            state["attempted_steps"] = self.optimizer_steps
+        if "rollouts_with_accepted_steps" not in state:
+            state["rollouts_with_accepted_steps"] = state.get(
+                "accepted_updates",
+                0 if self.optimizer_steps == 0 else state.get("updates", 0),
+            )
+        if "accepted_updates" not in state:
+            state["accepted_updates"] = state["rollouts_with_accepted_steps"]
+        return state
+
+    def to_state(self) -> dict:
+        return self.apply_to_state({})
+
+    def validate_sufficiency(self, out: Path) -> bool:
+        """Validate that necessary files for the current phase exist on disk before proceeding."""
+        out = Path(out)
+        ckpt_path = out / self.checkpoint
+        if not ckpt_path.is_file():
+            raise FileNotFoundError(f"Checkpoint file does not exist: {ckpt_path}")
+        if self.phase in (Phase.CRITIC, Phase.PPO):
+            if not self.pending_rollout:
+                raise ValueError(f"Pending rollout path is required for phase '{self.phase.value}'")
+            rollout_path = out / self.pending_rollout
+            if not rollout_path.exists():
+                raise FileNotFoundError(f"Pending rollout artifact does not exist: {rollout_path}")
+        if self.phase == Phase.COLLECT and self.rollout_number > 0:
+            ledger = out / "updates.jsonl"
+            if not ledger.is_file():
+                raise FileNotFoundError(f"Update ledger does not exist: {ledger}")
+            rows = [
+                json.loads(line)
+                for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            if not rows:
+                raise ValueError(f"Update ledger is empty: {ledger}")
+            last = rows[-1]
+            if last.get("rollout") != self.rollout_number:
+                raise ValueError(
+                    f"Update ledger rollout ({last.get('rollout')}) disagrees with boundary ({self.rollout_number})"
+                )
+            if "total_decisions" in last and last["total_decisions"] != self.decisions:
+                raise ValueError(
+                    f"Update ledger decisions ({last['total_decisions']}) disagrees with boundary ({self.decisions})"
+                )
+        return True
+
+    @classmethod
+    def heal_interrupted_update(cls, out: Path, state: dict) -> bool:
+        return heal_interrupted_update(out, state)
 
 
 def critic_statistics(predictions, returns):
@@ -287,12 +412,21 @@ def make_policy(config, device):
 def save_boundary(out, policy, optimizer, state, shuffle, config, identity, clock=None):
     if clock:
         clock.sync()
+    if isinstance(state, RolloutBoundary):
+        state_dict = state.to_state()
+    else:
+        state_dict = state
+    counters = TrainingCounters.from_dict(state_dict, protocol=KIND)
+    state_dict.update(counters.to_state_dict(protocol=KIND))
+    state_dict.setdefault("updates", 0)
+    if isinstance(state_dict.get("phase"), Phase):
+        state_dict["phase"] = state_dict["phase"].value
     checkpoint.save(
-        out / state["latest"], policy, optimizer, state, shuffle, config, identity
+        out / state_dict["latest"], policy, optimizer, state_dict, shuffle, config, identity
     )
     if clock:
         clock.sync()
-    write_json(out / "state.json", state)
+    write_json(out / "state.json", state_dict)
 
 
 def initialize(config, out):
@@ -345,14 +479,12 @@ def initialize(config, out):
         .strip(),
     }
     record["run_id"] = digest(record)
+    counters = TrainingCounters()
     state = {
-        "rollouts": 0,
+        **counters.to_state_dict(protocol=KIND),
         "updates": 0,
         "decisions": 0,
         "next_episode": 0,
-        "optimizer_steps": 0,
-        "attempted_steps": 0,
-        "rejected_steps": 0,
         "winless_streak": 0,
         "zero_accepted_streak": 0,
         "active_seconds": 0.0,
@@ -376,6 +508,7 @@ def initialize(config, out):
         config,
         {"run_id": record["run_id"]},
     )
+    RolloutBoundary.from_state(state).validate_sufficiency(out)
     return plan
 
 
@@ -426,6 +559,12 @@ def skipped_metrics(reason):
 
 def train(config, plan, out, device, runtime_path=None, max_updates=None):
     state = read_json(out / "state.json")
+    heal_interrupted_update(out, state)
+    counters = TrainingCounters.from_dict(state, protocol=KIND)
+    state.update(counters.to_state_dict(protocol=KIND))
+    state.setdefault("updates", counters.rollouts_with_accepted_steps)
+    boundary = RolloutBoundary.from_state(state)
+    boundary.validate_sufficiency(out)
     configure(17, device)
     record = read_json(out / "run.json")
     identity = {"run_id": record["run_id"]}
@@ -437,8 +576,15 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
         restored = checkpoint.restore(
             out / state["latest"], policy, optimizer, shuffle, config, identity
         )
-        for key in ("phase", "latest", "rollouts", "updates", "decisions", "optimizer_steps", "attempted_steps", "rejected_steps"):
-            if restored.get(key) != state.get(key):
+        if restored.get("pending_update"):
+            heal_interrupted_update(out, restored)
+        for key in (
+            "phase", "latest", "rollouts", "updates", "decisions",
+            "optimizer_steps", "attempted_steps", "rejected_steps",
+            "rollouts_collected", "rollouts_with_accepted_steps",
+            "adam_steps_attempted", "adam_steps_accepted",
+        ):
+            if key in restored and key in state and restored[key] != state[key]:
                 raise ValueError(f"Saved checkpoint and state disagree on {key}")
         due = target_bc_evaluation_due(config, state, current_policy_hash=policy_hash(policy.state_dict()))
         if state["phase"] != "collect":
@@ -581,11 +727,14 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                         episodes, out / "rollouts", state["rollouts"]
                     )
                     state["pending_rollout"] = "rollouts/" + artifact["path"]
-                    state["phase"] = "ppo" if state["critic_complete"] else "critic"
+                    state["phase"] = (
+                        Phase.PPO.value if state["critic_complete"] else Phase.CRITIC.value
+                    )
                     state["latest"] = "checkpoints/pending.pt"
                     save_boundary(
                         out, policy, optimizer, state, shuffle, config, identity, clock
                     )
+                    RolloutBoundary.from_state(state).validate_sufficiency(out)
                     print(
                         f"Sampling rollout {state['rollouts']}: {summary}; total={state['decisions']}",
                         flush=True,
@@ -611,7 +760,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                         b - a for a, b in compiler.intervals
                     )
                     state["critic_complete"] = True
-                    state["phase"] = "ppo"
+                    state["phase"] = Phase.PPO.value
                     artifact = save_rollout(episodes, out / "critic-rollout", 1)
                     state["pending_rollout"] = "critic-rollout/" + artifact["path"]
                     optimizer = optimizer_for(policy, config, device)
@@ -620,6 +769,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                     save_boundary(
                         out, policy, optimizer, state, shuffle, config, identity, clock
                     )
+                    RolloutBoundary.from_state(state).validate_sufficiency(out)
                     write_json(out / "critic-preparation.json", state["critic"])
                     print(
                         "Critic preparation: " + json.dumps(state["critic"]), flush=True
@@ -680,12 +830,6 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                     state["stop_reason"] = state["stop_reason"] or "active_time_limit"
                 elif state["decisions"] >= config["experiment"]["decisions"]:
                     state["stop_reason"] = state["stop_reason"] or "decision_limit"
-                state["phase"] = "collect"
-                state["latest"] = f"checkpoints/update-{state['rollouts']:04}.pt"
-                monitor.mark("checkpoint")
-                save_boundary(
-                    out, policy, optimizer, state, shuffle, config, identity, clock
-                )
                 row = {
                     "rollout": state["rollouts"],
                     **state["rollout_summary"],
@@ -704,8 +848,19 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                     "collection": state["collection"],
                     "ppo": metrics,
                 }
+                state["pending_update"] = row
+                state["phase"] = Phase.COLLECT.value
+                state["latest"] = f"checkpoints/update-{state['rollouts']:04}.pt"
+                monitor.mark("checkpoint")
+                save_boundary(
+                    out, policy, optimizer, state, shuffle, config, identity, clock
+                )
                 with (out / "updates.jsonl").open("a", encoding="utf-8") as stream:
                     stream.write(json.dumps(row, allow_nan=False) + "\n")
+                state.pop("pending_update", None)
+                state.pop("pending_rollout", None)
+                write_json(out / "state.json", state)
+                RolloutBoundary.from_state(state).validate_sufficiency(out)
                 write_json(out / "coverage.json", factory.summary())
                 print(
                     f"Rollout {state['rollouts']}: W/D/L={row['W']}/{row['D']}/{row['L']}; decisions={state['decisions']}; Adam={state['optimizer_steps']}; active={state['active_seconds']:.1f}s; {metrics['stop_reason']}",

@@ -1,5 +1,6 @@
 """Focused checks for silent risks in rl01.cp_imitation_target_more_data."""
 
+import json
 import random
 import tempfile
 import unittest
@@ -16,6 +17,8 @@ from civ5rl.engine.spans import Span
 from civ5rl.experiments.imitation_target_scale import (
     _format_corpus_entry,
     load_config,
+    reconcile_state_vs_steplog,
+    restore_epoch_cursor_and_batches,
     select_best_candidate,
 )
 from civ5rl.protocols.imitation import dump_episode
@@ -188,11 +191,74 @@ class TargetMoreDataTests(unittest.TestCase):
         full_batches = list(label_minibatches(order, masks, size=4))
         self.assertGreaterEqual(len(full_batches), 3)
 
-        # Simulate interrupting after cursor=2 batches and serializing epoch_order.
+        # Simulate interrupting after cursor=2 batches in epoch 2 and reconciling steps.jsonl.
         cursor = 2
         serialized_order = [[int(s.episode), int(s.start), int(s.stop)] for s in order]
-        restored_order = [Span(int(a), int(b), int(c)) for a, b, c in serialized_order]
-        resumed_batches = list(label_minibatches(restored_order, masks, size=4))[cursor:]
+        epoch1_records = [{"step": 1, "labels": 4}, {"step": 2, "labels": 4}]
+        epoch2_records = [
+            {"step": 3, "labels": full_batches[0][1]},
+            {"step": 4, "labels": full_batches[1][1]},
+        ]
+        committed = epoch1_records + epoch2_records
+        saved_state = {
+            "epoch": 2,
+            "epoch_completed": False,
+            "batch_cursor": cursor,
+            "epoch_order": serialized_order,
+            "Adam_steps": len(committed),
+            "free_labels_processed": sum(r["labels"] for r in committed),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            steplog = Path(tmp) / "steps.jsonl"
+            # Include an uncommitted trailing step to verify log truncation and no duplicate writes.
+            orphaned = [*committed, {"step": 5, "labels": 3}]
+            steplog.write_text(
+                "\n".join(json.dumps(r) for r in orphaned) + "\n", encoding="utf-8"
+            )
+            reconciled = reconcile_state_vs_steplog(
+                saved_state, dict(saved_state), steplog
+            )
+            self.assertEqual(reconciled, committed)
+            on_disk = [
+                json.loads(line)
+                for line in steplog.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(on_disk, committed)
+
+            with self.assertRaisesRegex(ValueError, "Non-sequential"):
+                bad_log = Path(tmp) / "bad.jsonl"
+                bad_log.write_text(
+                    json.dumps({"step": 1, "labels": 4})
+                    + "\n"
+                    + json.dumps({"step": 3, "labels": 4})
+                    + "\n",
+                    encoding="utf-8",
+                )
+                reconcile_state_vs_steplog(
+                    {**saved_state, "Adam_steps": 2, "free_labels_processed": 8},
+                    None,
+                    bad_log,
+                )
+
+            with self.assertRaisesRegex(ValueError, "Saved label count disagrees"):
+                reconcile_state_vs_steplog(
+                    {**saved_state, "free_labels_processed": 999}, None, steplog
+                )
+
+        history = [{"epoch": 1, "completed": True, "steps": 2, "labels": 8}]
+        restored = restore_epoch_cursor_and_batches(
+            saved_state, history, reconciled, masks, size=4
+        )
+        resumed_batches = list(restored.batches)
+        self.assertEqual(
+            (restored.order, restored.cursor, restored.records),
+            (order, cursor, epoch2_records),
+        )
+        with self.assertRaisesRegex(ValueError, "disagree with batch_cursor"):
+            restore_epoch_cursor_and_batches(
+                {**saved_state, "batch_cursor": 3}, history, reconciled, masks, size=4
+            )
 
         combined_batches = full_batches[:cursor] + resumed_batches
         self.assertEqual(combined_batches, full_batches)

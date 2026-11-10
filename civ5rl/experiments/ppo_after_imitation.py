@@ -1,7 +1,7 @@
 """Bounded on-policy P(win) fine-tuning from the frozen own-state BC policy."""
 
-import gc
 import ast
+import gc
 import hashlib
 import json
 import random
@@ -17,21 +17,29 @@ import torch
 from civ5rl.core.agent import RLAgent
 from civ5rl.engine.collector import Collector
 from civ5rl.engine.control import RunLock
+from civ5rl.engine.counters import TrainingCounters
 from civ5rl.engine.ppo import update
 from civ5rl.engine.resources import ResourceMonitor, analyze_telemetry
 from civ5rl.experiments.evaluation import paired_world_bootstrap, verify_replay
-from civ5rl.experiments.ppo_artifacts import prune_checkpoints, save_rollout
 from civ5rl.experiments.imitation_helpers import (
     CompilationClock,
     isolated_rng,
     load_policy,
     pool,
 )
+from civ5rl.experiments.ppo_artifacts import prune_checkpoints, save_rollout
 from civ5rl.protocols.imitation import search_config
-from civ5rl.provenance.common import file_sha256 as file_hash
-from civ5rl.protocols.ppo_after_imitation import KIND, CONTROLLED_KIND, controlled, advance_controlled_rollout, TrainingFactory, prepare_cases
+from civ5rl.protocols.ppo_after_imitation import (
+    CONTROLLED_KIND,
+    KIND,
+    TrainingFactory,
+    advance_controlled_rollout,
+    controlled,
+    prepare_cases,
+)
 from civ5rl.provenance import checkpoint
 from civ5rl.provenance.common import ROOT, configure, read_json, write_json
+from civ5rl.provenance.common import file_sha256 as file_hash
 from civ5rl.provenance.validation import validate_config
 from civ5sim import MatchConfig
 from civ5sim.cp_agent import CPAgent
@@ -139,11 +147,10 @@ def prepare(config, out):
             raise ValueError(f"Unexpected initial change: {name}")
     assert policy_hash(saved["model"]) == policy_hash(policy.state_dict())
     optimizer = optimizer_for(policy, config, "cpu")
+    counters = TrainingCounters()
     state = {
-        "updates": 0,
-        **({"accepted_updates": 0, "attempted_steps": 0, "rejected_steps": 0,
-            "zero_accepted_streak": 0, "first_accepted_evaluated": False} if controlled(config) else {}),
-        "optimizer_steps": 0,
+        **counters.to_state_dict(protocol=config["kind"]),
+        **({"zero_accepted_streak": 0, "first_accepted_evaluated": False} if controlled(config) else {}),
         "decisions": 0,
         "next_episode": 0,
         "active_seconds": 0.0,
@@ -349,41 +356,145 @@ def reusable_baseline(config, plan, out):
     return dirs if not mismatched else None
 
 
+EVALUATOR_VERSION = "1.0.0"
+
+EVALUATION_DEPENDENCIES = [
+    "civ5rl/core/agent.py",
+    "civ5rl/core/model.py",
+    "civ5rl/core/observation.py",
+    "civ5rl/core/schema.py",
+    "civ5rl/core/context.py",
+    "civ5rl/protocols/imitation.py",
+    "civ5rl/protocols/imitation_helpers.py",
+    "civ5sim/match.py",
+    "civ5sim/engine.py",
+    "civ5sim/cp_agent.py",
+    "civ5sim/greedy_agent.py",
+    "civ5sim/combat_ai.py",
+    "civ5sim/_native.py",
+    "build/combat.dll",
+    "build/combat_ai.dll",
+]
+
+
+def evaluator_dependency_hashes():
+    existing = [p for p in EVALUATION_DEPENDENCIES if (ROOT / p).exists()]
+    return {p: file_hash(ROOT / p) for p in existing}
+
+
+def match_execution(source: str) -> str:
+    try:
+        tree = ast.parse(source)
+    except Exception as exc:
+        raise ValueError(f"Failed to parse source AST: {exc}") from exc
+
+    def find_directory_start(body):
+        for i, n in enumerate(body):
+            if isinstance(n, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "directory" for t in n.targets
+            ):
+                return i
+            if (
+                isinstance(n, ast.AnnAssign)
+                and isinstance(n.target, ast.Name)
+                and n.target.id == "directory"
+            ):
+                return i
+        for i, n in enumerate(body):
+            if isinstance(n, ast.Assign):
+                for t in n.targets:
+                    if any(
+                        isinstance(node, ast.Name) and node.id == "directory"
+                        for node in ast.walk(t)
+                    ):
+                        return i
+            if isinstance(n, ast.AnnAssign) and any(
+                isinstance(node, ast.Name) and node.id == "directory"
+                for node in ast.walk(n.target)
+            ):
+                return i
+        return None
+
+    play_case = next(
+        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "play_case"),
+        None,
+    )
+    if play_case is not None:
+        start = find_directory_start(play_case.body)
+        body = play_case.body[start:] if start is not None else play_case.body
+        return ast.dump(
+            ast.Module(body=body, type_ignores=[]), include_attributes=False
+        )
+
+    eval_task = next(
+        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "evaluation_task"),
+        None,
+    )
+    if eval_task is not None:
+        start = find_directory_start(eval_task.body)
+        body = eval_task.body[start:] if start is not None else eval_task.body
+        return ast.dump(
+            ast.Module(body=body, type_ignores=[]), include_attributes=False
+        )
+
+    raise ValueError("Neither play_case nor evaluation_task found in evaluator source")
+
+
 
 def reusable_controlled_evaluation(config, plan, out, fingerprint, purpose):
     parent = ROOT / config["experiment"]["parent_run"]
-    recorded = read_json(parent / "passport.json")
-    previous_plan = read_json(parent / "manifest.json")
-    dependencies = [
-        "civ5rl/core/agent.py", "civ5rl/core/model.py", "civ5rl/core/observation.py",
-        "civ5rl/core/schema.py", "civ5rl/core/context.py", "civ5rl/protocols/imitation.py",
-        "civ5rl/protocols/imitation_helpers.py", "civ5sim/match.py", "civ5sim/engine.py",
-        "civ5sim/cp_agent.py", "civ5sim/greedy_agent.py", "civ5sim/combat_ai.py",
-        "civ5sim/_native.py", "build/combat.dll", "build/combat_ai.dll",
-    ]
-    dependencies = [p for p in dependencies if (ROOT / p).exists()]
-    mismatched = [p for p in dependencies if recorded["source_hashes"].get(p) != file_hash(ROOT / p)]
-    # The new kind adds a manifest guard; actual match execution must be unchanged.
-    def match_execution(source):
-        tree = ast.parse(source)
-        function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "evaluation_task")
-        start = next(i for i, n in enumerate(function.body)
-                     if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "directory" for t in n.targets))
-        return ast.dump(ast.Module(body=function.body[start:], type_ignores=[]), include_attributes=False)
+    dep_hashes = evaluator_dependency_hashes()
+    dependencies = list(dep_hashes.keys())
+    mismatched = []
 
-    with zipfile.ZipFile(parent / "sources.zip") as archive:
-        old_source = archive.read("civ5rl/experiments/ppo_after_imitation.py").decode("utf-8")
-    if match_execution(old_source) != match_execution(Path(__file__).read_text(encoding="utf-8")):
-        mismatched.append("evaluator_match_execution")
-    if read_json(parent / "resolved-config.json")["teacher_search"] != config["teacher_search"]:
-        mismatched.append("teacher_search")
-    if plan[purpose] != previous_plan[purpose]:
-        mismatched.append("cases")
-    old_cache = read_json(parent / "evaluations.json")
-    result = old_cache.get(purpose + ":" + fingerprint)
-    if result is None:
-        mismatched.append("policy_not_evaluated")
-    if not mismatched:
+    try:
+        recorded = read_json(parent / "passport.json")
+        for p in dependencies:
+            if recorded.get("source_hashes", {}).get(p) != dep_hashes[p]:
+                mismatched.append(p)
+    except Exception as exc:  # noqa: BLE001 -- record unreadable passport as mismatch
+        mismatched.append(f"unrecognized_parent_passport: {exc}")
+
+    # The new kind adds a manifest guard; actual match execution must be unchanged.
+    try:
+        archive_path = parent / "sources.zip"
+        if not archive_path.exists():
+            raise FileNotFoundError(f"Missing archive: {archive_path}")
+        with zipfile.ZipFile(archive_path) as archive:
+            namelist = archive.namelist()
+            if "civ5rl/experiments/ppo_after_imitation.py" not in namelist:
+                raise KeyError("civ5rl/experiments/ppo_after_imitation.py not found in archive")
+            old_source = archive.read("civ5rl/experiments/ppo_after_imitation.py").decode("utf-8")
+        current_source = Path(__file__).read_text(encoding="utf-8")
+        if match_execution(old_source) != match_execution(current_source):
+            mismatched.append("evaluator_match_execution")
+    except Exception as exc:  # noqa: BLE001 -- record unreadable or altered archive format as mismatch
+        mismatched.append(f"unrecognized_archive_format: {exc}")
+
+    try:
+        resolved = read_json(parent / "resolved-config.json")
+        if resolved.get("teacher_search") != config.get("teacher_search"):
+            mismatched.append("teacher_search")
+    except Exception as exc:  # noqa: BLE001 -- record unreadable config as mismatch
+        mismatched.append(f"unrecognized_config: {exc}")
+
+    try:
+        previous_plan = read_json(parent / "manifest.json")
+        if plan.get(purpose) != previous_plan.get(purpose):
+            mismatched.append("cases")
+    except Exception as exc:  # noqa: BLE001 -- record unreadable manifest as mismatch
+        mismatched.append(f"unrecognized_manifest: {exc}")
+
+    result = None
+    try:
+        old_cache = read_json(parent / "evaluations.json")
+        result = old_cache.get(purpose + ":" + fingerprint)
+        if result is None:
+            mismatched.append("policy_not_evaluated")
+    except Exception as exc:  # noqa: BLE001 -- record unreadable evaluations as mismatch
+        mismatched.append(f"unrecognized_evaluations: {exc}")
+
+    if not mismatched and result is not None:
         try:
             model = torch.load(result["checkpoint"], map_location="cpu", weights_only=False)["model"]
             if policy_hash(model) != fingerprint:
@@ -395,17 +506,33 @@ def reusable_controlled_evaluation(config, plan, out, fingerprint, purpose):
                         raise ValueError("Evaluation results changed")
                     for case in plan[purpose]:
                         d = directory / f"case-{case['case_id']:03}-side-{case['learner_side']}"
-                        if read_json(d / "case.json") != case or any(not (d / n).is_file() for n in ("replay.json", "final.json", "result.json")):
+                        if read_json(d / "case.json") != case or any(
+                            not (d / n).is_file() for n in ("replay.json", "final.json", "result.json")
+                        ):
                             raise ValueError("Evaluation provenance/replay missing")
         except (OSError, ValueError) as exc:
             mismatched.append(str(exc))
-    write_json(out / f"reuse-{purpose}-{fingerprint[:16]}.json", {
-        "source": str(parent), "mismatched": mismatched, "reused": not mismatched,
-        "dependency_hashes": {p: file_hash(ROOT / p) for p in dependencies},
-    })
-    if mismatched:
+
+    write_json(
+        out / f"reuse-{purpose}-{fingerprint[:16]}.json",
+        {
+            "source": str(parent),
+            "mismatched": mismatched,
+            "reused": not mismatched and result is not None,
+            "dependency_hashes": dep_hashes,
+        },
+    )
+    if mismatched or result is None:
         return None
-    return {**result, "reused_parent": True, "seconds": 0.0, "source_result": result}
+
+    return {
+        **result,
+        "reused_parent": True,
+        "seconds": 0.0,
+        "source_result": result,
+        "evaluator_version": result.get("evaluator_version", EVALUATOR_VERSION),
+        "dependency_hashes": result.get("dependency_hashes", dep_hashes),
+    }
 
 
 def evaluate_checkpoint(config, plan, out, path, purpose="development"):
@@ -425,6 +552,7 @@ def evaluate_checkpoint(config, plan, out, path, purpose="development"):
     if (
         purpose == "development"
         and not controlled(config)
+        and (out / "baseline-policy.json").is_file()
         and fingerprint == read_json(out / "baseline-policy.json")["hash"]
     ):
         reused = reusable_baseline(config, plan, out)
@@ -473,10 +601,13 @@ def evaluate_checkpoint(config, plan, out, path, purpose="development"):
                         "directory": str(directory),
                         "summary": match_summary(directory, len(plan[purpose])),
                     }
+    dep_hashes = evaluator_dependency_hashes()
     result = {
         "policy_hash": fingerprint,
         "checkpoint": str(path),
         "purpose": purpose,
+        "evaluator_version": EVALUATOR_VERSION,
+        "dependency_hashes": dep_hashes,
         "runs": runs,
         "reused_parent": bool(reused),
         "seconds": perf_counter() - started,
@@ -487,6 +618,13 @@ def evaluate_checkpoint(config, plan, out, path, purpose="development"):
 
 
 def save_boundary(config, out, policy, optimizer, state, rng, identity):
+    protocol = config["kind"]
+    has_updates = "updates" in state
+    saved_updates = state.get("updates")
+    counters = TrainingCounters.from_dict(state, protocol=protocol)
+    state.update(counters.to_state_dict(protocol=protocol))
+    if not controlled(config) and has_updates:
+        state["updates"] = saved_updates
     start = perf_counter()
     checkpoint.save(
         out / state["latest"], policy, optimizer, state, rng, config, identity
@@ -541,6 +679,13 @@ def train(config, plan, out, device):
     state = read_json(out / "state.json")
     if state["stop_reason"]:
         return state
+    protocol = config["kind"]
+    has_updates = "updates" in state
+    saved_updates = state.get("updates")
+    counters = TrainingCounters.from_dict(state, protocol=protocol)
+    state.update(counters.to_state_dict(protocol=protocol))
+    if not controlled(config) and has_updates:
+        state["updates"] = saved_updates
     if not (out / "preflight.json").exists():
         if controlled(config):
             from civ5rl.experiments.ppo_controlled_checks import preflight
@@ -594,7 +739,8 @@ def train(config, plan, out, device):
             deadline = (
                 tick + config["experiment"]["active_seconds"] - state["active_seconds"]
             )
-            monitor.mark("collection", update=state["updates"] + 1)
+            number = state["rollouts_collected"] + 1
+            monitor.mark("collection", update=number)
             episodes, next_episode, timings = collector.collect(
                 policy,
                 None,
@@ -610,7 +756,6 @@ def train(config, plan, out, device):
             before_decisions = state["decisions"]
             state["decisions"] += summary["decisions"]
             state["next_episode"] = next_episode
-            number = state["updates"] + 1
             monitor.mark("rollout_save")
             rollout_record = save_rollout(episodes, out / "rollouts", number)
             metrics = {
@@ -656,14 +801,33 @@ def train(config, plan, out, device):
                 del episodes
                 gc.collect()
             state["active_seconds"] += perf_counter() - tick
-            state["optimizer_steps"] += metrics["optimizer_steps"]
+            counters = TrainingCounters.from_dict(state, protocol=protocol)
+            accepted_steps = int(metrics["optimizer_steps"])
+            attempted_steps = int(
+                metrics.get("attempted_optimizer_steps", accepted_steps)
+            )
+            counters = counters.replace(
+                rollouts_collected=number,
+                rollouts_with_accepted_steps=counters.rollouts_with_accepted_steps
+                + (1 if accepted_steps > 0 else 0),
+                adam_steps_attempted=counters.adam_steps_attempted + attempted_steps,
+                adam_steps_accepted=counters.adam_steps_accepted + accepted_steps,
+            )
             first_accepted = False
             if controlled(config):
                 first_accepted = advance_controlled_rollout(state, metrics, number)
-                state["latest"] = f"checkpoints/update-{number:04}.pt"
-            elif metrics["optimizer_steps"]:
+                state.update(counters.to_state_dict(protocol=protocol))
                 state["updates"] = number
                 state["latest"] = f"checkpoints/update-{number:04}.pt"
+            else:
+                has_updates = "updates" in state
+                saved_updates = state.get("updates")
+                state.update(counters.to_state_dict(protocol=protocol))
+                if accepted_steps > 0:
+                    state["updates"] = number
+                    state["latest"] = f"checkpoints/update-{number:04}.pt"
+                elif has_updates:
+                    state["updates"] = saved_updates
             timed = (
                 state["active_seconds"] >= config["experiment"]["active_seconds"]
                 or metrics["stop_reason"] == "active_time_limit"
@@ -1022,6 +1186,6 @@ def run(phase, config, out, device):
             if (out / "state.json").exists():
                 try:
                     report(config, out)
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 -- best-effort report before re-raising
                     pass
             raise

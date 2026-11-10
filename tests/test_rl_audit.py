@@ -15,6 +15,8 @@ from civ5rl.provenance.audit import (
     verify_ppo_ledger,
     write_artifact_hashes,
 )
+from civ5rl.reporting.evaluation_audit import eval_wdl_summary, load_eval_rows
+from civ5sim.engine import digest
 
 
 class AuditTests(unittest.TestCase):
@@ -38,6 +40,54 @@ class AuditTests(unittest.TestCase):
         after[(0, 0, 0)] = (after[(0, 0, 0)][0], {"placement": "separated"}, None)
         with self.assertRaisesRegex(ValueError, "metadata"):
             clustered_paired_bootstrap(before, after, clusters=2)
+
+    def test_eval_row_loading_enforces_identity_side_and_plan_consistency(self):
+        def write_match(match_dir, world, case_id, learner_side, *, metric_side=None, winner=0):
+            match_dir.mkdir(parents=True, exist_ok=True)
+            case = {
+                "case_id": case_id,
+                "parent_world": world,
+                "learner_side": learner_side,
+                "placement": "contact",
+            }
+            case["case_hash"] = digest(case)
+            metric = {
+                "status": "completed",
+                "side": learner_side if metric_side is None else metric_side,
+                "winner": winner,
+                "case_id": case_id,
+                "parent_world": world,
+                "case_hash": case["case_hash"],
+            }
+            (match_dir / "case.json").write_text(json.dumps(case), encoding="utf-8")
+            (match_dir / "metrics.json").write_text(json.dumps(metric), encoding="utf-8")
+            (match_dir / "result.json").write_text(
+                json.dumps({"status": "completed", "winner": winner}), encoding="utf-8"
+            )
+            (match_dir / "final.json").write_text("{}", encoding="utf-8")
+            (match_dir / "replay.json").write_text("{}", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_match(root / "m0", 0, 0, 0, winner=0)
+            write_match(root / "m1", 0, 0, 1, winner=0)
+            plan = {"validation_cases": [{"parent_world": 0, "case_id": 0}]}
+            rows = load_eval_rows(root, expected_n=2, plan=plan)
+            self.assertEqual(
+                eval_wdl_summary(rows),
+                {"matches": 2, "W": 1, "D": 0, "L": 1, "win_rate": 0.5},
+            )
+            with self.assertRaisesRegex(ValueError, "do not match evaluation plan"):
+                load_eval_rows(
+                    root, plan={"cases": [{"parent_world": 0, "case_id": 0, "learner_side": 0}]}
+                )
+            write_match(root / "dup", 0, 0, 0, winner=0)
+            with self.assertRaisesRegex(ValueError, "Duplicate evaluation match"):
+                load_eval_rows(root)
+            (root / "dup").rename(root / ".ignored")
+            write_match(root / "m1", 0, 0, 1, metric_side=0, winner=0)
+            with self.assertRaisesRegex(ValueError, "Inconsistent learner side"):
+                load_eval_rows(root)
 
     def test_ledger_rejects_wrong_counts_and_invalid_kl(self):
         with tempfile.TemporaryDirectory() as temp:

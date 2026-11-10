@@ -15,20 +15,36 @@ import torch
 
 from civ5rl.engine.collector import Collector
 from civ5rl.engine.control import RunLock
+from civ5rl.engine.counters import TrainingCounters
 from civ5rl.engine.ppo import update
 from civ5rl.engine.resources import ResourceMonitor, analyze_telemetry
 from civ5rl.experiments.evaluation import paired_world_bootstrap, verify_replay
 from civ5rl.experiments.imitation_helpers import (
-    CompilationClock, assert_equal, isolated_rng, load_policy, pool,
+    CompilationClock,
+    assert_equal,
+    isolated_rng,
+    load_policy,
+    pool,
 )
 from civ5rl.experiments.ppo_after_imitation import (
-    match_summary, optimizer_for, play_case, policy_hash, summarize_rollout,
+    match_summary,
+    optimizer_for,
+    play_case,
+    policy_hash,
+    summarize_rollout,
 )
 from civ5rl.experiments.ppo_artifacts import prune_checkpoints, save_rollout
 from civ5rl.protocols.corpus import validate_corpus
 from civ5rl.protocols.ppo_scale_up import KIND, ScaleUpFactory
 from civ5rl.provenance import checkpoint
-from civ5rl.provenance.common import ROOT, configure, file_sha256, read_json, seed_for, write_json
+from civ5rl.provenance.common import (
+    ROOT,
+    configure,
+    file_sha256,
+    read_json,
+    seed_for,
+    write_json,
+)
 from civ5sim.engine import digest
 
 
@@ -96,12 +112,15 @@ def prepare(config, out):
         "native_build": read_json(ROOT / "build/remote-build.json") if (ROOT / "build/remote-build.json").exists() else None,
     }
     run_record["run_id"] = digest({k: run_record[k] for k in ("source_snapshot", "config", "parent_sha256", "input_manifest_sha256")})
-    state = {"updates": 0, "accepted_updates": 0, "attempted_steps": 0, "rejected_steps": 0,
-             "optimizer_steps": 0, "origin_Adam_counter": e["parent_optimizer_steps"],
-             "decisions": 0, "next_episode": e["start_episode"], "zero_accepted_streak": 0,
-             "active_seconds": 0., "evaluation_seconds": 0., "preparation_seconds": 0.,
-             "evaluated": {}, "latest": "checkpoints/initial.pt", "pending_evaluation": True,
-             "best": {"path": "checkpoints/initial.pt", "wins": -1, "update": 0}, "stop_reason": None}
+    counters = TrainingCounters()
+    state = {
+        **counters.to_state_dict(protocol=KIND),
+        "origin_Adam_counter": e["parent_optimizer_steps"],
+        "decisions": 0, "next_episode": e["start_episode"], "zero_accepted_streak": 0,
+        "active_seconds": 0., "evaluation_seconds": 0., "preparation_seconds": 0.,
+        "evaluated": {}, "latest": "checkpoints/initial.pt", "pending_evaluation": True,
+        "best": {"path": "checkpoints/initial.pt", "wins": -1, "update": 0}, "stop_reason": None,
+    }
     out.mkdir(parents=True, exist_ok=True)
     write_json(out / "manifest.json", plan)
     write_json(out / "run.json", run_record)
@@ -173,6 +192,9 @@ def train(config, plan, out, device, *, factory_type=ScaleUpFactory, development
     state = read_json(out / "state.json")
     if state["stop_reason"]:
         return
+    protocol = config.get("kind", KIND)
+    counters = TrainingCounters.from_dict(state, protocol=protocol)
+    state.update(counters.to_state_dict(protocol=protocol))
     configure(17, device)
     record = read_json(out / "run.json")
     identity = {"run_id": record["run_id"]}
@@ -243,7 +265,7 @@ def train(config, plan, out, device, *, factory_type=ScaleUpFactory, development
                 break
             started = perf_counter()
             deadline = started + e["active_seconds"] - state["active_seconds"]
-            number = state["updates"] + 1
+            number = state["rollouts_collected"] + 1
             monitor.mark("collection", update=number)
             episodes, following, timings = collector.collect(policy, None, state["next_episode"], monitor,
                 deadline=deadline, max_decisions=e["decisions"] - state["decisions"])
@@ -275,11 +297,15 @@ def train(config, plan, out, device, *, factory_type=ScaleUpFactory, development
             del episodes
             gc.collect()
             state["active_seconds"] += perf_counter() - started
+            counters = TrainingCounters.from_dict(state, protocol=protocol)
+            counters = counters.replace(
+                rollouts_collected=number,
+                rollouts_with_accepted_steps=counters.rollouts_with_accepted_steps + (1 if metrics["optimizer_steps"] else 0),
+                adam_steps_attempted=counters.adam_steps_attempted + metrics["attempted_optimizer_steps"],
+                adam_steps_accepted=counters.adam_steps_accepted + metrics["optimizer_steps"],
+            )
+            state.update(counters.to_state_dict(protocol=protocol))
             state["updates"] = number
-            state["optimizer_steps"] += metrics["optimizer_steps"]
-            state["attempted_steps"] += metrics["attempted_optimizer_steps"]
-            state["rejected_steps"] += metrics["rejected_optimizer_steps"]
-            state["accepted_updates"] += bool(metrics["optimizer_steps"])
             state["zero_accepted_streak"] = 0 if metrics["optimizer_steps"] else state["zero_accepted_streak"] + 1
             state["latest"] = f"checkpoints/update-{number:04}.pt"
             if state["active_seconds"] >= e["active_seconds"] or metrics["stop_reason"] == "active_time_limit":

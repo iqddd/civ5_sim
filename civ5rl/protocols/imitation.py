@@ -230,7 +230,20 @@ def validate_case(case, config, manifest):
 
 def match_task(task):
     """One isolated ordinary match. No policy training or CP in a GPU collector."""
-    config, manifest, case, directory, contender, opponent, device = task
+    if hasattr(task, "config") and hasattr(task, "case") and (
+        hasattr(task, "output_dir") or hasattr(task, "directory")
+    ):
+        config = task.config
+        manifest = task.manifest
+        case = task.case
+        directory = getattr(task, "output_dir", None)
+        if directory is None:
+            directory = getattr(task, "directory", None)
+        contender = task.contender
+        opponent = task.opponent
+        device = getattr(task, "device", "cpu")
+    else:
+        config, manifest, case, directory, contender, opponent, device = task
     directory = Path(directory)
     validate_case(case, config, manifest)
     write_json(directory / "case.json", case)
@@ -323,16 +336,21 @@ def task_for(
     contender="teacher",
     opponent="greedy",
     device="cpu",
+    *,
+    as_tuple=False,
 ):
-    return (
-        config,
-        manifest,
-        make_case(config, manifest, split, index),
-        str(directory),
-        contender,
-        opponent,
-        device,
+    from civ5rl.experiments.evaluation import MatchTask
+
+    task = MatchTask(
+        config=config,
+        manifest=manifest,
+        case=make_case(config, manifest, split, index),
+        output_dir=str(directory),
+        contender=contender,
+        opponent=opponent,
+        device=device,
     )
+    return tuple(task) if as_tuple else task
 
 
 def worker_setup():
