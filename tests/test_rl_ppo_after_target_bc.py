@@ -88,16 +88,12 @@ class TargetBCPPOTests(unittest.TestCase):
             if not name.startswith("value."):
                 self.assertTrue(torch.equal(value, before[name]), name)
         with torch.no_grad():
-            torch.testing.assert_close(
-                policy(batch, sequence=True)[0], logits_before, rtol=0, atol=0
-            )
+            torch.testing.assert_close(policy(batch, sequence=True)[0], logits_before, rtol=0, atol=0)
         self.assertEqual(behavior_digest(episodes), original_behavior)
         refreshed = np.concatenate([ep["old_value"] for ep in episodes])
         self.assertFalse(np.array_equal(refreshed, original_values))
         cache = RolloutCache(episodes, "C", "cpu", resident=False, cpu_labels=True)
-        np.testing.assert_array_equal(
-            cache.labels["advantages"].numpy(), np.concatenate(targets(episodes))
-        )
+        np.testing.assert_array_equal(cache.labels["advantages"].numpy(), np.concatenate(targets(episodes)))
         optimizer = optimizer_for(policy, self.config, "cpu")
         self.assertEqual(len(optimizer.state), 0)
 
@@ -114,12 +110,8 @@ class TargetBCPPOTests(unittest.TestCase):
             stop_reason=None,
         )
         for _ in range(4):
-            self.assertTrue(
-                record_collection(state, {"decisions": 8192, "W": 0}, self.config)
-            )
-        self.assertFalse(
-            record_collection(state, {"decisions": 8192, "W": 0}, self.config)
-        )
+            self.assertTrue(record_collection(state, {"decisions": 8192, "W": 0}, self.config))
+        self.assertFalse(record_collection(state, {"decisions": 8192, "W": 0}, self.config))
         self.assertEqual(state["decisions"], 40960)
         self.assertEqual(state["winless_streak"], 5)
         self.assertEqual(state["zero_accepted_streak"], 2)
@@ -201,6 +193,40 @@ class TargetBCPPOTests(unittest.TestCase):
                 TrainingCounters.from_dict(state, protocol=KIND).rollouts_with_accepted_steps,
                 0,
             )
+            legacy_zero_accepted = {"updates": 2, "optimizer_steps": 0}
+            for proto in (KIND, "ppo_controlled_updates"):
+                self.assertEqual(
+                    TrainingCounters.from_dict(
+                        legacy_zero_accepted, protocol=proto
+                    ).rollouts_with_accepted_steps,
+                    0,
+                )
+            conflicting = {
+                "updates": 5,
+                "rollout_number": 3,
+                "optimizer_steps": 10,
+                "steps_performed": 7,
+                "attempted_steps": 14,
+                "attempted_optimizer_steps": 12,
+            }
+            self.assertEqual(
+                TrainingCounters.from_dict(conflicting, protocol=KIND),
+                TrainingCounters(
+                    rollouts_collected=3,
+                    rollouts_with_accepted_steps=5,
+                    adam_steps_attempted=14,
+                    adam_steps_accepted=10,
+                ),
+            )
+            self.assertEqual(
+                TrainingCounters.from_dict(conflicting, protocol="ppo_controlled_updates"),
+                TrainingCounters(
+                    rollouts_collected=5,
+                    rollouts_with_accepted_steps=5,
+                    adam_steps_attempted=14,
+                    adam_steps_accepted=10,
+                ),
+            )
             row = {
                 "rollout": state["rollouts"],
                 "decisions": 2048,
@@ -223,7 +249,8 @@ class TargetBCPPOTests(unittest.TestCase):
                 },
             )
 
-            # Ordinary PPO train() without legacy attempted_steps/accepted_updates must advance counters and preserve updates on 0-step rollouts.
+            # Ordinary PPO train() without legacy attempted_steps/accepted_updates
+            # must advance counters and preserve updates on 0-step rollouts.
             ord_dir = tmp / "ordinary"
             (ord_dir / "checkpoints").mkdir(parents=True)
             ord_cfg = load_config("configs/rl-ppo-after-imitation.json")
@@ -288,9 +315,7 @@ class TargetBCPPOTests(unittest.TestCase):
                     "optimizer_steps": steps,
                     "attempted_optimizer_steps": 4,
                     "rejected_optimizer_steps": 4 - steps,
-                    "stop_reason": "active_time_limit"
-                    if call_idx[0] == 3
-                    else "epochs_complete",
+                    "stop_reason": "active_time_limit" if call_idx[0] == 3 else "epochs_complete",
                     "update_complete": True,
                 }
 
@@ -300,9 +325,7 @@ class TargetBCPPOTests(unittest.TestCase):
                     "civ5rl.experiments.ppo_after_imitation.create_policy",
                     return_value=policy,
                 ),
-                patch(
-                    "civ5rl.experiments.ppo_after_imitation.Collector", FakeCollector
-                ),
+                patch("civ5rl.experiments.ppo_after_imitation.Collector", FakeCollector),
                 patch(
                     "civ5rl.experiments.ppo_after_imitation.update",
                     side_effect=fake_update,
@@ -310,9 +333,7 @@ class TargetBCPPOTests(unittest.TestCase):
                 patch("civ5rl.experiments.ppo_after_imitation_checks.warmup"),
                 patch(
                     "civ5rl.experiments.ppo_after_imitation.development",
-                    side_effect=lambda cfg, pl, o, st: st.update(
-                        pending_evaluation=False
-                    ),
+                    side_effect=lambda cfg, pl, o, st: st.update(pending_evaluation=False),
                 ),
                 patch(
                     "civ5rl.experiments.ppo_after_imitation.save_rollout",
@@ -334,5 +355,3 @@ class TargetBCPPOTests(unittest.TestCase):
             )
             self.assertNotIn("accepted_updates", final_state)
             self.assertNotIn("attempted_steps", final_state)
-
-

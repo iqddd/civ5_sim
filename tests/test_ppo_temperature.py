@@ -26,9 +26,7 @@ class TemperatureTests(unittest.TestCase):
             [[0.7, -0.1, -float("inf")], [0.0, -float("inf"), -float("inf")]],
             requires_grad=True,
         )
-        old = torch.tensor(
-            [[0.4, 0.1, -float("inf")], [0.0, -float("inf"), -float("inf")]]
-        )
+        old = torch.tensor([[0.4, 0.1, -float("inf")], [0.0, -float("inf"), -float("inf")]])
         old_logp = (old / 0.5).log_softmax(-1)
         indices = torch.tensor([0, 0])
         values = torch.tensor([0.3, 0.2], requires_grad=True)
@@ -51,9 +49,7 @@ class TemperatureTests(unittest.TestCase):
         normalized = entropy / torch.tensor([np.log(2), 1.0], dtype=torch.float32)
         ratio = (logp[:, 0] - old_logp[:, 0]).exp()
         explicit = (
-            -torch.minimum(
-                ratio * advantages, ratio.clamp(0.8, 1.2) * advantages
-            ).mean()
+            -torch.minimum(ratio * advantages, ratio.clamp(0.8, 1.2) * advantages).mean()
             + 0.5 * (reference_values - returns).square().mean()
             - 0.03 * normalized.mean()
         )
@@ -64,14 +60,10 @@ class TemperatureTests(unittest.TestCase):
         torch.testing.assert_close(values.grad, reference_values.grad, rtol=0, atol=0)
         self.assertTrue(torch.equal(current.grad[1], torch.zeros(3)))
         torch.testing.assert_close(stats["entropy"], entropy.mean())
-        kl, _ = categorical_distance(
-            old_logp, policy_logits(current.detach(), 0.5), torch.isfinite(current)
-        )
+        kl, _ = categorical_distance(old_logp, policy_logits(current.detach(), 0.5), torch.isfinite(current))
         expected = (
             old_logp.double().exp()
-            * (old_logp.double() - logp.detach().double()).masked_fill(
-                ~torch.isfinite(logp), 0
-            )
+            * (old_logp.double() - logp.detach().double()).masked_fill(~torch.isfinite(logp), 0)
         ).sum(-1)
         torch.testing.assert_close(kl, expected, rtol=1e-5, atol=1e-7)
         default, _ = objective(
@@ -121,9 +113,7 @@ class TemperatureTests(unittest.TestCase):
             }
             encoded = encode_episode(ep, "C")
             with torch.no_grad():
-                logits, value, _ = policy.forward_sequences(
-                    batch_inputs(encoded, "cpu"), [length]
-                )
+                logits, value, _ = policy.forward_sequences(batch_inputs(encoded, "cpu"), [length])
             behavior = (logits / 0.5).log_softmax(-1).numpy()
             ep.update(
                 old_log_probs=[r.copy() for r in behavior],
@@ -132,10 +122,10 @@ class TemperatureTests(unittest.TestCase):
             )
             episodes.append(ep)
         backend = BatchedBackend(policy, episodes, config, "cpu")
-        pre_kl, error = backend.precheck()
-        self.assertLess(abs(pre_kl), 1e-7)
-        self.assertLess(error, 1e-5)
-        self.assertLess(abs(backend.replay["full_kl_free"]), 1e-7)
+        replay = backend.precheck()
+        self.assertLess(abs(replay["sampled_kl"]), 1e-7)
+        self.assertLess(replay["max_logp_error"], 1e-5)
+        self.assertLess(abs(replay["full_kl_free"]), 1e-7)
         # Move weights before comparing nonzero gradients and full old||current KL.
         with torch.no_grad():
             next(policy.parameters()).add_(0.001)
@@ -143,28 +133,20 @@ class TemperatureTests(unittest.TestCase):
         spans = [(0, 0, 3), (1, 0, 1)]
         backend.backward(spans, 4, 0.03)
         encoded = [item for ep in episodes for item in encode_episode(ep, "C")]
-        logits, value, _ = reference.forward_sequences(
-            batch_inputs(encoded, "cpu"), [3, 1]
-        )
+        logits, value, _ = reference.forward_sequences(batch_inputs(encoded, "cpu"), [3, 1])
         old = torch.tensor([v for ep in episodes for v in ep["old_logp"]])
         ret = torch.tensor([1.0, 1.0, 1.0, 0.0])
         adv = torch.from_numpy(np.concatenate(targets(episodes)))
-        loss, _ = objective(
-            logits / 0.5, value, torch.zeros(4, dtype=torch.long), old, ret, adv, 0.03
-        )
+        loss, _ = objective(logits / 0.5, value, torch.zeros(4, dtype=torch.long), old, ret, adv, 0.03)
         loss.backward()
-        for (name, p), (_, q) in zip(
-            policy.named_parameters(), reference.named_parameters()
-        ):
+        for (name, p), (_, q) in zip(policy.named_parameters(), reference.named_parameters()):
             torch.testing.assert_close(p.grad, q.grad, rtol=3e-5, atol=2e-6, msg=name)
         current = (logits / 0.5).log_softmax(-1)
         behavior = torch.from_numpy(np.stack(episodes[0]["old_log_probs"])).double()
         explicit = (behavior.exp() * (behavior - current[:3].double())).sum(-1).mean()
         self.assertAlmostEqual(backend.kl(), float(explicit.detach()), places=6)
         with self.assertRaisesRegex(ValueError, "temperature"):
-            BatchedBackend(
-                policy, episodes, {**config, "policy_temperature": 1.0}, "cpu"
-            )
+            BatchedBackend(policy, episodes, {**config, "policy_temperature": 1.0}, "cpu")
         with self.assertRaisesRegex(ValueError, "temperature"):
             require_rollout_temperature([{}], 0.5)
         require_rollout_temperature([{}], 1.0)

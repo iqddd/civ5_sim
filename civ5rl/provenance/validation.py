@@ -209,8 +209,7 @@ def validate_config(config):
         for key in keys:
             expected = reference[section][key]
             if (
-                config.get("kind")
-                in ("rl01.ppo_after_imitation", "rl01.ppo_controlled_updates")
+                config.get("kind") in ("rl01.ppo_after_imitation", "rl01.ppo_controlled_updates")
                 and section == "reward"
                 and key == "loss"
             ):
@@ -237,6 +236,11 @@ def validate_config(config):
     mode = config["ppo"].get("kl_measurement")
     if mode not in ("whole_rollout_after_epoch", "whole_rollout_after_optimizer_step"):
         raise ValueError("Unsupported configuration: ppo.kl_measurement")
+    if acceptance == "full_categorical_kl_rollback" and mode != "whole_rollout_after_optimizer_step":
+        raise ValueError(
+            "Unsupported configuration: full_categorical_kl_rollback requires "
+            "whole_rollout_after_optimizer_step"
+        )
     tokens = config["ppo"].get("valid_tokens_per_minibatch")
     if tokens is not None and (type(tokens) is not int or tokens < 1):
         raise ValueError("Invalid configuration: ppo.valid_tokens_per_minibatch")
@@ -273,10 +277,7 @@ def validate_config(config):
         for key in keys:
             if type(config[section][key]) is not int or config[section][key] < 1:
                 raise ValueError(f"Invalid configuration: {section}.{key}")
-    if (
-        config["ppo"]["sequences_per_microbatch"]
-        > config["ppo"]["sequences_per_minibatch"]
-    ):
+    if config["ppo"]["sequences_per_microbatch"] > config["ppo"]["sequences_per_minibatch"]:
         raise ValueError("Invalid configuration: ppo.sequences_per_microbatch")
     if "diagnostic" in config:
         from civ5rl.protocols.diagnostic_config import validate_diagnostic_config

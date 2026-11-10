@@ -12,6 +12,7 @@ import torch
 
 from civ5rl.engine.ppo import token_minibatches, update
 from civ5rl.engine.ppo_fast import measure_replay
+from civ5rl.engine.replay_metrics import StepReplay
 from civ5rl.experiments.evaluation import paired_world_bootstrap
 from civ5rl.protocols.ppo_after_imitation import TrainingFactory, prepare_cases
 from civ5rl.provenance.common import configure, read_json
@@ -30,15 +31,17 @@ class PPOAfterTests(unittest.TestCase):
         from civ5sim import Action
 
         end, attack = Action("end_turn"), Action("ranged", 0, 5)
-        episodes = [{
-            "observations": [{"turn": 0}, {"turn": 1}],
-            "actions": [(attack, end), (end,)],
-            "chosen": [1, 0],
-            "old_log_probs": [np.log(np.asarray([0.25, 0.75], np.float32)), np.zeros(1, np.float32)],
-            "old_logp": [float(np.log(np.float32(0.75))), 0.0],
-            "old_value": [0.125, 0.25],
-            "result": {"reward": 0},
-        }]
+        episodes = [
+            {
+                "observations": [{"turn": 0}, {"turn": 1}],
+                "actions": [(attack, end), (end,)],
+                "chosen": [1, 0],
+                "old_log_probs": [np.log(np.asarray([0.25, 0.75], np.float32)), np.zeros(1, np.float32)],
+                "old_logp": [float(np.log(np.float32(0.75))), 0.0],
+                "old_value": [0.125, 0.25],
+                "result": {"reward": 0},
+            }
+        ]
         with tempfile.TemporaryDirectory() as directory:
             save_rollout(episodes, directory, 1)
             restored = load_rollout(Path(directory) / "first.pt")
@@ -72,15 +75,9 @@ class PPOAfterTests(unittest.TestCase):
             set(Counter((c["learner_side"], c["placement"]) for c in cases).values()),
             {32},
         )
-        self.assertFalse(
-            {c["parent_world"] for c in cases}
-            & set(plan["base"]["worlds"]["validation"])
-        )
+        self.assertFalse({c["parent_world"] for c in cases} & set(plan["base"]["worlds"]["validation"]))
         self.assertTrue(
-            all(
-                c["opponent"] == "cp" and c["reward_profile"] == "win_probability"
-                for c in cases
-            )
+            all(c["opponent"] == "cp" and c["reward_profile"] == "win_probability" for c in cases)
         )
 
     def test_free_KL_has_correct_denominator_and_all_forced_is_null(self):
@@ -104,9 +101,7 @@ class PPOAfterTests(unittest.TestCase):
                 return (
                     {
                         "logits": torch.tensor([[0.0, 0.0], [0.0, -1e9], [0.0, -1e9]]),
-                        "action_mask": torch.tensor(
-                            [[True, True], [True, False], [True, False]]
-                        ),
+                        "action_mask": torch.tensor([[True, True], [True, False], [True, False]]),
                     },
                     {
                         "indices": torch.zeros(3, dtype=torch.long),
@@ -117,9 +112,7 @@ class PPOAfterTests(unittest.TestCase):
                 )
 
         result = measure_replay(Model(), Cache())
-        self.assertAlmostEqual(
-            result["sampled_kl_free"], result["sampled_kl"] * 3, places=6
-        )
+        self.assertAlmostEqual(result["sampled_kl_free"], result["sampled_kl"] * 3, places=6)
         self.assertEqual(result["free_decisions"], 1)
         cache = Cache()
         cache.action_counts = np.ones(3, dtype=int)
@@ -137,9 +130,7 @@ class PPOAfterTests(unittest.TestCase):
 
     def test_deadline_stops_before_step_or_after_required_KL_and_remainder(self):
         config = deepcopy(self.config)
-        episodes = [
-            {"chosen": [0] * 1027, "old_value": [0.0] * 1027, "result": {"reward": 1}}
-        ]
+        episodes = [{"chosen": [0] * 1027, "old_value": [0.0] * 1027, "result": {"reward": 1}}]
         clock = [0.0]
 
         class Backend:
@@ -153,7 +144,7 @@ class PPOAfterTests(unittest.TestCase):
                 Backend.instance = self
 
             def precheck(self):
-                return 0.0, 0.0
+                return {"sampled_kl": 0.0, "max_logp_error": 0.0}
 
             def backward(self, batch, count, entropy):
                 self.policy.weight.sum().backward()
@@ -164,9 +155,9 @@ class PPOAfterTests(unittest.TestCase):
             def record_gradient(self, norm):
                 pass
 
-            def kl(self):
+            def measure_step_replay(self):
                 self.kl_calls += 1
-                return 0.001
+                return StepReplay(0.001, {"sampled_kl": 0.001})
 
             def statistics(self, tokens):
                 return {}, None, None
@@ -207,9 +198,7 @@ class PPOAfterTests(unittest.TestCase):
             )
         self.assertEqual((result["optimizer_steps"], Backend.instance.kl_calls), (0, 0))
         batches = list(token_minibatches([(0, 0, 1027)], 1024))
-        self.assertEqual(
-            [sum(b - a for _, a, b in spans) for spans in batches], [1024, 3]
-        )
+        self.assertEqual([sum(b - a for _, a, b in spans) for spans in batches], [1024, 3])
 
     def test_confirmation_bootstrap_keeps_sixteen_cases_per_world(self):
         cases = {
@@ -220,9 +209,7 @@ class PPOAfterTests(unittest.TestCase):
         }
         a = dict.fromkeys(cases, 0)
         b = dict.fromkeys(cases, 1)
-        result = paired_world_bootstrap(
-            a, b, samples=10000, seed=20261103, cases=cases, cases_per_world=16
-        )
+        result = paired_world_bootstrap(a, b, samples=10000, seed=20261103, cases=cases, cases_per_world=16)
         self.assertEqual(result["CI95"], [1.0, 1.0])
         b.pop(next(iter(b)))
         with self.assertRaises(ValueError):

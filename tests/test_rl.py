@@ -60,10 +60,7 @@ class RLTests(unittest.TestCase):
                 actions = [ordered_actions(x.available_actions()) for x in (a, b)]
                 self.assertEqual(observations[0], observations[1])
                 self.assertEqual(actions[0], actions[1])
-                encoded = [
-                    e.encode(o, acts)
-                    for e, o, acts in zip(encoders, observations, actions)
-                ]
+                encoded = [e.encode(o, acts) for e, o, acts in zip(encoders, observations, actions)]
                 np.testing.assert_array_equal(encoded[0].cells, encoded[1].cells)
                 np.testing.assert_array_equal(encoded[0].globals, encoded[1].globals)
                 with torch.no_grad():
@@ -90,9 +87,7 @@ class RLTests(unittest.TestCase):
                 encoded_tiles = b._encode_tiles()
                 for i, tile in enumerate(encoded_tiles):
                     for d in range(6):
-                        self.assertEqual(
-                            bool(e.static[i, 20 + d]), bool(tile.rivers & (1 << d))
-                        )
+                        self.assertEqual(bool(e.static[i, 20 + d]), bool(tile.rivers & (1 << d)))
                         n = e.neighbors[i, d]
                         if n >= 0:
                             self.assertEqual(distance(m, i, int(n)), 1)
@@ -189,9 +184,7 @@ class RLTests(unittest.TestCase):
             encoded = encode_episode(ep, "C")
             with torch.no_grad():
                 logits, value, _ = policy(batch_inputs(encoded, "cpu"), sequence=True)
-                ep["old_logp"] = distribution_stats(logits, torch.tensor(ep["chosen"]))[
-                    0
-                ].tolist()
+                ep["old_logp"] = distribution_stats(logits, torch.tensor(ep["chosen"]))[0].tolist()
                 ep["old_value"] = value.tolist()
             episodes.append(ep)
         return episodes
@@ -219,9 +212,7 @@ class RLTests(unittest.TestCase):
         copy = deepcopy(original)
         outputs = []
         for model, cache in ((original, local), (copy, resident)):
-            logits, values, hidden = model.forward_sequences(
-                cache.gather_inputs([(0, 0, 2)]), [2]
-            )
+            logits, values, hidden = model.forward_sequences(cache.gather_inputs([(0, 0, 2)]), [2])
             loss = logits.log_softmax(-1)[:, 0].sum() + values.sum()
             loss.backward()
             outputs.append((logits.detach(), values.detach(), hidden.detach()))
@@ -310,6 +301,8 @@ class RLTests(unittest.TestCase):
                 reference = RolloutCache(episodes, "C", "cpu", cpu_labels=cpu_labels)
                 cached.enable_cached_replay()
                 first = measure_replay(policy, cached, sequences_per_batch=2)
+                self.assertEqual(cached.replay_mode, "device")
+                self.assertEqual(reference.replay_mode, "on_demand")
                 self.assertEqual(first, measure_replay(policy, reference, sequences_per_batch=2))
                 with torch.no_grad():
                     policy.action[-1].weight.add_(0.1)
@@ -322,6 +315,7 @@ class RLTests(unittest.TestCase):
         # A stale hidden/output cache silently invalidates the KL rollback gate.
         from civ5rl.engine.ppo import encode_episode
         from civ5rl.engine.ppo_fast import RolloutCache, measure_replay
+        from civ5rl.experiments.ppo_artifacts import load_rollout, save_rollout
 
         policy = Policy("C")
         episodes = self._short_rollout(policy)
@@ -330,18 +324,33 @@ class RLTests(unittest.TestCase):
             with torch.no_grad():
                 logits, _, _ = policy(batch_inputs(encoded, "cpu"), sequence=True)
             ep["old_log_probs"] = list(logits.log_softmax(-1).numpy())
+        with tempfile.TemporaryDirectory() as tmp:
+            save_rollout(episodes, tmp, 1)
+            episodes = load_rollout(Path(tmp) / "first.pt")
         policy.cuda()
         cached = RolloutCache(episodes, "C", "cuda", resident=False, cpu_labels=True)
         reference = RolloutCache(episodes, "C", "cuda", resident=False, cpu_labels=True)
         cached.enable_pinned_replay()
         first = measure_replay(policy, cached, 2, full_distribution=True)
+        self.assertEqual(cached.replay_mode, "host")
         self.assertGreater(cached.pinned_replay_bytes, 0)
         with torch.no_grad():
             policy.action[-1].weight.add_(0.1)
         actual = measure_replay(policy, cached, 2, full_distribution=True)
-        self.assertEqual(actual, measure_replay(policy, reference, 2, full_distribution=True))
+        expected = measure_replay(policy, reference, 2, full_distribution=True)
+        self.assertEqual(actual, expected)
         self.assertGreater(actual["full_kl"], first["full_kl"])
         self.assertGreater(cached.pinned_replay_hits, 0)
+        partial = RolloutCache(episodes, "C", "cuda", resident=False, cpu_labels=True)
+        partial.enable_pinned_replay(limit_bytes=cached.pinned_replay_bytes // 2)
+        plan = partial.prepare_replay_plan(2)
+        flags = [part.is_pinned for _, parts in plan.groups for part in parts]
+        self.assertEqual(set(flags), {True, False})
+        self.assertEqual(measure_replay(policy, partial, 2, full_distribution=True), expected)
+        cached.stage_gpu_replay(2, reserve_bytes=0)
+        self.assertEqual(cached.replay_mode, "device")
+        self.assertGreater(cached.cached_replay_bytes, 0)
+        self.assertEqual(measure_replay(policy, cached, 2, full_distribution=True), expected)
 
     def test_batched_gru_has_no_cross_episode_or_padding_effect(self):
         from civ5rl.ppo_fast import RolloutCache, prefixes
@@ -361,12 +370,8 @@ class RLTests(unittest.TestCase):
                 prefix,
                 sequence=True,
             )
-            torch.testing.assert_close(
-                logits[offset : offset + stop - start], expected_logits
-            )
-            torch.testing.assert_close(
-                values[offset : offset + stop - start], expected_values
-            )
+            torch.testing.assert_close(logits[offset : offset + stop - start], expected_logits)
+            torch.testing.assert_close(values[offset : offset + stop - start], expected_values)
             torch.testing.assert_close(last[:, i : i + 1], expected_h)
             offset += stop - start
 
@@ -388,8 +393,7 @@ class RLTests(unittest.TestCase):
         self.assertEqual(actual[0].shape, (1, 1))
 
     @unittest.skipUnless(
-        torch.cuda.is_available()
-        and torch.cuda.is_bf16_supported(including_emulation=False),
+        torch.cuda.is_available() and torch.cuda.is_bf16_supported(including_emulation=False),
         "Requires native CUDA BF16",
     )
     def test_bf16_dense_regions_keep_gru_logits_loss_and_gradients_fp32(self):
@@ -405,9 +409,7 @@ class RLTests(unittest.TestCase):
             ),
             policy.blocks[0]
             .mlp[0]
-            .register_forward_hook(
-                lambda module, args, output: observations.update(hex_dense=output.dtype)
-            ),
+            .register_forward_hook(lambda module, args, output: observations.update(hex_dense=output.dtype)),
             policy.memory.register_forward_pre_hook(
                 lambda module, args: observations.update(gru_input=args[0].dtype)
             ),
@@ -455,24 +457,18 @@ class RLTests(unittest.TestCase):
         message = f.linear(x, block.weight[0], block.bias)
         for direction in range(6):
             idx = neighbors[:, :, direction]
-            gathered = x[torch.arange(2)[:, None], idx.clamp_min(0)] * (
-                idx >= 0
-            ).unsqueeze(-1)
+            gathered = x[torch.arange(2)[:, None], idx.clamp_min(0)] * (idx >= 0).unsqueeze(-1)
             message = message + f.linear(gathered, block.weight[direction + 1])
         u = x + f.gelu(block.norm1(message))
         reference = u + block.mlp(block.norm2(u))
         torch.testing.assert_close(optimized, reference, atol=2e-6, rtol=2e-5)
-        grad_a = torch.autograd.grad(
-            optimized.square().mean(), (x, block.weight), retain_graph=True
-        )
+        grad_a = torch.autograd.grad(optimized.square().mean(), (x, block.weight), retain_graph=True)
         grad_b = torch.autograd.grad(reference.square().mean(), (x, block.weight))
         for a, b in zip(grad_a, grad_b):
             torch.testing.assert_close(a, b, atol=2e-6, rtol=2e-5)
 
     def test_analytic_ppo_loss_and_weighted_accumulation(self):
-        logits = torch.tensor(
-            [[0.0, 0.0], [1.0, 0.0], [0.0, -torch.inf]], requires_grad=True
-        )
+        logits = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, -torch.inf]], requires_grad=True)
         values = torch.tensor([0.2, -0.3, 0.1], requires_grad=True)
         indices = torch.tensor([0, 1, 0])
         old = distribution_stats(logits.detach(), indices)[0]
@@ -500,10 +496,7 @@ class RLTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
 
     def test_terminal_targets_sign_and_normalization(self):
-        eps = [
-            {"result": {"reward": r}, "chosen": [0, 0], "old_value": [0, 0]}
-            for r in (-1, 0, 1)
-        ]
+        eps = [{"result": {"reward": r}, "chosen": [0, 0], "old_value": [0, 0]} for r in (-1, 0, 1)]
         adv = targets(eps)
         self.assertLess(adv[0][0], 0)
         self.assertEqual(adv[1][0], 0)
@@ -532,9 +525,7 @@ class RLTests(unittest.TestCase):
         q = torch.tensor([[0.99900685, 0.00099315, 0], [1, 0, 0]], dtype=torch.float64)
         mask = p > 0
         kl, tv = categorical_distance(p.log(), q.log(), mask)
-        torch.testing.assert_close(
-            tv, torch.tensor([0.00000685, 0], dtype=torch.float64), atol=1e-14, rtol=0
-        )
+        torch.testing.assert_close(tv, torch.tensor([0.00000685, 0], dtype=torch.float64), atol=1e-14, rtol=0)
         self.assertTrue(torch.isfinite(kl).all())
         self.assertGreater((p[0, 1].log() - q[0, 1].log()).abs().item(), 0.005)
         limits = {"require_full_behavior_distribution": True}
@@ -568,9 +559,7 @@ class RLTests(unittest.TestCase):
         policy = Policy()
         episodes = self._short_rollout(policy)
         for ep in episodes:
-            ep["old_log_probs"] = [
-                np.full(len(a), -np.log(len(a)), np.float32) for a in ep["actions"]
-            ]
+            ep["old_log_probs"] = [np.full(len(a), -np.log(len(a)), np.float32) for a in ep["actions"]]
         with self.assertRaisesRegex(ValueError, "chosen logp"):
             RolloutCache(episodes, "C", "cpu")
 
@@ -618,9 +607,7 @@ class RLTests(unittest.TestCase):
                 env.applied(a, env.battle.step(a))
                 state = env.request()
             config = MatchConfig(s["map"], armies, 3)
-            match = run_match(
-                config, ["end_turn", "end_turn"], scenario=s, agent_seeds=[1, 2]
-            )
+            match = run_match(config, ["end_turn", "end_turn"], scenario=s, agent_seeds=[1, 2])
             self.assertEqual(state["result"]["reason"], match.result["reason"])
             self.assertEqual(env.history, [x["action"] for x in match.replay["steps"]])
             self.assertEqual(env.battle.snapshot(), match.final)
@@ -629,17 +616,12 @@ class RLTests(unittest.TestCase):
     def test_reachable_memory_pairs_and_current_only_ablation(self):
         for shared in (False, True):
             for side in (0, 1):
-                pair = [
-                    _history(0, 2 if shared else 0, side, branch, shared)
-                    for branch in (0, 1)
-                ]
+                pair = [_history(0, 2 if shared else 0, side, branch, shared) for branch in (0, 1)]
                 self.assertEqual(pair[0]["current"], pair[1]["current"])
                 self.assertEqual(pair[0]["actions"], pair[1]["actions"])
                 outputs = []
                 for case in pair:
-                    e = ObservationEncoder(
-                        context_for(case["scenario"], case["armies"], side, 60, 17), "A"
-                    )
+                    e = ObservationEncoder(context_for(case["scenario"], case["armies"], side, 60, 17), "A")
                     for step in case["history"]:
                         e.encode(step["observation"], step["actions"])
                         e.remember_action(step["action"], step["observation"])
@@ -659,9 +641,7 @@ class RLTests(unittest.TestCase):
 
     def test_seed_namespaces_and_closed_test(self):
         self.assertEqual(seed_for(17, 2, "battle"), seed_for(17, 2, "battle"))
-        self.assertNotEqual(
-            seed_for(17, 2, "battle"), seed_for(17, 2, "battle", namespace="validation")
-        )
+        self.assertNotEqual(seed_for(17, 2, "battle"), seed_for(17, 2, "battle", namespace="validation"))
         for split in ("test", "diagnostic_test", "cp_stress"):
             with self.assertRaises(ValueError):
                 require_split(self.config, split)
@@ -679,9 +659,7 @@ class RLTests(unittest.TestCase):
         monitor.gpu = object()
         monitor.nvml = SimpleNamespace(
             nvmlDeviceGetUtilizationRates=lambda _: SimpleNamespace(gpu=81, memory=62),
-            nvmlDeviceGetMemoryInfo=lambda _: SimpleNamespace(
-                used=3 * 2**30, total=16 * 2**30
-            ),
+            nvmlDeviceGetMemoryInfo=lambda _: SimpleNamespace(used=3 * 2**30, total=16 * 2**30),
             nvmlDeviceGetPowerUsage=lambda _: 132000,
             nvmlDeviceGetPowerManagementDefaultLimit=lambda _: 165000,
             nvmlDeviceGetEnforcedPowerLimit=lambda _: 150000,

@@ -6,48 +6,54 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
-_TARGET_BC_PROTOCOLS = frozenset({
-    "rl01.ppo_after_target_bc",
-    "ppo_after_target_bc",
-})
+_TARGET_BC_PROTOCOLS = frozenset(
+    {
+        "rl01.ppo_after_target_bc",
+        "ppo_after_target_bc",
+    }
+)
 
-_CONTROLLED_PPO_PROTOCOLS = frozenset({
-    "rl01.ppo_controlled_updates",
-    "ppo_controlled_updates",
-    "rl01.ppo_scale_up",
-    "ppo_scale_up",
-    "rl01.ppo_target_scale",
-    "ppo_target_scale",
-})
+_CONTROLLED_PPO_PROTOCOLS = frozenset(
+    {
+        "rl01.ppo_controlled_updates",
+        "ppo_controlled_updates",
+        "rl01.ppo_scale_up",
+        "ppo_scale_up",
+        "rl01.ppo_target_scale",
+        "ppo_target_scale",
+    }
+)
 
-_ORDINARY_PPO_PROTOCOLS = frozenset({
-    "rl01.ppo_after_imitation",
-    "ppo_after_imitation",
-})
+_ORDINARY_PPO_PROTOCOLS = frozenset(
+    {
+        "rl01.ppo_after_imitation",
+        "ppo_after_imitation",
+    }
+)
 
-_BC_PROTOCOLS = frozenset({
-    "bc",
-    "imitation_base",
-    "rl01.cp_imitation",
-    "cp_imitation",
-    "rl01.cp_imitation_own_states",
-    "cp_imitation_own_states",
-    "imitation_own_states",
-    "rl01.cp_imitation_target_scale",
-    "cp_imitation_target_scale",
-    "imitation_target_scale",
-    "rl01.cp_imitation_target_more_data",
-    "cp_imitation_target_more_data",
-    "imitation_target_more_data",
-    "rl01.cp_imitation_target_c2",
-    "cp_imitation_target_c2",
-    "imitation_target_c2",
-})
+_BC_PROTOCOLS = frozenset(
+    {
+        "bc",
+        "imitation_base",
+        "rl01.cp_imitation",
+        "cp_imitation",
+        "rl01.cp_imitation_own_states",
+        "cp_imitation_own_states",
+        "imitation_own_states",
+        "rl01.cp_imitation_target_scale",
+        "cp_imitation_target_scale",
+        "imitation_target_scale",
+        "rl01.cp_imitation_target_more_data",
+        "cp_imitation_target_more_data",
+        "imitation_target_more_data",
+        "rl01.cp_imitation_target_c2",
+        "cp_imitation_target_c2",
+        "imitation_target_c2",
+    }
+)
 
 
-def _normalize_protocol(
-    protocol: str | None, data: Mapping[str, Any] | None = None
-) -> str | None:
+def _normalize_protocol(protocol: str | None, data: Mapping[str, Any] | None = None) -> str | None:
     raw = protocol
     if raw is None and data is not None:
         kind = data.get("kind")
@@ -66,13 +72,71 @@ def _normalize_protocol(
     raise ValueError(f"Unsupported counter protocol: {protocol!r}")
 
 
-def _first_present(
-    data: Mapping[str, Any], keys: tuple[str, ...], default: Any = None
-) -> Any:
+def _first_present(data: Mapping[str, Any], keys: tuple[str, ...], default: Any = None) -> Any:
     for key in keys:
         if key in data and data[key] is not None:
             return data[key]
     return default
+
+
+_ATTEMPTED_STEP_KEYS = (
+    "adam_steps_attempted",
+    "attempted_steps",
+    "total_attempted_steps",
+    "attempted_optimizer_steps",
+)
+
+_PPO_ACCEPTED_STEP_KEYS = (
+    "adam_steps_accepted",
+    "optimizer_steps",
+    "accepted_optimizer_steps",
+    "total_Adam_steps",
+    "Adam_steps",
+    "steps_performed",
+    "Adam_steps_total",
+    "optimizer_steps_total",
+)
+
+_TARGET_BC_ROLLOUT_KEYS = (
+    "rollouts_collected",
+    "rollouts",
+    "rollout_number",
+    "rollout",
+    "updates",
+    "update",
+)
+
+_CONTROLLED_PPO_ROLLOUT_KEYS = (
+    "rollouts_collected",
+    "rollouts",
+    "updates",
+    "rollout_index",
+    "rollout_number",
+    "rollout",
+    "update",
+)
+
+
+def _resolve_accepted_rollouts(data: Mapping[str, Any]) -> Any:
+    rwa = _first_present(data, ("rollouts_with_accepted_steps", "accepted_updates"), default=None)
+    if rwa is not None:
+        return rwa
+    if (
+        "optimizer_steps" in data
+        and data["optimizer_steps"] is not None
+        and int(data["optimizer_steps"]) == 0
+    ):
+        return 0
+    return _first_present(data, ("updates", "update"), default=0)
+
+
+def _resolve_attempted_steps(data: Mapping[str, Any], accepted_steps: Any) -> Any:
+    att = _first_present(data, _ATTEMPTED_STEP_KEYS, default=None)
+    if att is not None:
+        return att
+    if "rejected_steps" in data and data["rejected_steps"] is not None:
+        return int(accepted_steps or 0) + int(data["rejected_steps"])
+    return accepted_steps
 
 
 @dataclass(frozen=True)
@@ -111,16 +175,7 @@ class TrainingCounters:
                 ),
                 default=0,
             )
-            att = _first_present(
-                data,
-                (
-                    "adam_steps_attempted",
-                    "attempted_steps",
-                    "total_attempted_steps",
-                    "attempted_optimizer_steps",
-                ),
-                default=asa,
-            )
+            att = _first_present(data, _ATTEMPTED_STEP_KEYS, default=asa)
             return cls(
                 rollouts_collected=0,
                 rollouts_with_accepted_steps=0,
@@ -128,130 +183,14 @@ class TrainingCounters:
                 adam_steps_accepted=int(asa) if asa is not None else 0,
             )
 
-        if mode == "ppo_after_target_bc":
-            rc = _first_present(
-                data,
-                (
-                    "rollouts_collected",
-                    "rollouts",
-                    "rollout_number",
-                    "rollout",
-                    "updates",
-                    "update",
-                ),
-                default=0,
+        if mode in ("ppo_after_target_bc", "ppo_controlled"):
+            rollout_keys = (
+                _TARGET_BC_ROLLOUT_KEYS if mode == "ppo_after_target_bc" else _CONTROLLED_PPO_ROLLOUT_KEYS
             )
-            asa = _first_present(
-                data,
-                (
-                    "adam_steps_accepted",
-                    "optimizer_steps",
-                    "accepted_optimizer_steps",
-                    "total_Adam_steps",
-                    "Adam_steps",
-                    "steps_performed",
-                    "Adam_steps_total",
-                    "optimizer_steps_total",
-                ),
-                default=0,
-            )
-            att = _first_present(
-                data,
-                (
-                    "adam_steps_attempted",
-                    "attempted_steps",
-                    "total_attempted_steps",
-                    "attempted_optimizer_steps",
-                ),
-                default=None,
-            )
-            if att is None:
-                rejected = (
-                    int(data.get("rejected_steps", 0) or 0)
-                    if "rejected_steps" in data
-                    else 0
-                )
-                att = int(asa or 0) + rejected
-            rwa = _first_present(
-                data,
-                ("rollouts_with_accepted_steps", "accepted_updates"),
-                default=None,
-            )
-            if rwa is None:
-                if (
-                    "optimizer_steps" in data
-                    and data["optimizer_steps"] is not None
-                    and int(data["optimizer_steps"]) == 0
-                ):
-                    rwa = 0
-                else:
-                    rwa = _first_present(data, ("updates", "update"), default=0)
-            return cls(
-                rollouts_collected=int(rc) if rc is not None else 0,
-                rollouts_with_accepted_steps=int(rwa) if rwa is not None else 0,
-                adam_steps_attempted=int(att) if att is not None else 0,
-                adam_steps_accepted=int(asa) if asa is not None else 0,
-            )
-
-        if mode == "ppo_controlled":
-            rc = _first_present(
-                data,
-                (
-                    "rollouts_collected",
-                    "rollouts",
-                    "updates",
-                    "rollout_index",
-                    "rollout_number",
-                    "rollout",
-                    "update",
-                ),
-                default=0,
-            )
-            asa = _first_present(
-                data,
-                (
-                    "adam_steps_accepted",
-                    "optimizer_steps",
-                    "accepted_optimizer_steps",
-                    "total_Adam_steps",
-                    "Adam_steps",
-                    "steps_performed",
-                    "Adam_steps_total",
-                    "optimizer_steps_total",
-                ),
-                default=0,
-            )
-            att = _first_present(
-                data,
-                (
-                    "adam_steps_attempted",
-                    "attempted_steps",
-                    "total_attempted_steps",
-                    "attempted_optimizer_steps",
-                ),
-                default=None,
-            )
-            if att is None:
-                rejected = (
-                    int(data.get("rejected_steps", 0) or 0)
-                    if "rejected_steps" in data
-                    else 0
-                )
-                att = int(asa or 0) + rejected
-            rwa = _first_present(
-                data,
-                ("rollouts_with_accepted_steps", "accepted_updates"),
-                default=None,
-            )
-            if rwa is None:
-                if (
-                    "optimizer_steps" in data
-                    and data["optimizer_steps"] is not None
-                    and int(data["optimizer_steps"]) == 0
-                ):
-                    rwa = 0
-                else:
-                    rwa = _first_present(data, ("updates", "update"), default=0)
+            rc = _first_present(data, rollout_keys, default=0)
+            asa = _first_present(data, _PPO_ACCEPTED_STEP_KEYS, default=0)
+            att = _resolve_attempted_steps(data, asa)
+            rwa = _resolve_accepted_rollouts(data)
             return cls(
                 rollouts_collected=int(rc) if rc is not None else 0,
                 rollouts_with_accepted_steps=int(rwa) if rwa is not None else 0,
@@ -260,18 +199,7 @@ class TrainingCounters:
             )
 
         if mode == "ppo_after_imitation":
-            rc = _first_present(
-                data,
-                (
-                    "rollouts_collected",
-                    "rollouts",
-                    "rollout_number",
-                    "rollout",
-                    "updates",
-                    "update",
-                ),
-                default=0,
-            )
+            rc = _first_present(data, _TARGET_BC_ROLLOUT_KEYS, default=0)
             rwa = _first_present(
                 data,
                 (
@@ -282,30 +210,8 @@ class TrainingCounters:
                 ),
                 default=0,
             )
-            asa = _first_present(
-                data,
-                (
-                    "adam_steps_accepted",
-                    "optimizer_steps",
-                    "accepted_optimizer_steps",
-                    "total_Adam_steps",
-                    "Adam_steps",
-                    "steps_performed",
-                    "Adam_steps_total",
-                    "optimizer_steps_total",
-                ),
-                default=0,
-            )
-            att = _first_present(
-                data,
-                (
-                    "adam_steps_attempted",
-                    "attempted_steps",
-                    "total_attempted_steps",
-                    "attempted_optimizer_steps",
-                ),
-                default=asa,
-            )
+            asa = _first_present(data, _PPO_ACCEPTED_STEP_KEYS, default=0)
+            att = _first_present(data, _ATTEMPTED_STEP_KEYS, default=asa)
             return cls(
                 rollouts_collected=int(rc) if rc is not None else 0,
                 rollouts_with_accepted_steps=int(rwa) if rwa is not None else 0,
@@ -327,21 +233,7 @@ class TrainingCounters:
             ),
             default=0,
         )
-        rwa = _first_present(
-            data,
-            ("rollouts_with_accepted_steps", "accepted_updates"),
-            default=None,
-        )
-        if rwa is None:
-            if (
-                "optimizer_steps" in data
-                and data["optimizer_steps"] is not None
-                and int(data["optimizer_steps"]) == 0
-            ):
-                rwa = 0
-            else:
-                rwa = _first_present(data, ("updates", "update"), default=0)
-
+        rwa = _resolve_accepted_rollouts(data)
         asa = _first_present(
             data,
             (
@@ -357,21 +249,7 @@ class TrainingCounters:
             ),
             default=0,
         )
-        att = _first_present(
-            data,
-            (
-                "adam_steps_attempted",
-                "attempted_steps",
-                "total_attempted_steps",
-                "attempted_optimizer_steps",
-            ),
-            default=None,
-        )
-        if att is None:
-            if "rejected_steps" in data and data["rejected_steps"] is not None:
-                att = int(asa or 0) + int(data["rejected_steps"])
-            else:
-                att = asa
+        att = _resolve_attempted_steps(data, asa)
 
         return cls(
             rollouts_collected=int(rc) if rc is not None else 0,

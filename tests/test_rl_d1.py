@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from civ5rl.config import load_config
 from civ5rl.common import configure, read_json
+from civ5rl.engine.replay_metrics import StepReplay
 from civ5rl.ppo import token_minibatches, update
 from civ5rl.validation import validate_config
 from test_rl_ppo_refactor import FakeBackend, ReverseRng
@@ -19,9 +20,9 @@ from civ5rl.protocols.diagnostic_d1 import load_weights, next_state_d1, prepare_
 
 
 class LowKLBackend(FakeBackend):
-    def kl(self):
+    def measure_step_replay(self):
         self.kl_calls += 1
-        return 0.001
+        return StepReplay(0.001, {"sampled_kl": 0.001})
 
 
 class D1Tests(unittest.TestCase):
@@ -38,27 +39,19 @@ class D1Tests(unittest.TestCase):
             self.assertTrue(all(n == 1024 for n in sizes[:-1]))
             self.assertEqual(sum(sizes), sum(lengths))
             expected = [(i, j) for i, a, b in order for j in range(a, b)]
-            actual = [
-                (i, j) for spans in batches for i, a, b in spans for j in range(a, b)
-            ]
+            actual = [(i, j) for spans in batches for i, a, b in spans for j in range(a, b)]
             self.assertEqual(actual, expected)
-            self.assertTrue(
-                all(0 < b - a <= 128 for spans in batches for _, a, b in spans)
-            )
+            self.assertTrue(all(0 < b - a <= 128 for spans in batches for _, a, b in spans))
 
     def test_per_step_stop_and_full_epoch_counts(self):
-        episodes = [
-            {"chosen": [0] * 8192, "old_value": [0.0] * 8192, "result": {"reward": 1}}
-        ]
+        episodes = [{"chosen": [0] * 8192, "old_value": [0.0] * 8192, "result": {"reward": 1}}]
         for backend, expected_steps, completed in (
             (FakeBackend, 1, 0),
             (LowKLBackend, 32, 4),
         ):
             model = torch.nn.Linear(1, 1, bias=False)
             optimizer = torch.optim.Adam(model.parameters())
-            with patch(
-                "torch.nn.utils.clip_grad_norm_", wraps=torch.nn.utils.clip_grad_norm_
-            ) as clip:
+            with patch("torch.nn.utils.clip_grad_norm_", wraps=torch.nn.utils.clip_grad_norm_) as clip:
                 result = update(
                     model,
                     optimizer,
@@ -143,21 +136,13 @@ class D1Tests(unittest.TestCase):
         base = [{"layout_id": i // 2, "side": i % 2, "win": False} for i in range(128)]
         for wins, passed in ((102, False), (103, True)):
             rows = [{**r, "win": i < wins} for i, r in enumerate(base)]
-            self.assertEqual(
-                gate("D1", {"win_rate": wins / 128}, rows, base)["passed"], passed
-            )
+            self.assertEqual(gate("D1", {"win_rate": wins / 128}, rows, base)["passed"], passed)
         state = {"status": "running", "stage_updates": 7, "consecutive": 0}
         self.assertEqual(next_state_d1(state, True)["consecutive"], 1)
+        self.assertEqual(next_state_d1({**state, "consecutive": 1}, False)["consecutive"], 0)
+        self.assertEqual(next_state_d1({**state, "stage_updates": 8}, False)["status"], "failed")
         self.assertEqual(
-            next_state_d1({**state, "consecutive": 1}, False)["consecutive"], 0
-        )
-        self.assertEqual(
-            next_state_d1({**state, "stage_updates": 8}, False)["status"], "failed"
-        )
-        self.assertEqual(
-            next_state_d1({**state, "stage_updates": 8, "consecutive": 1}, True)[
-                "status"
-            ],
+            next_state_d1({**state, "stage_updates": 8, "consecutive": 1}, True)["status"],
             "passed",
         )
 

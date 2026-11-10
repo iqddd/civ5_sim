@@ -1,8 +1,9 @@
 """Episodic recurrent PPO with exact current-weight prefix reconstruction."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from time import perf_counter
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from civ5rl.core.contracts import Episode
@@ -15,7 +16,11 @@ from civ5rl.core.distributions import policy_logits
 from civ5rl.core.model import batch_inputs, distribution_stats
 from civ5rl.core.observation import ObservationEncoder
 from civ5rl.engine.constants import DEFAULT_PREFIX_BLOCK_SIZE
-from civ5rl.engine.replay_metrics import KL_DIAGNOSTIC_KEYS, STEP_REPLAY_DIAGNOSTIC_KEYS
+from civ5rl.engine.replay_metrics import (
+    KL_DIAGNOSTIC_KEYS,
+    STEP_REPLAY_DIAGNOSTIC_KEYS,
+    StepReplay,
+)
 from civ5rl.engine.sequence import pack_minibatches
 from civ5rl.engine.spans import Span
 
@@ -33,9 +38,7 @@ def encode_episode(episode: "Episode", variant, *, reuse_cached=True):
         variant,
     )
     result = []
-    for obs, actions, chosen in zip(
-        episode["observations"], episode["actions"], episode["chosen"]
-    ):
+    for obs, actions, chosen in zip(episode["observations"], episode["actions"], episode["chosen"]):
         result.append(encoder.encode(obs, actions))
         encoder.remember_action(actions[chosen], obs)
     return result
@@ -73,11 +76,7 @@ def objective(
         ratio * advantages, ratio.clamp(1 - clip_ratio, 1 + clip_ratio) * advantages
     ).mean()
     value = (values - returns).square().mean()
-    loss = (
-        policy
-        + value_coefficient * value
-        - entropy_coefficient * normalized_entropy.mean()
-    )
+    loss = policy + value_coefficient * value - entropy_coefficient * normalized_entropy.mean()
     return loss, {
         "policy_loss": policy.detach(),
         "value_loss": value.detach(),
@@ -111,9 +110,9 @@ class RolloutBackend(Protocol):
     prefix_seconds: float
     backward_seconds: float
 
-    def precheck(self) -> tuple[float, float]: ...
+    def precheck(self) -> Mapping[str, Any]: ...
     def backward(self, minibatch, count, entropy_coefficient) -> int: ...
-    def kl(self) -> float | None: ...
+    def measure_step_replay(self) -> StepReplay: ...
     def record_gradient(self, norm) -> None: ...
     def statistics(self, tokens) -> tuple[dict, float, float]: ...
     def extras(self, optimizer_seconds) -> dict: ...
@@ -191,20 +190,18 @@ def _optimizer_attempt(
         metrics.steps += 1
     if per_step_kl:
         tick = perf_counter()
-        attempted_kl = backend.kl()
-        attempted_replay = dict(getattr(backend, "last_replay", {}))
+        attempted_replay = backend.measure_step_replay()
+        attempted_kl = attempted_replay.acceptance_kl
         if attempted_kl is not None and not np.isfinite(attempted_kl):
             raise FloatingPointError("Non-finite post-step KL")
         if controlled:
             kl_diagnostics = [
                 v
-                for k, v in attempted_replay.items()
+                for k, v in attempted_replay.diagnostics.items()
                 if k in KL_DIAGNOSTIC_KEYS and v is not None
             ]
             if not np.isfinite(kl_diagnostics).all():
-                raise FloatingPointError(
-                    "Non-finite post-step distribution diagnostics"
-                )
+                raise FloatingPointError("Non-finite post-step distribution diagnostics")
             accepted = attempted_kl is None or attempted_kl <= config["ppo"]["stop_kl"]
             if accepted:
                 metrics.steps += 1
@@ -214,16 +211,13 @@ def _optimizer_attempt(
                 snapshot.restore()
                 metrics.transaction_seconds += perf_counter() - transaction_start
                 metrics.rejected += 1
-                restored_kl = backend.kl()
+                restored_replay = backend.measure_step_replay()
+                restored_kl = restored_replay.acceptance_kl
                 if metrics.kl is None:
                     if restored_kl is not None:
                         raise RuntimeError("Rollback changed KL population")
-                elif restored_kl is None or not np.isclose(
-                    restored_kl, metrics.kl, rtol=1e-5, atol=1e-7
-                ):
-                    raise RuntimeError(
-                        f"Rollback replay mismatch: {restored_kl} != {metrics.kl}"
-                    )
+                elif restored_kl is None or not np.isclose(restored_kl, metrics.kl, rtol=1e-5, atol=1e-7):
+                    raise RuntimeError(f"Rollback replay mismatch: {restored_kl} != {metrics.kl}")
                 optimizer.zero_grad(set_to_none=True)
             del snapshot
         else:
@@ -242,11 +236,7 @@ def _optimizer_attempt(
             "final_accepted_kl": metrics.kl if controlled else None,
             "gradient_norm_pre_clip": float(norm),
             "seconds": perf_counter() - step_start,
-            **{
-                k: v
-                for k, v in attempted_replay.items()
-                if k in STEP_REPLAY_DIAGNOSTIC_KEYS
-            },
+            **{k: v for k, v in attempted_replay.diagnostics.items() if k in STEP_REPLAY_DIAGNOSTIC_KEYS},
         }
         metrics.step_records.append(record)
         if on_step is not None:
@@ -268,6 +258,13 @@ def update(
     deadline=None,
     on_step=None,
 ):
+    controlled = config["ppo"].get("step_acceptance") == "full_categorical_kl_rollback"
+    per_step_kl = (
+        config["ppo"].get("kl_measurement", "whole_rollout_after_epoch")
+        == "whole_rollout_after_optimizer_step"
+    )
+    if controlled and not per_step_kl:
+        raise ValueError("full_categorical_kl_rollback requires whole_rollout_after_optimizer_step")
     policy.train()
     start_update = perf_counter()
     if _backend is None:
@@ -289,22 +286,19 @@ def update(
         entropy_coefficient = schedule(config["ppo"]["entropy_schedule"], decisions)
     for group in optimizer.param_groups:
         group["lr"] = lr
-    pre_kl, pre_error = backend.precheck()
-    controlled = config["ppo"].get("step_acceptance") == "full_categorical_kl_rollback"
+    initial_replay = backend.precheck()
+    pre_kl = initial_replay["sampled_kl"]
+    pre_error = initial_replay["max_logp_error"]
     metrics = _UpdateMetrics(
         lr=lr,
         entropy_coefficient=entropy_coefficient,
         pre_kl=pre_kl,
         pre_error=pre_error,
         start_update=start_update,
-        kl=backend.replay["full_kl_free"] if controlled else pre_kl,
+        kl=initial_replay.get("full_kl_free") if controlled else pre_kl,
     )
     batch_chunks = config["ppo"]["sequences_per_minibatch"]
     token_count = config["ppo"].get("valid_tokens_per_minibatch")
-    per_step_kl = (
-        config["ppo"].get("kl_measurement", "whole_rollout_after_epoch")
-        == "whole_rollout_after_optimizer_step"
-    )
     stop_reason = "epochs_completed"
     for epoch in range(config["ppo"]["epochs"]):
         order = list(chunks)
@@ -312,10 +306,7 @@ def update(
         batches = (
             list(token_minibatches(order, token_count))
             if token_count
-            else [
-                order[first : first + batch_chunks]
-                for first in range(0, len(order), batch_chunks)
-            ]
+            else [order[first : first + batch_chunks] for first in range(0, len(order), batch_chunks)]
         )
         for batch_index, minibatch in enumerate(batches):
             if deadline is not None and perf_counter() >= deadline:
@@ -339,11 +330,7 @@ def update(
                 if (
                     timed_out
                     or not accepted
-                    or (
-                        not controlled
-                        and metrics.kl is not None
-                        and metrics.kl > config["ppo"]["stop_kl"]
-                    )
+                    or (not controlled and metrics.kl is not None and metrics.kl > config["ppo"]["stop_kl"])
                 ):
                     stop_reason = (
                         "active_time_limit"
@@ -357,7 +344,7 @@ def update(
             metrics.completed_epochs += 1
         if not per_step_kl:
             tick = perf_counter()
-            metrics.kl = backend.kl()
+            metrics.kl = backend.measure_step_replay().acceptance_kl
             metrics.kl_seconds += perf_counter() - tick
             if metrics.kl is not None and metrics.kl > config["ppo"]["stop_kl"]:
                 stop_reason = "stop_kl"
@@ -372,11 +359,7 @@ def update(
         rejected_optimizer_steps=metrics.rejected,
         final_accepted_kl=metrics.kl if controlled else None,
         max_attempted_kl=max(
-            (
-                r["attempted_kl"]
-                for r in metrics.step_records
-                if r["attempted_kl"] is not None
-            ),
+            (r["attempted_kl"] for r in metrics.step_records if r["attempted_kl"] is not None),
             default=None,
         ),
         transaction_seconds=metrics.transaction_seconds,
@@ -402,9 +385,7 @@ def update(
 def _summarize_ppo_update(backend, episodes, metrics: _UpdateMetrics):
     stats, gradient_mean, gradient_max = backend.statistics(metrics.tokens)
     critic_predictions = np.concatenate([e["old_value"] for e in episodes])
-    returns = np.concatenate(
-        [[e["result"]["reward"]] * len(e["chosen"]) for e in episodes]
-    )
+    returns = np.concatenate([[e["result"]["reward"]] * len(e["chosen"]) for e in episodes])
     variance = np.var(returns)
     extras = backend.extras(metrics.optimizer_seconds)
     return {

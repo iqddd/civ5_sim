@@ -1,7 +1,8 @@
 """GPU-resident rollout and batched recurrent chunks; same PPO minibatch/targets."""
 
+from dataclasses import dataclass
 from time import perf_counter
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import numpy as np
 import torch
@@ -18,10 +19,67 @@ from civ5rl.engine.constants import (
     DEFAULT_PREFIX_BLOCK_SIZE,
 )
 from civ5rl.engine.ppo import encode_episode, objective, targets
-from civ5rl.engine.replay_metrics import REPLAY_DIAGNOSTIC_KEYS
+from civ5rl.engine.replay_metrics import REPLAY_DIAGNOSTIC_KEYS, StepReplay
 from civ5rl.engine.sequence import SequenceBuffer
 from civ5rl.engine.spans import Span
 from civ5rl.engine.training import GradientAccumulator
+
+
+ReplayMode = Literal["on_demand", "host", "device"]
+
+
+class ReplayPart(NamedTuple):
+    data: dict[str, torch.Tensor]
+    labels: dict[str, torch.Tensor]
+    lengths: list[int]
+    slots: torch.Tensor | None
+    free_count: int
+
+
+class HostReplayPart(NamedTuple):
+    data: dict[str, torch.Tensor]
+    labels: dict[str, torch.Tensor]
+    lengths: list[int]
+    slots: torch.Tensor | None
+    free_count: int
+    is_pinned: bool
+
+
+def _part_tensor_bytes(data, labels, slots) -> int:
+    return sum(
+        t.numel() * t.element_size()
+        for t in (
+            *data.values(),
+            *labels.values(),
+            *((slots,) if slots is not None else ()),
+        )
+    )
+
+
+@dataclass
+class ReplayPlan:
+    """Prepared rollout replay plan with an explicit placement mode."""
+
+    mode: ReplayMode
+    sequences_per_batch: int
+    groups: list[tuple[int, list]]
+    cached_bytes: int = 0
+    _count_host_hits: bool = False
+
+    def iter_groups(self, cache):
+        if self.mode == "device":
+            yield from self.groups
+            return
+        if self.mode == "host":
+            count_hits = self._count_host_hits
+            self._count_host_hits = True
+            yield from _stream_pinned_groups(cache, self.groups, count_hits=count_hits)
+            return
+        for group_size, specs in self.groups:
+            parts = _replay_parts(cache, specs)
+            if not getattr(cache, "cpu_labels", False):
+                parts = list(parts)
+            yield group_size, parts
 
 
 def categorical_distance(behavior_log_probs, logits, mask):
@@ -53,14 +111,8 @@ def validate_behavior_replay(
     kl_tolerance = numerics.get("replay_max_kl", 1e-6)
     has_distribution = full_kl is not None and max_total_variation is not None
     use_distribution = amp_enabled and has_distribution
-    if (
-        amp_enabled
-        and numerics.get("require_full_behavior_distribution", False)
-        and not use_distribution
-    ):
-        raise RuntimeError(
-            "BF16 replay verification requires complete behavior distributions"
-        )
+    if amp_enabled and numerics.get("require_full_behavior_distribution", False) and not use_distribution:
+        raise RuntimeError("BF16 replay verification requires complete behavior distributions")
     distribution_bad = has_distribution and (
         not np.isfinite([full_kl, max_total_variation]).all()
         or full_kl > kl_tolerance
@@ -72,8 +124,11 @@ def validate_behavior_replay(
         or pre_kl > kl_tolerance
         or distribution_bad
     ):
+        mode_name = "full_distribution" if use_distribution else "sampled_logp"
         raise RuntimeError(
-            f"Behavior/replay mismatch: max_logp_error={max_logp_error}, sampled_KL={pre_kl}, full_KL={full_kl}, max_TV={max_total_variation}; mode={'full_distribution' if use_distribution else 'sampled_logp'}"
+            f"Behavior/replay mismatch: max_logp_error={max_logp_error}, "
+            f"sampled_KL={pre_kl}, full_KL={full_kl}, "
+            f"max_TV={max_total_variation}; mode={mode_name}"
         )
     return None if use_distribution else tolerance
 
@@ -81,27 +136,17 @@ def validate_behavior_replay(
 class RolloutCache(SequenceBuffer):
     def __init__(self, episodes, variant, device, *, resident=True, cpu_labels=False):
         self.episodes, self.device = episodes, device
-        super().__init__(
-            [encode_episode(e, variant) for e in episodes], device, resident=resident
-        )
+        super().__init__([encode_episode(e, variant) for e in episodes], device, resident=resident)
         flat = [x for episode in self.encoded for x in episode]
         self.resident = resident
         self.cpu_labels = cpu_labels
         label_device = "cpu" if cpu_labels else device
         advantages = targets(episodes)
         self.labels = {
-            "indices": torch.tensor(
-                [v for ep in episodes for v in ep["chosen"]], device=label_device
-            ),
-            "old_logp": torch.tensor(
-                [v for ep in episodes for v in ep["old_logp"]], device=label_device
-            ),
+            "indices": torch.tensor([v for ep in episodes for v in ep["chosen"]], device=label_device),
+            "old_logp": torch.tensor([v for ep in episodes for v in ep["old_logp"]], device=label_device),
             "returns": torch.tensor(
-                [
-                    float(ep["result"]["reward"])
-                    for ep in episodes
-                    for _ in ep["chosen"]
-                ],
+                [float(ep["result"]["reward"]) for ep in episodes for _ in ep["chosen"]],
                 device=label_device,
             ),
             "advantages": torch.tensor(np.concatenate(advantages), device=label_device),
@@ -112,19 +157,14 @@ class RolloutCache(SequenceBuffer):
         self.has_behavior_distribution = all(has_full)
         self.ragged_behavior = None
         if self.has_behavior_distribution and cpu_labels:
-            self.ragged_behavior = [
-                values for ep in episodes for values in ep["old_log_probs"]
-            ]
+            self.ragged_behavior = [values for ep in episodes for values in ep["old_log_probs"]]
             if len(self.ragged_behavior) != len(flat):
                 raise ValueError("Behavior distribution count differs from decisions")
-            for i, (values, count) in enumerate(
-                zip(self.ragged_behavior, self.action_counts)
-            ):
+            for i, (values, count) in enumerate(zip(self.ragged_behavior, self.action_counts)):
                 if (
                     len(values) != count
                     or not np.isfinite(values).all()
-                    or float(values[int(self.labels["indices"][i])])
-                    != float(self.labels["old_logp"][i])
+                    or float(values[int(self.labels["indices"][i])]) != float(self.labels["old_logp"][i])
                     or not np.isclose(np.exp(values).sum(), 1.0, atol=1e-5, rtol=0)
                 ):
                     raise ValueError("Invalid ragged behavior distribution")
@@ -141,9 +181,7 @@ class RolloutCache(SequenceBuffer):
             behavior = torch.tensor(behavior, device=device)
             selected = behavior.gather(1, self.labels["indices"][:, None])[:, 0]
             if not torch.equal(selected, self.labels["old_logp"]):
-                raise ValueError(
-                    "Recorded chosen logp differs from behavior distribution"
-                )
+                raise ValueError("Recorded chosen logp differs from behavior distribution")
             if not torch.allclose(
                 behavior.exp().sum(-1),
                 torch.ones(len(flat), device=device),
@@ -152,18 +190,28 @@ class RolloutCache(SequenceBuffer):
             ):
                 raise ValueError("Behavior probabilities do not sum to one")
             self.labels["old_log_probs"] = behavior
-        self.resident_bytes = sum(
-            v.numel() * v.element_size() for v in (self.data or {}).values()
-        ) + sum(v.numel() * v.element_size() for v in self.labels.values())
+        self.resident_bytes = sum(v.numel() * v.element_size() for v in (self.data or {}).values()) + sum(
+            v.numel() * v.element_size() for v in self.labels.values()
+        )
         self.spatial_cell_padding = 0
         self.replay_inputs = False
-        self._replay_plan = None
-        self._pinned_plan = None
+        self._replay_plan: ReplayPlan | None = None
         self._replay_h2d_stream = None
         self._replay_sums_runner = None
         self._pinned_replay = None
+        self._pinned_replay_limit = 0
         self.pinned_replay_bytes = 0
         self.pinned_replay_hits = 0
+
+    @property
+    def replay_mode(self) -> ReplayMode:
+        return self._replay_plan.mode if self._replay_plan is not None else "on_demand"
+
+    @property
+    def cached_replay_bytes(self) -> int:
+        if self._replay_plan is not None and self._replay_plan.mode == "device":
+            return self._replay_plan.cached_bytes
+        return 0
 
     def enable_cached_replay(self):
         """Cache inputs only; GRU state and logits always use current weights."""
@@ -173,27 +221,23 @@ class RolloutCache(SequenceBuffer):
             free, _ = torch.cuda.mem_get_info(self.device)
             if free < self.resident_bytes + DEFAULT_GPU_RESERVE_BYTES:
                 return
-            self._replay_sums_runner = torch.compile(
-                _replay_sums, dynamic=True, fullgraph=True
-            )
+            self._replay_sums_runner = torch.compile(_replay_sums, dynamic=True, fullgraph=True)
         self.replay_inputs = True
+        self._replay_plan = None
 
     def enable_pinned_replay(self, limit_bytes=DEFAULT_PINNED_REPLAY_BYTES):
         """Keep immutable replay inputs on CPU; stream each part to the GPU."""
-        if (
-            self.data is None
-            and self.cpu_labels
-            and str(self.device).startswith("cuda")
-        ):
+        if self.data is None and self.cpu_labels and str(self.device).startswith("cuda"):
             self._pinned_replay = {}
             self._pinned_replay_limit = limit_bytes
+            self._replay_plan = None
 
-    def _build_pinned_plan(self, sequences_per_batch, *, cpu_groups=None):
+    def _build_host_groups(self, sequences_per_batch, *, cpu_groups=None):
         if cpu_groups is None:
             cpu_groups, _ = self._collect_cpu_replay_groups(sequences_per_batch)
-        pinned_groups = []
+        host_groups = []
         for group_size, parts in cpu_groups:
-            pinned_parts = []
+            host_parts = []
             for key, data, labels, lengths, slots, free_count, part_bytes in parts:
                 is_pinned = False
                 if (
@@ -207,12 +251,9 @@ class RolloutCache(SequenceBuffer):
                     self._pinned_replay[key] = data, labels, lengths
                     self.pinned_replay_bytes += part_bytes
                     is_pinned = True
-                pinned_parts.append(
-                    (data, labels, lengths, slots, free_count, is_pinned)
-                )
-            pinned_groups.append((group_size, pinned_parts))
-        self._pinned_plan = (sequences_per_batch, pinned_groups)
-        return pinned_groups
+                host_parts.append(HostReplayPart(data, labels, lengths, slots, free_count, is_pinned))
+            host_groups.append((group_size, host_parts))
+        return host_groups
 
     def _collect_cpu_replay_groups(self, sequences_per_batch):
         cpu_groups = []
@@ -220,54 +261,110 @@ class RolloutCache(SequenceBuffer):
         for group_size, specs in _replay_group_specs(self, sequences_per_batch):
             parts = []
             for spans, slots_list, free_count in specs:
-                data, labels, lengths = self.batch(
-                    spans, device="cpu", min_cells=self.spatial_cell_padding
-                )
-                slots = (
-                    None
-                    if slots_list is None
-                    else torch.tensor(slots_list, dtype=torch.long)
-                )
-                part_bytes = sum(
-                    t.numel() * t.element_size()
-                    for t in (
-                        *data.values(),
-                        *labels.values(),
-                        *((slots,) if slots is not None else ()),
-                    )
-                )
+                data, labels, lengths = self.batch(spans, device="cpu", min_cells=self.spatial_cell_padding)
+                slots = None if slots_list is None else torch.tensor(slots_list, dtype=torch.long)
+                part_bytes = _part_tensor_bytes(data, labels, slots)
                 total_bytes += part_bytes
-                parts.append(
-                    (tuple(spans), data, labels, lengths, slots, free_count, part_bytes)
-                )
+                parts.append((tuple(spans), data, labels, lengths, slots, free_count, part_bytes))
             cpu_groups.append((group_size, parts))
         return cpu_groups, total_bytes
 
-    def stage_gpu_replay(
-        self, sequences_per_batch=8, *, reserve_bytes=2 * DEFAULT_GPU_RESERVE_BYTES
-    ):
+    def prepare_replay_plan(
+        self,
+        sequences_per_batch=8,
+        *,
+        reserve_bytes=2 * DEFAULT_GPU_RESERVE_BYTES,
+        prefer_device=False,
+    ) -> ReplayPlan:
+        """Select replay placement (on_demand, host, or device) and build the typed plan."""
+        if (
+            self._replay_plan is not None
+            and self._replay_plan.sequences_per_batch == sequences_per_batch
+            and (not prefer_device or self._replay_plan.mode == "device")
+        ):
+            return self._replay_plan
+
+        if prefer_device and str(self.device).startswith("cuda"):
+            cpu_groups, total_bytes = self._collect_cpu_replay_groups(sequences_per_batch)
+            free, _ = torch.cuda.mem_get_info(self.device)
+            if free >= total_bytes + reserve_bytes:
+                gpu_groups = []
+                for group_size, parts in cpu_groups:
+                    gpu_parts = []
+                    for _, data, labels, lengths, slots, free_count, _ in parts:
+                        gpu_data = {k: v.to(self.device) for k, v in data.items()}
+                        gpu_labels = {k: v.to(self.device) for k, v in labels.items()}
+                        gpu_slots = None if slots is None else slots.to(self.device)
+                        gpu_parts.append(ReplayPart(gpu_data, gpu_labels, lengths, gpu_slots, free_count))
+                    gpu_groups.append((group_size, gpu_parts))
+                self.replay_inputs = True
+                self._replay_plan = ReplayPlan(
+                    mode="device",
+                    sequences_per_batch=sequences_per_batch,
+                    groups=gpu_groups,
+                    cached_bytes=total_bytes,
+                )
+                return self._replay_plan
+            if self._pinned_replay is not None:
+                if (
+                    self._replay_plan is not None
+                    and self._replay_plan.sequences_per_batch == sequences_per_batch
+                    and self._replay_plan.mode == "host"
+                ):
+                    self._replay_plan._count_host_hits = True
+                    return self._replay_plan
+                host_groups = self._build_host_groups(sequences_per_batch, cpu_groups=cpu_groups)
+                self._replay_plan = ReplayPlan(
+                    mode="host",
+                    sequences_per_batch=sequences_per_batch,
+                    groups=host_groups,
+                    _count_host_hits=True,
+                )
+                return self._replay_plan
+
+        if self._pinned_replay is not None:
+            host_groups = self._build_host_groups(sequences_per_batch)
+            self._replay_plan = ReplayPlan(
+                mode="host",
+                sequences_per_batch=sequences_per_batch,
+                groups=host_groups,
+                _count_host_hits=False,
+            )
+            return self._replay_plan
+
+        specs_by_group = list(_replay_group_specs(self, sequences_per_batch))
+        if self.replay_inputs:
+            device_groups = []
+            total_bytes = 0
+            for group_size, specs in specs_by_group:
+                parts = list(_replay_parts(self, specs))
+                for part in parts:
+                    total_bytes += _part_tensor_bytes(part.data, part.labels, part.slots)
+                device_groups.append((group_size, parts))
+            self._replay_plan = ReplayPlan(
+                mode="device",
+                sequences_per_batch=sequences_per_batch,
+                groups=device_groups,
+                cached_bytes=total_bytes,
+            )
+            return self._replay_plan
+
+        self._replay_plan = ReplayPlan(
+            mode="on_demand",
+            sequences_per_batch=sequences_per_batch,
+            groups=specs_by_group,
+        )
+        return self._replay_plan
+
+    def stage_gpu_replay(self, sequences_per_batch=8, *, reserve_bytes=2 * DEFAULT_GPU_RESERVE_BYTES):
         """Stage pre-packed immutable replay parts in VRAM when reserve permits."""
         if not str(self.device).startswith("cuda"):
-            return
-        if self._replay_plan is not None and self._replay_plan[0] == sequences_per_batch:
-            return
-        cpu_groups, total_bytes = self._collect_cpu_replay_groups(sequences_per_batch)
-        free, _ = torch.cuda.mem_get_info(self.device)
-        if free >= total_bytes + reserve_bytes:
-            gpu_groups = []
-            for group_size, parts in cpu_groups:
-                gpu_parts = []
-                for _, data, labels, lengths, slots, free_count, _ in parts:
-                    gpu_data = {k: v.to(self.device) for k, v in data.items()}
-                    gpu_labels = {k: v.to(self.device) for k, v in labels.items()}
-                    gpu_slots = None if slots is None else slots.to(self.device)
-                    gpu_parts.append((gpu_data, gpu_labels, lengths, gpu_slots, free_count))
-                gpu_groups.append((group_size, gpu_parts))
-            self._replay_plan = (sequences_per_batch, gpu_groups)
-            self.replay_inputs = True
-            return
-        if self._pinned_replay is not None:
-            self._build_pinned_plan(sequences_per_batch, cpu_groups=cpu_groups)
+            return None
+        return self.prepare_replay_plan(
+            sequences_per_batch,
+            reserve_bytes=reserve_bytes,
+            prefer_device=True,
+        )
 
     def replay_batch(self, spans):
         if self._pinned_replay is None:
@@ -275,12 +372,8 @@ class RolloutCache(SequenceBuffer):
         key = tuple(spans)
         part = self._pinned_replay.get(key)
         if part is None:
-            data, labels, lengths = self.batch(
-                spans, device="cpu", min_cells=self.spatial_cell_padding
-            )
-            size = sum(
-                v.numel() * v.element_size() for v in (*data.values(), *labels.values())
-            )
+            data, labels, lengths = self.batch(spans, device="cpu", min_cells=self.spatial_cell_padding)
+            size = sum(v.numel() * v.element_size() for v in (*data.values(), *labels.values()))
             if self.pinned_replay_bytes + size <= self._pinned_replay_limit:
                 data = {k: v.pin_memory() for k, v in data.items()}
                 labels = {k: v.pin_memory() for k, v in labels.items()}
@@ -317,12 +410,8 @@ class RolloutCache(SequenceBuffer):
             data = {
                 **data,
                 "cells": torch.nn.functional.pad(data["cells"], (0, 0, 0, extra)),
-                "neighbors": torch.nn.functional.pad(
-                    data["neighbors"], (0, 0, 0, extra), value=-1
-                ),
-                "cell_mask": torch.nn.functional.pad(
-                    data["cell_mask"], (0, extra), value=False
-                ),
+                "neighbors": torch.nn.functional.pad(data["neighbors"], (0, 0, 0, extra), value=-1),
+                "cell_mask": torch.nn.functional.pad(data["cell_mask"], (0, extra), value=False),
             }
         selected = indices.cpu() if self.cpu_labels else indices
         labels = {
@@ -332,9 +421,7 @@ class RolloutCache(SequenceBuffer):
         }
         if include_behavior and self.ragged_behavior is not None:
             rows = [self.ragged_behavior[i] for i in selected.tolist()]
-            behavior = np.full(
-                (len(rows), data["action_mask"].shape[1]), -np.inf, np.float32
-            )
+            behavior = np.full((len(rows), data["action_mask"].shape[1]), -np.inf, np.float32)
             for i, values in enumerate(rows):
                 behavior[i, : len(values)] = values
             labels["old_log_probs"] = torch.from_numpy(behavior).to(device)
@@ -348,15 +435,8 @@ def prefixes(policy, cache, spans, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
     hidden = torch.zeros((1, len(spans), policy.hidden_size), device=cache.device)
     is_cuda = str(cache.device).startswith("cuda")
     for offset in range(0, max((start for _, start, _ in spans), default=0), block_size):
-        active = [
-            (slot, episode, start)
-            for slot, (episode, start, _) in enumerate(spans)
-            if start > offset
-        ]
-        subspans = [
-            Span(episode, offset, min(start, offset + block_size))
-            for _, episode, start in active
-        ]
+        active = [(slot, episode, start) for slot, (episode, start, _) in enumerate(spans) if start > offset]
+        subspans = [Span(episode, offset, min(start, offset + block_size)) for _, episode, start in active]
         if hasattr(cache, "gather_spatial_inputs"):
             batch = cache.gather_spatial_inputs(subspans)
             lengths = [span.length for span in subspans]
@@ -365,18 +445,14 @@ def prefixes(policy, cache, spans, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
         if policy.spatial_cuda_graphs:
             torch.compiler.cudagraph_mark_step_begin()
         if len(active) == len(spans):
-            hidden = policy.forward_sequences(
-                batch, lengths, hidden, memory_only=True
-            )
+            hidden = policy.forward_sequences(batch, lengths, hidden, memory_only=True)
         else:
             slots = torch.tensor(
                 [slot for slot, _, _ in active],
                 dtype=torch.long,
                 pin_memory=is_cuda,
             ).to(cache.device, non_blocking=is_cuda)
-            last = policy.forward_sequences(
-                batch, lengths, hidden.index_select(1, slots), memory_only=True
-            )
+            last = policy.forward_sequences(batch, lengths, hidden.index_select(1, slots), memory_only=True)
             hidden.index_copy_(1, slots, last)
     return hidden
 
@@ -428,9 +504,7 @@ def _part_free_count(cache, spans):
         int(
             (
                 cache.action_counts[
-                    int(cache.offsets[span.episode]) + span.start : int(
-                        cache.offsets[span.episode]
-                    )
+                    int(cache.offsets[span.episode]) + span.start : int(cache.offsets[span.episode])
                     + span.stop
                 ]
                 >= MIN_FREE_ACTIONS
@@ -442,9 +516,7 @@ def _part_free_count(cache, spans):
 
 def _replay_group_specs(cache, sequences_per_batch):
     for first in range(0, len(cache.episodes), sequences_per_batch):
-        episodes = list(
-            range(first, min(first + sequences_per_batch, len(cache.episodes)))
-        )
+        episodes = list(range(first, min(first + sequences_per_batch, len(cache.episodes))))
         group_size = len(episodes)
         max_length = max(len(cache.encoded[episode]) for episode in episodes)
         specs = []
@@ -465,9 +537,7 @@ def _replay_group_specs(cache, sequences_per_batch):
                 )
                 for _, episode in active
             ]
-            slots_list = (
-                None if len(active) == group_size else [slot for slot, _ in active]
-            )
+            slots_list = None if len(active) == group_size else [slot for slot, _ in active]
             specs.append((spans, slots_list, _part_free_count(cache, spans)))
         yield group_size, specs
 
@@ -483,33 +553,22 @@ def _stream_pinned_groups(cache, pinned_groups, *, count_hits):
         cpu_data, cpu_labels, lengths, cpu_slots, free_count, is_pinned = part
         h2d_stream.wait_stream(default_stream)
         with torch.cuda.stream(h2d_stream):
-            gpu_data = {
-                k: v.to(cache.device, non_blocking=is_pinned)
-                for k, v in cpu_data.items()
-            }
-            gpu_labels = {
-                k: v.to(cache.device, non_blocking=is_pinned)
-                for k, v in cpu_labels.items()
-            }
-            gpu_slots = (
-                None
-                if cpu_slots is None
-                else cpu_slots.to(cache.device, non_blocking=is_pinned)
-            )
+            gpu_data = {k: v.to(cache.device, non_blocking=is_pinned) for k, v in cpu_data.items()}
+            gpu_labels = {k: v.to(cache.device, non_blocking=is_pinned) for k, v in cpu_labels.items()}
+            gpu_slots = None if cpu_slots is None else cpu_slots.to(cache.device, non_blocking=is_pinned)
             done = torch.cuda.Event()
             done.record(h2d_stream)
         return gpu_data, gpu_labels, lengths, gpu_slots, free_count, is_pinned, done
 
     state = {"idx": 0, "inflight": _enqueue(flat[0]) if flat else None}
     for group_size, g_parts in pinned_groups:
+
         def _iter_group(num_parts=len(g_parts)):
             for _ in range(num_parts):
                 cur = state["inflight"]
                 nxt_idx = state["idx"] + 1
                 state["idx"] = nxt_idx
-                state["inflight"] = (
-                    _enqueue(flat[nxt_idx]) if nxt_idx < len(flat) else None
-                )
+                state["inflight"] = _enqueue(flat[nxt_idx]) if nxt_idx < len(flat) else None
                 (
                     gpu_data,
                     gpu_labels,
@@ -526,7 +585,7 @@ def _stream_pinned_groups(cache, pinned_groups, *, count_hits):
                     gpu_slots.record_stream(default_stream)
                 if count_hits and is_pinned:
                     cache.pinned_replay_hits += 1
-                yield gpu_data, gpu_labels, lengths, gpu_slots, free_count
+                yield ReplayPart(gpu_data, gpu_labels, lengths, gpu_slots, free_count)
 
         yield group_size, _iter_group()
 
@@ -542,41 +601,22 @@ def _replay_parts(cache, specs):
         else:
             batch, labels, lengths = cache.batch(spans)
         slots = (
-            None
-            if slots_list is None
-            else torch.tensor(slots_list, dtype=torch.long, device=cache.device)
+            None if slots_list is None else torch.tensor(slots_list, dtype=torch.long, device=cache.device)
         )
-        yield batch, labels, lengths, slots, free_count
+        yield ReplayPart(batch, labels, lengths, slots, free_count)
 
 
 def _replay_groups(cache, sequences_per_batch):
     # Immutable inputs only: no prefix states or outputs from previous weights.
-    previous = getattr(cache, "_replay_plan", None)
-    if previous is not None and previous[0] == sequences_per_batch:
-        yield from previous[1]
+    if hasattr(cache, "prepare_replay_plan"):
+        plan = cache.prepare_replay_plan(sequences_per_batch)
+        yield from plan.iter_groups(cache)
         return
-    if getattr(cache, "_pinned_replay", None) is not None and hasattr(
-        cache, "_build_pinned_plan"
-    ):
-        pinned = getattr(cache, "_pinned_plan", None)
-        if pinned is not None and pinned[0] == sequences_per_batch:
-            yield from _stream_pinned_groups(cache, pinned[1], count_hits=True)
-            return
-        groups = cache._build_pinned_plan(sequences_per_batch)
-        yield from _stream_pinned_groups(cache, groups, count_hits=False)
-        return
-    cache_inputs = bool(getattr(cache, "replay_inputs", False))
-    plan = []
     for group_size, specs in _replay_group_specs(cache, sequences_per_batch):
         parts = _replay_parts(cache, specs)
-        if cache_inputs or not getattr(cache, "cpu_labels", False):
+        if not getattr(cache, "cpu_labels", False):
             parts = list(parts)
-        group = group_size, parts
-        if cache_inputs:
-            plan.append(group)
-        yield group
-    if cache_inputs:
-        cache._replay_plan = sequences_per_batch, plan
+        yield group_size, parts
 
 
 @torch.no_grad()
@@ -592,17 +632,13 @@ def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=Fa
     runner = getattr(cache, "_replay_sums_runner", None) or _replay_sums
     for group_size, parts in _replay_groups(cache, sequences_per_batch):
         hidden = (
-            torch.zeros((1, group_size, policy.hidden_size), device=device)
-            if policy.is_recurrent
-            else None
+            torch.zeros((1, group_size, policy.hidden_size), device=device) if policy.is_recurrent else None
         )
         for batch, labels, lengths, slots, part_free in parts:
             if policy.spatial_cuda_graphs:
                 torch.compiler.cudagraph_mark_step_begin()
             part_hidden = (
-                None
-                if hidden is None
-                else (hidden if slots is None else hidden.index_select(1, slots))
+                None if hidden is None else (hidden if slots is None else hidden.index_select(1, slots))
             )
             logits, value, last = policy.forward_sequences(
                 batch,
@@ -634,9 +670,7 @@ def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=Fa
                     batch["action_mask"],
                 )
                 full_total += kl.sum()
-                full_free_total += kl.masked_fill(
-                    batch["action_mask"].sum(-1) < MIN_FREE_ACTIONS, 0
-                ).sum()
+                full_free_total += kl.masked_fill(batch["action_mask"].sum(-1) < MIN_FREE_ACTIONS, 0).sum()
                 max_tv = torch.maximum(max_tv, tv.max())
     # One host transfer for all diagnostics; full-distribution sums stay FP64.
     host_metrics = (
@@ -662,16 +696,12 @@ def measure_replay(policy, cache, sequences_per_batch=8, *, full_distribution=Fa
         "critic_mean": replay.critic_sum / count,
         "critic_mse": replay.residual_square_sum / count,
         "critic_explained_variance": (
-            1
-            - (replay.residual_square_sum / count - (replay.residual_sum / count) ** 2)
-            / variance
+            1 - (replay.residual_square_sum / count - (replay.residual_sum / count) ** 2) / variance
             if variance > 1e-12
             else None
         ),
         "max_logp_error": replay.max_logp_error,
-        "full_kl": replay.full_kl / count
-        if full_distribution and cache.has_behavior_distribution
-        else None,
+        "full_kl": replay.full_kl / count if full_distribution and cache.has_behavior_distribution else None,
         "full_kl_free": replay.full_kl_free / free_count
         if full_distribution and cache.has_behavior_distribution and free_count
         else None,
@@ -716,13 +746,9 @@ class BatchedBackend:
             resident=options.get("resident_rollout", True) if batched else False,
             cpu_labels=options.get("cpu_rollout_labels", False),
         )
-        self.cache.spatial_cell_padding = int(
-            getattr(policy, "spatial_cell_padding", 0) or 0
-        )
+        self.cache.spatial_cell_padding = int(getattr(policy, "spatial_cell_padding", 0) or 0)
         self.kl_batch = options.get("kl_sequences_per_batch", 8)
-        if str(device).startswith("cuda") and options.get(
-            "ppo_optimized_inputs", False
-        ):
+        if str(device).startswith("cuda") and options.get("ppo_optimized_inputs", False):
             self.cache.enable_compiled_gather()
             self.cache.enable_async_transfers()
         if options.get("ppo_cached_replay", False):
@@ -744,15 +770,17 @@ class BatchedBackend:
         self.totals = torch.zeros(len(self.names), device=device)
         self.gradients = []
         self.prefix_seconds = self.backward_seconds = 0.0
-        self.micro_chunks = (
-            config["ppo"].get("sequences_per_microbatch", 1) if batched else 1
-        )
+        self.micro_chunks = config["ppo"].get("sequences_per_microbatch", 1) if batched else 1
 
     def precheck(self):
         if self.monitor:
             self.monitor.mark("behavior_replay")
         self.replay = measure_replay(
-            self.policy, self.cache, self.kl_batch, full_distribution=True, temperature=self.temperature
+            self.policy,
+            self.cache,
+            self.kl_batch,
+            full_distribution=True,
+            temperature=self.temperature,
         )
         pre_kl, pre_error = self.replay["sampled_kl"], self.replay["max_logp_error"]
         self.replay_tolerance = validate_behavior_replay(
@@ -767,7 +795,7 @@ class BatchedBackend:
             self.monitor.mark("ppo", ppo_epoch=0)
         if not 1 <= self.micro_chunks <= self.config["ppo"]["sequences_per_minibatch"]:
             raise ValueError("Microbatch must contain 1..minibatch chunks")
-        return pre_kl, pre_error
+        return dict(self.replay)
 
     def backward(self, minibatch, count, entropy_coefficient):
         if self.policy.spatial_cuda_graphs:
@@ -787,9 +815,7 @@ class BatchedBackend:
             logits, value, _ = self.policy.forward_sequences(
                 batch,
                 lengths,
-                None
-                if hidden is None
-                else hidden[:, micro_start : micro_start + len(spans)].contiguous(),
+                None if hidden is None else hidden[:, micro_start : micro_start + len(spans)].contiguous(),
             )
             loss, stats = objective(
                 logits,
@@ -808,30 +834,34 @@ class BatchedBackend:
             weighted_loss = loss * (valid_tokens / count)
             accumulator.backward(weighted_loss)
             self.backward_seconds += perf_counter() - tick
-            self.totals += (
-                torch.stack([stats[key] for key in self.names]) * valid_tokens
-            )
+            self.totals += torch.stack([stats[key] for key in self.names]) * valid_tokens
             tokens += valid_tokens
         if not finite.item():
             raise FloatingPointError("Non-finite batched PPO loss")
         return tokens
 
-    def kl(self):
-        exact = (
-            self.config["ppo"].get("step_acceptance") == "full_categorical_kl_rollback"
-        )
+    def measure_step_replay(self) -> StepReplay:
+        exact = self.config["ppo"].get("step_acceptance") == "full_categorical_kl_rollback"
         if exact and not self.cache.has_behavior_distribution:
             raise ValueError("Controlled PPO requires behavior distributions")
-        self.last_replay = measure_replay(
-            self.policy, self.cache, self.kl_batch, full_distribution=exact, temperature=self.temperature
+        diagnostics = measure_replay(
+            self.policy,
+            self.cache,
+            self.kl_batch,
+            full_distribution=exact,
+            temperature=self.temperature,
         )
+        self.last_replay = diagnostics
         if exact:
-            return self.last_replay["full_kl_free"]
-        return (
-            self.last_replay["sampled_kl_free"]
-            if self.config["ppo"].get("kl_population") == "free"
-            else self.last_replay["sampled_kl"]
-        )
+            acceptance_kl = diagnostics["full_kl_free"]
+        elif self.config["ppo"].get("kl_population") == "free":
+            acceptance_kl = diagnostics["sampled_kl_free"]
+        else:
+            acceptance_kl = diagnostics["sampled_kl"]
+        return StepReplay(acceptance_kl=acceptance_kl, diagnostics=diagnostics)
+
+    def kl(self):
+        return self.measure_step_replay().acceptance_kl
 
     def record_gradient(self, norm):
         self.gradients.append(norm.detach())
@@ -856,37 +886,21 @@ class BatchedBackend:
             },
             "pre_update_full_kl": self.replay["full_kl"],
             "pre_update_max_total_variation": self.replay["max_total_variation"],
-            "behavior_check": "full_distribution"
-            if self.replay_tolerance is None
-            else "sampled_logp",
+            "behavior_check": "full_distribution" if self.replay_tolerance is None else "sampled_logp",
             "behavior_logp_tolerance": self.replay_tolerance,
             "optimizer_seconds": optimizer_seconds,
             "cache_seconds": self.cache_seconds,
             "rollout_device_bytes": self.cache.resident_bytes,
+            "replay_mode": self.cache.replay_mode,
             "cached_replay_inputs": self.cache.replay_inputs,
             "pinned_replay_input_bytes": self.cache.pinned_replay_bytes,
             "pinned_replay_hits": self.cache.pinned_replay_hits,
-            "cached_replay_input_bytes": sum(
-                tensor.numel() * tensor.element_size()
-                for _, parts in (
-                    self.cache._replay_plan[1]
-                    if self.cache._replay_plan is not None
-                    else []
-                )
-                for data, labels, _, slots, _ in parts
-                for tensor in (
-                    *data.values(),
-                    *labels.values(),
-                    *((slots,) if slots is not None else ()),
-                )
-            ),
+            "cached_replay_input_bytes": self.cache.cached_replay_bytes,
             "microbatch_sequences": self.micro_chunks,
         }
 
 
-def update_fast(
-    policy, optimizer, episodes, config, decisions, device, shuffle_rng, monitor=None
-):
+def update_fast(policy, optimizer, episodes, config, decisions, device, shuffle_rng, monitor=None):
     """Compatibility entry point; use the batched backend regardless of config."""
     from functools import partial
 

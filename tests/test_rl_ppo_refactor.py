@@ -1,6 +1,7 @@
 import unittest
 
 import torch
+from civ5rl.engine.replay_metrics import StepReplay
 from civ5rl.ppo import update
 
 
@@ -25,16 +26,16 @@ class FakeBackend:
         self.kl_calls = 0
 
     def precheck(self):
-        return 0.0, 0.0
+        return {"sampled_kl": 0.0, "max_logp_error": 0.0}
 
     def backward(self, minibatch, count, entropy_coefficient):
         self.batches.append((list(minibatch), count, entropy_coefficient))
         self.policy.weight.sum().backward()
         return count
 
-    def kl(self):
+    def measure_step_replay(self):
         self.kl_calls += 1
-        return 0.1
+        return StepReplay(0.1, {"sampled_kl": 0.1})
 
     def record_gradient(self, norm):
         self.gradients.append(norm.item())
@@ -80,9 +81,7 @@ class PPOControlTests(unittest.TestCase):
         policy = torch.nn.Linear(1, 1, bias=False)
         optimizer = torch.optim.SGD(policy.parameters(), lr=1)
         rng = ReverseRng()
-        result = update(
-            policy, optimizer, episodes, config, 50, "cpu", rng, _backend=FakeBackend
-        )
+        result = update(policy, optimizer, episodes, config, 50, "cpu", rng, _backend=FakeBackend)
         backend = FakeBackend.instance
         self.assertEqual([x[1] for x in backend.batches], [3, 4])
         self.assertTrue(all(x[2] == 0.05 for x in backend.batches))
