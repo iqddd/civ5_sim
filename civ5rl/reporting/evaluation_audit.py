@@ -5,36 +5,27 @@ from pathlib import Path
 
 import numpy as np
 
-from civ5rl.protocols.common import bootstrap_ci95
+from civ5rl.protocols.common import bootstrap_ci95, learner_outcome
 from civ5rl.provenance.common import ROOT, read_json
 from civ5sim.engine import digest
 
 
-def paired_world_bootstrap(
-    before, after, *, samples, seed, clusters=16, cases=None, cases_per_world=4
-):
+def paired_world_bootstrap(before, after, *, samples, seed, clusters=16, cases=None, cases_per_world=4):
     """Bootstrap matched outcomes by parent world, preserving case order."""
     if before.keys() != after.keys():
         raise ValueError("Unpaired evaluation cases")
     worlds = sorted({key[0] for key in before})
     if len(worlds) != clusters:
         raise ValueError("Wrong bootstrap cluster count")
-    if any(
-        len([key for key in before if key[0] == world]) != cases_per_world
-        for world in worlds
-    ):
+    if any(len([key for key in before if key[0] == world]) != cases_per_world for world in worlds):
         raise ValueError("Wrong paired case count per parent world")
     if cases is not None:
         if cases.keys() != before.keys():
             raise ValueError("Missing paired case metadata")
         for world in worlds:
-            combinations = [
-                (cases[key]["placement"], key[2]) for key in before if key[0] == world
-            ]
+            combinations = [(cases[key]["placement"], key[2]) for key in before if key[0] == world]
             if set(combinations) != {
-                (placement, side)
-                for placement in ("contact", "separated")
-                for side in (0, 1)
+                (placement, side) for placement in ("contact", "separated") for side in (0, 1)
             }:
                 raise ValueError("Expected both placements and sides per parent world")
             if any(
@@ -44,12 +35,7 @@ def paired_world_bootstrap(
             ):
                 raise ValueError("Unbalanced placements/sides per parent world")
     differences = np.asarray(
-        [
-            np.mean(
-                [after[key] - before[key] for key in sorted(before) if key[0] == world]
-            )
-            for world in worlds
-        ]
+        [np.mean([after[key] - before[key] for key in sorted(before) if key[0] == world]) for world in worlds]
     )
     ci = bootstrap_ci95(differences, samples=samples, seed=seed)
     return {
@@ -63,10 +49,7 @@ def paired_world_bootstrap(
 
 def outcome(metric):
     """Return the learner's W/D/L outcome for a completed metric."""
-    side, winner = metric["side"], metric["winner"]
-    if side not in (0, 1) or winner not in (None, 0, 1):
-        raise ValueError("Invalid side or winner")
-    return "D" if winner is None else "W" if winner == side else "L"
+    return learner_outcome(metric["winner"], metric["side"])
 
 
 def _extract_plan_keys(plan):
@@ -83,11 +66,7 @@ def _extract_plan_keys(plan):
 
     if isinstance(source, dict):
         first_key = next(iter(source.keys()), None)
-        if (
-            first_key is not None
-            and isinstance(first_key, (tuple, list))
-            and len(first_key) == 3
-        ):
+        if first_key is not None and isinstance(first_key, (tuple, list)) and len(first_key) == 3:
             return {tuple(k) for k in source}
         items = list(source.values())
     elif isinstance(source, (list, tuple, set)):
@@ -152,9 +131,7 @@ def load_eval_rows(directory, expected_n=None, *, plan=None, require_artifacts=T
         learner_side = case["learner_side"]
         outcome(metric)
         if side != learner_side:
-            raise ValueError(
-                f"Inconsistent learner side: metric side {side} != case side {learner_side}"
-            )
+            raise ValueError(f"Inconsistent learner side: metric side {side} != case side {learner_side}")
 
         winner = metric["winner"]
         if (
@@ -162,8 +139,7 @@ def load_eval_rows(directory, expected_n=None, *, plan=None, require_artifacts=T
             or metric["case_id"] != case["case_id"]
             or metric["parent_world"] != case["parent_world"]
             or metric["case_hash"] != case["case_hash"]
-            or case["case_hash"]
-            != digest({k: v for k, v in case.items() if k != "case_hash"})
+            or case["case_hash"] != digest({k: v for k, v in case.items() if k != "case_hash"})
         ):
             raise ValueError(f"Inconsistent evaluation identity/result: {match}")
 
@@ -172,7 +148,8 @@ def load_eval_rows(directory, expected_n=None, *, plan=None, require_artifacts=T
         key = (parent_world, case_id, learner_side)
         if key in rows:
             raise ValueError(
-                f"Duplicate evaluation match: parent_world={parent_world}, case_id={case_id}, learner_side={learner_side}"
+                f"Duplicate evaluation match: parent_world={parent_world}, "
+                f"case_id={case_id}, learner_side={learner_side}"
             )
         rows[key] = (metric, case, match)
 
@@ -191,13 +168,9 @@ def load_eval_rows(directory, expected_n=None, *, plan=None, require_artifacts=T
     return rows
 
 
-def clustered_paired_bootstrap(
-    before, after, *, clusters=16, samples=10000, seed=20261103
-):
+def clustered_paired_bootstrap(before, after, *, clusters=16, samples=10000, seed=20261103):
     """Compare matched saved rows, resampling whole parent worlds."""
-    if before.keys() != after.keys() or any(
-        before[k][1] != after[k][1] for k in before
-    ):
+    if before.keys() != after.keys() or any(before[k][1] != after[k][1] for k in before):
         raise ValueError("Unpaired validation cases or metadata")
     if not before or len(before) % clusters:
         raise ValueError("Unequal cases per parent world")
@@ -216,9 +189,7 @@ def clustered_paired_bootstrap(
         transitions[outcome(before[key][0])][outcome(after[key][0])] += 1
     report["transitions"] = transitions
     report["world_deltas"] = {
-        str(world): float(
-            np.mean([win(after[k]) - win(before[k]) for k in before if k[0] == world])
-        )
+        str(world): float(np.mean([win(after[k]) - win(before[k]) for k in before if k[0] == world]))
         for world in sorted({k[0] for k in before})
     }
     report["slices"] = {}
@@ -239,24 +210,16 @@ def clustered_paired_bootstrap(
     return report
 
 
-def compare_paired_directories(
-    before_path, after_path, *, samples, seed, require_artifacts=False
-):
+def compare_paired_directories(before_path, after_path, *, samples, seed, require_artifacts=False):
     """Read paired evaluations and return the historical tuple interface."""
-    before = load_eval_rows(
-        before_path, 64, require_artifacts=require_artifacts
-    )
-    after = load_eval_rows(
-        after_path, 64, require_artifacts=require_artifacts
-    )
+    before = load_eval_rows(before_path, 64, require_artifacts=require_artifacts)
+    after = load_eval_rows(after_path, 64, require_artifacts=require_artifacts)
     report = clustered_paired_bootstrap(before, after, samples=samples, seed=seed)
     slices = report.pop("slices")
     return report, slices, before, after
 
 
-def eval_wdl_summary(
-    rows_or_directory, expected_n=None, *, plan=None, require_artifacts=True
-):
+def eval_wdl_summary(rows_or_directory, expected_n=None, *, plan=None, require_artifacts=True):
     """Compute W/D/L counts and win rate from loaded rows or an evaluation directory."""
     if isinstance(rows_or_directory, (str, Path)):
         rows = load_eval_rows(
@@ -283,9 +246,7 @@ def eval_wdl_summary(
 wdl_summary = eval_wdl_summary
 
 
-def eval_slices_summary(
-    rows_or_directory, expected_n=None, *, plan=None, require_artifacts=True
-):
+def eval_slices_summary(rows_or_directory, expected_n=None, *, plan=None, require_artifacts=True):
     """Compute placement and side slices from loaded rows or an evaluation directory."""
     if isinstance(rows_or_directory, (str, Path)):
         rows = load_eval_rows(

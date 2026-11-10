@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
-from civ5rl.config import load_config
 from civ5rl.common import configure, read_json
 from civ5rl.diagnostic import (
     AttackOrEndTurn,
@@ -21,6 +20,7 @@ from civ5rl.diagnostic_metrics import decision_metrics, summarize_decisions
 from civ5rl.ppo import objective
 from civ5rl.validation import validate_config
 
+from civ5rl.config import load_config
 from civ5rl.provenance import bound_cases, case_manifest, validate_cases
 from civ5sim import Action
 
@@ -127,15 +127,11 @@ class DiagnosticTests(unittest.TestCase):
             from civ5rl.evaluation import require_split
 
             with self.assertRaises(ValueError):
-                require_split(
-                    self.config, split, mode="final", frozen_plan={"allowed": True}
-                )
+                require_split(self.config, split, mode="final", frozen_plan={"allowed": True})
             from civ5rl.evaluation import evaluate
 
             with self.assertRaisesRegex(ValueError, "Closed split"):
-                evaluate(
-                    None, object(), [{"split": split}], self.config, Path("unused")
-                )
+                evaluate(None, object(), [{"split": split}], self.config, Path("unused"))
         from civ5rl.collector import Collector
 
         # The check happens before touching the policy or worker pipes.
@@ -149,9 +145,7 @@ class DiagnosticTests(unittest.TestCase):
             dev = d[stage]["dev"]["cases"]
             self.assertEqual(len(dev), 128)
             self.assertEqual(len({s["physical_hash"] for s in dev}), 64)
-            self.assertFalse(
-                {s["physical_hash"] for s in train} & {s["physical_hash"] for s in dev}
-            )
+            self.assertFalse({s["physical_hash"] for s in train} & {s["physical_hash"] for s in dev})
             for spec in (dev[0], dev[1], train[0], train[1]):
                 self.assertTrue(reference_win(spec))
                 from civ5rl.env import DecisionEnv
@@ -174,12 +168,7 @@ class DiagnosticTests(unittest.TestCase):
         for spec in d["D0"]["dev"]["cases"]:
             proof = d0_certificate(spec)
             self.assertTrue(proof)
-            self.assertTrue(
-                all(
-                    p["minimum_damage"] >= 1 and p["rolls_checked"] == 1200
-                    for p in proof
-                )
-            )
+            self.assertTrue(all(p["minimum_damage"] >= 1 and p["rolls_checked"] == 1200 for p in proof))
 
     def test_attack_opponent_and_diagnostics(self):
         agent = AttackOrEndTurn()
@@ -200,11 +189,7 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(summary["end_turn_when_attack_available"], 1)
 
     def test_gates_consecutive_transitions_limits_and_bootstrap(self):
-        self.assertFalse(
-            gate("D0", {"win_rate": 0.95, "first_winning_attack_rate": 0.89}, [])[
-                "passed"
-            ]
-        )
+        self.assertFalse(gate("D0", {"win_rate": 0.95, "first_winning_attack_rate": 0.89}, [])["passed"])
         state = {
             "status": "running",
             "stage": "D0",
@@ -220,17 +205,11 @@ class DiagnosticTests(unittest.TestCase):
         two = next_state(one, True)
         self.assertEqual(two["stage"], "D1")
         self.assertEqual(two["stage_updates"], 0)
-        self.assertEqual(
-            next_state({**state, "stage_updates": 4}, False)["status"], "failed"
-        )
+        self.assertEqual(next_state({**state, "stage_updates": 4}, False)["status"], "failed")
         self.assertFalse(may_start_update({**state, "training_seconds": 1800}))
         self.assertFalse(may_start_update(state, stopping=True))
-        self.assertFalse(
-            may_start_update({**state, "pending_evaluation": {"stage": "D0"}})
-        )
-        rows = [
-            {"layout_id": i // 2, "side": i % 2, "win": i < 104} for i in range(128)
-        ]
+        self.assertFalse(may_start_update({**state, "pending_evaluation": {"stage": "D0"}}))
+        rows = [{"layout_id": i // 2, "side": i % 2, "win": i < 104} for i in range(128)]
         baseline = [{**r, "win": i < 60} for i, r in enumerate(rows)]
         result = gate("D1", {"win_rate": 104 / 128}, rows, baseline)
         self.assertTrue(result["passed"])
@@ -247,8 +226,7 @@ class DiagnosticTests(unittest.TestCase):
         try:
             state = env.request()
             shot = next(a for a in state["actions"] if a.kind == "ranged")
-            env.prepare(shot)
-            env.applied(shot, env.battle.step(shot))
+            env.step(shot)
             done = env.request()
             self.assertTrue(done["done"])
             self.assertEqual(done["result"]["reward"], 1)
@@ -263,12 +241,9 @@ class DiagnosticTests(unittest.TestCase):
         env = DecisionEnv(spec)
         try:
             state = env.request()
-            index = next(
-                i for i, a in enumerate(state["actions"]) if a.kind == "ranged"
-            )
+            index = next(i for i, a in enumerate(state["actions"]) if a.kind == "ranged")
             action = state["actions"][index]
-            env.prepare(action)
-            env.applied(action, env.battle.step(action))
+            env.step(action)
             reward = env.request()["result"]["reward"]
         finally:
             env.close()

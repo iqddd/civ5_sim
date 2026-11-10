@@ -6,14 +6,14 @@ from collections import Counter
 from copy import deepcopy
 
 from civ5map.maps import components, load
+from civ5rl.config import load_config as resolve_config
 from civ5rl.core.observation import distance
-from civ5rl.protocols.corpus import ScenarioFactory, map_path
 from civ5rl.protocols.common import (
     CoverageTracker,
+    case_content_hash,
     own_state_physical_hash,
-    self_digest,
 )
-from civ5rl.config import load_config as resolve_config
+from civ5rl.protocols.corpus import ScenarioFactory, map_path
 from civ5rl.provenance.common import ROOT, read_json, seed_for
 from civ5sim import Battle
 from civ5sim.engine import digest
@@ -64,9 +64,7 @@ def separated_candidates(m, group, n, rng, conflicts):
         )
         second_ranked = sorted(available, key=lambda t: (distance(m, other, t), t))
         second = (
-            rng.sample(second_ranked[: min(len(available), n + cycle * 2)], n)
-            if cycle
-            else second_ranked[:n]
+            rng.sample(second_ranked[: min(len(available), n + cycle * 2)], n) if cycle else second_ranked[:n]
         )
         positions = [None, None]
         positions[first_side], positions[1 - first_side] = first, second
@@ -114,15 +112,9 @@ def validate_profile(config):
     collection = deepcopy(reference["collection"])
     envs = config["collection"]["num_envs"]
     workers = config["collection"]["cpu_workers"]
-    if (
-        envs not in (4, 8, 16, 24, 32, 64)
-        or workers not in (4, 6, 8, 16, 32)
-        or envs % workers
-    ):
+    if envs not in (4, 8, 16, 24, 32, 64) or workers not in (4, 6, 8, 16, 32) or envs % workers:
         raise ValueError("Unsupported number of target-scale environments")
-    collection.update(
-        num_envs=envs, cpu_workers=workers, envs_per_worker=envs // workers
-    )
+    collection.update(num_envs=envs, cpu_workers=workers, envs_per_worker=envs // workers)
     if config["collection"] != collection:
         raise ValueError("Unsupported target-scale collection")
     ppo = deepcopy(reference["ppo"])
@@ -167,15 +159,12 @@ class TargetFactory:
                         "fog": True,
                         "random_damage": True,
                         "seed": battle_seed,
-                        "units": [
-                            {"type": "warrior", "side": 0, "tile": tile, "hp": 100}
-                        ],
+                        "units": [{"type": "warrior", "side": 0, "tile": tile, "hp": 100}],
                     }
                 ) as battle:
                     visibility[tile] = battle.observe(0)["visibility"]
             self.visibility_conflicts[key] = {
-                a: {b for b in group if a == b or visibility[a][b] or visibility[b][a]}
-                for a in group
+                a: {b for b in group if a == b or visibility[a][b] or visibility[b][a]} for a in group
             }
         return self.visibility_conflicts[key]
 
@@ -195,17 +184,14 @@ class TargetFactory:
     ):
         if (
             split not in ("train", "validation")
-            or world
-            not in self.base["worlds"]["training" if split == "train" else "validation"]
+            or world not in self.base["worlds"]["training" if split == "train" else "validation"]
         ):
             raise ValueError("Closed or untrusted target-scale world")
         entries = sorted(
             (
                 e
                 for e in self.base["maps"]
-                if e["split"] == split
-                and e["parent_seed"] == world
-                and e["size"] == size
+                if e["split"] == split and e["parent_seed"] == world and e["size"] == size
             ),
             key=lambda e: e["path"],
         )
@@ -259,10 +245,7 @@ class TargetFactory:
                 ],
             }
             with Battle(scenario) as battle:
-                seen = [
-                    any(u["side"] != s for u in battle.observe(s)["units"])
-                    for s in (0, 1)
-                ]
+                seen = [any(u["side"] != s for u in battle.observe(s)["units"]) for s in (0, 1)]
             if seen != [bool(contact), bool(contact)]:
                 reasons["visibility"] += 1
                 continue
@@ -276,10 +259,7 @@ class TargetFactory:
                 "opponent": "cp",
                 "opponent_search": deepcopy(self.config["teacher_search"]),
                 "reward_profile": "win_probability",
-                "agent_seeds": [
-                    seed_for(17, index, "learner_sampling", s, namespace)
-                    for s in (0, 1)
-                ],
+                "agent_seeds": [seed_for(17, index, "learner_sampling", s, namespace) for s in (0, 1)],
                 "streams": streams,
                 "parent_world": world,
                 "placement": "contact" if contact else "separated",
@@ -321,9 +301,7 @@ class TargetFactory:
         relative = index - self.config["experiment"]["start_episode"]
         strata = list(itertools.product(SIZES, range(3), (False, True), (0, 1))) * 4
         namespace = self.config["experiment"]["training_namespace"]
-        random.Random(
-            seed_for(17, relative // 144, "balance", namespace=namespace)
-        ).shuffle(strata)
+        random.Random(seed_for(17, relative // 144, "balance", namespace=namespace)).shuffle(strata)
         size, category, contact, side = strata[relative % 144]
         worlds = self.base["worlds"]["training"]
         spec = self.case(
@@ -347,14 +325,30 @@ class TargetFactory:
         return spec
 
     def validate_specs(self, specs):
-        if any(
-            digest(spec) not in self.issued or spec["split"] != "train"
-            for spec in specs
-        ):
+        if any(digest(spec) not in self.issued or spec["split"] != "train" for spec in specs):
             raise ValueError("Untrusted target-scale training case")
 
     def summary(self):
         return self._coverage_tracker.summary()
+
+
+def _paired_layout_cases(spec, index, used, *, duplicate_error):
+    h = own_state_physical_hash(spec["scenario"])
+    if h in used:
+        raise ValueError(duplicate_error)
+    used.add(h)
+    cases = []
+    for side in (0, 1):
+        case = {
+            **deepcopy(spec),
+            "case_id": index,
+            "layout_id": index,
+            "learner_side": side,
+            "physical_hash": h,
+        }
+        case["case_hash"] = case_content_hash(case)
+        cases.append(case)
+    return cases
 
 
 def evaluation_cases(config, base):
@@ -380,20 +374,14 @@ def evaluation_cases(config, base):
                     split="validation",
                     crop=(j + shift) % 4,
                 )
-                h = own_state_physical_hash(spec["scenario"])
-                if h in used:
-                    raise ValueError("Duplicate target validation physical layout")
-                used.add(h)
-                for side in (0, 1):
-                    case = {
-                        **deepcopy(spec),
-                        "case_id": index,
-                        "layout_id": index,
-                        "learner_side": side,
-                        "physical_hash": h,
-                    }
-                    case["case_hash"] = self_digest(case)
-                    cases.append(case)
+                cases.extend(
+                    _paired_layout_cases(
+                        spec,
+                        index,
+                        used,
+                        duplicate_error="Duplicate target validation physical layout",
+                    )
+                )
         result[purpose] = cases
     return result
 
@@ -404,9 +392,7 @@ HOLDOUT_WORLDS = (10015, 10051, 10040, 10053, 10041, 10038, 10047)
 def development_512_cases(config, base, *, existing_cases=()):
     """Generate 512 validation cases (256 layouts x 2 sides), disjoint from existing sets."""
     factory = TargetFactory(config, base)
-    used = {
-        own_state_physical_hash(c["scenario"]) for c in existing_cases if "scenario" in c
-    }
+    used = {own_state_physical_hash(c["scenario"]) for c in existing_cases if "scenario" in c}
     per_world = 16
     shift = 12
     cases = []
@@ -426,20 +412,14 @@ def development_512_cases(config, base, *, existing_cases=()):
                 split="validation",
                 crop=(j + shift) % 4,
             )
-            h = own_state_physical_hash(spec["scenario"])
-            if h in used:
-                raise ValueError("Duplicate target validation physical layout in development_512")
-            used.add(h)
-            for side in (0, 1):
-                case = {
-                    **deepcopy(spec),
-                    "case_id": index,
-                    "layout_id": index,
-                    "learner_side": side,
-                    "physical_hash": h,
-                }
-                case["case_hash"] = self_digest(case)
-                cases.append(case)
+            cases.extend(
+                _paired_layout_cases(
+                    spec,
+                    index,
+                    used,
+                    duplicate_error="Duplicate target validation physical layout in development_512",
+                )
+            )
     return cases
 
 
@@ -448,9 +428,7 @@ def holdout_126_cases(config, corpus_manifest, *, training_worlds=()):
     if set(HOLDOUT_WORLDS) & set(training_worlds):
         raise ValueError("Holdout worlds overlap training worlds")
     holdout_maps = [
-        m
-        for m in corpus_manifest["maps"]
-        if m["split"] == "train" and m["parent_seed"] in HOLDOUT_WORLDS
+        m for m in corpus_manifest["maps"] if m["split"] == "train" and m["parent_seed"] in HOLDOUT_WORLDS
     ]
     if len(holdout_maps) != len(HOLDOUT_WORLDS) * 12:
         raise ValueError("Expected 84 crops across the 7 holdout worlds")
@@ -488,6 +466,6 @@ def holdout_126_cases(config, corpus_manifest, *, training_worlds=()):
                 "layout_id": index,
                 "physical_hash": h,
             }
-            case["case_hash"] = self_digest(case)
+            case["case_hash"] = case_content_hash(case)
             cases.append(case)
     return cases

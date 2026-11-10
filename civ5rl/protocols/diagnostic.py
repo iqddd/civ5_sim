@@ -15,6 +15,7 @@ from civ5rl.protocols.common import (
     advance_stage_state,
     bootstrap_ci95,
     flat_map,
+    learner_outcome,
     paired_layout_deltas,
     physical_hash,
 )
@@ -46,9 +47,7 @@ def make_spec(scenario, stage, side, index, *, seed=20261108):
         "case_id": index,
         "layout_id": index,
         "scenario": value,
-        "armies": [
-            [u["type"] for u in value["units"] if u["side"] == s] for s in (0, 1)
-        ],
+        "armies": [[u["type"] for u in value["units"] if u["side"] == s] for s in (0, 1)],
         "learner_side": side,
         "max_rounds": 3 if stage == "D0" else 10,
         "max_calls_per_turn": 2000,
@@ -56,9 +55,7 @@ def make_spec(scenario, stage, side, index, *, seed=20261108):
         if stage == "D0"
         # The historical alias resolves via civ5rl.__init__._ALIASES; it is hashed.
         else "civ5rl.diagnostic:AttackOrEndTurn",
-        "agent_seeds": [
-            seed_for(seed, index, "sampling", s, "diagnostic_" + stage) for s in (0, 1)
-        ],
+        "agent_seeds": [seed_for(seed, index, "sampling", s, "diagnostic_" + stage) for s in (0, 1)],
         "parent_world": index,
         "placement": "contact",
         "diagnostics": True,
@@ -72,12 +69,7 @@ _SHOT_DAMAGE_ROLLS = 1200
 
 def shot_damage_bounds(preview, range_error, *, library=None):
     lib = library if library is not None else native.library()
-    if (
-        lib.sim_damage(
-            preview.attacker_strength, preview.defender_strength, _SHOT_DAMAGE_ROLLS
-        )
-        != -1
-    ):
+    if lib.sim_damage(preview.attacker_strength, preview.defender_strength, _SHOT_DAMAGE_ROLLS) != -1:
         raise ValueError(range_error)
     values = [
         lib.sim_damage(preview.attacker_strength, preview.defender_strength, roll)
@@ -127,8 +119,7 @@ def reference_win(spec):
                     return False
                 first = False
                 action = agent.act(state["observation"], state["actions"])
-                env.prepare(action)
-                env.applied(action, env.battle.step(action))
+                env.step(action)
         finally:
             agent.close()
 
@@ -162,11 +153,7 @@ def admit_candidate(task):
 
 def candidate(stage, rng):
     tiles = rng.sample(range(36), 2 if stage == "D0" else 4)
-    types = (
-        ("archer", "warrior")
-        if stage == "D0"
-        else ("warrior", "archer", "warrior", "archer")
-    )
+    types = ("archer", "warrior") if stage == "D0" else ("warrior", "archer", "warrior", "archer")
     units = [
         {
             "type": kind,
@@ -254,9 +241,7 @@ def prepare(directory, config):
                     "needed": needed,
                 },
             )
-            raise RuntimeError(
-                f"Insufficient admitted {stage} layouts after {attempts} candidates"
-            )
+            raise RuntimeError(f"Insufficient admitted {stage} layouts after {attempts} candidates")
         # All candidates were admitted without seeing any policy outcomes.
         groups = {"dev": accepted[:64], "train": accepted[64:]}
         result[stage] = {}
@@ -268,11 +253,7 @@ def prepare(directory, config):
                     if stage == "D0":
                         for u in scenario["units"]:
                             u["side"] ^= side
-                    specs.append(
-                        make_spec(
-                            scenario, stage, side, i, seed=20261120 + (split == "train")
-                        )
-                    )
+                    specs.append(make_spec(scenario, stage, side, i, seed=20261120 + (split == "train")))
             result[stage][split] = case_manifest(
                 specs,
                 source="rl01.diagnostic." + stage,
@@ -297,12 +278,8 @@ class DiagnosticFactory:
         rng = random.Random(seed_for(self.seed, episode_id, "case", namespace=stage))
         spec = deepcopy(pool[rng.randrange(len(pool))])
         spec["episode_id"] = episode_id
-        spec["scenario"]["seed"] = seed_for(
-            self.seed, episode_id, "battle", namespace=stage
-        )
-        spec["agent_seeds"] = [
-            seed_for(self.seed, episode_id, "sampling", s, stage) for s in (0, 1)
-        ]
+        spec["scenario"]["seed"] = seed_for(self.seed, episode_id, "battle", namespace=stage)
+        spec["agent_seeds"] = [seed_for(self.seed, episode_id, "sampling", s, stage) for s in (0, 1)]
         manifest = case_manifest(
             [spec],
             source=self.dataset[stage]["train"]["source"],
@@ -324,12 +301,14 @@ def episode_rows(episodes):
     for ep in episodes:
         first = ep["decision_metrics"][0]
         r, s = ep["result"], ep["spec"]
+        outcome = learner_outcome(r["winner"], s["learner_side"])
         rows.append(
             {
                 "layout_id": s["layout_id"],
                 "side": s["learner_side"],
                 "reward": r["reward"],
-                "win": r["reward"] == 1,
+                "outcome": outcome,
+                "win": outcome == "W",
                 "first_ranged": first["ranged_chosen"],
                 "first_ranged_probability": first["ranged_probability"],
                 "rounds": r["rounds"],
@@ -342,17 +321,15 @@ def episode_rows(episodes):
 
 def outcome_summary(episodes):
     rows = episode_rows(episodes)
-    counts = Counter(r["reward"] for r in rows)
+    counts = Counter(r["outcome"] for r in rows)
     return {
         "games": len(rows),
-        "wins": counts[1],
-        "draws": counts[0],
-        "losses": counts[-1],
-        "win_rate": counts[1] / len(rows),
+        "wins": counts["W"],
+        "draws": counts["D"],
+        "losses": counts["L"],
+        "win_rate": counts["W"] / len(rows),
         "first_winning_attack_rate": sum(r["first_ranged"] for r in rows) / len(rows),
-        "first_winning_attack_probability": float(
-            np.mean([r["first_ranged_probability"] for r in rows])
-        ),
+        "first_winning_attack_probability": float(np.mean([r["first_ranged_probability"] for r in rows])),
         "rounds_mean": float(np.mean([r["rounds"] for r in rows])),
         "damage_dealt_mean": float(np.mean([r["damage_dealt"] for r in rows])),
         "units_lost_mean": float(np.mean([r["units_lost"] for r in rows])),
@@ -362,10 +339,7 @@ def outcome_summary(episodes):
 
 def gate(stage, summary, rows, baseline_rows=None):
     if stage == "D0":
-        return {
-            "passed": summary["win_rate"] >= 0.95
-            and summary["first_winning_attack_rate"] >= 0.90
-        }
+        return {"passed": summary["win_rate"] >= 0.95 and summary["first_winning_attack_rate"] >= 0.90}
     d = paired_layout_deltas(rows, baseline_rows)
     lower, upper = bootstrap_ci95(d)
     delta = float(d.mean())

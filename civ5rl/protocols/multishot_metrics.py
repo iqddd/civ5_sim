@@ -7,6 +7,7 @@ import numpy as np
 from civ5rl.protocols.common import (
     advance_stage_state,
     bootstrap_ci95,
+    learner_outcome,
     paired_layout_deltas,
 )
 from civ5rl.protocols.diagnostic_metrics import summarize_decisions
@@ -34,11 +35,7 @@ def moments(values):
 
 def sequence_metrics(ep):
     observations, actions, chosen = ep["observations"], ep["actions"], ep["chosen"]
-    shots = [
-        i
-        for i, (acts, index) in enumerate(zip(actions, chosen))
-        if acts[index].kind == "ranged"
-    ]
+    shots = [i for i, (acts, index) in enumerate(zip(actions, chosen)) if acts[index].kind == "ranged"]
     output = {
         "shots": len(shots),
         "decisions": len(chosen),
@@ -57,11 +54,7 @@ def sequence_metrics(ep):
     shot = actions[first][chosen[first]]
     own = {u["id"]: u for u in observations[first]["units"]}
     attacker = own[shot.unit]
-    target = next(
-        u
-        for u in own.values()
-        if u["tile"] == shot.target and u["side"] != attacker["side"]
-    )
+    target = next(u for u in own.values() if u["tile"] == shot.target and u["side"] != attacker["side"])
     ids = (attacker["id"], target["id"])
     positions = (attacker["tile"], target["tile"])
     reasons = set()
@@ -71,15 +64,11 @@ def sequence_metrics(ep):
     for j in range(first + 1, len(chosen)):
         obs = observations[j]
         units = {u["id"]: u for u in obs["units"]}
-        if ids[0] not in units or any(
-            u.get("hp", 1) <= 0 for i, u in units.items() if i in ids
-        ):
+        if ids[0] not in units or any(u.get("hp", 1) <= 0 for i, u in units.items() if i in ids):
             reasons.add("unit_destroyed")
         if ids[1] not in units:
             reasons.add("visibility_lost")
-        if any(
-            i in units and units[i]["tile"] != pos for i, pos in zip(ids, positions)
-        ):
+        if any(i in units and units[i]["tile"] != pos for i, pos in zip(ids, positions)):
             reasons.add("movement")
         if obs["turn"] == observations[first]["turn"]:
             continue
@@ -97,9 +86,7 @@ def sequence_metrics(ep):
         if not reasons:
             output["contact_opportunity"] = True
             output["contact_used"] = chosen[j] in matching
-            output["contact_probability"] = float(
-                np.exp(ep["old_log_probs"][j][matching]).sum()
-            )
+            output["contact_probability"] = float(np.exp(ep["old_log_probs"][j][matching]).sum())
         break
     else:
         reasons.add("episode_ended")
@@ -113,23 +100,17 @@ def summarize(episodes):
     rows = []
     for ep in episodes:
         r, s = ep["result"], ep["spec"]
+        outcome = learner_outcome(r["winner"], s["learner_side"])
         seq = sequence_metrics(ep)
-        enemy = [
-            i
-            for i, u in enumerate(s["scenario"]["units"])
-            if u["side"] != s["learner_side"]
-        ]
-        healing = sum(
-            event["healing"][i]
-            for event in r.get("diagnostic_events", [])
-            for i in enemy
-        )
+        enemy = [i for i, u in enumerate(s["scenario"]["units"]) if u["side"] != s["learner_side"]]
+        healing = sum(event["healing"][i] for event in r.get("diagnostic_events", []) for i in enemy)
         rows.append(
             {
                 "episode_id": s["episode_id"],
                 "layout_id": s["layout_id"],
                 "side": s["learner_side"],
-                "win": r["reward"] == 1,
+                "win": outcome == "W",
+                "outcome": outcome,
                 "reward": r["reward"],
                 "reason": r["reason"],
                 "rounds": r["rounds"],
@@ -140,55 +121,39 @@ def summarize(episodes):
             }
         )
     n = len(rows)
-    counts = Counter(r["reward"] for r in rows)
+    counts = Counter(r["outcome"] for r in rows)
     shot_rows = [r for r in rows if r["shots"]]
     opportunities = [r for r in rows if r["contact_opportunity"]]
     wins = [r for r in rows if r["win"]]
     returns = [ep["result"]["reward"] for ep in episodes for _ in ep["chosen"]]
     values = [v for ep in episodes for v in ep.get("old_value", [])]
-    raw_adv = (
-        np.asarray(returns) - np.asarray(values) if len(values) == len(returns) else []
-    )
-    normalized = (
-        (raw_adv - np.mean(raw_adv)) / (np.std(raw_adv) + 1e-8) if len(raw_adv) else []
-    )
+    raw_adv = np.asarray(returns) - np.asarray(values) if len(values) == len(returns) else []
+    normalized = (raw_adv - np.mean(raw_adv)) / (np.std(raw_adv) + 1e-8) if len(raw_adv) else []
     result = {
         "games": n,
-        "wins": counts[1],
-        "draws": counts[0],
-        "losses": counts[-1],
-        "win_rate": counts[1] / n,
+        "wins": counts["W"],
+        "draws": counts["D"],
+        "losses": counts["L"],
+        "win_rate": counts["W"] / n,
         "actions": summarize_decisions(episodes),
         "shots": dict(Counter(r["shots"] for r in rows)),
-        "draw_reasons": dict(Counter(r["reason"] for r in rows if r["reward"] == 0)),
+        "draw_reasons": dict(Counter(r["reason"] for r in rows if r["outcome"] == "D")),
         "decisions": moments([r["decisions"] for r in rows]),
         "rounds": moments([r["rounds"] for r in rows]),
         "damage_dealt": moments([r["damage_dealt"] for r in rows]),
         "enemy_healing": moments([r["enemy_healing"] for r in rows]),
-        "wins_with_two_or_more_shots": ratio(
-            sum(r["shots"] >= 2 for r in wins), len(wins)
-        ),
-        "repeat_shot_any": ratio(
-            sum(r["repeat_shot"] for r in shot_rows), len(shot_rows)
-        ),
-        "next_own_turn_after_shot": ratio(
-            sum(r["next_own_turn_reached"] for r in shot_rows), len(shot_rows)
-        ),
+        "wins_with_two_or_more_shots": ratio(sum(r["shots"] >= 2 for r in wins), len(wins)),
+        "repeat_shot_any": ratio(sum(r["repeat_shot"] for r in shot_rows), len(shot_rows)),
+        "next_own_turn_after_shot": ratio(sum(r["next_own_turn_reached"] for r in shot_rows), len(shot_rows)),
         "contact_opportunity_reached": ratio(len(opportunities), len(shot_rows)),
-        "contact_immediate_use": ratio(
-            sum(r["contact_used"] for r in opportunities), len(opportunities)
-        ),
+        "contact_immediate_use": ratio(sum(r["contact_used"] for r in opportunities), len(opportunities)),
         "contact_probability": ratio(
             sum(r["contact_probability"] for r in opportunities), len(opportunities)
         ),
         "contact_absence_reasons": dict(
-            Counter(
-                reason for r in shot_rows for reason in r["contact_absence_reasons"]
-            )
+            Counter(reason for r in shot_rows for reason in r["contact_absence_reasons"])
         ),
-        "after_first_shot": dict(
-            sum((Counter(r["after_first_shot"]) for r in rows), Counter())
-        ),
+        "after_first_shot": dict(sum((Counter(r["after_first_shot"]) for r in rows), Counter())),
         "episode_return": moments([r["reward"] for r in rows]),
         "token_return": moments(returns),
         "old_value": moments(values),

@@ -4,9 +4,24 @@ import json
 from collections import Counter
 from copy import deepcopy
 
+import numpy as np
+
+from civ5rl.core.env import learner_outcome
 from civ5sim.engine import digest
 
-import numpy as np
+__all__ = [
+    "CoverageTracker",
+    "advance_stage_state",
+    "bootstrap_ci95",
+    "case_content_hash",
+    "flat_map",
+    "learner_outcome",
+    "own_state_physical_hash",
+    "paired_layout_deltas",
+    "physical_hash",
+    "require_config",
+    "self_digest",
+]
 
 
 def bootstrap_ci95(values, *, samples=10000, seed=20261103):
@@ -27,18 +42,12 @@ def paired_layout_deltas(rows, baseline, *, layouts=64):
     if a.keys() != b.keys():
         raise ValueError("Bootstrap cases differ")
     layout_ids = sorted({k[0] for k in a})
-    if len(layout_ids) != layouts or any(
-        (i, side) not in a for i in layout_ids for side in (0, 1)
-    ):
+    if len(layout_ids) != layouts or any((i, side) not in a for i in layout_ids for side in (0, 1)):
         raise ValueError(f"Bootstrap requires {layouts} complete layouts")
-    return np.asarray(
-        [sum(a[i, side] - b[i, side] for side in (0, 1)) / 2 for i in layout_ids]
-    )
+    return np.asarray([sum(a[i, side] - b[i, side] for side in (0, 1)) / 2 for i in layout_ids])
 
 
-def advance_stage_state(
-    state, passed, *, update_field, update_limit, success, failure, time_limit=None
-):
+def advance_stage_state(state, passed, *, update_field, update_limit, success, failure, time_limit=None):
     value = deepcopy(state)
     value["consecutive"] = value.get("consecutive", 0) + 1 if passed else 0
     if value["consecutive"] >= 2:
@@ -91,13 +100,9 @@ def physical_hash(scenario):
 def own_state_physical_hash(scenario):
     # Unlike physical_hash, hash only map digest and selected unit fields; keep its wire format.
     # Seeds, side-to-play and unit list order do not create a new physical layout.
-    units = [
-        (u["side"], u["type"], u["tile"], u.get("hp", 100)) for u in scenario["units"]
-    ]
+    units = [(u["side"], u["type"], u["tile"], u.get("hp", 100)) for u in scenario["units"]]
     flipped = [(1 - s, k, t, hp) for s, k, t, hp in units]
-    return digest(
-        {"map": digest(scenario["map"]), "units": min(sorted(units), sorted(flipped))}
-    )
+    return digest({"map": digest(scenario["map"]), "units": min(sorted(units), sorted(flipped))})
 
 
 def require_config(config, expected, prefix="Unsupported configuration: "):
@@ -110,8 +115,11 @@ def require_config(config, expected, prefix="Unsupported configuration: "):
             raise ValueError(f"{prefix}{field}")
 
 
-def self_digest(mapping, key="case_hash"):
-    return digest({name: value for name, value in mapping.items() if name != key})
+def case_content_hash(case, key="case_hash"):
+    return digest({name: value for name, value in case.items() if name != key})
+
+
+self_digest = case_content_hash
 
 
 class CoverageTracker:

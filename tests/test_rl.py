@@ -603,8 +603,7 @@ class RLTests(unittest.TestCase):
             env = DecisionEnv(spec)
             state = env.request()
             while not state["done"]:
-                a = Action("end_turn")
-                env.applied(a, env.battle.step(a))
+                env.step(Action("end_turn"))
                 state = env.request()
             config = MatchConfig(s["map"], armies, 3)
             match = run_match(config, ["end_turn", "end_turn"], scenario=s, agent_seeds=[1, 2])
@@ -612,6 +611,71 @@ class RLTests(unittest.TestCase):
             self.assertEqual(env.history, [x["action"] for x in match.replay["steps"]])
             self.assertEqual(env.battle.snapshot(), match.final)
             env.close()
+        with DecisionEnv({**spec, "learner_side": 0, "diagnostics": True}) as env:
+            env.request()
+            bad = Action("ranged", 999, 999)
+            with self.assertRaisesRegex(RuntimeError, "bad_unit"):
+                env.step(bad)
+            self.assertEqual(env.learner_decisions, 0)
+            self.assertEqual(env.history[-1]["unit"], 999)
+
+    def test_wdl_summaries_are_invariant_to_reward_profile(self):
+        from civ5rl.core.env import _terminal_reward, learner_outcome
+        from civ5rl.protocols.diagnostic import outcome_summary
+        from civ5rl.protocols.evaluation import summarize
+
+        outcomes = ((0, 0, "W"), (None, 0, "D"), (0, 1, "L"))
+        for winner, side, expected in outcomes:
+            self.assertEqual(learner_outcome(winner, side), expected)
+        eval_summaries, diag_summaries = [], []
+        for profile in ("symmetric", "win_probability"):
+            episodes = [
+                {
+                    "spec": {
+                        "opponent": "greedy",
+                        "learner_side": side,
+                        "parent_world": 1,
+                        "layout_id": idx,
+                    },
+                    "decision_metrics": [
+                        {
+                            "chosen_kind": "end_turn",
+                            "attack_available": False,
+                            "attack_chosen": False,
+                            "attack_probability": 0.0,
+                            "ranged_available": False,
+                            "ranged_chosen": False,
+                            "ranged_probability": 0.0,
+                            "melee_available": False,
+                            "melee_chosen": False,
+                            "melee_probability": 0.0,
+                            "move_available": False,
+                        }
+                    ],
+                    "result": {
+                        "winner": winner,
+                        "reward": _terminal_reward(winner, side, profile),
+                        "reason": "turn_limit" if winner is None else "army_destroyed",
+                        "rounds": 3.0,
+                        "commands": 6,
+                        "remaining_hp": [100, 100],
+                        "damage_dealt": [0, 0],
+                        "units_lost": [0, 0],
+                        "first_contact_turn": 0,
+                    },
+                }
+                for idx, (winner, side, _) in enumerate(outcomes)
+            ]
+            eval_summaries.append(summarize(episodes, samples=16)["greedy"])
+            diag_summaries.append(outcome_summary(episodes))
+        self.assertEqual(eval_summaries[0], eval_summaries[1])
+        self.assertEqual(eval_summaries[0]["wins"], 1)
+        self.assertEqual(eval_summaries[0]["draws"], 1)
+        self.assertEqual(eval_summaries[0]["losses"], 1)
+        self.assertEqual(diag_summaries[0], diag_summaries[1])
+        self.assertEqual(diag_summaries[0]["wins"], 1)
+        self.assertEqual(diag_summaries[0]["draws"], 1)
+        self.assertEqual(diag_summaries[0]["losses"], 1)
 
     def test_reachable_memory_pairs_and_current_only_ablation(self):
         for shared in (False, True):

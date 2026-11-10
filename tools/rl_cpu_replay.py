@@ -31,8 +31,7 @@ def replay_case(case):
             state = env.request()
             if state["done"] or action not in state["actions"]:
                 raise AssertionError("Recorded learner command is no longer legal")
-            env.prepare(action)
-            env.applied(action, env.battle.step(action))
+            env.step(action)
         state = env.request()
         if not state["done"]:
             raise AssertionError("Replay did not finish the complete episode")
@@ -55,9 +54,7 @@ class CPUReplay:
         self.cases = [
             {
                 "spec": ep["spec"],
-                "commands": [
-                    row[int(chosen)] for row, chosen in zip(ep["actions"], ep["chosen"])
-                ],
+                "commands": [row[int(chosen)] for row, chosen in zip(ep["actions"], ep["chosen"])],
             }
             for ep in episodes
         ]
@@ -95,9 +92,7 @@ class CPUReplay:
 
     def verify(self, actual):
         if actual != self.expected:
-            raise AssertionError(
-                "CPU replay changed episode order, commands or outcomes"
-            )
+            raise AssertionError("CPU replay changed episode order, commands or outcomes")
         from civ5sim.engine import digest
 
         return {

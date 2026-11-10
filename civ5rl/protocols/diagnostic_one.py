@@ -111,17 +111,13 @@ def _certify_one_decision_case(old, new):
                 )
                 enc.append(encoder.encode(state["observation"], state["actions"]))
             for key in vars(enc[0]):
-                np.testing.assert_array_equal(
-                    getattr(enc[0], key), getattr(enc[1], key)
-                )
+                np.testing.assert_array_equal(getattr(enc[0], key), getattr(enc[1], key))
         shots = [act for act in y["actions"] if act.kind == "ranged"]
         if not shots:
             raise ValueError("One-decision D0 has no initial ranged attack")
         minima = []
         for shot in shots:
-            hp = next(
-                u["hp"] for u in y["observation"]["units"] if u["tile"] == shot.target
-            )
+            hp = next(u["hp"] for u in y["observation"]["units"] if u["tile"] == shot.target)
             preview = b.battle.preview_attack(shot)
             minimum, _ = shot_damage_bounds(preview, "Native random roll range changed")
             if minimum < hp:
@@ -133,16 +129,14 @@ def _certify_one_decision_case(old, new):
                     "rolls": _SHOT_DAMAGE_ROLLS,
                 }
             )
-        b.prepare(shots[0])
-        b.applied(shots[0], b.battle.step(shots[0]))
+        b.step(shots[0])
         win = b.request()
         if not win["done"] or win["result"]["reward"] != 1:
             raise ValueError("Immediate shot control did not win")
     with DecisionEnv(new) as env:
         env.request()
         action = Action("end_turn")
-        env.prepare(action)
-        env.applied(action, env.battle.step(action))
+        env.step(action)
         commands = env.commands
         done = env.request()
         if (

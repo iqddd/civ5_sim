@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from civ5rl.core.agent import RLAgent
-from civ5rl.protocols.common import bootstrap_ci95
+from civ5rl.protocols.common import bootstrap_ci95, learner_outcome
 from civ5rl.provenance import bound_cases, case_manifest, validate_cases
 from civ5rl.provenance.common import write_json
 from civ5sim.engine import Battle, digest
@@ -36,23 +36,23 @@ def validation_specs(factory, config):
         )
         for opponent in ("random", "greedy"):
             for side in (0, 1):
-                specs.append(
-                    {**base, "opponent": opponent, "learner_side": side, "case_id": i}
-                )
+                specs.append({**base, "opponent": opponent, "learner_side": side, "case_id": i})
     return bound_cases(
-        case_manifest(
-            specs, source="rl01.validation", split="validation", namespace="validation"
-        )
+        case_manifest(specs, source="rl01.validation", split="validation", namespace="validation")
     )
 
 
-def _wdl_stats(rewards: np.ndarray):
+def _wdl_stats(outcomes):
+    games = len(outcomes)
+    wins = sum(o == "W" for o in outcomes)
+    draws = sum(o == "D" for o in outcomes)
+    losses = sum(o == "L" for o in outcomes)
     return {
-        "games": len(rewards),
-        "wins": int((rewards == 1).sum()),
-        "draws": int((rewards == 0).sum()),
-        "losses": int((rewards == -1).sum()),
-        "score": float(((rewards + 1) / 2).mean()) if len(rewards) else None,
+        "games": games,
+        "wins": int(wins),
+        "draws": int(draws),
+        "losses": int(losses),
+        "score": float((wins + 0.5 * draws) / games) if games else None,
     }
 
 
@@ -60,64 +60,54 @@ def summarize(episodes, samples=10000, seed=20261103):
     grouped = defaultdict(list)
     for e in episodes:
         s, r = e["spec"], e["result"]
-        grouped[s["opponent"]].append((s, r))
+        grouped[s["opponent"]].append((s, r, learner_outcome(r["winner"], s["learner_side"])))
     output = {}
     for opponent, rows in grouped.items():
-        rewards = np.asarray([r["reward"] for _, r in rows])
-        worlds = sorted({s["parent_world"] for s, _ in rows})
+        outcomes = [o for _, _, o in rows]
+        worlds = sorted({s["parent_world"] for s, _, _ in rows})
         world_scores = np.asarray(
             [
                 np.mean(
-                    [(r["reward"] + 1) / 2 for s, r in rows if s["parent_world"] == w]
+                    [
+                        1.0 if o == "W" else 0.5 if o == "D" else 0.0
+                        for s, _, o in rows
+                        if s["parent_world"] == w
+                    ]
                 )
                 for w in worlds
             ]
         )
         ci = bootstrap_ci95(world_scores, samples=samples, seed=seed)
         output[opponent] = {
-            **_wdl_stats(rewards),
+            **_wdl_stats(outcomes),
             "ci95": ci.tolist(),
             "sides": {
-                str(side): _wdl_stats(
-                    np.asarray(
-                        [r["reward"] for s, r in rows if s["learner_side"] == side]
-                    )
-                )
-                for side in (0, 1)
+                str(side): _wdl_stats([o for s, _, o in rows if s["learner_side"] == side]) for side in (0, 1)
             },
-            "rounds_mean": float(np.mean([r["rounds"] for _, r in rows])),
-            "command_mean": float(np.mean([r["commands"] for _, r in rows])),
-            "turn_limit_draws": sum(r["reason"] == "turn_limit" for _, r in rows),
-            "learner_hp_mean": float(
-                np.mean([r["remaining_hp"][s["learner_side"]] for s, r in rows])
-            ),
+            "rounds_mean": float(np.mean([r["rounds"] for _, r, _ in rows])),
+            "command_mean": float(np.mean([r["commands"] for _, r, _ in rows])),
+            "turn_limit_draws": sum(r["reason"] == "turn_limit" for _, r, _ in rows),
+            "learner_hp_mean": float(np.mean([r["remaining_hp"][s["learner_side"]] for s, r, _ in rows])),
             "opponent_hp_mean": float(
-                np.mean([r["remaining_hp"][1 - s["learner_side"]] for s, r in rows])
+                np.mean([r["remaining_hp"][1 - s["learner_side"]] for s, r, _ in rows])
             ),
             "first_contact_turn_mean": float(
-                np.mean(
-                    [
-                        r["first_contact_turn"]
-                        for _, r in rows
-                        if r["first_contact_turn"] is not None
-                    ]
-                )
+                np.mean([r["first_contact_turn"] for _, r, _ in rows if r["first_contact_turn"] is not None])
             )
-            if any(r["first_contact_turn"] is not None for _, r in rows)
+            if any(r["first_contact_turn"] is not None for _, r, _ in rows)
             else None,
         }
     return output
 
 
-def evaluate(
-    policy, collector, specs, config, directory, monitor=None, trusted_manifest=None
-):
+def evaluate(policy, collector, specs, config, directory, monitor=None, trusted_manifest=None):
     directory = Path(directory)
     require_split(config, "validation")
     for spec in specs:
-        if spec.get("split") in ("test", "diagnostic_test") or spec.get(
-            "provenance", {}
-        ).get("split") in ("test", "diagnostic_test"):
+        if spec.get("split") in ("test", "diagnostic_test") or spec.get("provenance", {}).get("split") in (
+            "test",
+            "diagnostic_test",
+        ):
             raise ValueError("Closed split in evaluation cases")
 
     if trusted_manifest is None:
@@ -163,8 +153,8 @@ def save_replays(policy, specs, device, directory, count=8, outcomes=None):
 
     selected = []
     if outcomes:
-        for reward in (1, -1, 0):
-            matches = [o for o in outcomes if o["result"]["reward"] == reward]
+        for target in ("W", "L", "D"):
+            matches = [o for o in outcomes if learner_outcome(o["result"]["winner"], o["side"]) == target]
             if matches:
                 o = matches[0]
                 selected.append(
@@ -187,9 +177,7 @@ def save_replays(policy, specs, device, directory, count=8, outcomes=None):
             s["max_rounds"],
             max_calls_per_turn=s["max_calls_per_turn"],
         )
-        outcome = run_match(
-            config, agents, scenario=s["scenario"], agent_seeds=s["agent_seeds"]
-        )
+        outcome = run_match(config, agents, scenario=s["scenario"], agent_seeds=s["agent_seeds"])
         if outcome.result["status"] != "completed":
             raise RuntimeError(outcome.result["error"])
         path = Path(directory) / f"match-{i:02}"
@@ -218,13 +206,8 @@ def save_training_replay(episode, directory):
             "reason": r["reason"],
             "error": None,
             "commands": r["commands"],
-            "agents": [
-                "learner" if side == s["learner_side"] else s["opponent"]
-                for side in (0, 1)
-            ],
-            "seeds": s.get(
-                "streams", {"battle": s["scenario"]["seed"], "agents": s["agent_seeds"]}
-            ),
+            "agents": ["learner" if side == s["learner_side"] else s["opponent"] for side in (0, 1)],
+            "seeds": s.get("streams", {"battle": s["scenario"]["seed"], "agents": s["agent_seeds"]}),
             "initial_state_sha256": digest(replay["initial"]),
             "final_state_sha256": digest(final),
         }

@@ -37,9 +37,7 @@ class OneDecisionTests(unittest.TestCase):
                     action = next((a for a in state["actions"] if a.kind == kind), None)
                     if action is None:
                         continue
-                    env.prepare(action)
-                    result = env.battle.step(action)
-                    env.applied(action, result)
+                    env.step(action)
                     count = env.commands
                     with patch.object(
                         env.opponent,
@@ -50,14 +48,10 @@ class OneDecisionTests(unittest.TestCase):
                         again = env.request()
                     self.assertTrue(final["done"])
                     self.assertTrue(again["done"])
-                    self.assertEqual(
-                        final["result"]["reward"], 1 if kind == "ranged" else 0
-                    )
+                    self.assertEqual(final["result"]["reward"], 1 if kind == "ranged" else 0)
                     self.assertEqual(
                         final["result"]["reason"],
-                        "army_destroyed"
-                        if kind == "ranged"
-                        else "diagnostic_decision_limit",
+                        "army_destroyed" if kind == "ranged" else "diagnostic_decision_limit",
                     )
                     self.assertEqual(env.commands, count)
                     self.assertEqual(env.learner_decisions, 1)
@@ -71,21 +65,16 @@ class OneDecisionTests(unittest.TestCase):
         with DecisionEnv(spec) as env:
             env.request()
             action = Action("ranged", 999, 999)
-            result = env.battle.step(action)
             with self.assertRaises(RuntimeError):
-                env.applied(action, result)
+                env.step(action)
             self.assertEqual(env.learner_decisions, 0)
 
     def test_inputs_manifests_and_original_initial_weights(self):
         validate_config(self.config)
         old = read_json("artifacts/rl/diagnostic-results/manifests/manifest.json")
         for split in ("train", "dev"):
-            self.assertNotEqual(
-                self.dataset["D0"][split]["hash"], old["D0"][split]["hash"]
-            )
-            for a, b in zip(
-                old["D0"][split]["cases"], self.dataset["D0"][split]["cases"]
-            ):
+            self.assertNotEqual(self.dataset["D0"][split]["hash"], old["D0"][split]["hash"])
+            for a, b in zip(old["D0"][split]["cases"], self.dataset["D0"][split]["cases"]):
                 self.assertEqual(
                     a,
                     {
@@ -125,13 +114,9 @@ class OneDecisionTests(unittest.TestCase):
         reset = next_state_one(first, False)
         self.assertEqual(reset["consecutive"], 0)
         self.assertEqual(next_state_one(first, True)["status"], "passed")
+        self.assertEqual(next_state_one({**state, "stage_updates": 8}, False)["status"], "failed")
         self.assertEqual(
-            next_state_one({**state, "stage_updates": 8}, False)["status"], "failed"
-        )
-        self.assertEqual(
-            next_state_one({**state, "stage_updates": 8, "consecutive": 1}, True)[
-                "status"
-            ],
+            next_state_one({**state, "stage_updates": 8, "consecutive": 1}, True)["status"],
             "passed",
         )
 
@@ -176,9 +161,7 @@ class OneDecisionTests(unittest.TestCase):
             cache.labels["returns"].numpy(), [ep["result"]["reward"] for ep in episodes]
         )
         optimizer = torch.optim.Adam(policy.parameters(), lr=0.0003)
-        stats = update_fast(
-            policy, optimizer, episodes, config, 0, "cpu", random.Random(18)
-        )
+        stats = update_fast(policy, optimizer, episodes, config, 0, "cpu", random.Random(18))
         self.assertEqual(stats["optimizer_steps"], 2)
         self.assertEqual(stats["objective_valid_tokens"], 16)
         self.assertTrue(all(int(x["step"]) == 2 for x in optimizer.state.values()))

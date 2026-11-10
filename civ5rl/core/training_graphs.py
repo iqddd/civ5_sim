@@ -8,7 +8,6 @@ from torch.autograd.function import once_differentiable
 
 from civ5rl.core.spatial import SPATIAL_KEYS, iter_spatial_blocks
 
-
 CUDA_GRAPH_WARMUP_STEPS = 3
 
 
@@ -18,24 +17,19 @@ class CoalescedSpatial(torch.autograd.Function):
     @staticmethod
     def forward(ctx, policy, batch, *parameters):
         if any(batch[key].requires_grad for key in SPATIAL_KEYS):
-            raise ValueError(
-                "Coalesced spatial training expects constant observation inputs"
-            )
+            raise ValueError("Coalesced spatial training expects constant observation inputs")
         size = policy.spatial_batch_size
         outputs, counts = [], []
-        runner = policy._spatial_runner or policy.spatial
+        runner = policy.spatial_runner
         with torch.enable_grad():
             for part, count in iter_spatial_blocks(batch, size):
                 outputs.append(runner(part))
                 counts.append(count)
         ctx.parameter_count = len(parameters)
         ctx.counts = counts
-        ctx.save_for_backward(
-            *parameters, *(value for pair in outputs for value in pair)
-        )
+        ctx.save_for_backward(*parameters, *(value for pair in outputs for value in pair))
         return tuple(
-            torch.cat([pair[j][:count] for pair, count in zip(outputs, counts)], 0)
-            for j in range(2)
+            torch.cat([pair[j][:count] for pair, count in zip(outputs, counts)], 0) for j in range(2)
         )
 
     @staticmethod
@@ -85,22 +79,21 @@ class _GRUEntry:
                 torch.autograd.grad(outputs, inputs, (self.dy, self.dh))
         torch.cuda.current_stream(x.device).wait_stream(stream)
         self.forward_graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.forward_graph, stream=stream, capture_error_mode="thread_local"), torch.enable_grad():
+        with (
+            torch.cuda.graph(self.forward_graph, stream=stream, capture_error_mode="thread_local"),
+            torch.enable_grad(),
+        ):
             self.outputs = self.module(self.x, self.hidden)
         self.backward_graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.backward_graph, stream=stream, capture_error_mode="thread_local"):
-            self.gradients = torch.autograd.grad(
-                self.outputs, inputs, (self.dy, self.dh), retain_graph=True
-            )
+            self.gradients = torch.autograd.grad(self.outputs, inputs, (self.dy, self.dh), retain_graph=True)
 
 
 class _GRUReplay(torch.autograd.Function):
     @staticmethod
     def forward(ctx, entry, x, hidden, *parameters):
         if entry.active:
-            raise RuntimeError(
-                "GRU graph replay requires backward before reusing the same shape"
-            )
+            raise RuntimeError("GRU graph replay requires backward before reusing the same shape")
         entry.active = True
         entry.x.copy_(x)
         entry.hidden.copy_(hidden)
@@ -135,14 +128,9 @@ class RecurrentGraphs:
             or module.dropout != 0
             or module.batch_first
             or module.input_size != module.hidden_size
-            or any(
-                p.device.type != "cuda" or p.dtype != torch.float32
-                for p in module.parameters()
-            )
+            or any(p.device.type != "cuda" or p.dtype != torch.float32 for p in module.parameters())
         ):
-            raise ValueError(
-                "GRU graphs require the single-layer FP32 CUDA model C GRU"
-            )
+            raise ValueError("GRU graphs require the single-layer FP32 CUDA model C GRU")
         if type(max_shapes) is not int or max_shapes < 1:
             raise ValueError("GRU graph max_shapes must be a positive integer")
         self.module, self.max_shapes = module, max_shapes
@@ -156,9 +144,7 @@ class RecurrentGraphs:
         if x.dtype != torch.float32:
             raise ValueError("GRU graphs require FP32 recurrent inputs")
         if hidden is None:
-            hidden = torch.zeros(
-                (1, x.shape[1], self.module.hidden_size), device=x.device, dtype=x.dtype
-            )
+            hidden = torch.zeros((1, x.shape[1], self.module.hidden_size), device=x.device, dtype=x.dtype)
         key = (tuple(x.shape), tuple(hidden.shape), x.device)
         self._seen[key] += 1
         if key not in self.entries:

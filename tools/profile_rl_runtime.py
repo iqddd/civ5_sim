@@ -42,12 +42,9 @@ def replay(episodes):
                     state["actions"] != ep["actions"][index]
                     or state["observation"] != ep["observations"][index]
                 ):
-                    raise AssertionError(
-                        "Replay changed legal actions or public observation"
-                    )
+                    raise AssertionError("Replay changed legal actions or public observation")
                 action = state["actions"][chosen]
-                env.prepare(action)
-                env.applied(action, env.battle.step(action))
+                env.step(action)
             state = env.request()
             if not state["done"] or state["joint_commands"] != ep["joint_commands"]:
                 raise AssertionError("Replay changed commands or episode boundary")
@@ -177,9 +174,7 @@ def main():
         action="store_true",
         help="Execute one temporary CP command in every worker",
     )
-    parser.add_argument(
-        "--process-priority", choices=("normal", "above_normal"), default="normal"
-    )
+    parser.add_argument("--process-priority", choices=("normal", "above_normal"), default="normal")
     parser.add_argument(
         "--cpu-benchmark",
         action="store_true",
@@ -205,10 +200,7 @@ def main():
         worker_priority = 0
         psutil.Process().nice(worker_priority)
     started = perf_counter()
-    if (
-        min(args.episodes, args.repeat) < 1
-        or min(args.warmup, args.warmup_episodes) < 0
-    ):
+    if min(args.episodes, args.repeat) < 1 or min(args.warmup, args.warmup_episodes) < 0:
         parser.error("Positive episode/repeat counts and nonnegative warmup required")
     if args.cpu_benchmark and args.phase != "cpu":
         parser.error("--cpu-benchmark requires phase=cpu")
@@ -341,12 +333,8 @@ def main():
                     }
                     result["worker_priorities"] = priorities
                     result["parent_priority"] = int(psutil.Process().nice())
-                    if any(
-                        value != int(worker_priority) for value in priorities.values()
-                    ):
-                        raise RuntimeError(
-                            "A worker did not receive the requested process priority"
-                        )
+                    if any(value != int(worker_priority) for value in priorities.values()):
+                        raise RuntimeError("A worker did not receive the requested process priority")
                 if args.warmup_workers:
                     monitor.mark("warmup")
                     tick = perf_counter()
@@ -355,18 +343,14 @@ def main():
                     acknowledgements = []
                     for connection, process in collector.workers:
                         if not connection.poll(300):
-                            raise TimeoutError(
-                                "Worker warmup acknowledgement timed out"
-                            )
+                            raise TimeoutError("Worker warmup acknowledgement timed out")
                         kind, acknowledgement = connection.recv()
                         if (
                             kind != "warmup"
                             or acknowledgement.get("pid") != process.pid
                             or acknowledgement.get("cp_calls") != 1
                         ):
-                            raise RuntimeError(
-                                f"Invalid worker warmup: {acknowledgement}"
-                            )
+                            raise RuntimeError(f"Invalid worker warmup: {acknowledgement}")
                         acknowledgements.append(acknowledgement)
                     result["worker_warmup"] = acknowledgements
                     result["worker_warmup_seconds"] = perf_counter() - tick
@@ -377,9 +361,7 @@ def main():
                     import numpy as np
 
                     with np.load(args.reference_trace) as archive:
-                        reference_trace = {
-                            name: archive[name] for name in archive.files
-                        }
+                        reference_trace = {name: archive[name] for name in archive.files}
 
                 def action(*, warmup=False):
                     nonlocal reference_trace, diagnostic_index
@@ -388,9 +370,7 @@ def main():
                     stat_paths = (
                         [
                             Path(p) / "cpu.stat"
-                            for p in result["hardware"]
-                            .get("cgroup", {})
-                            .get("quota_sources", [])
+                            for p in result["hardware"].get("cgroup", {}).get("quota_sources", [])
                         ]
                         if args.cpu_stat
                         else []
@@ -402,9 +382,7 @@ def main():
                         return {
                             str(p): {
                                 key: int(value)
-                                for key, value in (
-                                    line.split() for line in p.read_text().splitlines()
-                                )
+                                for key, value in (line.split() for line in p.read_text().splitlines())
                             }
                             for p in stat_paths
                         }
@@ -423,7 +401,10 @@ def main():
                         stat_after = cpu_stat_snapshot()
                     if args.cpu_stat:
                         timings["cpu_stat"] = {
-                            "scope": "quota cgroup counters around collector.collect; shared cgroup activity included",
+                            "scope": (
+                                "quota cgroup counters around collector.collect; "
+                                "shared cgroup activity included"
+                            ),
                             "before": stat_before,
                             "after": stat_after,
                             "delta": {
@@ -435,9 +416,7 @@ def main():
                                 for p, counters in stat_after.items()
                             },
                         }
-                    timings["compilation_seconds"] = sum(
-                        b - a for a, b in compiler.intervals
-                    )
+                    timings["compilation_seconds"] = sum(b - a for a, b in compiler.intervals)
                     monitor.mark("verification")
                     diagnostic = timings.pop("diagnostics", None)
                     diagnostic_file = None
@@ -448,14 +427,9 @@ def main():
                     trace = {}
                     for name in ("old_log_probs", "old_hidden", "old_value"):
                         parts = [
-                            np.asarray(v).reshape(-1)
-                            for ep in values
-                            for v in ep[name]
-                            if v is not None
+                            np.asarray(v).reshape(-1) for ep in values for v in ep[name] if v is not None
                         ]
-                        trace[name] = (
-                            np.concatenate(parts) if parts else np.empty(0, np.float32)
-                        )
+                        trace[name] = np.concatenate(parts) if parts else np.empty(0, np.float32)
                     if reference_trace is None and not warmup:
                         reference_trace = trace
                     if not warmup and not (args.out / "trace.npz").exists():
@@ -468,18 +442,9 @@ def main():
                         if not warmup
                     }
                     return {
-                        "commands_hash": digest(
-                            [ep["joint_commands"] for ep in values]
-                        ),
+                        "commands_hash": digest([ep["joint_commands"] for ep in values]),
                         "results_hash": digest(
-                            [
-                                {
-                                    k: v
-                                    for k, v in ep["result"].items()
-                                    if k != "timings"
-                                }
-                                for ep in values
-                            ]
+                            [{k: v for k, v in ep["result"].items() if k != "timings"} for ep in values]
                         ),
                         "commands": sum(len(ep["joint_commands"]) for ep in values),
                         "positions": sum(len(ep["chosen"]) for ep in values),
@@ -495,24 +460,17 @@ def main():
                     monitor.mark("verification")
                     tick = perf_counter()
                     if args.cpu_history_reference:
-                        reference = json.loads(
-                            args.cpu_history_reference.read_text(encoding="utf-8")
-                        )
+                        reference = json.loads(args.cpu_history_reference.read_text(encoding="utf-8"))
                         if (
                             not reference.get("history_verified")
                             or reference["episodes"] != len(episodes)
-                            or reference["native_library_sha256"]
-                            != result["native_library_sha256"]
+                            or reference["native_library_sha256"] != result["native_library_sha256"]
                             or reference["source_commit"] != result["source_commit"]
                             or before[str(args.rollout.resolve())]
                             not in reference["protected_inputs"].values()
                         ):
-                            raise ValueError(
-                                "CPU history reference does not match this workload/build"
-                            )
-                        result["history_reference_sha256"] = file_sha256(
-                            args.cpu_history_reference
-                        )
+                            raise ValueError("CPU history reference does not match this workload/build")
+                        result["history_reference_sha256"] = file_sha256(args.cpu_history_reference)
                     else:
                         replay(episodes)
                     result["history_verified"] = True
@@ -521,9 +479,7 @@ def main():
                     if workers > len(episodes):
                         parser.error("CPU workers cannot exceed episode count")
                     monitor.mark("cpu_setup")
-                    cpu_replay = CPUReplay(
-                        episodes, workers, args.out, args.source_root
-                    )
+                    cpu_replay = CPUReplay(episodes, workers, args.out, args.source_root)
                     result.update(workers=workers, cpu_benchmark=True)
                     action = cpu_replay.run
                 else:
@@ -540,11 +496,7 @@ def main():
                 if counters:
                     counters.cai_profile_reset()
                 tick = perf_counter()
-                outcome = (
-                    action(warmup=phase == "warmup")
-                    if args.phase == "collection"
-                    else action()
-                )
+                outcome = action(warmup=phase == "warmup") if args.phase == "collection" else action()
                 elapsed = perf_counter() - tick
                 if cpu_replay:
                     monitor.mark("verification")
@@ -553,20 +505,12 @@ def main():
                     outcome["timings"] = {"cpu_seconds": elapsed}
                     elapsed += perf_counter() - tick
                 timings = outcome.get("timings", {})
-                seconds = timings.get(
-                    "collection_seconds", timings.get("cpu_seconds", elapsed)
-                )
+                seconds = timings.get("collection_seconds", timings.get("cpu_seconds", elapsed))
                 # FP32 heads can round differently when asynchronous batching
                 # changes shape. Keep hashes/deviations, require exact commands.
-                signature = {
-                    k: v
-                    for k, v in outcome.items()
-                    if k.endswith("hash") and k != "behavior_hash"
-                }
+                signature = {k: v for k, v in outcome.items() if k.endswith("hash") and k != "behavior_hash"}
                 if phase in references and references[phase] != signature:
-                    raise AssertionError(
-                        "Repeated workload changed commands, behavior or results"
-                    )
+                    raise AssertionError("Repeated workload changed commands, behavior or results")
                 references[phase] = signature
                 trial = {
                     "seconds": seconds,

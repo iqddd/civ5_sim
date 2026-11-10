@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, NamedTuple, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, NotRequired, TypedDict
 
 if TYPE_CHECKING:
     import numpy as np
@@ -22,6 +22,15 @@ class Scenario(TypedDict):
     seed: NotRequired[int]
 
 
+# Case identifiers and digests have two distinct scopes:
+# - Provenance.case_id: manifest entry index (0..len(cases)-1) assigned by
+#   case_manifest() within trusted_manifest["cases"].
+# - ScenarioSpec.case_id: protocol scenario/layout identifier (may be shared
+#   by a side-swapped pair in paired evaluations).
+# - manifest_entry_digest(spec) (Provenance.case_hash): digest of spec
+#   excluding "provenance", binding a case to its manifest entry.
+# - case_content_hash(case) (ScenarioSpec.case_hash): self-digest of case
+#   excluding "case_hash", verifying serialized case content.
 class Provenance(TypedDict):
     source: str
     split: str
@@ -50,6 +59,7 @@ class BaseScenarioSpec(TypedDict):
 class ProvenanceFields(TypedDict, total=False):
     episode_id: int
     case_id: int
+    case_hash: str
     layout_id: int
     physical_hash: str
     streams: dict[str, int]
@@ -94,14 +104,31 @@ class EpisodeResult(TypedDict):
     diagnostic_events: NotRequired[list[dict[str, Any]]]
 
 
-class WorkerState(TypedDict):
-    done: bool
-    observation: NotRequired[dict[str, Any]]
-    actions: NotRequired[tuple[Action, ...]]
-    result: NotRequired[EpisodeResult]
-    joint_commands: NotRequired[list[dict[str, Any]]]
+class DecisionState(TypedDict):
+    done: Literal[False]
+    observation: dict[str, Any]
+    actions: tuple[Action, ...]
+
+
+class FinishedState(TypedDict):
+    done: Literal[True]
+    result: EpisodeResult
+    joint_commands: list[dict[str, Any]]
+
+
+WorkerState = DecisionState | FinishedState
+
+
+class PublishedDecisionState(DecisionState):
     encoded_inline: NotRequired[Encoded]
     encoded_shape: NotRequired[tuple[int, int]]
+
+
+class RepeatedDoneState(TypedDict):
+    done: Literal[True]
+
+
+PublishedWorkerState = PublishedDecisionState | FinishedState | RepeatedDoneState
 
 
 class WorkerCommand(NamedTuple):
@@ -113,13 +140,13 @@ class WorkerCommand(NamedTuple):
 class WorkerStepItem(NamedTuple):
     slot: int
     generation: int
-    state: WorkerState
+    state: PublishedWorkerState
     completed_at: float
     diagnostics: dict[str, Any] | None = None
 
 
 class WorkerPayload(TypedDict):
-    states: NotRequired[list[WorkerState]]
+    states: NotRequired[list[PublishedWorkerState]]
     worker_encoding_seconds: float
     wave: NotRequired[int]
     items: NotRequired[list[WorkerStepItem]]

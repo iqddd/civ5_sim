@@ -12,9 +12,7 @@ from civ5rl.core.schema import (
     ACTION_INPUT_DIM,
     C2_ATTN_HEADS,
     C2_DISTANCE_BUCKETS,
-    C2_HEX_BLOCKS,
     CONTEXT_INPUT_DIM,
-    HEX_BLOCKS,
     HEX_DIM,
     HEX_DIRECTIONS,
     HEX_MLP_DIM,
@@ -26,14 +24,12 @@ from civ5rl.core.schema import (
     TILE_DIM,
 )
 from civ5rl.core.spatial import iter_spatial_blocks
-from civ5rl.core.variants import RECURRENT_VARIANTS, PolicyVariant
+from civ5rl.core.variants import PolicyVariant, variant_spec
 
 GRU_GATES = 3
 
 
-def batch_inputs(
-    items, device, *, non_blocking=False, spatial_only=False, min_cells=0
-):
+def batch_inputs(items, device, *, non_blocking=False, spatial_only=False, min_cells=0):
     if not items or any(len(item.cells) == 0 for item in items):
         raise ValueError("Each batch item must contain at least one cell")
     batch_size = len(items)
@@ -71,10 +67,7 @@ def batch_inputs(
             action_features=features,
             action_mask=action_mask,
         )
-    return {
-        k: torch.from_numpy(v).to(device, non_blocking=non_blocking)
-        for k, v in values.items()
-    }
+    return {k: torch.from_numpy(v).to(device, non_blocking=non_blocking) for k, v in values.items()}
 
 
 def _duplicate_singleton(value):
@@ -106,9 +99,9 @@ class HexNeighborGather(torch.autograd.Function):
             ),
             2,
         )
-        routed = gradient.gather(
-            1, inverse.clamp_min(0).unsqueeze(-1).expand_as(gradient)
-        ) * (inverse >= 0).unsqueeze(-1)
+        routed = gradient.gather(1, inverse.clamp_min(0).unsqueeze(-1).expand_as(gradient)) * (
+            inverse >= 0
+        ).unsqueeze(-1)
         return torch.cat((torch.zeros_like(routed[:, :, :1]), routed), 2), None
 
 
@@ -126,9 +119,9 @@ class ActionEmbeddingGather(torch.autograd.Function):
     @staticmethod
     def backward(ctx, gradient):
         (indices,) = ctx.saved_tensors
-        routing = (
-            indices.unsqueeze(-1) == torch.arange(ctx.num_cells, device=indices.device)
-        ).to(gradient.dtype)
+        routing = (indices.unsqueeze(-1) == torch.arange(ctx.num_cells, device=indices.device)).to(
+            gradient.dtype
+        )
         with torch.autocast(gradient.device.type, enabled=False):
             return torch.bmm(routing.transpose(1, 2), gradient), None
 
@@ -153,28 +146,22 @@ class MapMaximum(torch.autograd.Function):
 class HexBlock(nn.Module):
     def __init__(self):
         super().__init__()
-        self.weight = nn.Parameter(
-            torch.empty(SELF_AND_HEX_DIRECTIONS, HEX_DIM, HEX_DIM)
-        )
+        self.weight = nn.Parameter(torch.empty(SELF_AND_HEX_DIRECTIONS, HEX_DIM, HEX_DIM))
         self.bias = nn.Parameter(torch.zeros(HEX_DIM))
         self.inverse_routing = False
         self.norm1 = nn.LayerNorm(HEX_DIM, eps=1e-5)
         self.norm2 = nn.LayerNorm(HEX_DIM, eps=1e-5)
-        self.mlp = nn.Sequential(
-            nn.Linear(HEX_DIM, HEX_MLP_DIM), nn.GELU(), nn.Linear(HEX_MLP_DIM, HEX_DIM)
-        )
+        self.mlp = nn.Sequential(nn.Linear(HEX_DIM, HEX_MLP_DIM), nn.GELU(), nn.Linear(HEX_MLP_DIM, HEX_DIM))
 
     def forward(self, x, neighbors, mask):
         # Project all seven directions in one GEMM, then gather by direction.
         # W_d x_neighbor == (W_d x)_neighbor; no model/parameter change.
         b, n, _ = x.shape
-        projected = F.linear(
-            x, self.weight.reshape((SELF_AND_HEX_DIRECTIONS) * HEX_DIM, HEX_DIM)
-        ).reshape(b, n, SELF_AND_HEX_DIRECTIONS, HEX_DIM)
+        projected = F.linear(x, self.weight.reshape((SELF_AND_HEX_DIRECTIONS) * HEX_DIM, HEX_DIM)).reshape(
+            b, n, SELF_AND_HEX_DIRECTIONS, HEX_DIM
+        )
         batch_index = torch.arange(b, device=x.device)[:, None, None]
-        directions = torch.arange(1, SELF_AND_HEX_DIRECTIONS, device=x.device)[
-            None, None, :
-        ]
+        directions = torch.arange(1, SELF_AND_HEX_DIRECTIONS, device=x.device)[None, None, :]
         messages = (
             HexNeighborGather.apply(projected, neighbors)
             if self.inverse_routing
@@ -195,11 +182,9 @@ def hex_distance_buckets_from_neighbors(
     num_buckets: int = C2_DISTANCE_BUCKETS,
 ) -> torch.Tensor:
     """Exact pairwise hex distance buckets 0..num_buckets-1 from the neighbors graph."""
-    b, n, _ = neighbors.shape
+    _b, n, _ = neighbors.shape
     row_parity = (neighbors[:, 0, 5] >= 0).long()
-    w = torch.where(
-        neighbors[:, 0, 5] >= 0, neighbors[:, 0, 5], neighbors[:, 0, 0]
-    ).clamp_min(2)
+    w = torch.where(neighbors[:, 0, 5] >= 0, neighbors[:, 0, 5], neighbors[:, 0, 0]).clamp_min(2)
     idx = torch.arange(n, device=neighbors.device, dtype=torch.long)[None, :]
     x = idx % w[:, None]
     y = idx // w[:, None]
@@ -212,9 +197,7 @@ def hex_distance_buckets_from_neighbors(
     return torch.where(valid_pairs, dist.clamp(0, num_buckets - 1), 0)
 
 
-def unit_cell_mask_from_cells(
-    cells: torch.Tensor, cell_mask: torch.Tensor
-) -> torch.Tensor:
+def unit_cell_mask_from_cells(cells: torch.Tensor, cell_mask: torch.Tensor) -> torch.Tensor:
     """Public unit cells: own alive units, visible enemies, or remembered contacts."""
     own_present = (cells[..., TILE["own_type"]] > 0).any(-1)
     enemy_present = (cells[..., TILE["enemy_type"]] > 0).any(-1)
@@ -251,31 +234,19 @@ class CellUnitAttention(nn.Module):
         self.q_proj = nn.Linear(HEX_DIM, HEX_DIM)
         self.kv_proj = nn.Linear(HEX_DIM, 2 * HEX_DIM)
         self.out_proj = nn.Linear(HEX_DIM, HEX_DIM)
-        self.distance_bias = nn.Parameter(
-            torch.zeros(C2_ATTN_HEADS, C2_DISTANCE_BUCKETS)
-        )
+        self.distance_bias = nn.Parameter(torch.zeros(C2_ATTN_HEADS, C2_DISTANCE_BUCKETS))
 
     def forward_with_weights(self, x, cells, neighbors, cell_mask):
         b, n, _ = x.shape
         unit_mask = unit_cell_mask_from_cells(cells, cell_mask)
         buckets = hex_distance_buckets_from_neighbors(neighbors, cell_mask)
         u = self.norm(x)
-        q = (
-            self.q_proj(u)
-            .reshape(b, n, self.num_heads, self.head_dim)
-            .transpose(1, 2)
-        )
-        k, v = (
-            self.kv_proj(u)
-            .reshape(b, n, 2, self.num_heads, self.head_dim)
-            .unbind(2)
-        )
+        q = self.q_proj(u).reshape(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+        k, v = self.kv_proj(u).reshape(b, n, 2, self.num_heads, self.head_dim).unbind(2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         with torch.autocast(x.device.type, enabled=False):
-            bias = BucketBias.apply(self.distance_bias.float(), buckets).permute(
-                1, 0, 2, 3
-            )
+            bias = BucketBias.apply(self.distance_bias.float(), buckets).permute(1, 0, 2, 3)
             logits = torch.matmul(q.float(), k.float().transpose(-2, -1)) * self.scale + bias
             logits = logits.masked_fill(~unit_mask[:, None, None, :], -torch.inf)
             has_units = unit_mask.any(-1, keepdim=True)[:, None, :, None]
@@ -292,24 +263,134 @@ class CellUnitAttention(nn.Module):
         return out
 
 
+class _PolicyExecutor:
+    """Execution strategy, compilation, and batch padding outside nn.Module state."""
+
+    def __init__(self):
+        self.spatial_runner = None
+        self.heads_runner = None
+        self.memory_runner = None
+
+    def compile(
+        self,
+        policy,
+        *,
+        dynamic=True,
+        mode="default",
+        recompile_limit=32,
+        spatial_mode=None,
+    ):
+        # Inference/no-grad replay/training have separate autograd specializations.
+        # Keep a bounded cache, and retain fullgraph=True so fallback is never silent.
+        policy.spatial_cuda_graphs = spatial_mode == "reduce-overhead"
+        self.spatial_runner = torch.compile(
+            policy.spatial,
+            dynamic=dynamic,
+            mode=spatial_mode or mode,
+            fullgraph=True,
+            recompile_limit=recompile_limit,
+        )
+        self.heads_runner = torch.compile(
+            policy.heads,
+            dynamic=dynamic,
+            mode=mode,
+            fullgraph=True,
+            recompile_limit=recompile_limit,
+        )
+
+    def enable_recurrent_graphs(self, memory_module, *, max_shapes=64):
+        from civ5rl.core.training_graphs import RecurrentGraphs
+
+        self.memory_runner = RecurrentGraphs(memory_module, max_shapes=max_shapes)
+
+    def encode_spatial(self, policy, batch):
+        extra = policy.spatial_cell_padding - batch["cells"].shape[1]
+        if extra > 0:
+            # Keep BF16 GEMM geometry independent of which map sizes happen
+            # to share a collector/replay batch. Padding never enters pooling.
+            batch = {
+                **batch,
+                "cells": F.pad(batch["cells"], (0, 0, 0, extra)),
+                "neighbors": F.pad(batch["neighbors"], (0, 0, 0, extra), value=-1),
+                "cell_mask": F.pad(batch["cell_mask"], (0, extra), value=False),
+            }
+        with policy.autocast(batch["cells"]):
+            return self._encode_spatial(policy, batch)
+
+    def _encode_spatial(self, policy, batch):
+        if policy.coalesced_spatial and torch.is_grad_enabled():
+            from civ5rl.core.training_graphs import CoalescedSpatial
+
+            parameters = tuple(
+                p
+                for name, p in policy.named_parameters()
+                if name.startswith(("projection.", "blocks.", "unit_attention.", "context."))
+                and p.requires_grad
+            )
+            return CoalescedSpatial.apply(policy, batch, *parameters)
+        if policy.spatial_batch_size:
+            # BF16 GEMM output rounding can vary with the row count. Use the
+            # same GEMM shapes during action selection, replay and gradients.
+            # Padding rows are independent and discarded before memory/loss.
+            size = policy.spatial_batch_size
+            outputs = []
+            runner = policy.spatial_runner
+            for part, count in iter_spatial_blocks(batch, size):
+                x, context_embedding = runner(part)
+                outputs.append((x[:count], context_embedding[:count]))
+            return tuple(torch.cat([output[i] for output in outputs], 0) for i in range(2))
+        if self.spatial_runner is not None and len(batch["cells"]) == 1:
+            padded = _pad_singleton_rows(batch)
+            x, context_embedding = self.spatial_runner(padded)
+            return x[:1], context_embedding[:1]
+        return policy.spatial_runner(batch)
+
+    def score_heads(self, policy, batch, x, h):
+        with policy.autocast(x):
+            return self._score_heads(policy, batch, x, h)
+
+    def _score_heads(self, policy, batch, x, h):
+        if self.heads_runner is None:
+            return policy.heads(batch, x, h)
+        action_keys = ("sources", "targets", "action_features", "action_mask")
+        action_batch = {key: batch[key] for key in action_keys}
+        num_rows, num_actions = len(x), action_batch["sources"].shape[1]
+        if num_rows == 1:
+            action_batch = _pad_singleton_rows(action_batch)
+            x, h = _duplicate_singleton(x), _duplicate_singleton(h)
+        if num_actions == 1:
+            action_batch = dict(action_batch)
+            for key in action_keys:
+                value = action_batch[key]
+                fill = -1 if key in ("sources", "targets") else 0
+                action_batch[key] = torch.cat((value, torch.full_like(value, fill)), 1)
+        logits, value = self.heads_runner(action_batch, x, h)
+        return logits[:num_rows, :num_actions], value[:num_rows]
+
+    def run_recurrent_memory(self, policy, context_embedding, lengths, hidden):
+        # CUDA autocast can select FP16 for cuDNN RNN even inside BF16 autocast.
+        # Keep both GRU arithmetic and stored army memory explicitly in FP32.
+        with torch.autocast(context_embedding.device.type, enabled=False):
+            sequences = context_embedding.float().split(lengths)
+            padded = nn.utils.rnn.pad_sequence(sequences)
+            output, _ = (self.memory_runner or policy.memory)(
+                padded, None if hidden is None else hidden.float()
+            )
+        valid = torch.cat([output[:length, i] for i, length in enumerate(lengths)])
+        last = torch.stack([output[length - 1, i] for i, length in enumerate(lengths)])[None]
+        return valid, last
+
+
 class Policy(nn.Module):
     def __init__(self, variant: PolicyVariant | str = PolicyVariant.CONTACTS_GRU):
         super().__init__()
-        self.variant = PolicyVariant(variant).value
+        self.variant_spec = variant_spec(variant)
+        self.variant = self.variant_spec.variant.value
         self.hex_dim = HEX_DIM
         self.hidden_size = HIDDEN_SIZE
         self.projection = nn.Linear(TILE_DIM, HEX_DIM)
-        num_blocks = (
-            C2_HEX_BLOCKS
-            if self.variant == PolicyVariant.CONTACTS_GRU_C2
-            else HEX_BLOCKS
-        )
-        self.blocks = nn.ModuleList([HexBlock() for _ in range(num_blocks)])
-        self.unit_attention = (
-            CellUnitAttention()
-            if self.variant == PolicyVariant.CONTACTS_GRU_C2
-            else None
-        )
+        self.blocks = nn.ModuleList([HexBlock() for _ in range(self.variant_spec.hex_blocks)])
+        self.unit_attention = CellUnitAttention() if self.variant_spec.uses_unit_attention else None
         self.context = nn.Sequential(
             nn.Linear(CONTEXT_INPUT_DIM, HIDDEN_SIZE),
             nn.GELU(),
@@ -318,7 +399,7 @@ class Policy(nn.Module):
         )
         self.memory = (
             nn.GRU(HIDDEN_SIZE, HIDDEN_SIZE)
-            if self.variant in RECURRENT_VARIANTS
+            if self.variant_spec.is_recurrent
             else nn.Sequential(
                 nn.Linear(HIDDEN_SIZE, MEMORY_MLP_DIM),
                 nn.GELU(),
@@ -326,15 +407,10 @@ class Policy(nn.Module):
                 nn.GELU(),
             )
         )
-        self.action = nn.Sequential(
-            nn.Linear(ACTION_INPUT_DIM, HEX_DIM), nn.GELU(), nn.Linear(HEX_DIM, 1)
-        )
-        self.value = nn.Sequential(
-            nn.Linear(HIDDEN_SIZE, HEX_DIM), nn.GELU(), nn.Linear(HEX_DIM, 1)
-        )
+        self.action = nn.Sequential(nn.Linear(ACTION_INPUT_DIM, HEX_DIM), nn.GELU(), nn.Linear(HEX_DIM, 1))
+        self.value = nn.Sequential(nn.Linear(HIDDEN_SIZE, HEX_DIM), nn.GELU(), nn.Linear(HEX_DIM, 1))
         self.activation_checkpointing = False
-        self._spatial_runner = None
-        self._heads_runner = None
+        self._executor = _PolicyExecutor()
         self.amp_enabled = False
         self.spatial_batch_size = 0
         self.spatial_cell_padding = 0
@@ -343,12 +419,39 @@ class Policy(nn.Module):
         self.spatial_cuda_graphs = False
         self.coalesced_spatial = False
         self.coalesced_accumulation = False
-        self._memory_runner = None
         self._initialize()
 
     @property
     def is_recurrent(self) -> bool:
-        return self.variant in RECURRENT_VARIANTS
+        return self.variant_spec.is_recurrent
+
+    @property
+    def spatial_runner(self):
+        return self._executor.spatial_runner or self.spatial
+
+    @property
+    def _spatial_runner(self):
+        return self._executor.spatial_runner
+
+    @_spatial_runner.setter
+    def _spatial_runner(self, runner):
+        self._executor.spatial_runner = runner
+
+    @property
+    def _heads_runner(self):
+        return self._executor.heads_runner
+
+    @_heads_runner.setter
+    def _heads_runner(self, runner):
+        self._executor.heads_runner = runner
+
+    @property
+    def _memory_runner(self):
+        return self._executor.memory_runner
+
+    @_memory_runner.setter
+    def _memory_runner(self, runner):
+        self._executor.memory_runner = runner
 
     def enable_amp(self, enabled=True, *, spatial_batch_size=0):
         if enabled and (
@@ -359,9 +462,7 @@ class Policy(nn.Module):
         if type(spatial_batch_size) is not int or spatial_batch_size < 0:
             raise ValueError("Spatial batch size must be a nonnegative integer")
         if self.coalesced_spatial and (not enabled or not spatial_batch_size):
-            raise ValueError(
-                "Coalesced spatial training requires a fixed spatial block"
-            )
+            raise ValueError("Coalesced spatial training requires a fixed spatial block")
         self.amp_enabled = enabled
         self.spatial_batch_size = spatial_batch_size if enabled else 0
 
@@ -385,9 +486,7 @@ class Policy(nn.Module):
         if any(value is not None and type(value) is not bool for value in options):
             raise ValueError("Execution options must be boolean")
         if coalesced_spatial and not self.spatial_batch_size:
-            raise ValueError(
-                "Coalesced spatial training requires a fixed spatial block"
-            )
+            raise ValueError("Coalesced spatial training requires a fixed spatial block")
         if inverse_routing is not None:
             for block in self.blocks:
                 block.inverse_routing = inverse_routing
@@ -413,140 +512,46 @@ class Policy(nn.Module):
         self.configure_execution(coalesced_spatial=True)
 
     def enable_recurrent_graphs(self, *, max_shapes=64):
-        from civ5rl.core.training_graphs import RecurrentGraphs
-
-        self._memory_runner = RecurrentGraphs(self.memory, max_shapes=max_shapes)
+        self._executor.enable_recurrent_graphs(self.memory, max_shapes=max_shapes)
 
     def autocast(self, tensor):
-        return torch.autocast(
-            tensor.device.type, dtype=torch.bfloat16, enabled=self.amp_enabled
-        )
+        return torch.autocast(tensor.device.type, dtype=torch.bfloat16, enabled=self.amp_enabled)
 
-    def enable_compile(
-        self, *, dynamic=True, mode="default", recompile_limit=32, spatial_mode=None
-    ):
+    def enable_compile(self, *, dynamic=True, mode="default", recompile_limit=32, spatial_mode=None):
         """Compile tensor-heavy regions; cuDNN GRU stays eager, weights stay portable."""
-        # Inference/no-grad replay/training have separate autograd specializations.
-        # Keep a bounded cache, and retain fullgraph=True so fallback is never silent.
-        self.spatial_cuda_graphs = spatial_mode == "reduce-overhead"
-        self._spatial_runner = torch.compile(
-            self.spatial,
-            dynamic=dynamic,
-            mode=spatial_mode or mode,
-            fullgraph=True,
-            recompile_limit=recompile_limit,
-        )
-        self._heads_runner = torch.compile(
-            self.heads,
+        self._executor.compile(
+            self,
             dynamic=dynamic,
             mode=mode,
-            fullgraph=True,
             recompile_limit=recompile_limit,
+            spatial_mode=spatial_mode,
         )
 
     def encode_spatial(self, batch):
-        extra = self.spatial_cell_padding - batch["cells"].shape[1]
-        if extra > 0:
-            # Keep BF16 GEMM geometry independent of which map sizes happen
-            # to share a collector/replay batch. Padding never enters pooling.
-            batch = {
-                **batch,
-                "cells": F.pad(batch["cells"], (0, 0, 0, extra)),
-                "neighbors": F.pad(batch["neighbors"], (0, 0, 0, extra), value=-1),
-                "cell_mask": F.pad(batch["cell_mask"], (0, extra), value=False),
-            }
-        with self.autocast(batch["cells"]):
-            return self._encode_spatial(batch)
-
-    def _encode_spatial(self, batch):
-        if self.coalesced_spatial and torch.is_grad_enabled():
-            from civ5rl.core.training_graphs import CoalescedSpatial
-
-            parameters = tuple(
-                p
-                for name, p in self.named_parameters()
-                if name.startswith(
-                    ("projection.", "blocks.", "unit_attention.", "context.")
-                )
-                and p.requires_grad
-            )
-            return CoalescedSpatial.apply(self, batch, *parameters)
-        if self.spatial_batch_size:
-            # BF16 GEMM output rounding can vary with the row count. Use the
-            # same GEMM shapes during action selection, replay and gradients.
-            # Padding rows are independent and discarded before memory/loss.
-            size = self.spatial_batch_size
-            outputs = []
-            runner = self._spatial_runner or self.spatial
-            for part, count in iter_spatial_blocks(batch, size):
-                x, context_embedding = runner(part)
-                outputs.append((x[:count], context_embedding[:count]))
-            return tuple(
-                torch.cat([output[i] for output in outputs], 0) for i in range(2)
-            )
-        if self._spatial_runner is not None and len(batch["cells"]) == 1:
-            padded = _pad_singleton_rows(batch)
-            x, context_embedding = self._spatial_runner(padded)
-            return x[:1], context_embedding[:1]
-        return (self._spatial_runner or self.spatial)(batch)
+        return self._executor.encode_spatial(self, batch)
 
     def score_heads(self, batch, x, h):
-        with self.autocast(x):
-            return self._score_heads(batch, x, h)
-
-    def _score_heads(self, batch, x, h):
-        if self._heads_runner is None:
-            return self.heads(batch, x, h)
-        action_keys = ("sources", "targets", "action_features", "action_mask")
-        action_batch = {key: batch[key] for key in action_keys}
-        num_rows, num_actions = len(x), action_batch["sources"].shape[1]
-        if num_rows == 1:
-            action_batch = _pad_singleton_rows(action_batch)
-            x, h = _duplicate_singleton(x), _duplicate_singleton(h)
-        if num_actions == 1:
-            action_batch = dict(action_batch)
-            for key in action_keys:
-                value = action_batch[key]
-                fill = -1 if key in ("sources", "targets") else 0
-                action_batch[key] = torch.cat((value, torch.full_like(value, fill)), 1)
-        logits, value = self._heads_runner(action_batch, x, h)
-        return logits[:num_rows, :num_actions], value[:num_rows]
+        return self._executor.score_heads(self, batch, x, h)
 
     def _check_sequences(self, batch_size, lengths, hidden):
         if (
             not lengths
             or any(
-                not isinstance(length, Integral)
-                or isinstance(length, bool)
-                or length <= 0
+                not isinstance(length, Integral) or isinstance(length, bool) or length <= 0
                 for length in lengths
             )
             or sum(lengths) != batch_size
         ):
-            raise ValueError(
-                "Sequence lengths must be positive and sum to the batch size"
-            )
-        if self.variant in RECURRENT_VARIANTS:
+            raise ValueError("Sequence lengths must be positive and sum to the batch size")
+        if self.is_recurrent:
             self._check_hidden(hidden, len(lengths))
 
     def sequence_memory(self, context_embedding, lengths, hidden=None):
         self._check_sequences(len(context_embedding), lengths, hidden)
-        if self.variant not in RECURRENT_VARIANTS:
+        if not self.is_recurrent:
             with self.autocast(context_embedding):
                 return self.memory(context_embedding).float(), None
-        # CUDA autocast can select FP16 for cuDNN RNN even inside BF16 autocast.
-        # Keep both GRU arithmetic and stored army memory explicitly in FP32.
-        with torch.autocast(context_embedding.device.type, enabled=False):
-            sequences = context_embedding.float().split(lengths)
-            padded = nn.utils.rnn.pad_sequence(sequences)
-            output, _ = (self._memory_runner or self.memory)(
-                padded, None if hidden is None else hidden.float()
-            )
-        valid = torch.cat([output[:length, i] for i, length in enumerate(lengths)])
-        last = torch.stack([output[length - 1, i] for i, length in enumerate(lengths)])[
-            None
-        ]
-        return valid, last
+        return self._executor.run_recurrent_memory(self, context_embedding, lengths, hidden)
 
     def forward_sequences(self, batch, lengths, hidden=None, *, memory_only=False):
         self._check_sequences(len(batch["cells"]), lengths, hidden)
@@ -565,7 +570,7 @@ class Policy(nn.Module):
             elif isinstance(module, HexBlock):
                 for w in module.weight:
                     nn.init.xavier_uniform_(w)
-        if self.variant in RECURRENT_VARIANTS:
+        if self.is_recurrent:
             nn.init.xavier_uniform_(self.memory.weight_ih_l0)
             for w in self.memory.weight_hh_l0.chunk(GRU_GATES):
                 nn.init.orthogonal_(w)
@@ -604,14 +609,10 @@ class Policy(nn.Module):
                 x = self.unit_attention(x, batch["cells"], batch["neighbors"], mask)
         mean = x.sum(1) / mask.sum(1, keepdim=True)
         masked = x.masked_fill(~mask.unsqueeze(-1), -torch.inf)
-        maximum = (
-            MapMaximum.apply(masked) if self.maximum_routing else masked.max(1).values
-        )
+        maximum = MapMaximum.apply(masked) if self.maximum_routing else masked.max(1).values
         with torch.autocast(x.device.type, enabled=False):
             context_embedding = self.context(
-                torch.cat(
-                    (mean, maximum, batch["globals"], batch["previous"]), -1
-                ).float()
+                torch.cat((mean, maximum, batch["globals"], batch["previous"]), -1).float()
             )
         return x, context_embedding
 
@@ -626,9 +627,7 @@ class Policy(nn.Module):
                 embeddings.append(ActionEmbeddingGather.apply(x, idx))
                 continue
             embeddings.append(
-                flat[(idx.clamp_min(0) + offsets).reshape(-1)].reshape(
-                    b, -1, self.hex_dim
-                )
+                flat[(idx.clamp_min(0) + offsets).reshape(-1)].reshape(b, -1, self.hex_dim)
                 * (idx >= 0).unsqueeze(-1)
             )
         action_input = torch.cat(
@@ -642,9 +641,7 @@ class Policy(nn.Module):
         # Preserve action probabilities across different rollout/replay batches.
         with torch.autocast(h.device.type, enabled=False):
             logits = (
-                self.action(action_input.float())
-                .squeeze(-1)
-                .masked_fill(~batch["action_mask"], -torch.inf)
+                self.action(action_input.float()).squeeze(-1).masked_fill(~batch["action_mask"], -torch.inf)
             )
             value = self.value(h.float()).squeeze(-1)
         return logits, value
@@ -655,23 +652,17 @@ class Policy(nn.Module):
             batch_size,
             self.hidden_size,
         ):
-            raise ValueError(
-                f"Hidden state must have shape (1, {batch_size}, {self.hidden_size})"
-            )
+            raise ValueError(f"Hidden state must have shape (1, {batch_size}, {self.hidden_size})")
 
     def forward(self, batch, hidden=None, *, sequence=False):
-        if self.variant not in RECURRENT_VARIANTS:
+        if not self.is_recurrent:
             return self.forward_sequences(batch, [len(batch["cells"])], hidden)
         self._check_hidden(hidden, 1 if sequence else len(batch["cells"]))
         x, context_embedding = self.encode_spatial(batch)
         # sequence=True: items are consecutive decisions of one episode.
-        recurrent_input = (
-            context_embedding[:, None] if sequence else context_embedding[None]
-        )
+        recurrent_input = context_embedding[:, None] if sequence else context_embedding[None]
         with torch.autocast(context_embedding.device.type, enabled=False):
-            output, hidden = self.memory(
-                recurrent_input.float(), None if hidden is None else hidden.float()
-            )
+            output, hidden = self.memory(recurrent_input.float(), None if hidden is None else hidden.float())
         h = output[:, 0] if sequence else output[0]
         logits, value = self.score_heads(batch, x, h)
         return logits, value, hidden

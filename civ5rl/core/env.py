@@ -2,13 +2,13 @@
 
 from dataclasses import asdict
 from time import perf_counter
-from typing import NamedTuple
+from typing import Any, Literal, NamedTuple
 
 from civ5rl.core.context import context_for
 from civ5rl.core.contracts import ScenarioSpec, WorkerState
 from civ5rl.core.observation import ordered_actions
 from civ5sim.agents import load_agent
-from civ5sim.engine import Battle
+from civ5sim.engine import Action, Battle
 
 ATTACK_KINDS = ("melee", "ranged")
 END_TURN = "end_turn"
@@ -20,6 +20,20 @@ class PendingAttack(NamedTuple):
     attacker_hp: int
     defender_side: int
     defender_hp: int
+
+
+class PreparedStep(NamedTuple):
+    action: Action
+    acting_side: int
+    units_before: list[dict[str, Any]] | None
+    pending_attack: PendingAttack | None
+
+
+def learner_outcome(winner: int | None, learner_side: int) -> Literal["W", "D", "L"]:
+    """Return the learner's W/D/L match outcome independently of reward_profile."""
+    if learner_side not in (0, 1) or winner not in (None, 0, 1):
+        raise ValueError("Invalid side or winner")
+    return "D" if winner is None else "W" if winner == learner_side else "L"
 
 
 def _terminal_reward(winner: int | None, side: int, profile: str) -> int:
@@ -48,8 +62,7 @@ class DecisionEnv:
         self.learner_decisions = 0
         self.learner_decision_limit = spec.get("learner_decision_limit")
         if self.learner_decision_limit is not None and (
-            type(self.learner_decision_limit) is not int
-            or self.learner_decision_limit < 1
+            type(self.learner_decision_limit) is not int or self.learner_decision_limit < 1
         ):
             raise ValueError("Learner decision limit must be a positive integer")
         self.battle = Battle(spec["scenario"], log=False)
@@ -87,33 +100,74 @@ class DecisionEnv:
             raise
         self.first_contact_turn = None
         self.damage = [0, 0]
-        self._pending_attack = None
+        self._prepared_step: PreparedStep | None = None
         self.diagnostic_events = []
-        self._step_before = None
         self.collection_diagnostics = None
         self.diagnostic_key = None
 
-    def prepare(self, action):
-        self._pending_attack = None
-        if self.spec.get("record_step_events", False):
-            self._step_before = self.battle.snapshot()["units"]
-        if self.spec.get("diagnostics") and action.kind in ATTACK_KINDS:
-            units = self.battle.snapshot()["units"]
+    def prepare_step(self, action) -> PreparedStep:
+        acting_side = self.turns % NUM_SIDES
+        record_events = self.spec.get("record_step_events", False)
+        need_attack = bool(self.spec.get("diagnostics") and action.kind in ATTACK_KINDS)
+        units = self.battle.snapshot()["units"] if record_events or need_attack else None
+        units_before = units if record_events else None
+        pending_attack = None
+        if need_attack and units is not None and 0 <= action.unit < len(units):
             attacker = units[action.unit]
-            defender = next(
-                u for u in units if u["tile"] == action.target and u["hp"] > 0
+            defender = next((u for u in units if u["tile"] == action.target and u["hp"] > 0), None)
+            if defender is not None:
+                pending_attack = PendingAttack(
+                    attacker["side"],
+                    attacker["hp"],
+                    defender["side"],
+                    defender["hp"],
+                )
+        return PreparedStep(action, acting_side, units_before, pending_attack)
+
+    def finish_step(self, prepared: PreparedStep, result):
+        action = prepared.action
+        self.history.append(asdict(action))
+        if not result.ok:
+            raise RuntimeError(f"Kernel rejected public legal action: {result.error}")
+        if prepared.units_before is not None:
+            after = self.battle.snapshot()["units"]
+            self.diagnostic_events.append(
+                {
+                    "side": prepared.acting_side,
+                    "turn": self.turns,
+                    "action": asdict(action),
+                    "hp_before": [u["hp"] for u in prepared.units_before],
+                    "hp_after": [u["hp"] for u in after],
+                    "healing": [
+                        max(0, unit_after["hp"] - unit_before["hp"])
+                        for unit_before, unit_after in zip(prepared.units_before, after)
+                    ],
+                }
             )
-            self._pending_attack = PendingAttack(
-                attacker["side"],
-                attacker["hp"],
-                defender["side"],
-                defender["hp"],
-            )
+        if prepared.acting_side == self.side:
+            self.learner_decisions += 1
+        if prepared.pending_attack is not None:
+            attack = prepared.pending_attack
+            self.damage[attack.attacker_side] += min(result.damage, attack.defender_hp)
+            self.damage[attack.defender_side] += min(result.retaliation, attack.attacker_hp)
+        self.commands += 1
+        self.calls += 1
+        if action.kind == END_TURN:
+            self.turns += 1
+            self.calls = 0
+
+    def step(self, action):
+        prepared = self.prepare_step(action)
+        result = self.battle.step(action)
+        self.finish_step(prepared, result)
+        return result
+
+    def prepare(self, action) -> PreparedStep:
+        self._prepared_step = self.prepare_step(action)
+        return self._prepared_step
 
     def check(self):
-        self.terminal = terminal_result(
-            self.battle, self.turns, self.spec["max_rounds"]
-        )
+        self.terminal = terminal_result(self.battle, self.turns, self.spec["max_rounds"])
         if (
             self.terminal is None
             and self.learner_decision_limit is not None
@@ -123,39 +177,11 @@ class DecisionEnv:
         return self.terminal
 
     def applied(self, action, result):
-        self.history.append(asdict(action))
-        if not result.ok:
-            raise RuntimeError(f"Kernel rejected public legal action: {result.error}")
-        if self._step_before is not None:
-            after = self.battle.snapshot()["units"]
-            self.diagnostic_events.append(
-                {
-                    "side": self.turns % NUM_SIDES,
-                    "turn": self.turns,
-                    "action": asdict(action),
-                    "hp_before": [u["hp"] for u in self._step_before],
-                    "hp_after": [u["hp"] for u in after],
-                    "healing": [
-                        max(0, unit_after["hp"] - unit_before["hp"])
-                        for unit_before, unit_after in zip(self._step_before, after)
-                    ],
-                }
-            )
-            self._step_before = None
-        if self.turns % NUM_SIDES == self.side:
-            self.learner_decisions += 1
-        if self._pending_attack is not None:
-            attack = self._pending_attack
-            self.damage[attack.attacker_side] += min(result.damage, attack.defender_hp)
-            self.damage[attack.defender_side] += min(
-                result.retaliation, attack.attacker_hp
-            )
-            self._pending_attack = None
-        self.commands += 1
-        self.calls += 1
-        if action.kind == END_TURN:
-            self.turns += 1
-            self.calls = 0
+        prepared = self._prepared_step
+        self._prepared_step = None
+        if prepared is None or prepared.action != action:
+            prepared = PreparedStep(action, self.turns % NUM_SIDES, None, None)
+        self.finish_step(prepared, result)
 
     def request(self) -> WorkerState:
         state = self.request_slice()
@@ -179,9 +205,7 @@ class DecisionEnv:
 
                 planning = CallPlanningServices(
                     self.opponent.planner,
-                    PlanningState.from_battle(
-                        self.battle, 1 - self.side, observation=obs
-                    ),
+                    PlanningState.from_battle(self.battle, 1 - self.side, observation=obs),
                     1 - self.side,
                     obs["turn"],
                 )
@@ -202,10 +226,8 @@ class DecisionEnv:
             if action not in actions:
                 raise RuntimeError("Illegal opponent action")
             start = perf_counter()
-            self.prepare(action)
-            result = self.battle.step(action)
+            result = self.step(action)
             self.timings["simulation_seconds"] += perf_counter() - start
-            self.applied(action, result)
             callback = getattr(self.opponent, "on_action_result", None)
             if callable(getattr(self.opponent, "act_with_planning", None)) and callback:
                 start = perf_counter()
@@ -223,22 +245,18 @@ class DecisionEnv:
                 "joint_commands": self.history,
                 "result": {
                     **self.terminal,
-                    "reward": _terminal_reward(
-                        self.terminal["winner"], self.side, self.reward_profile
-                    ),
+                    "reward": _terminal_reward(self.terminal["winner"], self.side, self.reward_profile),
                     "commands": self.commands,
                     "learner_decisions": self.learner_decisions,
                     "rounds": self.turns / NUM_SIDES,
                     "timings": self.timings.copy(),
                     "first_contact_turn": self.first_contact_turn,
                     "remaining_hp": [
-                        sum(u["hp"] for u in final["units"] if u["side"] == s)
-                        for s in range(NUM_SIDES)
+                        sum(u["hp"] for u in final["units"] if u["side"] == s) for s in range(NUM_SIDES)
                     ],
                     "damage_dealt": self.damage.copy(),
                     "units_lost": [
-                        sum(u["hp"] <= 0 for u in final["units"] if u["side"] == s)
-                        for s in range(NUM_SIDES)
+                        sum(u["hp"] <= 0 for u in final["units"] if u["side"] == s) for s in range(NUM_SIDES)
                     ],
                     **(
                         {"diagnostic_events": self.diagnostic_events}
@@ -250,9 +268,7 @@ class DecisionEnv:
         if self.calls >= self.spec["max_calls_per_turn"]:
             raise RuntimeError("Learner action limit")
         observation = self.battle.observe(self.side)
-        if self.first_contact_turn is None and any(
-            u["side"] != self.side for u in observation["units"]
-        ):
+        if self.first_contact_turn is None and any(u["side"] != self.side for u in observation["units"]):
             self.first_contact_turn = self.turns
         return {
             "done": False,

@@ -8,16 +8,17 @@ from civ5sim.engine import digest
 ALLOWED = {"train", "validation", "diagnostic_train", "diagnostic_dev"}
 
 
-def case_digest(spec):
+def manifest_entry_digest(spec):
     return digest({k: v for k, v in spec.items() if k != "provenance"})
+
+
+case_digest = manifest_entry_digest
 
 
 def case_manifest(specs, *, source, split, namespace):
     if split not in ALLOWED:
         raise ValueError(f"Closed or unsupported split: {split}")
-    cases = [
-        {k: deepcopy(v) for k, v in spec.items() if k != "provenance"} for spec in specs
-    ]
+    cases = [{k: deepcopy(v) for k, v in spec.items() if k != "provenance"} for spec in specs]
     for spec in cases:
         _validate_protocol_case(spec, source, split)
     manifest = {
@@ -41,13 +42,13 @@ def bound_cases(manifest):
                 "source": manifest["source"],
                 "split": manifest["split"],
                 "namespace": manifest["namespace"],
-                "case_id": i,
-                "case_hash": case_digest(spec),
+                "case_id": manifest_index,
+                "case_hash": manifest_entry_digest(spec),
                 "scenario_hash": digest(spec["scenario"]),
                 "manifest_hash": manifest["hash"],
             },
         }
-        for i, spec in enumerate(manifest["cases"])
+        for manifest_index, spec in enumerate(manifest["cases"])
     ]
 
 
@@ -73,22 +74,20 @@ def validate_cases(specs, trusted_manifest):
     validate_manifest(trusted_manifest)
     for spec in specs:
         provenance = spec.get("provenance", {})
-        case_id = provenance.get("case_id")
-        if type(case_id) is not int or not 0 <= case_id < len(
-            trusted_manifest["cases"]
-        ):
+        manifest_index = provenance.get("case_id")
+        if type(manifest_index) is not int or not 0 <= manifest_index < len(trusted_manifest["cases"]):
             raise ValueError("Case provenance identifier is missing or invalid")
-        expected = trusted_manifest["cases"][case_id]
+        expected = trusted_manifest["cases"][manifest_index]
         fields = {
             "source": trusted_manifest["source"],
             "split": trusted_manifest["split"],
             "namespace": trusted_manifest["namespace"],
             "manifest_hash": trusted_manifest["hash"],
-            "case_id": case_id,
-            "case_hash": case_digest(expected),
+            "case_id": manifest_index,
+            "case_hash": manifest_entry_digest(expected),
             "scenario_hash": digest(expected["scenario"]),
         }
-        if provenance != fields or case_digest(spec) != fields["case_hash"]:
+        if provenance != fields or manifest_entry_digest(spec) != fields["case_hash"]:
             raise ValueError("Case differs from trusted manifest/provenance")
         if spec.get("split", provenance["split"]) != provenance["split"]:
             raise ValueError("Case split differs from trusted provenance")

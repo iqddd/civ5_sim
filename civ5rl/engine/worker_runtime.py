@@ -41,9 +41,7 @@ class _WorkerRuntime:
         for spec in specs:
             self.envs.append(DecisionEnv(spec))
             if self.shared is not None:
-                self.encoders.append(
-                    ObservationEncoder(context_from_spec(spec), variant)
-                )
+                self.encoders.append(ObservationEncoder(context_from_spec(spec), variant))
         self.previous = [None] * len(self.envs)
 
     def warmup(self, spec: ScenarioSpec):
@@ -85,20 +83,21 @@ class _WorkerRuntime:
         validate=None,
         applied=None,
     ):
+        prepared = []
         for command in commands:
             if validate is not None:
                 validate(command)
-            self.envs[command.slot].prepare(command.action)
+            prepared.append(self.envs[command.slot].prepare_step(command.action))
         started = perf_counter()
         results = step_batch(
             [self.envs[command.slot].battle for command in commands],
             [command.action for command in commands],
         )
         elapsed = (perf_counter() - started) / max(len(commands), 1)
-        for command, result in zip(commands, results):
+        for command, step, result in zip(commands, prepared, results):
             env = self.envs[command.slot]
             env.timings["simulation_seconds"] += elapsed
-            env.applied(command.action, result)
+            env.finish_step(step, result)
             if interleave_history:
                 self.remember(command)
             if applied is not None:
@@ -118,9 +117,7 @@ class _WorkerRuntime:
             return 0.0
         started = perf_counter()
         state.update(
-            self.shared.write(
-                slot, self.encoders[slot].encode(state["observation"], state["actions"])
-            )
+            self.shared.write(slot, self.encoders[slot].encode(state["observation"], state["actions"]))
         )
         return perf_counter() - started
 
@@ -130,9 +127,7 @@ class _WorkerRuntime:
                 "error",
                 {
                     "traceback": traceback.format_exc(),
-                    "episodes": [
-                        env.reproduction() for env in self.envs if env is not None
-                    ],
+                    "episodes": [env.reproduction() for env in self.envs if env is not None],
                 },
             )
         )

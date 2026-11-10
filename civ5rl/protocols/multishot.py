@@ -44,10 +44,7 @@ def specification(config, *, full_config=False):
         ref = spec[field]
         if file_sha256(ROOT / ref["path"]) != ref["sha256"]:
             raise InvalidDataset(field + " SHA256 mismatch")
-    if (
-        file_sha256(ROOT / spec["initialization"]["checkpoint"])
-        != spec["initialization"]["sha256"]
-    ):
+    if file_sha256(ROOT / spec["initialization"]["checkpoint"]) != spec["initialization"]["sha256"]:
         raise InvalidDataset("Initialization checkpoint SHA256 mismatch")
     if full_config:
         for section in (
@@ -62,9 +59,7 @@ def specification(config, *, full_config=False):
             "telemetry",
         ):
             if config[section] != spec[section]:
-                raise InvalidDataset(
-                    "Runtime config differs from frozen spec: " + section
-                )
+                raise InvalidDataset("Runtime config differs from frozen spec: " + section)
     return spec
 
 
@@ -81,9 +76,7 @@ def control_episode(spec, passive=False):
         while True:
             state = env.request()
             if state["done"]:
-                ep.update(
-                    result=state["result"], joint_commands=state["joint_commands"]
-                )
+                ep.update(result=state["result"], joint_commands=state["joint_commands"])
                 break
             acts = state["actions"]
             shot = next((a for a in acts if a.kind == "ranged"), None)
@@ -94,39 +87,24 @@ def control_episode(spec, passive=False):
             ep["observations"].append(state["observation"])
             ep["actions"].append(acts)
             ep["chosen"].append(chosen)
-            ep["old_log_probs"].append(
-                np.where(probabilities > 0, 0, -np.inf).astype(np.float32)
-            )
+            ep["old_log_probs"].append(np.where(probabilities > 0, 0, -np.inf).astype(np.float32))
             ep["decision_metrics"].append(decision_metrics(acts, chosen, probabilities))
-            env.prepare(action)
-            env.applied(action, env.battle.step(action))
+            env.step(action)
     check_control(ep, passive)
     return ep
 
 
 def check_control(ep, passive):
     r, s = ep["result"], ep["spec"]
-    if (
-        r["reward"] != (0 if passive else 1)
-        or r["reason"] == "diagnostic_decision_limit"
-    ):
+    if r["reward"] != (0 if passive else 1) or r["reason"] == "diagnostic_decision_limit":
         raise InvalidDataset("Multishot control outcome differs")
     if not passive and sum(m["ranged_chosen"] for m in ep["decision_metrics"]) < 2:
         raise InvalidDataset("Control won with fewer than two shots")
     events = r["diagnostic_events"]
-    own = [
-        i
-        for i, u in enumerate(s["scenario"]["units"])
-        if u["side"] == s["learner_side"]
-    ]
-    if any(
-        event["side"] != s["learner_side"] and event["action"]["kind"] != "end_turn"
-        for event in events
-    ):
+    own = [i for i, u in enumerate(s["scenario"]["units"]) if u["side"] == s["learner_side"]]
+    if any(event["side"] != s["learner_side"] and event["action"]["kind"] != "end_turn" for event in events):
         raise InvalidDataset("Multishot opponent used a non-end-turn action")
-    if any(
-        event["hp_after"][i] < event["hp_before"][i] for event in events for i in own
-    ):
+    if any(event["hp_after"][i] < event["hp_before"][i] for event in events for i in own):
         raise InvalidDataset("Multishot opponent damaged the learner")
 
 
@@ -136,9 +114,7 @@ def prepare(directory, config):
     start = perf_counter()
     spec = specification(config)
     source = read_json(ROOT / spec["source_dataset"]["path"])
-    verify_self_digest(
-        source, error_msg="Original corpus hash mismatch", exception_type=InvalidDataset
-    )
+    verify_self_digest(source, error_msg="Original corpus hash mismatch", exception_type=InvalidDataset)
     dataset = {
         "schema": 1,
         "kind": "rl01.D0-multishot",
@@ -226,11 +202,7 @@ def _certify_multishot_case(case, lib):
         if not shots:
             raise InvalidDataset("No initial ranged attack")
         for action in shots:
-            hp = next(
-                u["hp"]
-                for u in state["observation"]["units"]
-                if u["tile"] == action.target
-            )
+            hp = next(u["hp"] for u in state["observation"]["units"] if u["tile"] == action.target)
             preview = env.battle.preview_attack(action)
             try:
                 minimum, maximum = shot_damage_bounds(
@@ -239,9 +211,7 @@ def _certify_multishot_case(case, lib):
                     library=lib,
                 )
             except ValueError as error:
-                raise InvalidDataset(
-                    "Initial shot non-lethality certificate failed"
-                ) from error
+                raise InvalidDataset("Initial shot non-lethality certificate failed") from error
             if hp != 40 or minimum < 0 or maximum >= hp:
                 raise InvalidDataset("Initial shot non-lethality certificate failed")
             bounds.append(

@@ -7,6 +7,7 @@ from typing import NamedTuple
 import numpy as np
 
 from civ5map.maps import adjacent, passable, validate
+from civ5rl.core.contracts import AgentContext
 from civ5rl.core.schema import (
     ACTION,
     ACTION_DIM,
@@ -25,8 +26,7 @@ from civ5rl.core.schema import (
     TILE_DIM,
     opposite_direction,
 )
-from civ5rl.core.contracts import AgentContext
-from civ5rl.core.variants import PolicyVariant
+from civ5rl.core.variants import PolicyVariant, variant_spec
 from civ5sim.engine import ELEVATIONS, FEATURES, KINDS, MAX_MOVES, TERRAINS, UNIT_TYPES
 
 HP_SCALE = 100
@@ -39,9 +39,7 @@ DISTANCE_SCALE = 32
 
 
 def ordered_actions(actions):
-    result = tuple(
-        sorted(set(actions), key=lambda a: (KINDS.index(a.kind), a.unit, a.target))
-    )
+    result = tuple(sorted(set(actions), key=lambda a: (KINDS.index(a.kind), a.unit, a.target)))
     if len(result) != len(actions):
         warnings.warn("Duplicate public actions removed", RuntimeWarning, stacklevel=2)
     if not result:
@@ -105,7 +103,8 @@ class ObservationEncoder:
         w, h = m["width"], m["height"]
         if max(w, h) > MAX_MAP_AXIS or min(w, h) < 2 or m["wrap_x"]:
             raise ValueError("RL-01 requires a non-wrapping map with axes 2..16")
-        self.variant = PolicyVariant(variant)
+        self.variant_spec = variant_spec(variant)
+        self.variant = self.variant_spec.variant
         self.side = context["side"]
         self.max_rounds = context["max_rounds"]
         self.random_damage = context["random_damage"]
@@ -116,9 +115,7 @@ class ObservationEncoder:
         self.neighbors = np.full((w * h, HEX_DIRECTIONS), -1, np.int64)
         for i, tile in enumerate(m["tiles"]):
             self.static[i, TILE["terrain"].start + TERRAINS.index(tile["terrain"])] = 1
-            self.static[
-                i, TILE["elevation"].start + ELEVATIONS.index(tile["elevation"])
-            ] = 1
+            self.static[i, TILE["elevation"].start + ELEVATIONS.index(tile["elevation"])] = 1
             self.static[i, TILE["feature"].start + FEATURES.index(tile["feature"])] = 1
             self.static[i, TILE["position_passable"]] = (*self.xy(i), passable(tile))
             for d in range(HEX_DIRECTIONS):
@@ -131,11 +128,7 @@ class ObservationEncoder:
                 self.static[i, TILE["rivers"].start + d] = river
         for tile_index, neighbors in enumerate(self.neighbors):
             for direction, neighbor in enumerate(neighbors):
-                if (
-                    neighbor >= 0
-                    and self.neighbors[neighbor, opposite_direction(direction)]
-                    != tile_index
-                ):
+                if neighbor >= 0 and self.neighbors[neighbor, opposite_direction(direction)] != tile_index:
                     raise ValueError("Map neighbors are not reciprocal")
         self.contacts: dict[int, ContactRecord] = {}
         self.last_visible = np.full(w * h, -1, np.int64)
@@ -150,13 +143,9 @@ class ObservationEncoder:
             return m["tiles"][tile_index]["rivers"][direction - 1] >= 0
         if adjacent_xy is not None:
             neighbor = adjacent_xy[1] * w + adjacent_xy[0]
-            return (
-                m["tiles"][neighbor]["rivers"][opposite_direction(direction) - 1] >= 0
-            )
+            return m["tiles"][neighbor]["rivers"][opposite_direction(direction) - 1] >= 0
         return any(
-            edge["x"] == tile_index % w
-            and edge["y"] == tile_index // w
-            and edge["direction"] == direction
+            edge["x"] == tile_index % w and edge["y"] == tile_index // w and edge["direction"] == direction
             for edge in m.get("boundary_rivers", [])
         )
 
@@ -177,8 +166,7 @@ class ObservationEncoder:
         own = {u["id"]: u for u in observation["units"] if u["side"] == self.side}
         source = own.get(action.unit)
         result[
-            PREVIOUS["source_type"].start
-            + (UNIT_TYPES.index(source["type"]) if source else len(UNIT_TYPES))
+            PREVIOUS["source_type"].start + (UNIT_TYPES.index(source["type"]) if source else len(UNIT_TYPES))
         ] = 1
         if source:
             result[PREVIOUS["source_xy"]] = self.xy(source["tile"])
@@ -198,7 +186,7 @@ class ObservationEncoder:
         cells, own, enemy = self._encode_cells(observation, clock)
         globals_ = self._encode_globals(own, enemy, turn, clock)
         previous = self.previous.copy()
-        if self.variant == PolicyVariant.CURRENT_ONLY_MLP:
+        if not self.variant_spec.uses_contact_history:
             for name in (
                 "visibility_age",
                 "seen",
@@ -213,9 +201,7 @@ class ObservationEncoder:
         sources, targets, features = self._encode_actions(actions, own)
         self.last_clock = clock
         self.last_turn = turn
-        return Encoded(
-            cells, globals_, previous, self.neighbors, sources, targets, features
-        )
+        return Encoded(cells, globals_, previous, self.neighbors, sources, targets, features)
 
     def _encode_cells(self, observation, clock):
         visibility = np.asarray(observation["visibility"], dtype=bool)
@@ -256,16 +242,11 @@ class ObservationEncoder:
         historical = {}
         for uid, contact in self.contacts.items():
             if uid not in visible_ids:
-                historical.setdefault((contact.tile, contact.type_index), []).append(
-                    contact
-                )
+                historical.setdefault((contact.tile, contact.type_index), []).append(contact)
         for (tile, kind), records in historical.items():
-            cells[tile, TILE["contact_count"].start + kind] = (
-                len(records) / ROSTER_SCALE
-            )
+            cells[tile, TILE["contact_count"].start + kind] = len(records) / ROSTER_SCALE
             cells[tile, TILE["contact_age"].start + kind] = (
-                min(clock - max(record.last_clock for record in records), AGE_CAP)
-                / AGE_CAP
+                min(clock - max(record.last_clock for record in records), AGE_CAP) / AGE_CAP
             )
             cells[tile, TILE["contact_hp"].start + kind] = (
                 np.mean([record.last_hp for record in records]) / HP_SCALE
@@ -284,11 +265,9 @@ class ObservationEncoder:
                 globals_[offset + UNIT_TYPES.index(kind)] += 1 / ROSTER_SCALE
         for contact in self.contacts.values():
             globals_[GLOBAL["contacts"].start + contact.type_index] += 1 / ROSTER_SCALE
-        if self.variant == PolicyVariant.CONTACTS_GRU_C2:
+        if self.variant_spec.bounded_time_features:
             turn_feature = min(turn / (2 * MAX_ROUNDS_SCALE), 1.0)
-            max_rounds_feature = min(
-                max(0.0, (2 * self.max_rounds - turn) / (2 * MAX_ROUNDS_SCALE)), 1.0
-            )
+            max_rounds_feature = min(max(0.0, (2 * self.max_rounds - turn) / (2 * MAX_ROUNDS_SCALE)), 1.0)
         else:
             turn_feature = turn / (2 * self.max_rounds)
             max_rounds_feature = self.max_rounds / MAX_ROUNDS_SCALE
@@ -316,9 +295,7 @@ class ObservationEncoder:
             source = own_by_id.get(a.unit)
             if source:
                 sources[j] = source["tile"]
-                features[
-                    j, ACTION["source_type"].start + UNIT_TYPES.index(source["type"])
-                ] = 1
+                features[j, ACTION["source_type"].start + UNIT_TYPES.index(source["type"])] = 1
                 features[j, ACTION["has_source"]] = 1
             if a.target >= 0:
                 targets[j] = a.target
@@ -328,8 +305,7 @@ class ObservationEncoder:
                 features[j, ACTION["displacement"]] = (
                     (targets[j] % w - sources[j] % w) / (MAX_MAP_AXIS - 1),
                     (targets[j] // w - sources[j] // w) / (MAX_MAP_AXIS - 1),
-                    distance(self.map, int(sources[j]), int(targets[j]))
-                    / DISTANCE_SCALE,
+                    distance(self.map, int(sources[j]), int(targets[j])) / DISTANCE_SCALE,
                 )
         return sources, targets, features
 
@@ -342,7 +318,5 @@ def convert_globals_time_to_c2(globals_array: np.ndarray) -> np.ndarray:
     old_turn = result[..., turn_idx].astype(np.float64)
     old_max = result[..., max_idx].astype(np.float64)
     result[..., turn_idx] = np.minimum(old_turn * old_max, 1.0).astype(np.float32)
-    result[..., max_idx] = np.clip((1.0 - old_turn) * old_max, 0.0, 1.0).astype(
-        np.float32
-    )
+    result[..., max_idx] = np.clip((1.0 - old_turn) * old_max, 0.0, 1.0).astype(np.float32)
     return result
