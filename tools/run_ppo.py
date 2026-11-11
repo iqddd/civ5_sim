@@ -4,6 +4,7 @@ import argparse
 import importlib
 import os
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +49,14 @@ def main(argv=None):
         config = protocol.load_config(ROOT / args.config)
     runner = importlib.import_module("civ5rl.experiments." + name).run
     out = args.out or ROOT / config["output"]
+    from civ5rl.reporting.progress_process import ProcessProgress
+
+    progress = ProcessProgress(out, config) if args.phase in ("train", "run", "resume", "evaluate") else nullcontext()
+    with progress:
+        return _execute(args, config, kind, name, runner, out)
+
+
+def _execute(args, config, kind, name, runner, out):
     if (
         name == "ppo_after_imitation" and args.phase == "run"
         and not (out / "passport.json").exists()

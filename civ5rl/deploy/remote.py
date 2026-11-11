@@ -346,7 +346,7 @@ training=read('training.json')
 if isinstance(training,dict):
  training={k:training.get(k) for k in ('status','stop_reason','epochs','Adam_steps','free_labels_processed','active_seconds','latest','microbatch','value_head_unchanged','GPU_utilization_review') if k in training}
 resources=tail('telemetry/resources.jsonl') or tail('training-telemetry/resources.jsonl')
-print(json.dumps({'status':read('status.json'),'state':state,'collection':collection,'training':training,'updates_tail':tail('updates.jsonl'),'steps_tail':tail('steps.jsonl'),'resources_tail':resources,'selected':read('selected.json') or read('selection.json'),'evaluations':read('evaluations.json'),'development':read('development.json'),'confirmation':read('confirmation.json'),'performance':read('performance.json')}))
+print(json.dumps({'status':read('status.json'),'state':state,'collection':collection,'training':training,'updates_tail':tail('updates.jsonl'),'steps_tail':tail('steps.jsonl'),'resources_tail':resources,'selected':read('selected.json') or read('selection.json'),'evaluations':read('evaluations.json'),'development':read('development.json'),'confirmation':read('confirmation.json'),'performance':read('performance.json'),'progress':read('derived/progress/latest.json')}))
 """
 
 

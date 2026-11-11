@@ -1291,6 +1291,7 @@ def train(config, plan, out, *, resume=False):
                 compilation=compilation,
                 epoch=epoch,
                 initial_steps=steps,
+                active_seconds=clock.seconds,
                 max_steps=max_steps,
                 should_stop=_check_stop,
                 on_step_completed=_on_step,

@@ -59,8 +59,22 @@ def main(argv=None):
     cmd.add_argument("--clusters", type=int, default=16)
     cmd.add_argument("--samples", type=int, default=10000)
     cmd.add_argument("--seed", type=int, default=20261103)
+    cmd = commands.add_parser("progress")
+    source = cmd.add_mutually_exclusive_group(required=True)
+    source.add_argument("--run", type=Path)
+    source.add_argument("--deployment", type=Path)
+    cmd.add_argument("--watch", action="store_true")
+    cmd.add_argument("--interval", type=float, default=900)
+    cmd.add_argument("--alpha", type=float, default=0.1)
+    cmd.add_argument("--exclude-compilation", action="store_true")
+    cmd.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    if args.command == "snapshot":
+    if args.command == "progress":
+        from civ5rl.reporting.progress_process import watch_progress
+        return watch_progress(run=args.run, deployment=args.deployment, watch=args.watch,
+                              interval=args.interval, alpha=args.alpha,
+                              exclude_compilation=args.exclude_compilation, json_output=args.json)
+    elif args.command == "snapshot":
         result = write_snapshot(
             args.run, args.out, last=args.last, block_size=args.block_size
         )

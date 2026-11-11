@@ -4,6 +4,7 @@ import argparse
 import importlib
 import os
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,6 +96,14 @@ def main(argv=None):
         "rl01.cp_imitation_target_c2",
     ):
         config = module.load_config(args.config)
+    from civ5rl.reporting.progress_process import ProcessProgress
+
+    progress = ProcessProgress(out, config) if args.phase in ("collect", "train", "run", "resume", "evaluate") else nullcontext()
+    with progress:
+        return _execute(args, config, kind, module, out, workers)
+
+
+def _execute(args, config, kind, module, out, workers):
     if kind == "rl01.cp_imitation_own_states":
         return module.run(args.phase, config, out, workers, args.device, args.cycle)
     if kind != "rl01.cp_imitation":

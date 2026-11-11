@@ -337,6 +337,7 @@ def run_bc_minibatch_stream(
     should_stop=None,
     on_step_completed=None,
     check_counter_steps=(),
+    active_seconds=None,
 ):
     """Execute BC minibatches with background .npz decompression, pinned H2D stream, and CPU/GPU overlap.
 
@@ -389,6 +390,8 @@ def run_bc_minibatch_stream(
                 else 0.0,
             }
             records.append(record)
+            if active_seconds is not None:
+                record["active_seconds"] = active_seconds()
             if steps_log_path is not None:
                 with steps_log_path.open("a", encoding="utf-8") as stream:
                     stream.write(json.dumps(record) + "\n")
@@ -506,6 +509,8 @@ def run_bc_minibatch_stream(
         }
         last_wall_anchor = now
         records.append(record)
+        if active_seconds is not None:
+            record["active_seconds"] = active_seconds()
         if log_handle is not None:
             log_handle.write(json.dumps(record) + "\n")
             log_handle.flush()
