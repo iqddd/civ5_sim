@@ -61,9 +61,6 @@ def main(argv=None, *, root=ROOT):
         if not args.tuning_rollout or not args.tuning_dir:
             raise ValueError("--tuning-rollout and --tuning-dir are required for tune")
         tuning_dir = Path(args.tuning_dir)
-        tuning_dir.mkdir(parents=True, exist_ok=True)
-        if not (tuning_dir / "machine.json").exists():
-            _write(tuning_dir / "machine.json", {"hardware": hardware()})
         parent = cfg.get("parent") or cfg.get("experiment", {}).get("parent")
         command = [
             sys.executable,
@@ -79,6 +76,11 @@ def main(argv=None, *, root=ROOT):
             "--budget-seconds",
             "600",
         ]
+        code = subprocess.run(command, cwd=root, check=False).returncode
+        tuning_dir.mkdir(parents=True, exist_ok=True)
+        if not (tuning_dir / "machine.json").exists():
+            _write(tuning_dir / "machine.json", {"hardware": hardware()})
+        return code
     else:
         if args.mode == "run" and has_progress:
             raise ValueError("Run already exists; use resume")
