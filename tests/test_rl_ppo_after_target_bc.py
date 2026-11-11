@@ -663,12 +663,20 @@ class TargetBCPPOTests(unittest.TestCase):
         self.assertEqual(budget["partial_minibatch_steps_allowance"], 1024)
         self.assertEqual(budget["terminal_overshoot_steps_allowance"], 16)
         self.assertEqual(budget["planned_optimizer_steps_upper_bound"], 17424)
-        self.assertEqual(budget["planned_kl_checks_upper_bound"], 1536)
-        self.assertTrue(budget["fits_within_active_seconds"])
+        self.assertEqual(budget["planned_kl_checks_upper_bound"], 17936)
+        self.assertIsNone(budget["fits_within_active_seconds"])
+        self.assertTrue(budget["warnings"])
+        calibrated = deepcopy(c2_cfg)
+        calibrated["experiment"]["time_budget_check"]["expected_kl_checks_per_rollout"] = 6
+        estimate = compute_time_budget_check(calibrated)
+        self.assertEqual(estimate["planned_kl_checks_expected"], 1536)
+        self.assertTrue(estimate["fits_within_active_seconds"])
+        self.assertFalse(estimate["worst_case_fits_within_active_seconds"])
         over_budget = deepcopy(c2_cfg)
         over_budget["ppo"]["kl_measurement"] = "whole_rollout_after_optimizer_step"
-        with self.assertRaises(ValueError):
-            compute_time_budget_check(over_budget)
+        estimate = compute_time_budget_check(over_budget)
+        self.assertFalse(estimate["fits_within_active_seconds"])
+        self.assertTrue(estimate["warnings"])
         state = {
             "decisions": 1048576,
             "baseline_wins": 193,

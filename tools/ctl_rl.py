@@ -20,6 +20,7 @@ def main(argv=None):
     for name in (
         "snapshot",
         "performance",
+        "overhead",
         "audit",
         "request-pause",
         "close",
@@ -28,8 +29,13 @@ def main(argv=None):
     ):
         cmd = commands.add_parser(name)
         cmd.add_argument("--run", type=Path, required=True)
-        if name in ("snapshot", "audit", "wait-and-finalize"):
+        if name in ("snapshot", "audit", "wait-and-finalize", "overhead"):
             cmd.add_argument("--out", type=Path, required=True)
+        if name == "overhead":
+            cmd.add_argument("--reference-start", type=int, required=True)
+            cmd.add_argument("--reference-stop", type=int, required=True)
+            cmd.add_argument("--through-update", type=int)
+            cmd.add_argument("--deployment", type=Path, action="append", default=[])
         if name in ("snapshot", "performance", "wait-and-finalize"):
             cmd.add_argument("--last", type=int)
         if name in ("snapshot", "wait-and-finalize"):
@@ -65,6 +71,12 @@ def main(argv=None):
             return result
     elif args.command == "audit":
         result = audit_run(args.run, args.out)
+    elif args.command == "overhead":
+        from civ5rl.reporting.overhead import write_overhead
+        result = write_overhead(
+            args.run, args.out, reference_start=args.reference_start,
+            reference_stop=args.reference_stop, through_update=args.through_update, deployments=args.deployment,
+        )
     elif args.command == "compare":
         result = compare(
             args.before,

@@ -430,6 +430,8 @@ def update(
         )
     policy.train()
     start_update = perf_counter()
+    if monitor:
+        monitor.mark("rollout_preparation")
     if _backend is None:
         from civ5rl.engine.ppo_fast import BatchedBackend
 

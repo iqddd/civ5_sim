@@ -58,6 +58,7 @@ python tools/ctl_rl.py request-pause --run RUN --after-update 12
 python tools/ctl_rl.py request-pause --run RUN --after-epoch 10
 python tools/ctl_rl.py wait-and-finalize --run RUN --out OUT --timeout 600
 python tools/ctl_rl.py close --run RUN --reason "Research stopped at saved boundary"
+python tools/ctl_rl.py extend-budget --run RUN --additional-seconds 3600 --reason "User requested one extra active hour"
 ```
 
 Запрос — порог в `pause.request`, не сигнал процессу. PPO-after-target-BC
@@ -80,10 +81,18 @@ shuffle RNG, курсор batch и потраченный бюджет) без �
 pending evaluation, пишет closure/status. Model/Adam/RNG не меняет;
 закрытый запуск отказывает обычному train/resume.
 
+`extend-budget` применим к неработающему, возобновляемому after-target-BC PPO.
+Он добавляет согласованные секунды в отдельный `active-budget.json` с `run_id`,
+исходным лимитом и историей запросов; config, checkpoints и потраченное время
+не переписываются. Runner с поддержкой продления использует сумму лимитов,
+но лимит решений не меняет. Старому процессу нужен штатный pause/pull/resume
+на новой версии runner; смена кода записывается в `source-revisions/`.
+
 ## Производительность и GPU
 
 ```powershell
 python tools/ctl_rl.py performance --run RUN --last 10 --json
+python tools/ctl_rl.py overhead --run RUN --out RUN/derived/overhead --reference-start 49 --reference-stop 59 --through-update 76 --deployment DEPLOYMENT
 ```
 
 Без `--last` анализируется весь запуск. Учитываются только законченные строки
@@ -95,8 +104,8 @@ Torch/GPU и показывает timers, coverage, фазовые NVML means, �
 | Показатель | Смысл |
 |---|---|
 | `collection` | Wall time сбора, записанный collector |
-| `ppo_recorded` | Таймер optimizer после создания backend/precheck |
-| `ppo_operation` | Весь `update()`, включая backend и precheck |
+| `ppo_recorded` | В текущем PPO `ppo_seconds` включает создание backend и precheck |
+| `ppo_operation` | Внешний интервал вызова `update()` в runner, включая backend и precheck |
 | `ppo_operation_without_compilation` | Тот же интервал без пересечения с Dynamo callbacks |
 | `dynamo_callbacks` | Tracing/backend callbacks, не исключительно генерация CUDA-кода |
 
@@ -115,6 +124,17 @@ Torch/GPU и показывает timers, coverage, фазовые NVML means, �
 через collection или менять модель, precision, batch/budget ради процента.
 WDDM D3D Usage не заменяет NVML; короткую фазу не удлиняют ради измерения.
 CPU-bound collection оптимизируют по времени одинаковой работы.
+
+`overhead` разделяет active time на collection, Dynamo callbacks внутри PPO,
+PPO без этих callbacks и явно неатрибутированный остаток. KL/backward/cache —
+вложенные таймеры, складывать их с этим балансом нельзя. Reference range
+задаётся явно; масштабирование по решениям — описательное сравнение, не
+доказательство оптимальной скорости. `--deployment` можно повторять для
+истории процессов: паузы между ними не приравниваются к расходу GPU или оплате.
+Phase telemetry может включать неудачные попытки того же rollout, поэтому её
+итоги не заменяют таймеры committed updates. Текущий runner передаёт monitor
+в PPO: preparation/precheck отмечаются отдельно; старые данные от этого
+автоматически не получают более точную разбивку.
 
 `integrate_gpu_interval` принимает секунды от `ResourceMonitor.start()`,
 не UTC/абсолютный `perf_counter`. Coverage знаменует весь запрошенный интервал,
@@ -149,7 +169,7 @@ Python/NumPy/Torch/CUDA RNG; optimizer не создаётся, новых ма�
 `full-cycle` действительно собирает данные и выполняет отбрасываемые updates.
 Нужен совместимый PPO boundary checkpoint с PPO Adam; BC Adam не сбрасывается
 молча. Входы защищаются hashes, состояния/RNG восстанавливаются между trials.
-`bc` прогревает компиляцию вне замеряемого окна, затем измеряет итеративное BC-обучение по NVML (`60s` и интеграл интервала), при `--trace-steps` сохраняет Chrome-трассу Kineto CPU+CUDA и `*-trace-summary.json`, а при `--verify-parity` сверяет CE, норму градиента и обновлённые веса с синхронным baseline-циклом, не модифицируя каталог научного прогона. На Windows при включённом `torch.compile` команду запускают с активированным MSVC (`vcvars64.bat`, чтобы `cl.exe` был в `PATH`). Для предстартовой проверки достаточно короткого прогона (`--warmup 3 --steps 5 --trace-steps 3`): помимо NVML Core Load проверяют `% TDP` и `top_kernels` в сводке трейса (должны доминировать GEMM и Triton-ядра, а не детерминированный `indexing_backward` или `DeviceRadixSort`), после чего сверяют `steps_per_epoch × step_seconds × epochs` с лимитом `training_seconds`. Для запусков PPO (`rl01.ppo_after_target_bc`) предстартовая сверка бюджета (`compute_time_budget_check` в `protocols/ppo_after_target_bc.py`, сохраняемая в `run.json` при `initialize`) дополнительно учитывает превышение номинального числа шагов из-за неполных последних minibatch в каждой эпохе (`+epochs` шагов на каждый rollout при упаковке `pack_minibatches`) и доигрывания начатых эпизодов на границе бюджета, а также число полных replay-проверок KL (`precheck` + проверки в конце каждой эпохи и резерв на всплески `minibatch_approx_kl` при `whole_rollout_after_epoch_or_minibatch_spike`).
+`bc` прогревает компиляцию вне замеряемого окна, затем измеряет итеративное BC-обучение по NVML (`60s` и интеграл интервала), при `--trace-steps` сохраняет Chrome-трассу Kineto CPU+CUDA и `*-trace-summary.json`, а при `--verify-parity` сверяет CE, норму градиента и обновлённые веса с синхронным baseline-циклом, не модифицируя каталог научного прогона. На Windows при включённом `torch.compile` команду запускают с активированным MSVC (`vcvars64.bat`, чтобы `cl.exe` был в `PATH`). Для предстартовой проверки достаточно короткого прогона (`--warmup 3 --steps 5 --trace-steps 3`): помимо NVML Core Load проверяют `% TDP` и `top_kernels` в сводке трейса (должны доминировать GEMM и Triton-ядра, а не детерминированный `indexing_backward` или `DeviceRadixSort`), после чего сверяют `steps_per_epoch × step_seconds × epochs` с лимитом `training_seconds`. Для запусков PPO (`rl01.ppo_after_target_bc`) предстартовая сверка бюджета (`compute_time_budget_check` в `protocols/ppo_after_target_bc.py`, сохраняемая в `run.json` при `initialize`) дополнительно учитывает превышение номинального числа шагов из-за неполных последних minibatch в каждой эпохе (`+epochs` шагов на каждый rollout при упаковке `pack_minibatches`) и доигрывания начатых эпизодов на границе бюджета, а также число полных replay-проверок KL. Для `whole_rollout_after_epoch_or_minibatch_spike` измеренный прогноз задаётся `expected_kl_checks_per_rollout`; без него ожидаемое попадание в бюджет остаётся неизвестным. Отдельно показывается пессимистичный сценарий: precheck, проверка после каждого шага при защёлкнутой жёлтой зоне и возможная проверка отката. Старый резерв «одна проверка на всплеск» не является верхней границей. Превышение выводится предупреждением с числами, а не автоматическим запретом из-за одного худшего сценария.
 Для `--compare-git-rev` поддержан только replay. Диагностика CP воспроизводит
 сохранённый эпизод; `--trace-from` требует trace-enabled native library.
 Она сообщает mismatches и root checks; без этого флага доступна обычная сверка.
@@ -197,16 +217,31 @@ rollout и фиксируются как условия исполнения.
 
 `tools/remote_rl.py` работает с уже существующим инстансом поверх `remote-python-ssh`.
 Аренда и выбор машины выполняются отдельно; по умолчанию проекта при создании
-Vast-инстанса готовятся два кандидата (`--parallel 2`).
+Vast-инстанса готовятся два кандидата (`--parallel 2`). При запуске удалённого
+опыта не нужно перечитывать исходники `civ5rl/deploy/` или `tools/tune_rl_collection.py` —
+выполняется сразу штатная последовательность команд ниже.
+
+На Windows инструменты репозитория (`tools/remote_rl.py`, `tools/ctl_rl.py`)
+запускаются через `.venv\Scripts\python.exe` (где установлены `lupa`, `torch` и
+зависимости симулятора), а менеджер инстансов `vastai_instance.py` — через
+системный `python` (где установлен `keyring` для Vast API ключа; поэтому при
+завершении удобнее вызвать `pull --keep-instance` через `.venv\Scripts\python.exe`,
+а затем явно удалить инстанс через `vastai_instance.py delete <ID>`). Для
+`rl01.ppo_after_target_bc` при упаковке с `--mode tune` в `--extra-input`
+передаётся готовый роллаут-носитель расстановок (например,
+`artifacts/rl/ppo-target-bc-t05/rollouts/rollout-0001.pt`).
 
 ```powershell
-python tools/remote_rl.py package --config configs/rl-ppo-target-bc-t05.json --out artifacts/deployments/ppo-t05 --extra-input CASE_CARRIER.pt
-python tools/remote_rl.py launch --deployment artifacts/deployments/ppo-t05 --mode tune --instance INSTANCE_JSON
-python tools/remote_rl.py pull --deployment artifacts/deployments/ppo-t05
-python tools/remote_rl.py launch --deployment artifacts/deployments/ppo-t05 --mode run
-python tools/remote_rl.py status --deployment artifacts/deployments/ppo-t05
-python tools/remote_rl.py pull --deployment artifacts/deployments/ppo-t05 --keep-instance
-python tools/remote_rl.py launch --deployment artifacts/deployments/ppo-t05 --mode resume
+git push origin HEAD
+python C:\Users\Roman\.codex\skills\vastai-instance-manager\scripts\vastai_instance.py create --profile 4090 --parallel 2 --save-instance .tmp/instance.json
+.venv\Scripts\python.exe tools/remote_rl.py package --config configs/rl-ppo-c2-h60-gae.json --out artifacts/deployments/ppo-c2-h60-gae --instance .tmp/instance.json --extra-input artifacts/rl/ppo-target-bc-t05/rollouts/rollout-0001.pt
+.venv\Scripts\python.exe tools/remote_rl.py launch --deployment artifacts/deployments/ppo-c2-h60-gae --mode tune
+.venv\Scripts\python.exe tools/remote_rl.py pull --deployment artifacts/deployments/ppo-c2-h60-gae --keep-instance
+.venv\Scripts\python.exe tools/remote_rl.py launch --deployment artifacts/deployments/ppo-c2-h60-gae --mode run
+.venv\Scripts\python.exe tools/remote_rl.py status --deployment artifacts/deployments/ppo-c2-h60-gae
+.venv\Scripts\python.exe tools/remote_rl.py pull --deployment artifacts/deployments/ppo-c2-h60-gae --keep-instance
+.venv\Scripts\python.exe tools/remote_rl.py launch --deployment artifacts/deployments/ppo-c2-h60-gae --mode resume
+python C:\Users\Roman\.codex\skills\vastai-instance-manager\scripts\vastai_instance.py delete INSTANCE_ID
 ```
 
 | Kind | run | tune | resume |

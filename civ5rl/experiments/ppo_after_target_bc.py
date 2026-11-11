@@ -508,6 +508,8 @@ def initialize(config, out):
         raise ValueError("New PPO Adam must be empty")
     shuffle_seed = seed_for(17, 0, "shuffle", namespace=experiment["shuffle_namespace"])
     budget_check = compute_time_budget_check(config)
+    if budget_check is not None:
+        print("Active-time budget check: " + json.dumps(budget_check, ensure_ascii=False), flush=True)
     record = {
         "kind": KIND,
         "config": config,
@@ -873,6 +875,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                             state["decisions"],
                             device,
                             shuffle,
+                            monitor=monitor,
                             deadline=deadline,
                             on_step=inspect_step,
                             _backend=partial(BatchedBackend, pinned_replay=True),

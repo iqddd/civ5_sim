@@ -1,5 +1,6 @@
 """Shared storage and packing of recurrent decision sequences."""
 
+from contextlib import contextmanager
 from time import perf_counter
 
 import numpy as np
@@ -27,29 +28,38 @@ def cuda_memory_snapshot(device):
     }
 
 
-def resident_memory_preflight(device, required_bytes, reserve_bytes):
-    """Reclaim unused cached blocks before rejecting a resident allocation.
+@contextmanager
+def allocation_with_reserve(device, reserve_bytes):
+    """Allocate real tensors in the body, then probe allocator headroom.
 
-    Driver-free bytes exclude PyTorch's reusable cache. Do not add all cached
-    bytes to the capacity estimate: split blocks and graph pools may be unable
-    to satisfy this allocation. Recheck actual driver availability after reclaim.
+    The caching allocator, not driver-free telemetry, decides availability.
+    A single contiguous reserve probe is conservative admission headroom, not a
+    guarantee for future training. No cache flush or allocator setting changes.
+    Callers must discard partially built containers on a genuine CUDA OOM.
     """
-    before = cuda_memory_snapshot(device)
-    result = {"before": before, "reclaimed": False, "reclaim_seconds": 0.0}
-    available = before
-    if required_bytes + reserve_bytes > before["driver_free_bytes"]:
-        tick = perf_counter()
-        with torch.cuda.device(device):
-            torch.cuda.empty_cache()
-        result.update(reclaimed=True, reclaim_seconds=perf_counter() - tick)
-        available = cuda_memory_snapshot(device)
-        result["after"] = available
-    if required_bytes + reserve_bytes > available["driver_free_bytes"]:
-        raise MemoryError(
-            f"Resident input cache requires {required_bytes} bytes plus "
-            f"{reserve_bytes} reserve; memory={result}"
-        )
-    return result
+    if not str(device).startswith("cuda"):
+        yield None
+        return
+    result = {
+        "before": cuda_memory_snapshot(device),
+        "reserve_bytes": reserve_bytes,
+        "reserve_policy": "contiguous_allocator_probe_after_data",
+    }
+    stage = "data_allocation"
+    try:
+        yield result
+        result["after_data"] = cuda_memory_snapshot(device)
+        stage = "reserve_probe"
+        if reserve_bytes:
+            probe = torch.empty(reserve_bytes, dtype=torch.uint8, device=device)
+            del probe
+        result["after_probe"] = cuda_memory_snapshot(device)
+        result["status"] = "admitted"
+    except torch.cuda.OutOfMemoryError as error:
+        result.update(status="out_of_memory", stage=stage)
+        result["at_failure"] = cuda_memory_snapshot(device)
+        error.add_note(f"CUDA allocation admission: {result}")
+        raise
 
 
 class SequenceBuffer:
@@ -68,7 +78,7 @@ class SequenceBuffer:
         self.action_counts = np.asarray([len(item.sources) for item in flat])
         self.data = None
         self.required_bytes = 0
-        self.memory_preflight = None
+        self.memory_admission = None
         if resident:
             # Derive shapes and dtypes from the canonical batching implementation.
             template = batch_inputs(flat[:1], "cpu")
@@ -89,16 +99,18 @@ class SequenceBuffer:
             self.required_bytes = sum(
                 int(np.prod(shapes[k])) * v.element_size() for k, v in template.items()
             )
-            if str(device).startswith("cuda"):
-                self.memory_preflight = resident_memory_preflight(
-                    device, self.required_bytes, reserve_bytes
-                )
             if deadline is not None and perf_counter() >= deadline:
                 raise TimeoutError("Resident preparation exceeded optimization budget")
-            self.data = {
-                k: torch.empty(shapes[k], dtype=v.dtype, device=device)
-                for k, v in template.items()
-            }
+            data = {}
+            try:
+                with allocation_with_reserve(device, reserve_bytes) as admission:
+                    for key, value in template.items():
+                        data[key] = torch.empty(shapes[key], dtype=value.dtype, device=device)
+            except torch.cuda.OutOfMemoryError:
+                data.clear()
+                raise
+            self.data = data
+            self.memory_admission = admission
             for first in range(0, rows, 256):
                 if deadline is not None and perf_counter() >= deadline:
                     raise TimeoutError(

@@ -20,7 +20,7 @@ from civ5rl.engine.constants import (
 )
 from civ5rl.engine.ppo import encode_episode, episode_returns, objective, targets
 from civ5rl.engine.replay_metrics import REPLAY_DIAGNOSTIC_KEYS, StepReplay
-from civ5rl.engine.sequence import SequenceBuffer, cuda_memory_snapshot
+from civ5rl.engine.sequence import SequenceBuffer, allocation_with_reserve, cuda_memory_snapshot
 from civ5rl.engine.spans import Span
 from civ5rl.engine.training import GradientAccumulator
 
@@ -214,6 +214,7 @@ class RolloutCache(SequenceBuffer):
         self._pinned_replay_limit = 0
         self.pinned_replay_bytes = 0
         self.pinned_replay_hits = 0
+        self.replay_memory_admission = None
 
     @property
     def replay_mode(self) -> ReplayMode:
@@ -230,9 +231,6 @@ class RolloutCache(SequenceBuffer):
         if self.data is None:
             return
         if str(self.device).startswith("cuda"):
-            free, _ = torch.cuda.mem_get_info(self.device)
-            if free < self.resident_bytes + DEFAULT_GPU_RESERVE_BYTES:
-                return
             self._replay_sums_runner = torch.compile(_replay_sums, dynamic=True, fullgraph=True)
         self.replay_inputs = True
         self._replay_plan = None
@@ -252,7 +250,11 @@ class RolloutCache(SequenceBuffer):
             host_parts = []
             for key, data, labels, lengths, slots, free_count, part_bytes in parts:
                 is_pinned = False
-                if (
+                cached = self._pinned_replay.get(key) if self._pinned_replay is not None else None
+                if cached is not None:
+                    data, labels, lengths = cached
+                    is_pinned = True
+                elif (
                     self._pinned_replay is not None
                     and self.pinned_replay_bytes + part_bytes <= self._pinned_replay_limit
                 ):
@@ -288,7 +290,7 @@ class RolloutCache(SequenceBuffer):
         reserve_bytes=2 * DEFAULT_GPU_RESERVE_BYTES,
         prefer_device=False,
     ) -> ReplayPlan:
-        """Select replay placement (on_demand, host, or device) and build the typed plan."""
+        """Try real cached replay allocations; fall back only on CUDA OOM."""
         if (
             self._replay_plan is not None
             and self._replay_plan.sequences_per_batch == sequences_per_batch
@@ -296,68 +298,51 @@ class RolloutCache(SequenceBuffer):
         ):
             return self._replay_plan
 
-        if prefer_device and str(self.device).startswith("cuda"):
-            cpu_groups, total_bytes = self._collect_cpu_replay_groups(sequences_per_batch)
-            free, _ = torch.cuda.mem_get_info(self.device)
-            if free >= total_bytes + reserve_bytes:
-                gpu_groups = []
-                for group_size, parts in cpu_groups:
-                    gpu_parts = []
-                    for _, data, labels, lengths, slots, free_count, _ in parts:
-                        gpu_data = {k: v.to(self.device) for k, v in data.items()}
-                        gpu_labels = {k: v.to(self.device) for k, v in labels.items()}
-                        gpu_slots = None if slots is None else slots.to(self.device)
-                        gpu_parts.append(ReplayPart(gpu_data, gpu_labels, lengths, gpu_slots, free_count))
-                    gpu_groups.append((group_size, gpu_parts))
+        specs_by_group = list(_replay_group_specs(self, sequences_per_batch))
+        if self.replay_inputs or (prefer_device and str(self.device).startswith("cuda")):
+            device_groups, parts, part = [], None, None
+            total_bytes = 0
+            try:
+                with allocation_with_reserve(self.device, reserve_bytes) as admission:
+                    self.replay_memory_admission = admission
+                    for group_size, specs in specs_by_group:
+                        parts = []
+                        device_groups.append((group_size, parts))
+                        for part in _replay_parts(self, specs):
+                            total_bytes += _part_tensor_bytes(part.data, part.labels, part.slots)
+                            parts.append(part)
+            except torch.cuda.OutOfMemoryError:
+                # No exception/traceback is retained in the fallback plan.
+                # Drop both completed groups and the most recent local aliases.
+                device_groups.clear()
+                if parts is not None:
+                    parts.clear()
+                part = None
+                self.replay_inputs = False
+            else:
                 self.replay_inputs = True
                 self._replay_plan = ReplayPlan(
                     mode="device",
                     sequences_per_batch=sequences_per_batch,
-                    groups=gpu_groups,
+                    groups=device_groups,
                     cached_bytes=total_bytes,
-                )
-                return self._replay_plan
-            if self._pinned_replay is not None:
-                if (
-                    self._replay_plan is not None
-                    and self._replay_plan.sequences_per_batch == sequences_per_batch
-                    and self._replay_plan.mode == "host"
-                ):
-                    self._replay_plan._count_host_hits = True
-                    return self._replay_plan
-                host_groups = self._build_host_groups(sequences_per_batch, cpu_groups=cpu_groups)
-                self._replay_plan = ReplayPlan(
-                    mode="host",
-                    sequences_per_batch=sequences_per_batch,
-                    groups=host_groups,
-                    _count_host_hits=True,
                 )
                 return self._replay_plan
 
         if self._pinned_replay is not None:
+            if (
+                self._replay_plan is not None
+                and self._replay_plan.sequences_per_batch == sequences_per_batch
+                and self._replay_plan.mode == "host"
+            ):
+                self._replay_plan._count_host_hits = True
+                return self._replay_plan
             host_groups = self._build_host_groups(sequences_per_batch)
             self._replay_plan = ReplayPlan(
                 mode="host",
                 sequences_per_batch=sequences_per_batch,
                 groups=host_groups,
-                _count_host_hits=False,
-            )
-            return self._replay_plan
-
-        specs_by_group = list(_replay_group_specs(self, sequences_per_batch))
-        if self.replay_inputs:
-            device_groups = []
-            total_bytes = 0
-            for group_size, specs in specs_by_group:
-                parts = list(_replay_parts(self, specs))
-                for part in parts:
-                    total_bytes += _part_tensor_bytes(part.data, part.labels, part.slots)
-                device_groups.append((group_size, parts))
-            self._replay_plan = ReplayPlan(
-                mode="device",
-                sequences_per_batch=sequences_per_batch,
-                groups=device_groups,
-                cached_bytes=total_bytes,
+                _count_host_hits=prefer_device,
             )
             return self._replay_plan
 
@@ -934,7 +919,8 @@ class BatchedBackend:
             "optimizer_seconds": optimizer_seconds,
             "cache_seconds": self.cache_seconds,
             "rollout_device_bytes": self.cache.resident_bytes,
-            "resident_memory_preflight": self.cache.memory_preflight,
+            "resident_memory_admission": self.cache.memory_admission,
+            "replay_memory_admission": self.cache.replay_memory_admission,
             "cuda_memory_after_update": (
                 cuda_memory_snapshot(self.device)
                 if str(self.device).startswith("cuda") else None

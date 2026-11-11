@@ -1,6 +1,7 @@
 ## Required reading
 
 - Read `docs/README.md` before starting work, then read the relevant documents linked there. It is the entry point for current contracts, operating procedures, and experiment history.
+- Before launching, inspecting, pausing, resuming, auditing, or packaging any local or remote RL run (including after context truncation), read `docs/rl-operations.md` directly and follow its CLI sequences instead of re-deriving workflows from source code.
 
 ## Documentation policy
 
@@ -36,6 +37,12 @@ This is a single-developer research project. Prioritize experiment progress and 
 
 Before adding a test, identify the specific failure it catches and why a normal run or existing check would miss it. If the benefit is marginal, skip it.
 
+## Waiting policy for long training runs
+
+- After launching or resuming a long local or remote training run, use short checks until at least 2–3 accepted optimizer steps confirm that training is progressing.
+- Once progress is confirmed, switch to interruptible 15-minute waits between status checks. Do not use frequent polling during stable training unless the user requests it or a known deadline or failure requires an earlier check.
+- User messages interrupt the wait: handle the request, then resume the monitoring cadence unless the user changes it. Waiting or interrupting a wait must not stop the training process.
+
 ## GPU utilization policy
 
 - During sustained iterative data processing on the GPU, target GPU Core Load of at least 80%, averaged over 60 seconds within that iterative phase. Use NVIDIA NVML or an equivalent hardware metric; do not use Windows WDDM GPU D3D Usage as a substitute.
@@ -47,7 +54,7 @@ Before adding a test, identify the specific failure it catches and why a normal 
 
 ## Vast.ai machine selection
 
-- Unless explicitly agreed otherwise, search and prepare two parallel candidates (`--parallel 2`) when creating a Vast.ai instance. Keep the requested GPU profile and its other defaults unchanged.
+- Unless explicitly agreed otherwise, search and prepare two parallel candidates (`--parallel 2`) when creating a Vast.ai instance. Keep the requested GPU profile and its other defaults unchanged. Follow the remote packaging, tuning, launch, and pull command sequence in `docs/rl-operations.md`.
 
 ## Experiment planning and pre-launch checks
 

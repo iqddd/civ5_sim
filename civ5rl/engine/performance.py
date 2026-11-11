@@ -233,8 +233,8 @@ def summarize_performance(directory, last=None):
         },
         "notes": [
             "Only cycles committed to updates.jsonl are selected; the current incomplete cycle is excluded.",
-            "ppo_recorded is the historical optimizer timer; ppo_operation also includes backend setup/precheck.",
-            "Dynamo callbacks cover tracing/backend work, not just GPU code generation; do not subtract them from the narrower historical timer.",
+            "Current ppo_seconds starts before backend setup/precheck; operation_seconds is the enclosing runner interval. Historical formats may differ.",
+            "Dynamo callbacks cover tracing/backend work, not just GPU code generation; subtract only matching intervals and do not add nested timers.",
             "Phase durations and GPU means are separate: missing NVML/gaps reduce coverage, never imply zero load.",
             "Without phases.jsonl, boundaries are estimated from ~1s samples; NVML itself remains sampled even with exact boundaries.",
         ],
