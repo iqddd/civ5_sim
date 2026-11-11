@@ -338,7 +338,7 @@ def tail(name):
  return result
 state=read('state.json')
 if isinstance(state,dict):
- state={k:state.get(k) for k in ('rollouts','updates','decisions','optimizer_steps','attempted_steps','rejected_steps','active_seconds','evaluation_seconds','phase','stop_reason','baseline_wins','latest','best','development_points','rollout_summary','critic','epoch','epoch_completed','batch_cursor','Adam_steps','free_labels_processed','epochs_history') if k in state}
+ state={k:state.get(k) for k in ('rollouts','updates','decisions','optimizer_steps','attempted_steps','rejected_steps','active_seconds','active_seconds_limit','evaluation_seconds','phase','stop_reason','baseline_wins','latest','best','development_points','rollout_summary','critic','epoch','epoch_completed','batch_cursor','Adam_steps','free_labels_processed','epochs_history') if k in state}
 collection=read('collection.json')
 if isinstance(collection,dict):
  collection={k:collection.get(k) for k in ('status','stop_reason','labels','new_labels','old_labels','positions','new_positions','old_positions','seconds','waves','completed_waves','eta_seconds','physical_repeats','new_matches_count','old_matches_count') if k in collection}

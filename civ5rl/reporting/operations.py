@@ -4,6 +4,7 @@ import json
 import pickle
 import time
 import zipfile
+from datetime import UTC, datetime
 from collections import Counter
 from pathlib import Path
 
@@ -36,6 +37,39 @@ ARTIFACT_ERRORS = (
 
 def _read(path, default=None):
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else default
+
+
+def extend_budget(directory, additional_seconds, reason):
+    """Record an authorized operational extension without rewriting saved config."""
+    if type(additional_seconds) is not int or additional_seconds <= 0 or not reason.strip():
+        raise ValueError("A positive integer extension and reason are required")
+    directory = Path(directory)
+    with RunLock(directory):
+        record = _read(directory / "run.json")
+        state = _read(directory / "state.json")
+        status = _read(directory / "status.json", {})
+        if record["kind"] != "rl01.ppo_after_target_bc":
+            raise ValueError("Budget extension supports PPO after target BC only")
+        if status.get("status") not in ("paused", "technical_error") or state.get("stop_reason"):
+            raise ValueError("Extend only an inactive, resumable run")
+        base = record["config"]["experiment"]["active_seconds"]
+        previous = _read(directory / "active-budget.json", {})
+        if previous and (
+            previous.get("schema") != 1 or previous.get("run_id") != record["run_id"]
+            or previous.get("base_active_seconds") != base
+        ):
+            raise ValueError("Existing budget extension differs from this run")
+        value = {
+            "schema": 1, "run_id": record["run_id"], "base_active_seconds": base,
+            "additional_active_seconds": previous.get("additional_active_seconds", 0) + additional_seconds,
+            "requests": [*previous.get("requests", []), {
+                "at_utc": datetime.now(UTC).isoformat(), "additional_seconds": additional_seconds,
+                "reason": reason, "update": state["updates"],
+                "active_seconds": state["active_seconds"],
+            }],
+        }
+        write_json(directory / "active-budget.json", value)
+        return value
 
 
 def compare(before, after, expected_n, *, clusters=16, samples=10000, seed=20261103):

@@ -19,6 +19,27 @@ def write(path, value):
 
 
 class OperationsTest(unittest.TestCase):
+    def test_budget_extension_preserves_config_and_spent_time(self):
+        from civ5rl.experiments.ppo_after_target_bc import ActiveClock
+        from civ5rl.reporting.operations import extend_budget
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, state = self.fixture(tmp)
+            record = json.loads((root / "run.json").read_text())
+            record["config"]["experiment"]["active_seconds"] = 14400
+            write(root / "run.json", record)
+            state["active_seconds"] = 10800
+            write(root / "state.json", state)
+            frozen = (root / "run.json").read_bytes()
+            extend_budget(root, 3600, "User requested another hour")
+            clock = ActiveClock(state, root)
+            clock.pause()
+            self.assertEqual(clock.limit(record["config"]), 18000)
+            self.assertGreaterEqual(state["active_seconds"], 10800)
+            self.assertEqual((root / "run.json").read_bytes(), frozen)
+            with patch("civ5rl.experiments.ppo_after_target_bc.perf_counter", return_value=100):
+                self.assertAlmostEqual(clock.deadline(record["config"]), 7300, places=1)
+
     def fixture(self, directory):
         root = Path(directory)
         (root / "run.lock").write_bytes(b"0")

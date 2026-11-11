@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from civ5rl.engine.control import close_run, request_pause
 from civ5rl.engine.performance import performance_markdown, summarize_performance
 from civ5rl.provenance.common import write_json
-from civ5rl.reporting.operations import audit_run, compare, wait_and_finalize
+from civ5rl.reporting.operations import audit_run, compare, extend_budget, wait_and_finalize
 from civ5rl.reporting.snapshot import write_snapshot
 
 
@@ -23,6 +23,7 @@ def main(argv=None):
         "audit",
         "request-pause",
         "close",
+        "extend-budget",
         "wait-and-finalize",
     ):
         cmd = commands.add_parser(name)
@@ -39,8 +40,10 @@ def main(argv=None):
             boundary = cmd.add_mutually_exclusive_group(required=True)
             boundary.add_argument("--after-epoch", type=int)
             boundary.add_argument("--after-update", type=int)
-        if name == "close":
+        if name in ("close", "extend-budget"):
             cmd.add_argument("--reason", required=True)
+        if name == "extend-budget":
+            cmd.add_argument("--additional-seconds", type=int, required=True)
         if name == "wait-and-finalize":
             cmd.add_argument("--timeout", type=float, required=True)
     cmd = commands.add_parser("compare")
@@ -79,6 +82,8 @@ def main(argv=None):
         )
     elif args.command == "close":
         result = close_run(args.run, args.reason)
+    elif args.command == "extend-budget":
+        result = extend_budget(args.run, args.additional_seconds, args.reason)
     else:
         result = wait_and_finalize(
             args.run,

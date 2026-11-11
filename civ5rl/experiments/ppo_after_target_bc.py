@@ -415,10 +415,28 @@ class ActiveClock:
     def resume(self):
         self.started = perf_counter()
 
+    def limit(self, config):
+        base = float(config["experiment"]["active_seconds"])
+        path = self.out / "active-budget.json"
+        additional = 0
+        if path.exists():
+            extension = read_json(path)
+            if (
+                extension.get("schema") != 1
+                or extension.get("run_id") != read_json(self.out / "run.json")["run_id"]
+                or extension.get("base_active_seconds") != base
+                or type(extension.get("additional_active_seconds")) is not int
+                or extension["additional_active_seconds"] < 0
+            ):
+                raise ValueError("Invalid recorded active-budget extension")
+            additional = extension["additional_active_seconds"]
+        self.state["active_seconds_limit"] = base + additional
+        return base + additional
+
     def deadline(self, config):
         self.sync()
         return perf_counter() + max(
-            0, config["experiment"]["active_seconds"] - self.state["active_seconds"]
+            0, self.limit(config) - self.state["active_seconds"]
         )
 
 
@@ -875,7 +893,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                 del episodes
                 gc.collect()
                 clock.sync()
-                if state["active_seconds"] >= config["experiment"]["active_seconds"]:
+                if state["active_seconds"] >= clock.limit(config):
                     state["stop_reason"] = state["stop_reason"] or "active_time_limit"
                 elif state["decisions"] >= config["experiment"]["decisions"]:
                     state["stop_reason"] = state["stop_reason"] or "decision_limit"
@@ -892,7 +910,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                     "active_time_overshoot_seconds": max(
                         0,
                         state["active_seconds"]
-                        - config["experiment"]["active_seconds"],
+                        - clock.limit(config),
                     ),
                     "collection": state["collection"],
                     "ppo": metrics,
@@ -1023,6 +1041,7 @@ def report(config, out):
         f"# PPO после {parent_label}",
         "",
         f"Статус: {state['stop_reason'] or state['phase']}; решения {state['decisions']}; active {state['active_seconds']:.2f} с.",
+        f"Лимит active: {state.get('active_seconds_limit', config['experiment']['active_seconds']):.0f} с; исходный бюджет {config['experiment']['active_seconds']} с; продления в active-budget.json.",
         f"Sampling rollouts {state['rollouts']}; PPO updates {state['updates']}; accepted/rejected Adam {state['optimizer_steps']}/{state['rejected_steps']}.",
         f"GPU {read_json(out / 'run.json')['GPU']}; T={config.get('policy_temperature', 1)}; max_rounds={max_rounds}; gamma={gamma}; gae_lambda={gae_lambda}; microbatch {config['ppo']['sequences_per_microbatch']}; обычный CP; reward 1/0/0.",
         "",
