@@ -668,10 +668,17 @@ class Policy(nn.Module):
         return logits, value, hidden
 
 
-def distribution_stats(logits, indices):
+def distribution_stats(logits, indices, *, entropy_grad=True):
     log_probs = logits.log_softmax(-1)
-    probs = log_probs.exp()
-    entropy = -(probs * log_probs.masked_fill(~torch.isfinite(log_probs), 0)).sum(-1)
-    count = torch.isfinite(logits).sum(-1)
-    normalized = torch.where(count > 1, entropy / count.clamp_min(2).float().log(), 0)
-    return log_probs.gather(-1, indices[:, None]).squeeze(-1), entropy, normalized
+    logp = log_probs.gather(-1, indices[:, None]).squeeze(-1)
+    with torch.set_grad_enabled(torch.is_grad_enabled() and entropy_grad):
+        ent_log_probs = log_probs if entropy_grad else log_probs.detach()
+        probs = ent_log_probs.exp()
+        entropy = -(
+            probs * ent_log_probs.masked_fill(~torch.isfinite(ent_log_probs), 0)
+        ).sum(-1)
+        count = torch.isfinite(logits).sum(-1)
+        normalized = torch.where(
+            count > 1, entropy / count.clamp_min(2).float().log(), 0
+        )
+    return logp, entropy, normalized

@@ -2,7 +2,7 @@
 
 Read this index before starting work, then consult the relevant references.
 Command paths are relative to the repository root. The main references were
-checked against the code on November 8, 2026; consult the ledger for individual
+checked against the code on November 11, 2026; consult the ledger for individual
 experiment conditions and results. Historical documents do not authorize new runs.
 
 ## Main references

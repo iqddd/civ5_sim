@@ -1,6 +1,6 @@
 # Архитектура RL
 
-Справочник реализации, сверенный с исходниками 9 ноября 2026 года. Условия
+Справочник реализации, сверенный с исходниками 11 ноября 2026 года. Условия
 конкретного опыта задаёт его конфигурация и протокол из
 [журнала экспериментов](experiment-ledger.md). Базовый `rl-v1` и поздние
 опыты BC/PPO имеют разные награды, бюджеты и настройки исполнения.
@@ -141,13 +141,23 @@ CPU workers, переключается между ними после кома�
 не делится на части. Разные scheduler/ёмкости могут менять границы rollout:
 это не обещание идентичного дальнейшего обучения.
 
-При `gamma=lambda=1` return каждой позиции равен исходу её эпизода;
-`A=G-V_old`. В текущем PPO advantage нормализуется по всем реальным решениям,
-включая forced. Actor, entropy и value усредняются по всем valid tokens.
-У forced одна легальная команда: собственные policy-gradient и entropy равны
-нулю, но включение этих позиций меняет масштаб среднего. Полный KL
-контролируемого режима считается по свободным решениям. В BC forced
-сохраняются в истории и исключаются из CE; это отдельное правило.
+При `gamma=lambda=1` (`complete_episode_monte_carlo`) return каждой позиции
+равен терминальному исходу её эпизода $R \in \{0, 1\}$, а сырое преимущество
+равно $A_t = R - V_{\text{old}}(s_t)$. При `gamma < 1` или `gae_lambda < 1`
+(`discounted_monte_carlo_with_gae`, функции `episode_returns` и
+`raw_gae_advantages` в `engine/ppo.py`) целью регрессии критика — как при
+коротком прогреве `prepare_critic` на первом сборе, так и в основных PPO-шагах —
+служит точный дисконтированный терминальный возврат $G_t = \gamma^{T-1-t} R$,
+а преимущество актора вычисляется обратным проходом $\text{GAE}(\gamma, \lambda)$
+по завершённому эпизоду ($\delta_t = r_t + \gamma V_{\text{old}}(s_{t+1}) - V_{\text{old}}(s_t)$
+при $V_{\text{old}}(s_T)=0$, $r_{T-1}=R$, $r_{t<T-1}=0$ и
+$\hat{A}_t = \delta_t + \gamma \lambda \hat{A}_{t+1}$). В обоих режимах
+advantage z-нормализуется по всем реальным решениям rollout, включая forced.
+Actor, entropy и value усредняются по всем valid tokens. У forced одна
+легальная команда: собственные policy-gradient и entropy равны нулю, но
+включение этих позиций меняет масштаб среднего. Полный KL контролируемого
+режима считается по свободным решениям (`action_mask.sum(-1) >= 2`). В BC
+forced сохраняются в истории и исключаются из CE; это отдельное правило.
 
 ```text
 ratio = exp(logp_current - logp_old)
@@ -172,15 +182,34 @@ PPO выполняется единым циклом `engine/ppo.py` через 
 
 Behavior replay проверяется до обновления. Остановка по approximate KL
 базового v1 и полный `KL(old||current)` с rollback model/Adam/RNG поздних
-протоколов — разные правила; одно не заменяет другое. Размер Adam batch,
-microbatch, число эпох, критерий принятия и учёт бюджета берутся из опыта.
+протоколов (`step_acceptance="full_categorical_kl_rollback"`) — разные правила;
+одно не заменяет другое. Для контролируемого отката поддерживаются два режима
+`kl_measurement`:
+- `whole_rollout_after_optimizer_step` — полный `KL(old||current)` по свободным
+  решениям всего rollout проверяется после каждого `optimizer.step()`.
+- `whole_rollout_after_epoch_or_minibatch_spike` — на каждом minibatch внутри
+  `BatchedBackend.backward` без дополнительных проходов модели в FP64 считается
+  minibatch-прокси Шульмана `k3` (`(r - 1) - log r`, $r = \pi_\theta^{(T)} / \pi_{\text{old}}^{(T)}$)
+  по свободным решениям; полный прогон `measure_step_replay()` вызывается в конце
+  каждой эпохи PPO либо немедленно при входе в жёлтую зону (`minibatch_approx_kl > minibatch_kl_spike_threshold`,
+  по умолчанию `0.010`), подтверждая пачку накопленных шагов в `AdamSnapshot` при
+  `full_kl_free <= stop_kl` (`0.015`) или откатывая все неподтверждённые шаги
+  от последней проверенной границы через `AdamSnapshot.restore()`.
+
+Размер Adam batch, microbatch, число эпох, критерий принятия, целевой набор
+оценки (`development` на 128 случаев или `development_512` на 512 случаев) и
+предстартовая проверка временного бюджета (`compute_time_budget_check`) берутся из опыта.
 
 ## Значения по умолчанию и настройки опытов
 
 | Настройка | Базовая реализация / rl-v1 | Пример явного выбора |
 |---|---|---|
 | scheduler | `barrier` | `ready` или `streaming` в runtime/конфиге опыта |
-| policy temperature | `1` | `0.5` в `configs/rl-ppo-target-bc-t05.json` |
+| policy temperature | `1` | `0.5` в `configs/rl-ppo-target-bc-t05.json` и `configs/rl-ppo-c2-h60-gae.json` |
+| max_rounds | `30` | `60` в `configs/rl-ppo-c2-h60-gae.json` |
+| gamma / gae_lambda | `1` / `1` | `0.997` / `0.95` в `configs/rl-ppo-c2-h60-gae.json` |
+| kl_measurement | `whole_rollout_after_optimizer_step` | `whole_rollout_after_epoch_or_minibatch_spike` в `configs/rl-ppo-c2-h60-gae.json` |
+| evaluation_purpose | `development` (128) | `development_512` (512) в `configs/rl-ppo-c2-h60-gae.json` |
 | spatial_cell_padding | `0` | `256` в target-scale PPO/BC |
 | Среды / workers в rl-v1 | 32 / 4 | Результат подбора на конкретной машине |
 | PPO batched/resident/compile в rl-v1 | Включены в performance | Режимы backend остаются настраиваемыми |

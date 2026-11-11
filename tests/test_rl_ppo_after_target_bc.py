@@ -9,8 +9,16 @@ import torch
 from civ5rl.config import load_config
 from civ5rl.core.model import Policy, batch_inputs
 from civ5rl.engine.counters import TrainingCounters
-from civ5rl.engine.ppo import encode_episode, targets
-from civ5rl.engine.ppo_fast import RolloutCache
+from civ5rl.engine.ppo import (
+    encode_episode,
+    episode_returns,
+    raw_gae_advantages,
+    targets,
+    update,
+)
+from civ5rl.engine.ppo_fast import BatchedBackend, RolloutCache
+from civ5rl.engine.replay_metrics import StepReplay
+from civ5rl.experiments.imitation_helpers import assert_equal
 from civ5rl.experiments.ppo_after_imitation import (
     optimizer_for,
     train as ordinary_ppo_train,
@@ -24,6 +32,8 @@ from civ5rl.protocols.ppo_after_imitation import KIND as ORDINARY_PPO_KIND
 from civ5rl.protocols.ppo_after_target_bc import (
     KIND,
     check_development_gain,
+    compute_time_budget_check,
+    load_config as load_target_bc_config,
     record_collection,
     record_optimization,
 )
@@ -355,3 +365,325 @@ class TargetBCPPOTests(unittest.TestCase):
             )
             self.assertNotIn("accepted_updates", final_state)
             self.assertNotIn("attempted_steps", final_state)
+
+    def test_discounted_returns_and_gae_math(self):
+        ep_win = {
+            "chosen": [0, 1, 0],
+            "old_value": [0.2, 0.5, 0.8],
+            "result": {"reward": 1.0},
+        }
+        ep_loss = {
+            "chosen": [1, 0],
+            "old_value": [0.4, 0.3],
+            "result": {"reward": 0.0},
+        }
+        episodes = [ep_win, ep_loss]
+
+        # Legacy gamma=1, lambda=1 exact equivalence
+        mc_ret = episode_returns(episodes, gamma=1.0)
+        np.testing.assert_allclose(mc_ret[0], [1.0, 1.0, 1.0], rtol=0, atol=0)
+        np.testing.assert_allclose(mc_ret[1], [0.0, 0.0], rtol=0, atol=0)
+        mc_adv = raw_gae_advantages(episodes, gamma=1.0, gae_lambda=1.0)
+        np.testing.assert_allclose(mc_adv[0], [0.8, 0.5, 0.2], rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(mc_adv[1], [-0.4, -0.3], rtol=1e-6, atol=1e-6)
+
+        # Discounted returns and GAE(gamma=0.997, lambda=0.95)
+        gamma, lam = 0.997, 0.95
+        disc_ret = episode_returns(episodes, gamma=gamma)
+        np.testing.assert_allclose(
+            disc_ret[0],
+            np.asarray([gamma**2, gamma**1, 1.0], dtype=np.float32),
+            rtol=1e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(disc_ret[1], [0.0, 0.0], rtol=0, atol=0)
+
+        # Hand-computed backward GAE for ep_win: V = [0.2, 0.5, 0.8], R = 1.0
+        d2 = 1.0 + gamma * 0.0 - 0.8
+        a2 = d2
+        d1 = 0.0 + gamma * 0.8 - 0.5
+        a1 = d1 + gamma * lam * a2
+        d0 = 0.0 + gamma * 0.5 - 0.2
+        a0 = d0 + gamma * lam * a1
+
+        # Hand-computed backward GAE for ep_loss: V = [0.4, 0.3], R = 0.0
+        ld1 = 0.0 + gamma * 0.0 - 0.3
+        la1 = ld1
+        ld0 = 0.0 + gamma * 0.3 - 0.4
+        la0 = ld0 + gamma * lam * la1
+
+        gae_adv = raw_gae_advantages(episodes, gamma=gamma, gae_lambda=lam)
+        np.testing.assert_allclose(
+            gae_adv[0], np.asarray([a0, a1, a2], dtype=np.float32), rtol=1e-6, atol=1e-7
+        )
+        np.testing.assert_allclose(
+            gae_adv[1], np.asarray([la0, la1], dtype=np.float32), rtol=1e-6, atol=1e-7
+        )
+
+        # Propagation of gamma and gae_lambda through prepare_critic and RolloutCache
+        policy = Policy()
+        real_eps = self.episodes(policy)
+        settings = {**self.config["critic"], "batch_size": 4}
+        warmup = prepare_critic(
+            policy, real_eps, settings, "cpu", gamma=gamma, gae_lambda=lam
+        )
+        expected_disc_returns = np.concatenate(episode_returns(real_eps, gamma=gamma))
+        expected_raw_gae = np.concatenate(
+            raw_gae_advantages(real_eps, gamma=gamma, gae_lambda=lam)
+        )
+        self.assertAlmostEqual(
+            warmup["after"]["return_mean"], float(expected_disc_returns.mean()), places=6
+        )
+        self.assertNotAlmostEqual(
+            warmup["after"]["return_mean"], 5.0 / 8.0, places=4
+        )
+        self.assertAlmostEqual(
+            warmup["raw_advantage_std"], float(np.std(expected_raw_gae)), places=6
+        )
+        cache = RolloutCache(
+            real_eps,
+            "C",
+            "cpu",
+            resident=False,
+            cpu_labels=True,
+            gamma=gamma,
+            gae_lambda=lam,
+        )
+        np.testing.assert_allclose(
+            cache.labels["returns"].numpy(), expected_disc_returns, rtol=0, atol=0
+        )
+        np.testing.assert_allclose(
+            cache.labels["advantages"].numpy(),
+            np.concatenate(targets(real_eps, gamma=gamma, gae_lambda=lam)),
+            rtol=0,
+            atol=0,
+        )
+
+    def test_epoch_or_spike_kl_commit_and_rollback(self):
+        import random
+        import tempfile
+        from pathlib import Path
+
+        policy = Policy()
+        episodes = self.episodes(policy)
+        cfg = deepcopy(self.config)
+        cfg["performance"]["compile"] = False
+        cfg["ppo"].update(
+            epochs=2,
+            sequence_length=4,
+            sequences_per_minibatch=1,
+            sequences_per_microbatch=1,
+            valid_tokens_per_minibatch=4,
+            kl_measurement="whole_rollout_after_epoch_or_minibatch_spike",
+            minibatch_kl_spike_threshold=0.01,
+            target_kl=0.01,
+            stop_kl=0.05,
+            gamma=0.997,
+            gae_lambda=0.95,
+        )
+        optimizer = optimizer_for(policy, cfg, "cpu")
+        replay_calls = [0]
+
+        class CountingBackend(BatchedBackend):
+            def measure_step_replay(self):
+                replay_calls[0] += 1
+                return super().measure_step_replay()
+
+        metrics = update(
+            policy,
+            optimizer,
+            episodes,
+            cfg,
+            0,
+            "cpu",
+            random.Random(17),
+            _backend=CountingBackend,
+        )
+        # 2 epochs * 2 minibatches = 4 steps, but only 2 full-rollout KL checks (1 per epoch).
+        self.assertEqual(metrics["attempted_optimizer_steps"], 4)
+        self.assertEqual(metrics["accepted_optimizer_steps"], 4)
+        self.assertEqual(metrics["rejected_optimizer_steps"], 0)
+        self.assertEqual(replay_calls[0], 2)
+        self.assertEqual(
+            [r["full_kl_checked"] for r in metrics["optimizer_step_records"]],
+            [False, True, False, True],
+        )
+        self.assertEqual(
+            [r["committed_accepted_steps"] for r in metrics["optimizer_step_records"]],
+            [2, 2, 4, 4],
+        )
+        first_commit_record = [
+            r for r in metrics["optimizer_step_records"] if r["full_kl_checked"]
+        ][0]
+        self.assertEqual(
+            first_commit_record["accepted_step"],
+            first_commit_record["committed_accepted_steps"],
+        )
+
+        # Full rollback at epoch end restores exact model & Adam state (including exp_avg/exp_avg_sq).
+        saved_weights = deepcopy(policy.state_dict())
+        saved_adam = deepcopy(optimizer.state_dict())
+        strict_cfg = deepcopy(cfg)
+        strict_cfg["ppo"]["stop_kl"] = 1e-12
+        rollback_metrics = update(
+            policy,
+            optimizer,
+            episodes,
+            strict_cfg,
+            0,
+            "cpu",
+            random.Random(19),
+            _backend=CountingBackend,
+        )
+        self.assertEqual(rollback_metrics["stop_reason"], "rejected_full_kl")
+        self.assertEqual(rollback_metrics["accepted_optimizer_steps"], 0)
+        self.assertEqual(rollback_metrics["attempted_optimizer_steps"], 2)
+        self.assertEqual(rollback_metrics["rejected_optimizer_steps"], 2)
+        assert_equal(policy.state_dict(), saved_weights)
+        assert_equal(optimizer.state_dict(), saved_adam)
+
+        # Mid-epoch spike triggers immediate check, latches yellow_zone, and rolls back
+        # step 4 to the intermediate snapshot committed after step 3.
+        step_counter = [0]
+        scripted_minibatch_kl = [0.002, 0.003, 0.015, 0.001]
+        snapshots_after_step = {}
+
+        class SpikeAndLatchBackend(BatchedBackend):
+            def backward(self, minibatch, count, entropy_coefficient):
+                tokens = super().backward(minibatch, count, entropy_coefficient)
+                self.last_minibatch_approx_kl = scripted_minibatch_kl[step_counter[0]]
+                step_counter[0] += 1
+                return tokens
+
+            def measure_step_replay(self):
+                real = super().measure_step_replay()
+                if step_counter[0] == 4 and "step4_rejected" not in snapshots_after_step:
+                    snapshots_after_step["step4_rejected"] = True
+                    return StepReplay(
+                        acceptance_kl=cfg["ppo"]["stop_kl"] + 0.02,
+                        diagnostics=real.diagnostics,
+                    )
+                return real
+
+        def capture_intermediate(record):
+            if record["accepted"] and record["full_kl_checked"] and record["step"] == 3:
+                snapshots_after_step["weights_3"] = deepcopy(policy.state_dict())
+                snapshots_after_step["adam_3"] = deepcopy(optimizer.state_dict())
+
+        partial_metrics = update(
+            policy,
+            optimizer,
+            episodes,
+            cfg,
+            0,
+            "cpu",
+            random.Random(23),
+            on_step=capture_intermediate,
+            _backend=SpikeAndLatchBackend,
+        )
+        self.assertEqual(partial_metrics["stop_reason"], "rejected_full_kl")
+        self.assertEqual(partial_metrics["attempted_optimizer_steps"], 4)
+        self.assertEqual(partial_metrics["accepted_optimizer_steps"], 3)
+        self.assertEqual(partial_metrics["rejected_optimizer_steps"], 1)
+        self.assertEqual(partial_metrics["epochs_completed"], 1)
+        self.assertEqual(
+            [r["full_kl_checked"] for r in partial_metrics["optimizer_step_records"]],
+            [False, True, True, True],
+        )
+        self.assertEqual(
+            [r["accepted"] for r in partial_metrics["optimizer_step_records"]],
+            [True, True, True, False],
+        )
+        self.assertEqual(
+            [
+                r["committed_accepted_steps"]
+                for r in partial_metrics["optimizer_step_records"]
+            ],
+            [2, 2, 3, 3],
+        )
+        assert_equal(policy.state_dict(), snapshots_after_step["weights_3"])
+        assert_equal(optimizer.state_dict(), snapshots_after_step["adam_3"])
+        self.assertFalse(
+            all(
+                torch.equal(policy.state_dict()[k], saved_weights[k])
+                for k in saved_weights
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            write_json(tmp / "run.json", {"run_id": "kl_batch", "config": cfg})
+            state = {
+                **TrainingCounters(
+                    rollouts_collected=3,
+                    rollouts_with_accepted_steps=2,
+                    adam_steps_attempted=10,
+                    adam_steps_accepted=7,
+                ).to_state_dict(protocol=KIND),
+                "updates": 3,
+                "decisions": 24,
+                "rejected_steps": 3,
+                "phase": "collect",
+            }
+            write_json(tmp / "state.json", state)
+            rows = [
+                {
+                    "rollout": 1,
+                    "decisions": 8,
+                    "total_decisions": 8,
+                    "ppo": {**metrics, "PPO_skipped": False},
+                },
+                {
+                    "rollout": 2,
+                    "decisions": 8,
+                    "total_decisions": 16,
+                    "ppo": {**rollback_metrics, "PPO_skipped": False},
+                },
+                {
+                    "rollout": 3,
+                    "decisions": 8,
+                    "total_decisions": 24,
+                    "ppo": {**partial_metrics, "PPO_skipped": False},
+                },
+            ]
+            with (tmp / "updates.jsonl").open("w", encoding="utf-8") as f:
+                import json
+
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            verified = verify_ppo_ledger(tmp)
+            self.assertEqual(verified["status"], "verified")
+            self.assertEqual(verified["totals"]["accepted"], 7)
+            self.assertEqual(verified["totals"]["rejected"], 3)
+
+    def test_c2_h60_gae_config_and_early_gain_gate(self):
+        c2_cfg = load_target_bc_config("configs/rl-ppo-c2-h60-gae.json")
+        budget = compute_time_budget_check(c2_cfg)
+        self.assertEqual(budget["nominal_optimizer_steps"], 16384)
+        self.assertEqual(budget["partial_minibatch_steps_allowance"], 1024)
+        self.assertEqual(budget["terminal_overshoot_steps_allowance"], 16)
+        self.assertEqual(budget["planned_optimizer_steps_upper_bound"], 17424)
+        self.assertEqual(budget["planned_kl_checks_upper_bound"], 1536)
+        self.assertTrue(budget["fits_within_active_seconds"])
+        over_budget = deepcopy(c2_cfg)
+        over_budget["ppo"]["kl_measurement"] = "whole_rollout_after_optimizer_step"
+        with self.assertRaises(ValueError):
+            compute_time_budget_check(over_budget)
+        state = {
+            "decisions": 1048576,
+            "baseline_wins": 193,
+            "best": {"wins": 203},
+            "development_points": {"1048576": "hash_1m"},
+            "stop_reason": None,
+        }
+        # +10 wins on 512 matches (+1.95 pp < +2.0 pp) triggers early stop
+        check_development_gain(state, c2_cfg)
+        self.assertEqual(state["stop_reason"], "no_development_gain")
+        # +11 wins on 512 matches (+2.15 pp >= +2.0 pp) continues
+        state.update(stop_reason=None, best={"wins": 204})
+        check_development_gain(state, c2_cfg)
+        self.assertIsNone(state["stop_reason"])
+
+
+if __name__ == "__main__":
+    unittest.main()

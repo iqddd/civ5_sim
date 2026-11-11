@@ -1,0 +1,85 @@
+{
+  "base_config": "configs/rl-ppo-target-bc-t05.json",
+  "kind": "rl01.ppo_after_target_bc",
+  "output": "artifacts/rl/ppo-c2-h60-gae",
+  "policy_temperature": 0.5,
+  "workers": 8,
+  "environment": {
+    "max_rounds": 60,
+    "max_units_per_side": 13
+  },
+  "model": {
+    "variant": "C2",
+    "hex_blocks": 8,
+    "unit_attention": {
+      "heads": 4,
+      "distance_buckets": 16
+    },
+    "time_encoding": "elapsed_remaining_over_60_clamped",
+    "expected_parameter_count": 2166722
+  },
+  "collection": {
+    "min_learner_decisions_per_update": 16384
+  },
+  "performance": {
+    "resident_rollout": true,
+    "ppo_optimized_inputs": true,
+    "ppo_cached_replay": true,
+    "cpu_rollout_labels": false
+  },
+  "ppo": {
+    "gamma": 0.997,
+    "gae_lambda": 0.95,
+    "return_estimator": "discounted_monte_carlo_with_gae",
+    "kl_measurement": "whole_rollout_after_epoch_or_minibatch_spike",
+    "minibatch_kl_spike_threshold": 0.01,
+    "target_kl": 0.01,
+    "stop_kl": 0.015,
+    "step_acceptance": "full_categorical_kl_rollback",
+    "kl_population": "free",
+    "evaluation_purpose": "development_512"
+  },
+  "experiment": {
+    "parent": "artifacts/rl/cp-imitation-target-c2/checkpoints/epoch-20.pt",
+    "parent_label": "target C2 BC epoch 20",
+    "parent_sha256": "e5226d46d0997d06c0d2aa2cdddcfb543099a62d7e90bbb400d35ade00dbeee9",
+    "parent_policy_hash": "f4c488ddb4148390f6c97c1b23bce7b4474c482f8750f8061a74543eec084e6c",
+    "parent_manifest": "artifacts/rl/c2-dev512-h60-baseline/manifest.json",
+    "parent_run": "artifacts/rl/cp-imitation-target-c2",
+    "parent_optimizer_steps": 0,
+    "decisions": 4194304,
+    "active_seconds": 14400,
+    "milestones": [
+      1048576,
+      2097152,
+      3145728,
+      4194304
+    ],
+    "start_episode": 0,
+    "training_namespace": "ppo_c2_h60_gae_train_v1",
+    "shuffle_namespace": "ppo_c2_h60_gae_shuffle_v1",
+    "critic_namespace": "ppo_c2_h60_gae_critic_v1",
+    "initial_value": "fit_first_rollout",
+    "max_winless_rollouts": 5,
+    "max_zero_accepted_rollouts": 3,
+    "early_gain_decisions": 1048576,
+    "early_gain_min_win_rate_delta": 0.02,
+    "confirmation_min_win_rate_delta": 0.05,
+    "confirmation_min_ci95_low": 0.0,
+    "protocol": "docs/rl-architecture.md",
+    "time_budget_check": {
+      "local_precheck_gpu": "NVIDIA GeForce RTX 4060 Ti",
+      "local_measured_step_seconds_mean": 0.3904,
+      "local_measured_step_seconds_median": 0.3916,
+      "local_measured_replay_16k_seconds": 2.4023,
+      "c2_4090_to_4060ti_speed_ratio": 0.4113,
+      "target_gpu": "NVIDIA GeForce RTX 4090",
+      "target_gpu_step_seconds": 0.18,
+      "target_gpu_kl_check_seconds": 1.15,
+      "target_collection_decisions_per_second": 550.0,
+      "terminal_episode_overshoot_decisions": 4096,
+      "spike_kl_checks_per_rollout": 1,
+      "runtime_compilation_allowance_seconds": 180.0
+    }
+  }
+}

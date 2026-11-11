@@ -187,7 +187,7 @@ def _c2_bc_inputs(root, cfg):
     return names
 
 
-def input_group(rel_posix, output_posix):
+def input_group(rel_posix, output_posix, tracked=()):
     """Minimal off-spine directory prefix: pairwise disjoint and outside output."""
     parts = PurePosixPath(rel_posix).parts
     out_parts = PurePosixPath(output_posix).parts
@@ -197,9 +197,18 @@ def input_group(rel_posix, output_posix):
         raise ValueError(
             f"Input overlaps experiment output {output_posix}: {rel_posix}"
         )
+    first_off_spine = None
     for depth in range(1, len(parts)):
         if parts[:depth] != out_parts[:depth]:
-            return "/".join(parts[:depth])
+            candidate = "/".join(parts[:depth])
+            if first_off_spine is None:
+                first_off_spine = candidate
+            if not any(
+                t == candidate or t.startswith(candidate + "/") for t in tracked
+            ):
+                return candidate
+    if first_off_spine is not None:
+        return first_off_spine
     raise ValueError(
         f"Input sits directly in an ancestor directory of {output_posix}: {rel_posix}"
     )
@@ -279,7 +288,7 @@ def stage_inputs(
         if name in tracked:
             tracked_inputs[name] = _sha(root / name)
             continue
-        group = input_group(name, output_posix)
+        group = input_group(name, output_posix, tracked=tracked)
         if any(t == group or t.startswith(group + "/") for t in tracked):
             raise ValueError(
                 f"Input sync group {group!r} overlaps git-tracked files; "

@@ -25,7 +25,13 @@ from civ5rl.engine.control import (
 )
 from civ5rl.engine.counters import TrainingCounters
 from civ5rl.engine.performance import performance_markdown, summarize_performance
-from civ5rl.engine.ppo import encode_episode, targets, update
+from civ5rl.engine.ppo import (
+    encode_episode,
+    episode_returns,
+    raw_gae_advantages,
+    targets,
+    update,
+)
 from civ5rl.engine.ppo_fast import BatchedBackend
 from civ5rl.engine.resources import ResourceMonitor
 from civ5rl.experiments.evaluation import paired_world_bootstrap
@@ -48,6 +54,7 @@ from civ5rl.experiments.ppo_target_scale import evaluate
 from civ5rl.protocols.ppo_after_target_bc import (
     KIND,
     check_development_gain,
+    compute_time_budget_check,
     record_collection,
     record_optimization,
     validate_profile,
@@ -239,6 +246,8 @@ def prepare_critic(
     settings,
     device,
     *,
+    gamma=1.0,
+    gae_lambda=1.0,
     deadline=None,
     progress=None,
     preparation_started=None,
@@ -248,12 +257,7 @@ def prepare_critic(
     fit_deadline = min(started + settings["active_seconds"], deadline or float("inf"))
     original_policy_hash = policy_hash(policy.state_dict())
     original_behavior = behavior_digest(episodes)
-    returns = np.concatenate(
-        [
-            np.full(len(ep["chosen"]), ep["result"]["reward"], dtype=np.float32)
-            for ep in episodes
-        ]
-    )
+    returns = np.concatenate(episode_returns(episodes, gamma=gamma))
     before = critic_statistics(
         np.concatenate([ep["old_value"] for ep in episodes]), returns
     )
@@ -337,22 +341,38 @@ def prepare_critic(
     flat_offset = 0
     after_values = []
     with torch.no_grad():
-        for episode_index, start, features in recurrent_features(
-            policy, episodes, device
-        ):
-            values = policy.value(features.to(device)).squeeze(-1).cpu().tolist()
-            episodes[episode_index]["old_value"][start : start + len(values)] = values
-            after_values.extend(values)
-            flat_offset += len(values)
-            if progress:
-                progress()
+        if cached == len(returns):
+            for episode in episodes:
+                ep_len = len(episode["old_value"])
+                for start in range(0, ep_len, 128):
+                    chunk_len = min(128, ep_len - start)
+                    features = cache[flat_offset : flat_offset + chunk_len].to(device)
+                    values = policy.value(features).squeeze(-1).cpu().tolist()
+                    episode["old_value"][start : start + chunk_len] = values
+                    after_values.extend(values)
+                    flat_offset += chunk_len
+                    if progress:
+                        progress()
+        else:
+            for episode_index, start, features in recurrent_features(
+                policy, episodes, device
+            ):
+                values = policy.value(features.to(device)).squeeze(-1).cpu().tolist()
+                episodes[episode_index]["old_value"][start : start + len(values)] = values
+                after_values.extend(values)
+                flat_offset += len(values)
+                if progress:
+                    progress()
     if flat_offset != len(returns):
         raise ValueError("Incomplete first-rollout old_value refresh")
     if policy_hash(policy.state_dict()) != original_policy_hash:
         raise RuntimeError("Critic preparation changed encoder/GRU/policy parameters")
     if behavior_digest(episodes) != original_behavior:
         raise RuntimeError("Critic preparation changed recorded behavior")
-    advantages = targets(episodes)
+    raw_advantages = np.concatenate(
+        raw_gae_advantages(episodes, gamma=gamma, gae_lambda=gae_lambda)
+    )
+    advantages = targets(episodes, gamma=gamma, gae_lambda=gae_lambda)
     return {
         "steps": steps,
         "positions_processed": processed,
@@ -363,7 +383,7 @@ def prepare_critic(
         "refresh_seconds": perf_counter() - refresh_started,
         "before": before,
         "after": critic_statistics(after_values, returns),
-        "raw_advantage_std": float(np.std(returns - np.asarray(after_values))),
+        "raw_advantage_std": float(np.std(raw_advantages)),
         "normalized_advantage_std": float(np.concatenate(advantages).std()),
         "behavior_parameters_unchanged": True,
         "recorded_behavior_unchanged": True,
@@ -437,8 +457,23 @@ def initialize(config, out):
     plan = read_json(ROOT / experiment["parent_manifest"])
     if digest({k: v for k, v in plan.items() if k != "hash"}) != plan["hash"]:
         raise ValueError("Target manifest hash differs")
-    if len(plan["development"]) != 128 or len(plan["confirmation"]) != 256:
+    eval_purpose = config.get("ppo", {}).get("evaluation_purpose", "development")
+    if (
+        len(plan["development"]) != 128
+        or len(plan["confirmation"]) != 256
+        or (
+            eval_purpose == "development_512"
+            and len(plan.get("development_512", [])) != 512
+        )
+    ):
         raise ValueError("Unexpected evaluation cases")
+    expected_rounds = int(config.get("environment", {}).get("max_rounds", 30))
+    if any(
+        int(c.get("max_rounds", 30)) != expected_rounds for c in plan[eval_purpose]
+    ) or any(
+        int(c.get("max_rounds", 30)) != expected_rounds for c in plan["confirmation"]
+    ):
+        raise ValueError("Evaluation case max_rounds differs from environment config")
     write_json(out / "manifest.json", plan)
     configure(17, "cpu")
     policy = make_policy(config, "cpu")
@@ -454,9 +489,11 @@ def initialize(config, out):
     if optimizer.state:
         raise ValueError("New PPO Adam must be empty")
     shuffle_seed = seed_for(17, 0, "shuffle", namespace=experiment["shuffle_namespace"])
+    budget_check = compute_time_budget_check(config)
     record = {
         "kind": KIND,
         "config": config,
+        **({"time_budget_check": budget_check} if budget_check is not None else {}),
         "parent_sha256": experiment["parent_sha256"],
         "parent_model_equal": True,
         "new_Adam_empty": True,
@@ -516,9 +553,10 @@ def development(config, plan, out, state, shuffle, clock=None):
     if clock:
         clock.pause()
     started = perf_counter()
+    purpose = config.get("ppo", {}).get("evaluation_purpose", "development")
     try:
         with isolated_rng(shuffle):
-            result = evaluate(config, plan, out, state["latest"], "development")
+            result = evaluate(config, plan, out, state["latest"], purpose)
         state["evaluation_seconds"] += perf_counter() - started
         state["evaluated"][result["policy_hash"]] = {
             **result,
@@ -752,6 +790,8 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                             episodes,
                             config["critic"],
                             device,
+                            gamma=float(config["ppo"].get("gamma", 1.0)),
+                            gae_lambda=float(config["ppo"].get("gae_lambda", 1.0)),
                             deadline=deadline,
                             progress=clock.progress,
                             preparation_started=critic_started,
@@ -781,18 +821,27 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                     def inspect_step(step, optimizer=optimizer):
                         if (
                             step["accepted"]
+                            and step.get("full_kl_checked", True)
                             and not (out / "first-accepted-step.json").exists()
                         ):
                             counters = {
                                 int(value["step"]) for value in optimizer.state.values()
                             }
-                            if counters != {1}:
+                            expected_counter = int(step["committed_accepted_steps"])
+                            if (
+                                counters != {expected_counter}
+                                or int(step["accepted_step"]) != expected_counter
+                            ):
                                 raise RuntimeError(
-                                    f"First PPO Adam counter differs: {counters}"
+                                    f"First PPO Adam counter differs from committed steps: {counters} != {{{expected_counter}}}"
                                 )
                             write_json(
                                 out / "first-accepted-step.json",
-                                {"Adam_counter": 1, "step": step},
+                                {
+                                    "Adam_counter": expected_counter,
+                                    "committed_accepted_steps": expected_counter,
+                                    "step": step,
+                                },
                             )
 
                     with CompilationClock() as compiler:
@@ -896,8 +945,6 @@ def finish(config, plan, out):
     if state["best"]["path"] == "checkpoints/initial.pt":
         write_json(out / "confirmation.json", {"status": "not_run_parent_selected"})
         return
-    baseline = evaluate(config, plan, out, "checkpoints/initial.pt", "confirmation")
-    candidate = evaluate(config, plan, out, state["best"]["path"], "confirmation")
 
     def outcomes(point):
         directory = out / point["runs"]["argmax"]["cp"]["directory"]
@@ -910,6 +957,44 @@ def finish(config, plan, out):
             cases[key] = case
         return results, cases
 
+    dev_comparison = None
+    dev_purpose = config.get("ppo", {}).get("evaluation_purpose", "development")
+    min_delta = config["experiment"].get("confirmation_min_win_rate_delta")
+    if min_delta is not None:
+        dev_baseline = evaluate(
+            config, plan, out, "checkpoints/initial.pt", dev_purpose
+        )
+        dev_candidate = evaluate(
+            config, plan, out, state["best"]["path"], dev_purpose
+        )
+        dev_before, dev_cases = outcomes(dev_baseline)
+        dev_after, dev_paired = outcomes(dev_candidate)
+        if dev_cases != dev_paired:
+            raise ValueError(f"{dev_purpose} cases are not exactly paired")
+        dev_comparison = paired_world_bootstrap(
+            dev_before,
+            dev_after,
+            samples=10000,
+            seed=20261103,
+            cases=dev_cases,
+            cases_per_world=len(dev_before) // 16,
+        )
+        min_ci_low = float(config["experiment"].get("confirmation_min_ci95_low", 0.0))
+        if (
+            dev_comparison["delta"] < float(min_delta)
+            or dev_comparison["CI95"][0] <= min_ci_low
+        ):
+            write_json(
+                out / "confirmation.json",
+                {
+                    "status": f"not_run_{dev_purpose}_gate_not_met",
+                    f"{dev_purpose}_comparison": dev_comparison,
+                },
+            )
+            return
+
+    baseline = evaluate(config, plan, out, "checkpoints/initial.pt", "confirmation")
+    candidate = evaluate(config, plan, out, state["best"]["path"], "confirmation")
     before, cases = outcomes(baseline)
     after, paired = outcomes(candidate)
     if cases != paired:
@@ -917,22 +1002,31 @@ def finish(config, plan, out):
     comparison = paired_world_bootstrap(
         before, after, samples=10000, seed=20261103, cases=cases, cases_per_world=16
     )
-    write_json(
-        out / "confirmation.json",
-        {"baseline": baseline, "candidate": candidate, "comparison": comparison},
-    )
+    payload = {
+        "baseline": baseline,
+        "candidate": candidate,
+        "comparison": comparison,
+    }
+    if dev_comparison is not None:
+        payload[f"{dev_purpose}_comparison"] = dev_comparison
+    write_json(out / "confirmation.json", payload)
 
 
 def report(config, out):
     state = read_json(out / "state.json")
+    parent_label = config["experiment"].get("parent_label", "target BC epoch 10")
+    eval_purpose = config.get("ppo", {}).get("evaluation_purpose", "development")
+    max_rounds = config.get("environment", {}).get("max_rounds", 30)
+    gamma = config["ppo"].get("gamma", 1)
+    gae_lambda = config["ppo"].get("gae_lambda", 1)
     lines = [
-        "# PPO после target BC epoch 10",
+        f"# PPO после {parent_label}",
         "",
         f"Статус: {state['stop_reason'] or state['phase']}; решения {state['decisions']}; active {state['active_seconds']:.2f} с.",
         f"Sampling rollouts {state['rollouts']}; PPO updates {state['updates']}; accepted/rejected Adam {state['optimizer_steps']}/{state['rejected_steps']}.",
-        f"GPU {read_json(out / 'run.json')['GPU']}; T={config.get('policy_temperature', 1)}; microbatch {config['ppo']['sequences_per_microbatch']}; обычный CP; reward 1/0/0.",
+        f"GPU {read_json(out / 'run.json')['GPU']}; T={config.get('policy_temperature', 1)}; max_rounds={max_rounds}; gamma={gamma}; gae_lambda={gae_lambda}; microbatch {config['ppo']['sequences_per_microbatch']}; обычный CP; reward 1/0/0.",
         "",
-        "| Решения | Checkpoint | W/D/L development |",
+        f"| Решения | Checkpoint | W/D/L {eval_purpose} |",
         "|---:|---|---|",
     ]
     for point in state["evaluated"].values():

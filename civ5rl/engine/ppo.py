@@ -44,13 +44,59 @@ def encode_episode(episode: "Episode", variant, *, reuse_cached=True):
     return result
 
 
-def targets(episodes):
-    advantages = [
-        np.asarray([e["result"]["reward"]] * len(e["chosen"]), np.float32)
-        - np.asarray(e["old_value"], np.float32)
-        for e in episodes
-    ]
-    all_advantages = np.concatenate(advantages)
+def episode_returns(episodes, gamma=1.0):
+    gamma = float(gamma)
+    result = []
+    for e in episodes:
+        t = len(e["chosen"])
+        if t == 0:
+            result.append(np.empty(0, dtype=np.float32))
+            continue
+        reward = float(e["result"]["reward"])
+        if reward == 0.0:
+            result.append(np.zeros(t, dtype=np.float32))
+        elif gamma == 1.0:
+            result.append(np.full(t, reward, dtype=np.float32))
+        else:
+            powers = np.arange(t - 1, -1, -1, dtype=np.float64)
+            result.append((reward * (gamma ** powers)).astype(np.float32))
+    return result
+
+
+def raw_gae_advantages(episodes, gamma=1.0, gae_lambda=1.0):
+    gamma = float(gamma)
+    gae_lambda = float(gae_lambda)
+    if gamma == 1.0 and gae_lambda == 1.0:
+        return [
+            np.asarray([e["result"]["reward"]] * len(e["chosen"]), np.float32)
+            - np.asarray(e["old_value"], np.float32)
+            for e in episodes
+        ]
+    discount = gamma * gae_lambda
+    advantages = []
+    for e in episodes:
+        t = len(e["chosen"])
+        if t == 0:
+            advantages.append(np.empty(0, dtype=np.float32))
+            continue
+        reward = float(e["result"]["reward"])
+        values = np.asarray(e["old_value"], dtype=np.float64)
+        adv = np.empty(t, dtype=np.float64)
+        gae = 0.0
+        next_val = 0.0
+        for idx in range(t - 1, -1, -1):
+            r_t = reward if idx == t - 1 else 0.0
+            delta = r_t + gamma * next_val - values[idx]
+            gae = delta + discount * gae
+            adv[idx] = gae
+            next_val = values[idx]
+        advantages.append(adv.astype(np.float32))
+    return advantages
+
+
+def targets(episodes, *, gamma=1.0, gae_lambda=1.0):
+    advantages = raw_gae_advantages(episodes, gamma=gamma, gae_lambda=gae_lambda)
+    all_advantages = np.concatenate(advantages) if advantages else np.empty(0, np.float32)
     if not len(all_advantages):
         raise ValueError("Empty PPO rollout")
     mean, std = all_advantages.mean(), all_advantages.std()
@@ -70,19 +116,27 @@ def objective(
     value_coefficient=0.5,
     temperature=1.0,
 ):
-    logp, entropy, normalized_entropy = distribution_stats(policy_logits(logits, temperature), indices)
+    use_entropy = bool(entropy_coefficient)
+    logp, entropy, normalized_entropy = distribution_stats(
+        policy_logits(logits, temperature),
+        indices,
+        entropy_grad=use_entropy,
+    )
     ratio = (logp - old_logp).exp()
     policy = -torch.minimum(
         ratio * advantages, ratio.clamp(1 - clip_ratio, 1 + clip_ratio) * advantages
     ).mean()
     value = (values - returns).square().mean()
-    loss = policy + value_coefficient * value - entropy_coefficient * normalized_entropy.mean()
+    loss = policy + value_coefficient * value
+    if use_entropy:
+        loss = loss - entropy_coefficient * normalized_entropy.mean()
     return loss, {
         "policy_loss": policy.detach(),
         "value_loss": value.detach(),
         "entropy": entropy.mean().detach(),
         "normalized_entropy": normalized_entropy.mean().detach(),
         "clip_fraction": ((ratio - 1).abs() > clip_ratio).float().mean().detach(),
+        "logp": logp.detach(),
     }
 
 
@@ -229,6 +283,9 @@ def _optimizer_attempt(
             "step": metrics.attempts,
             "accepted": accepted,
             "accepted_step": metrics.steps,
+            "committed_accepted_steps": metrics.steps,
+            "commit_batch_steps": 1,
+            "full_kl_checked": True,
             "attempted_kl": attempted_kl,
             "epoch": epoch + 1,
             "valid_tokens": count,
@@ -242,6 +299,110 @@ def _optimizer_attempt(
         if on_step is not None:
             on_step(record)
     return accepted
+
+
+def _verify_batch_kl(
+    policy,
+    optimizer,
+    backend,
+    pending_steps,
+    verified_snapshot,
+    config,
+    metrics,
+    on_step,
+):
+    """Run full-rollout KL verification on pending steps and commit or roll back."""
+    from civ5rl.engine.optimizer_transaction import AdamSnapshot
+
+    tick = perf_counter()
+    attempted_replay = backend.measure_step_replay()
+    attempted_kl = attempted_replay.acceptance_kl
+    if attempted_kl is not None and not np.isfinite(attempted_kl):
+        raise FloatingPointError("Non-finite post-step KL")
+    kl_diagnostics = [
+        v
+        for k, v in attempted_replay.diagnostics.items()
+        if k in KL_DIAGNOSTIC_KEYS and v is not None
+    ]
+    if not np.isfinite(kl_diagnostics).all():
+        raise FloatingPointError("Non-finite post-step distribution diagnostics")
+    accepted = attempted_kl is None or attempted_kl <= config["ppo"]["stop_kl"]
+    if accepted:
+        transaction_start = perf_counter()
+        new_snapshot = AdamSnapshot(policy, optimizer)
+        metrics.transaction_seconds += perf_counter() - transaction_start
+        metrics.kl = attempted_kl
+        batch_len = len(pending_steps)
+        committed_steps = metrics.steps + batch_len
+        for idx, pending in enumerate(pending_steps):
+            metrics.steps += 1
+            record = {
+                **pending,
+                "accepted": True,
+                "accepted_step": metrics.steps,
+                "committed_accepted_steps": committed_steps,
+                "commit_batch_steps": batch_len,
+                "attempted_kl": attempted_kl,
+                "kl": attempted_kl,
+                "final_accepted_kl": metrics.kl,
+                "full_kl_checked": idx == batch_len - 1,
+                **{
+                    k: v
+                    for k, v in attempted_replay.diagnostics.items()
+                    if k in STEP_REPLAY_DIAGNOSTIC_KEYS
+                },
+            }
+            metrics.step_records.append(record)
+            if on_step is not None:
+                on_step(record)
+        pending_steps.clear()
+        metrics.kl_seconds += perf_counter() - tick
+        if metrics.kl is not None and not np.isfinite(metrics.kl):
+            raise FloatingPointError("Non-finite post-step KL")
+        return True, new_snapshot, attempted_kl
+    else:
+        transaction_start = perf_counter()
+        verified_snapshot.restore()
+        metrics.transaction_seconds += perf_counter() - transaction_start
+        restored_replay = backend.measure_step_replay()
+        restored_kl = restored_replay.acceptance_kl
+        if metrics.kl is None:
+            if restored_kl is not None:
+                raise RuntimeError("Rollback changed KL population")
+        elif restored_kl is None or not np.isclose(
+            restored_kl, metrics.kl, rtol=1e-5, atol=1e-7
+        ):
+            raise RuntimeError(
+                f"Rollback replay mismatch: {restored_kl} != {metrics.kl}"
+            )
+        optimizer.zero_grad(set_to_none=True)
+        batch_len = len(pending_steps)
+        for idx, pending in enumerate(pending_steps):
+            metrics.rejected += 1
+            record = {
+                **pending,
+                "accepted": False,
+                "accepted_step": metrics.steps,
+                "committed_accepted_steps": metrics.steps,
+                "commit_batch_steps": batch_len,
+                "attempted_kl": attempted_kl,
+                "kl": attempted_kl,
+                "final_accepted_kl": metrics.kl,
+                "full_kl_checked": idx == batch_len - 1,
+                **{
+                    k: v
+                    for k, v in attempted_replay.diagnostics.items()
+                    if k in STEP_REPLAY_DIAGNOSTIC_KEYS
+                },
+            }
+            metrics.step_records.append(record)
+            if on_step is not None:
+                on_step(record)
+        pending_steps.clear()
+        metrics.kl_seconds += perf_counter() - tick
+        if metrics.kl is not None and not np.isfinite(metrics.kl):
+            raise FloatingPointError("Non-finite post-step KL")
+        return False, verified_snapshot, attempted_kl
 
 
 def update(
@@ -259,12 +420,14 @@ def update(
     on_step=None,
 ):
     controlled = config["ppo"].get("step_acceptance") == "full_categorical_kl_rollback"
-    per_step_kl = (
-        config["ppo"].get("kl_measurement", "whole_rollout_after_epoch")
-        == "whole_rollout_after_optimizer_step"
-    )
-    if controlled and not per_step_kl:
-        raise ValueError("full_categorical_kl_rollback requires whole_rollout_after_optimizer_step")
+    kl_mode = config["ppo"].get("kl_measurement", "whole_rollout_after_epoch")
+    per_step_kl = kl_mode == "whole_rollout_after_optimizer_step"
+    epoch_or_spike_kl = kl_mode == "whole_rollout_after_epoch_or_minibatch_spike"
+    if controlled and not (per_step_kl or epoch_or_spike_kl):
+        raise ValueError(
+            "full_categorical_kl_rollback requires whole_rollout_after_optimizer_step "
+            "or whole_rollout_after_epoch_or_minibatch_spike"
+        )
     policy.train()
     start_update = perf_counter()
     if _backend is None:
@@ -300,59 +463,198 @@ def update(
     batch_chunks = config["ppo"]["sequences_per_minibatch"]
     token_count = config["ppo"].get("valid_tokens_per_minibatch")
     stop_reason = "epochs_completed"
-    for epoch in range(config["ppo"]["epochs"]):
-        order = list(chunks)
-        shuffle_rng.shuffle(order)
-        batches = (
-            list(token_minibatches(order, token_count))
-            if token_count
-            else [order[first : first + batch_chunks] for first in range(0, len(order), batch_chunks)]
+
+    if epoch_or_spike_kl:
+        from civ5rl.engine.optimizer_transaction import (
+            AdamSnapshot,
+            require_finite_state,
         )
-        for batch_index, minibatch in enumerate(batches):
-            if deadline is not None and perf_counter() >= deadline:
-                stop_reason = "active_time_limit"
-                break
-            metrics.started_epochs = epoch + 1
-            accepted = _optimizer_attempt(
-                policy,
-                optimizer,
-                backend,
-                minibatch,
-                config,
-                metrics,
-                controlled=controlled,
-                per_step_kl=per_step_kl,
-                epoch=epoch,
-                on_step=on_step,
+
+        spike_threshold = float(
+            config["ppo"].get(
+                "minibatch_kl_spike_threshold", config["ppo"].get("target_kl", 0.01)
             )
-            if per_step_kl:
-                timed_out = deadline is not None and perf_counter() >= deadline
-                if (
-                    timed_out
-                    or not accepted
-                    or (not controlled and metrics.kl is not None and metrics.kl > config["ppo"]["stop_kl"])
-                ):
-                    stop_reason = (
-                        "active_time_limit"
-                        if timed_out
-                        else ("rejected_full_kl" if controlled else "stop_kl")
-                    )
-                    if batch_index == len(batches) - 1 and (not controlled or accepted):
-                        metrics.completed_epochs += 1
+        )
+        transaction_start = perf_counter()
+        verified_snapshot = AdamSnapshot(policy, optimizer)
+        metrics.transaction_seconds += perf_counter() - transaction_start
+        pending_steps: list[dict] = []
+        yellow_zone = False
+
+        for epoch in range(config["ppo"]["epochs"]):
+            order = list(chunks)
+            shuffle_rng.shuffle(order)
+            batches = (
+                list(token_minibatches(order, token_count))
+                if token_count
+                else [
+                    order[first : first + batch_chunks]
+                    for first in range(0, len(order), batch_chunks)
+                ]
+            )
+            epoch_finished_clean = True
+            for batch_index, minibatch in enumerate(batches):
+                if deadline is not None and perf_counter() >= deadline:
+                    stop_reason = "active_time_limit"
+                    epoch_finished_clean = False
                     break
-        else:
-            metrics.completed_epochs += 1
-        if not per_step_kl:
-            tick = perf_counter()
-            metrics.kl = backend.measure_step_replay().acceptance_kl
-            metrics.kl_seconds += perf_counter() - tick
-            if metrics.kl is not None and metrics.kl > config["ppo"]["stop_kl"]:
-                stop_reason = "stop_kl"
-        if monitor:
-            monitor.mark("ppo", ppo_epoch=epoch + 1, optimizer_steps=metrics.steps)
-        if stop_reason in ("stop_kl", "rejected_full_kl", "active_time_limit"):
-            break
-    summary = _summarize_ppo_update(backend, episodes, metrics)
+                metrics.started_epochs = epoch + 1
+                step_start = perf_counter()
+                count = sum(stop - start for _, start, stop in minibatch)
+                optimizer.zero_grad(set_to_none=True)
+                processed = backend.backward(
+                    minibatch, count, metrics.entropy_coefficient
+                )
+                if processed != count:
+                    raise ValueError("PPO backend valid-token count mismatch")
+                metrics.tokens += processed
+                minibatch_approx_kl = float(
+                    getattr(backend, "last_minibatch_approx_kl", 0.0)
+                )
+                tick = perf_counter()
+                norm = torch.nn.utils.clip_grad_norm_(
+                    policy.parameters(),
+                    config["ppo"]["max_gradient_norm"],
+                    error_if_nonfinite=True,
+                )
+                backend.record_gradient(norm)
+                optimizer.step()
+                metrics.attempts += 1
+                require_finite_state(policy, optimizer)
+                metrics.optimizer_seconds += perf_counter() - tick
+                pending_steps.append(
+                    {
+                        "step": metrics.attempts,
+                        "epoch": epoch + 1,
+                        "valid_tokens": count,
+                        "gradient_norm_pre_clip": float(norm),
+                        "minibatch_approx_kl": minibatch_approx_kl,
+                        "seconds": perf_counter() - step_start,
+                    }
+                )
+                if minibatch_approx_kl > spike_threshold:
+                    yellow_zone = True
+                is_last_batch = batch_index == len(batches) - 1
+                timed_out = deadline is not None and perf_counter() >= deadline
+                if yellow_zone or is_last_batch or timed_out:
+                    accepted, verified_snapshot, attempted_kl = _verify_batch_kl(
+                        policy,
+                        optimizer,
+                        backend,
+                        pending_steps,
+                        verified_snapshot,
+                        config,
+                        metrics,
+                        on_step,
+                    )
+                    if (
+                        accepted
+                        and attempted_kl is not None
+                        and attempted_kl > spike_threshold
+                    ):
+                        yellow_zone = True
+                    if not accepted:
+                        stop_reason = "rejected_full_kl"
+                        epoch_finished_clean = False
+                        break
+                    if timed_out:
+                        stop_reason = "active_time_limit"
+                        if is_last_batch:
+                            metrics.completed_epochs += 1
+                        epoch_finished_clean = False
+                        break
+            if pending_steps:
+                accepted, verified_snapshot, _ = _verify_batch_kl(
+                    policy,
+                    optimizer,
+                    backend,
+                    pending_steps,
+                    verified_snapshot,
+                    config,
+                    metrics,
+                    on_step,
+                )
+                if not accepted:
+                    stop_reason = "rejected_full_kl"
+                    epoch_finished_clean = False
+            if epoch_finished_clean:
+                metrics.completed_epochs += 1
+            if monitor:
+                monitor.mark(
+                    "ppo", ppo_epoch=epoch + 1, optimizer_steps=metrics.steps
+                )
+            if stop_reason in ("stop_kl", "rejected_full_kl", "active_time_limit"):
+                break
+        del verified_snapshot
+    else:
+        for epoch in range(config["ppo"]["epochs"]):
+            order = list(chunks)
+            shuffle_rng.shuffle(order)
+            batches = (
+                list(token_minibatches(order, token_count))
+                if token_count
+                else [
+                    order[first : first + batch_chunks]
+                    for first in range(0, len(order), batch_chunks)
+                ]
+            )
+            for batch_index, minibatch in enumerate(batches):
+                if deadline is not None and perf_counter() >= deadline:
+                    stop_reason = "active_time_limit"
+                    break
+                metrics.started_epochs = epoch + 1
+                accepted = _optimizer_attempt(
+                    policy,
+                    optimizer,
+                    backend,
+                    minibatch,
+                    config,
+                    metrics,
+                    controlled=controlled,
+                    per_step_kl=per_step_kl,
+                    epoch=epoch,
+                    on_step=on_step,
+                )
+                if per_step_kl:
+                    timed_out = deadline is not None and perf_counter() >= deadline
+                    if (
+                        timed_out
+                        or not accepted
+                        or (
+                            not controlled
+                            and metrics.kl is not None
+                            and metrics.kl > config["ppo"]["stop_kl"]
+                        )
+                    ):
+                        stop_reason = (
+                            "active_time_limit"
+                            if timed_out
+                            else ("rejected_full_kl" if controlled else "stop_kl")
+                        )
+                        if batch_index == len(batches) - 1 and (
+                            not controlled or accepted
+                        ):
+                            metrics.completed_epochs += 1
+                        break
+            else:
+                metrics.completed_epochs += 1
+            if not per_step_kl:
+                tick = perf_counter()
+                metrics.kl = backend.measure_step_replay().acceptance_kl
+                metrics.kl_seconds += perf_counter() - tick
+                if metrics.kl is not None and metrics.kl > config["ppo"]["stop_kl"]:
+                    stop_reason = "stop_kl"
+            if monitor:
+                monitor.mark(
+                    "ppo", ppo_epoch=epoch + 1, optimizer_steps=metrics.steps
+                )
+            if stop_reason in ("stop_kl", "rejected_full_kl", "active_time_limit"):
+                break
+    gamma = float(config.get("ppo", {}).get("gamma", 1.0))
+    gae_lambda = float(config.get("ppo", {}).get("gae_lambda", 1.0))
+    summary = _summarize_ppo_update(
+        backend, episodes, metrics, gamma=gamma, gae_lambda=gae_lambda
+    )
     summary.update(
         attempted_optimizer_steps=metrics.attempts,
         accepted_optimizer_steps=metrics.steps,
@@ -382,10 +684,15 @@ def update(
     return summary
 
 
-def _summarize_ppo_update(backend, episodes, metrics: _UpdateMetrics):
+def _summarize_ppo_update(
+    backend, episodes, metrics: _UpdateMetrics, *, gamma=1.0, gae_lambda=1.0
+):
     stats, gradient_mean, gradient_max = backend.statistics(metrics.tokens)
     critic_predictions = np.concatenate([e["old_value"] for e in episodes])
-    returns = np.concatenate([[e["result"]["reward"]] * len(e["chosen"]) for e in episodes])
+    returns = np.concatenate(episode_returns(episodes, gamma=gamma))
+    raw_advantages = np.concatenate(
+        raw_gae_advantages(episodes, gamma=gamma, gae_lambda=gae_lambda)
+    )
     variance = np.var(returns)
     extras = backend.extras(metrics.optimizer_seconds)
     return {
@@ -405,8 +712,8 @@ def _summarize_ppo_update(backend, episodes, metrics: _UpdateMetrics):
         "return_std": float(returns.std()),
         "value_mean": float(critic_predictions.mean()),
         "value_std": float(critic_predictions.std()),
-        "raw_advantage_mean": float((returns - critic_predictions).mean()),
-        "raw_advantage_std": float((returns - critic_predictions).std()),
+        "raw_advantage_mean": float(raw_advantages.mean()),
+        "raw_advantage_std": float(raw_advantages.std()),
         "explained_variance": None
         if variance == 0
         else float(1 - np.var(returns - critic_predictions) / variance),

@@ -1,6 +1,6 @@
 # Работа с RL-запусками
 
-Сверено с CLI и реализацией 9 ноября 2026 года. Команды выполняются из корня
+Сверено с CLI и реализацией 11 ноября 2026 года. Команды выполняются из корня
 репозитория в окружении опыта. `RUN`, `CONFIG`, `CHECKPOINT`, `ROLLOUT` и
 `OUT` ниже — подставляемые пути. Условия обучения, parent и критерии выбора
 модели ищите в [журнале](experiment-ledger.md), устройство паспортов — в
@@ -149,7 +149,7 @@ Python/NumPy/Torch/CUDA RNG; optimizer не создаётся, новых ма�
 `full-cycle` действительно собирает данные и выполняет отбрасываемые updates.
 Нужен совместимый PPO boundary checkpoint с PPO Adam; BC Adam не сбрасывается
 молча. Входы защищаются hashes, состояния/RNG восстанавливаются между trials.
-`bc` прогревает компиляцию вне замеряемого окна, затем измеряет итеративное BC-обучение по NVML (`60s` и интеграл интервала), при `--trace-steps` сохраняет Chrome-трассу Kineto CPU+CUDA и `*-trace-summary.json`, а при `--verify-parity` сверяет CE, норму градиента и обновлённые веса с синхронным baseline-циклом, не модифицируя каталог научного прогона. На Windows при включённом `torch.compile` команду запускают с активированным MSVC (`vcvars64.bat`, чтобы `cl.exe` был в `PATH`). Для предстартовой проверки достаточно короткого прогона (`--warmup 3 --steps 5 --trace-steps 3`): помимо NVML Core Load проверяют `% TDP` и `top_kernels` в сводке трейса (должны доминировать GEMM и Triton-ядра, а не детерминированный `indexing_backward` или `DeviceRadixSort`), после чего сверяют `steps_per_epoch × step_seconds × epochs` с лимитом `training_seconds`.
+`bc` прогревает компиляцию вне замеряемого окна, затем измеряет итеративное BC-обучение по NVML (`60s` и интеграл интервала), при `--trace-steps` сохраняет Chrome-трассу Kineto CPU+CUDA и `*-trace-summary.json`, а при `--verify-parity` сверяет CE, норму градиента и обновлённые веса с синхронным baseline-циклом, не модифицируя каталог научного прогона. На Windows при включённом `torch.compile` команду запускают с активированным MSVC (`vcvars64.bat`, чтобы `cl.exe` был в `PATH`). Для предстартовой проверки достаточно короткого прогона (`--warmup 3 --steps 5 --trace-steps 3`): помимо NVML Core Load проверяют `% TDP` и `top_kernels` в сводке трейса (должны доминировать GEMM и Triton-ядра, а не детерминированный `indexing_backward` или `DeviceRadixSort`), после чего сверяют `steps_per_epoch × step_seconds × epochs` с лимитом `training_seconds`. Для запусков PPO (`rl01.ppo_after_target_bc`) предстартовая сверка бюджета (`compute_time_budget_check` в `protocols/ppo_after_target_bc.py`, сохраняемая в `run.json` при `initialize`) дополнительно учитывает превышение номинального числа шагов из-за неполных последних minibatch в каждой эпохе (`+epochs` шагов на каждый rollout при упаковке `pack_minibatches`) и доигрывания начатых эпизодов на границе бюджета, а также число полных replay-проверок KL (`precheck` + проверки в конце каждой эпохи и резерв на всплески `minibatch_approx_kl` при `whole_rollout_after_epoch_or_minibatch_spike`).
 Для `--compare-git-rev` поддержан только replay. Диагностика CP воспроизводит
 сохранённый эпизод; `--trace-from` требует trace-enabled native library.
 Она сообщает mismatches и root checks; без этого флага доступна обычная сверка.

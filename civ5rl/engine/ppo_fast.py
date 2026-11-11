@@ -18,7 +18,7 @@ from civ5rl.engine.constants import (
     DEFAULT_PINNED_REPLAY_BYTES,
     DEFAULT_PREFIX_BLOCK_SIZE,
 )
-from civ5rl.engine.ppo import encode_episode, objective, targets
+from civ5rl.engine.ppo import encode_episode, episode_returns, objective, targets
 from civ5rl.engine.replay_metrics import REPLAY_DIAGNOSTIC_KEYS, StepReplay
 from civ5rl.engine.sequence import SequenceBuffer
 from civ5rl.engine.spans import Span
@@ -134,19 +134,31 @@ def validate_behavior_replay(
 
 
 class RolloutCache(SequenceBuffer):
-    def __init__(self, episodes, variant, device, *, resident=True, cpu_labels=False):
+    def __init__(
+        self,
+        episodes,
+        variant,
+        device,
+        *,
+        resident=True,
+        cpu_labels=False,
+        gamma=1.0,
+        gae_lambda=1.0,
+    ):
         self.episodes, self.device = episodes, device
         super().__init__([encode_episode(e, variant) for e in episodes], device, resident=resident)
         flat = [x for episode in self.encoded for x in episode]
         self.resident = resident
         self.cpu_labels = cpu_labels
         label_device = "cpu" if cpu_labels else device
-        advantages = targets(episodes)
+        returns = episode_returns(episodes, gamma=gamma)
+        advantages = targets(episodes, gamma=gamma, gae_lambda=gae_lambda)
         self.labels = {
             "indices": torch.tensor([v for ep in episodes for v in ep["chosen"]], device=label_device),
             "old_logp": torch.tensor([v for ep in episodes for v in ep["old_logp"]], device=label_device),
             "returns": torch.tensor(
-                [float(ep["result"]["reward"]) for ep in episodes for _ in ep["chosen"]],
+                np.concatenate(returns),
+                dtype=torch.float32,
                 device=label_device,
             ),
             "advantages": torch.tensor(np.concatenate(advantages), device=label_device),
@@ -739,12 +751,15 @@ class BatchedBackend:
         require_rollout_temperature(episodes, self.temperature)
         tick = perf_counter()
         batched = force_batched or options.get("batched_ppo", False)
+        ppo_cfg = config.get("ppo", {})
         self.cache = RolloutCache(
             episodes,
             policy.variant,
             device,
             resident=options.get("resident_rollout", True) if batched else False,
             cpu_labels=options.get("cpu_rollout_labels", False),
+            gamma=float(ppo_cfg.get("gamma", 1.0)),
+            gae_lambda=float(ppo_cfg.get("gae_lambda", 1.0)),
         )
         self.cache.spatial_cell_padding = int(getattr(policy, "spatial_cell_padding", 0) or 0)
         self.kl_batch = options.get("kl_sequences_per_batch", 8)
@@ -770,6 +785,11 @@ class BatchedBackend:
         self.totals = torch.zeros(len(self.names), device=device)
         self.gradients = []
         self.prefix_seconds = self.backward_seconds = 0.0
+        self.last_minibatch_approx_kl = 0.0
+        self.track_minibatch_kl = (
+            ppo_cfg.get("kl_measurement")
+            == "whole_rollout_after_epoch_or_minibatch_spike"
+        )
         self.micro_chunks = config["ppo"].get("sequences_per_microbatch", 1) if batched else 1
 
     def precheck(self):
@@ -804,6 +824,16 @@ class BatchedBackend:
         hidden = prefixes(self.policy, self.cache, minibatch)
         self.prefix_seconds += perf_counter() - tick
         finite = torch.ones((), dtype=torch.bool, device=self.device)
+        k3_free_sum = (
+            torch.zeros((), dtype=torch.float64, device=self.device)
+            if self.track_minibatch_kl
+            else None
+        )
+        free_tokens_total = (
+            torch.zeros((), dtype=torch.long, device=self.device)
+            if self.track_minibatch_kl
+            else None
+        )
         tokens = 0
         accumulator = GradientAccumulator(
             self.policy.parameters(), coalesced=self.policy.coalesced_accumulation
@@ -829,6 +859,12 @@ class BatchedBackend:
                 value_coefficient=self.config["ppo"]["value_coefficient"],
                 temperature=self.temperature,
             )
+            if self.track_minibatch_kl:
+                log_ratio = (stats["logp"] - labels["old_logp"]).double()
+                k3 = (log_ratio.exp() - 1.0) - log_ratio
+                free_mask = batch["action_mask"].sum(-1) >= MIN_FREE_ACTIONS
+                k3_free_sum += k3.masked_fill(~free_mask, 0.0).sum()
+                free_tokens_total += free_mask.sum()
             finite &= torch.isfinite(loss.detach())
             valid_tokens = sum(lengths)
             weighted_loss = loss * (valid_tokens / count)
@@ -838,6 +874,13 @@ class BatchedBackend:
             tokens += valid_tokens
         if not finite.item():
             raise FloatingPointError("Non-finite batched PPO loss")
+        if self.track_minibatch_kl:
+            free_count = int(free_tokens_total.item())
+            self.last_minibatch_approx_kl = (
+                float(k3_free_sum.item()) / free_count if free_count > 0 else 0.0
+            )
+        else:
+            self.last_minibatch_approx_kl = 0.0
         return tokens
 
     def measure_step_replay(self) -> StepReplay:
