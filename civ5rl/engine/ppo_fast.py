@@ -20,7 +20,7 @@ from civ5rl.engine.constants import (
 )
 from civ5rl.engine.ppo import encode_episode, episode_returns, objective, targets
 from civ5rl.engine.replay_metrics import REPLAY_DIAGNOSTIC_KEYS, StepReplay
-from civ5rl.engine.sequence import SequenceBuffer
+from civ5rl.engine.sequence import SequenceBuffer, cuda_memory_snapshot
 from civ5rl.engine.spans import Span
 from civ5rl.engine.training import GradientAccumulator
 
@@ -934,6 +934,11 @@ class BatchedBackend:
             "optimizer_seconds": optimizer_seconds,
             "cache_seconds": self.cache_seconds,
             "rollout_device_bytes": self.cache.resident_bytes,
+            "resident_memory_preflight": self.cache.memory_preflight,
+            "cuda_memory_after_update": (
+                cuda_memory_snapshot(self.device)
+                if str(self.device).startswith("cuda") else None
+            ),
             "replay_mode": self.cache.replay_mode,
             "cached_replay_inputs": self.cache.replay_inputs,
             "pinned_replay_input_bytes": self.cache.pinned_replay_bytes,

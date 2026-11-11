@@ -13,6 +13,45 @@ from civ5rl.engine.constants import DEFAULT_GPU_RESERVE_BYTES, DEFAULT_PREFIX_BL
 from civ5rl.engine.spans import Span
 
 
+def cuda_memory_snapshot(device):
+    """Distinguish driver-free memory from live tensors and allocator caches."""
+    free, total = torch.cuda.mem_get_info(device)
+    stats = torch.cuda.memory_stats(device)
+    return {
+        "driver_free_bytes": free,
+        "device_total_bytes": total,
+        "allocated_bytes": torch.cuda.memory_allocated(device),
+        "reserved_bytes": torch.cuda.memory_reserved(device),
+        "active_bytes": stats.get("active_bytes.all.current"),
+        "inactive_split_bytes": stats.get("inactive_split_bytes.all.current"),
+    }
+
+
+def resident_memory_preflight(device, required_bytes, reserve_bytes):
+    """Reclaim unused cached blocks before rejecting a resident allocation.
+
+    Driver-free bytes exclude PyTorch's reusable cache. Do not add all cached
+    bytes to the capacity estimate: split blocks and graph pools may be unable
+    to satisfy this allocation. Recheck actual driver availability after reclaim.
+    """
+    before = cuda_memory_snapshot(device)
+    result = {"before": before, "reclaimed": False, "reclaim_seconds": 0.0}
+    available = before
+    if required_bytes + reserve_bytes > before["driver_free_bytes"]:
+        tick = perf_counter()
+        with torch.cuda.device(device):
+            torch.cuda.empty_cache()
+        result.update(reclaimed=True, reclaim_seconds=perf_counter() - tick)
+        available = cuda_memory_snapshot(device)
+        result["after"] = available
+    if required_bytes + reserve_bytes > available["driver_free_bytes"]:
+        raise MemoryError(
+            f"Resident input cache requires {required_bytes} bytes plus "
+            f"{reserve_bytes} reserve; memory={result}"
+        )
+    return result
+
+
 class SequenceBuffer:
     def __init__(
         self,
@@ -29,6 +68,7 @@ class SequenceBuffer:
         self.action_counts = np.asarray([len(item.sources) for item in flat])
         self.data = None
         self.required_bytes = 0
+        self.memory_preflight = None
         if resident:
             # Derive shapes and dtypes from the canonical batching implementation.
             template = batch_inputs(flat[:1], "cpu")
@@ -50,11 +90,9 @@ class SequenceBuffer:
                 int(np.prod(shapes[k])) * v.element_size() for k, v in template.items()
             )
             if str(device).startswith("cuda"):
-                free, _ = torch.cuda.mem_get_info(device)
-                if self.required_bytes + reserve_bytes > free:
-                    raise MemoryError(
-                        f"Resident input cache requires {self.required_bytes} bytes plus {reserve_bytes} reserve; free={free}"
-                    )
+                self.memory_preflight = resident_memory_preflight(
+                    device, self.required_bytes, reserve_bytes
+                )
             if deadline is not None and perf_counter() >= deadline:
                 raise TimeoutError("Resident preparation exceeded optimization budget")
             self.data = {

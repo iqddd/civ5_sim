@@ -171,6 +171,11 @@ loss = policy_loss + value_coef*value_loss - entropy_coef*mean(H_norm)
 chunks и общую сборку входов. Его используют `DemonstrationCache`,
 `ResidentDemonstrations` и `RolloutCache`; классы добавляют BC/PPO labels.
 Размещение на GPU опционально и проверяет доступную память с резервом.
+Если driver-free памяти недостаточно, resident preflight один раз освобождает
+неиспользуемый кэш PyTorch через `empty_cache()` и повторяет проверку; живые
+тензоры и резерв не уменьшаются. Снимки driver-free, allocated, reserved и
+inactive split до/после освобождения, а также снимок после PPO сохраняются
+в метриках update. Реальная нехватка после освобождения остаётся ошибкой.
 `gather` ограничивает ширину дополнения команд текущим batch.
 
 PPO выполняется единым циклом `engine/ppo.py` через `BatchedBackend` из
@@ -256,3 +261,12 @@ Frozen audit не сравнивает текущее дерево/устано�
 resolved config остаются такими: отчёт указывает `config_hash_verified: false`.
 Перенос кода между модулями меняет execution identity даже при совместимых
 тензорах. Совместимость модели не разрешает обход lineage/migration checks.
+
+У `ppo_after_target_bc` исторический runner сохраняет `run.json` с `run_id`,
+коммитом и тремя implementation hashes, но checkpoint identity содержит только
+`run_id`; полный текущий execution passport при resume не проверяется. Это
+ограничение проверки, а не подтверждение неизменности исходников. Согласованное
+исправление runtime оформляется новым deployment на новом коммите и отдельной
+записью `source-revisions/` в каталоге запуска: причина, исходный и новый коммиты,
+точный allowlist и hashes изменённых execution-файлов, checkpoint и счётчики
+границы. Исторические `run.json`, паспорта и checkpoints не переписываются.
