@@ -35,6 +35,8 @@ from civ5rl.engine.ppo import (
     update,
 )
 from civ5rl.engine.ppo_fast import BatchedBackend
+from civ5rl.engine.ppo_adam import adapts_value, grouped_optimizer, expected_counters, check_counters
+from civ5rl.experiments.ppo_critic_adaptation import adapt_critic
 from civ5rl.engine.resources import ResourceMonitor
 from civ5rl.experiments.evaluation import paired_world_bootstrap
 from civ5rl.experiments.imitation_helpers import (
@@ -446,7 +448,11 @@ def save_boundary(out, policy, optimizer, state, shuffle, config, identity, cloc
     counters = TrainingCounters.from_dict(state_dict, protocol=KIND)
     state_dict.update(counters.to_state_dict(protocol=KIND))
     state_dict.setdefault("updates", 0)
-    state_dict["Adam_counter_total"] = int(state_dict.get("origin_Adam_counter", 0)) + counters.adam_steps_accepted
+    if adapts_value(config):
+        state_dict.pop("Adam_counter_total", None)
+        state_dict["Adam_counters"] = expected_counters(state_dict)
+    else:
+        state_dict["Adam_counter_total"] = int(state_dict.get("origin_Adam_counter", 0)) + counters.adam_steps_accepted
     if isinstance(state_dict.get("phase"), Phase):
         state_dict["phase"] = state_dict["phase"].value
     checkpoint.save(
@@ -492,6 +498,17 @@ def load_initial_optimizer(policy, saved, config):
                 raise ValueError(f"Parent Adam {name} differs from experiment")
         if tuple(group["betas"]) != tuple(config["optimizer"]["betas"]):
             raise ValueError("Parent Adam betas differ from experiment")
+    if adapts_value(config):
+        inherited = optimizer
+        optimizer = grouped_optimizer(policy, config, "cpu")
+        if len(inherited.param_groups) != 1:
+            raise ValueError("Expected one parent Adam group before selective reset")
+        options = {k: v for k, v in inherited.param_groups[0].items() if k != "params"}
+        for group in optimizer.param_groups:
+            group.update(options)
+        for name, parameter in policy.named_parameters():
+            if not name.startswith("value."):
+                optimizer.state[parameter] = inherited.state[parameter]
     return optimizer
 
 
@@ -564,6 +581,8 @@ def initialize(config, out):
         "new_Adam_empty": not inherited,
         "parent_Adam_counter": int(experiment["parent_optimizer_steps"]),
         "critic_preserved": inherited,
+        **({"value_optimizer": "reset_then_preserve", "Adam_counter_groups": ["shared_actor", "value"]}
+           if adapts_value(config) else {}),
         "behavior_hash": policy_hash(policy.state_dict()),
         "manifest_hash": plan["hash"],
         "seed": 17,
@@ -603,7 +622,7 @@ def initialize(config, out):
         "zero_accepted_streak": 0,
         "active_seconds": 0.0,
         "evaluation_seconds": 0.0,
-        "critic_complete": inherited,
+        "critic_complete": inherited and not adapts_value(config),
         "phase": "collect",
         "latest": "checkpoints/initial.pt",
         "stop_reason": None,
@@ -691,10 +710,15 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
     clock = ActiveClock(state, out)
     try:
         policy = make_policy(config, device)
-        optimizer = optimizer_for(policy, config, device)
+        optimizer = (grouped_optimizer(policy, config, device) if adapts_value(config)
+                     else optimizer_for(policy, config, device))
         restored = checkpoint.restore(
             out / state["latest"], policy, optimizer, shuffle, config, identity
         )
+        if adapts_value(config):
+            check_counters(optimizer, restored)
+            # A value-only capsule, if present, is restored by adapt_critic below.
+            state["critic_progress"] = restored.get("critic_progress", {})
         if restored.get("pending_update"):
             heal_interrupted_update(out, restored)
         for key in (
@@ -866,7 +890,12 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                     monitor.mark("critic_preparation")
                     with CompilationClock() as compiler:
                         compiler.monitor = monitor
-                        state["critic"] = prepare_critic(
+                        state["critic"] = adapt_critic(
+                            policy, optimizer, episodes, config, device, out, state, shuffle,
+                            identity, clock, deadline, features_for=recurrent_features,
+                            behavior_hash=behavior_digest, statistics=critic_statistics,
+                            policy_hash=policy_hash,
+                        ) if adapts_value(config) else prepare_critic(
                             policy,
                             episodes,
                             config["critic"],
@@ -884,8 +913,9 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                     state["phase"] = Phase.PPO.value
                     artifact = save_rollout(episodes, out / "critic-rollout", 1)
                     state["pending_rollout"] = "critic-rollout/" + artifact["path"]
-                    optimizer = optimizer_for(policy, config, device)
-                    assert not optimizer.state
+                    if not adapts_value(config):
+                        optimizer = optimizer_for(policy, config, device)
+                        assert not optimizer.state
                     state["latest"] = "checkpoints/critic-ready.pt"
                     save_boundary(
                         out, policy, optimizer, state, shuffle, config, identity, clock
@@ -905,13 +935,13 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                             and step.get("full_kl_checked", True)
                             and not (out / "first-accepted-step.json").exists()
                         ):
-                            counters = {
-                                int(value["step"]) for value in optimizer.state.values()
-                            }
+                            counters = {int(value["step"]) for value in optimizer.state.values()}
                             expected_counter = (int(state.get("origin_Adam_counter", 0))
                                                 + int(state["optimizer_steps"])
                                                 + int(step["committed_accepted_steps"]))
-                            if (
+                            if adapts_value(config):
+                                grouped = check_counters(optimizer, state, int(step["committed_accepted_steps"]))
+                            elif (
                                 counters != {expected_counter}
                                 or int(step["accepted_step"]) != int(step["committed_accepted_steps"])
                             ):
@@ -921,7 +951,8 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                             write_json(
                                 out / "first-accepted-step.json",
                                 {
-                                    "Adam_counter": expected_counter,
+                                    **({"Adam_counters": grouped} if adapts_value(config)
+                                       else {"Adam_counter": expected_counter}),
                                     "inherited_Adam_counter": int(state.get("origin_Adam_counter", 0)),
                                     "committed_accepted_steps": state["optimizer_steps"] + int(step["committed_accepted_steps"]),
                                     "step": step,
@@ -1114,7 +1145,8 @@ def report(config, out):
         f"Статус: {state['stop_reason'] or state['phase']}; решения {state['decisions']}; active {state['active_seconds']:.2f} с.",
         f"Лимит active: {state.get('active_seconds_limit', config['experiment']['active_seconds']):.0f} с; исходный бюджет {config['experiment']['active_seconds']} с; продления в active-budget.json.",
         f"Sampling rollouts {state['rollouts']}; PPO updates {state['updates']}; accepted/rejected Adam {state['optimizer_steps']}/{state['rejected_steps']}.",
-        f"Adam: inherited {state.get('origin_Adam_counter', 0)}; new accepted {state['optimizer_steps']}; total {state.get('origin_Adam_counter', 0) + state['optimizer_steps']}.",
+        (f"Adam groups: {state.get('Adam_counters', expected_counters(state))}; critic preparation {state.get('critic_progress', {}).get('steps', 0)}; new PPO accepted {state['optimizer_steps']}."
+         if adapts_value(config) else f"Adam: inherited {state.get('origin_Adam_counter', 0)}; new accepted {state['optimizer_steps']}; total {state.get('origin_Adam_counter', 0) + state['optimizer_steps']}."),
         f"GPU {read_json(out / 'run.json')['GPU']}; T={config.get('policy_temperature', 1)}; max_rounds={max_rounds}; gamma={gamma}; gae_lambda={gae_lambda}; microbatch {config['ppo']['sequences_per_microbatch']}; обычный CP; reward 1/0/0.",
         "",
         f"| Решения | Checkpoint | W/D/L {eval_purpose} |",

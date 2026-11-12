@@ -10,7 +10,9 @@ KIND = "rl01.ppo_after_target_bc"
 
 
 def validate_profile(config):
-    if config.get("output") == "artifacts/rl/ppo-c2-h60-gae-continuation":
+    if config.get("output") == "artifacts/rl/ppo-c2-h60-gae-gamma1":
+        profile = "rl-ppo-c2-h60-gae-gamma1.json"
+    elif config.get("output") == "artifacts/rl/ppo-c2-h60-gae-continuation":
         profile = "rl-ppo-c2-h60-gae-continuation.json"
     elif config.get("output") == "artifacts/rl/ppo-c2-h60-gae":
         profile = "rl-ppo-c2-h60-gae.json"
@@ -47,13 +49,17 @@ def compute_time_budget_check(config):
         historical = experiment.get("historical_active_time_estimate")
         if historical:
             low, high = historical["decisions_per_second_range"]
-            seconds = [experiment["decisions"] / rate for rate in (high, low)]
+            adaptation = (float(config["critic"]["active_seconds"])
+                          if experiment.get("initial_value") == "adapt_parent_first_rollout" else 0.0)
+            seconds = [experiment["decisions"] / rate + adaptation for rate in (high, low)]
             return {"basis": "historical_full_cycle_active_time", "source": historical["source"],
                     "expected_active_seconds_range": seconds,
+                    "critic_adaptation_allowance_seconds": adaptation,
                     "active_seconds_limit": experiment["active_seconds"],
                     "reserve_seconds_range": [experiment["active_seconds"] - s for s in reversed(seconds)],
                     "fits_historical_range": seconds[-1] <= experiment["active_seconds"],
-                    "warnings": ["Historical late-window throughput is not a guarantee for a new machine; evaluations pause active time."]}
+                    "warnings": ["Historical late-window throughput is not a guarantee for a new machine; evaluations pause active time."]
+                    + (["Mandatory critic refresh may exceed the preparation allowance and still consumes active time."] if adaptation else [])}
         return None
     decisions_budget = int(experiment["decisions"])
     active_limit = float(experiment["active_seconds"])

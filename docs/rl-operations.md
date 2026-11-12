@@ -453,6 +453,96 @@ python C:\Users\Roman\.codex\skills\vastai-instance-manager\scripts\vastai_insta
 основным синхронизируемым mirror-каталогом (`--local-sync-dir` <-> `--remote-sync-dir`).
 Перед `package` рабочее дерево Git должно быть чистым, а `HEAD` — отправлен в `origin` (`git push`).
 
+### Подготовленная ветка gamma=1
+
+`configs/rl-ppo-c2-h60-gae-gamma1.json` ответвляется от того же update 150,
+сохраняет Adam общей сети/actor и адаптирует value head под недисконтированный
+исход. Это отдельный опыт: 4 Mi новых решений или пять активных часов,
+Development 0/1/2/3/4 Mi и gate W0+11 на 2 Mi. Подготовка critic входит в бюджет.
+Исторический темп 323–400 dec/s даёт 2,91–3,61 часа на 4 Mi; полный недавний
+запуск с компиляцией дал около 282 dec/s (около 4,13 часа при экстраполяции).
+Дополнительно учесть до 300 секунд подготовки и refresh; скорость новой машины
+не гарантируется. Отдельный benchmark и полный Development при подготовке
+не запускаются. Статус профиля — подготовлен, не запущен.
+
+Локальный запуск после отдельного согласования:
+
+```powershell
+$cfg = 'configs/rl-ppo-c2-h60-gae-gamma1.json'
+$run = 'artifacts/rl/ppo-c2-h60-gae-gamma1'
+.venv/Scripts/python.exe tools/run_ppo.py run --config $cfg --runtime-config RUNTIME
+.venv/Scripts/python.exe tools/ctl_rl.py progress --run $run --watch --interval 900
+.venv/Scripts/python.exe tools/ctl_rl.py request-pause --run $run --after-update UPDATE
+.venv/Scripts/python.exe tools/run_ppo.py resume --config $cfg --runtime-config RUNTIME
+.venv/Scripts/python.exe tools/ctl_rl.py audit --run $run --out artifacts/rl/ppo-c2-h60-gae-gamma1/derived/audit
+```
+
+CUDA/FP32 runtime оценок закреплён самим профилем. Для удалённого исполнения
+использовать ту же последовательность package/tune/pull/run/resume выше, заменив
+config и deployment на gamma1. Сначала выгрузить завершившийся job, затем resume.
+При сбое подготовки сохранять вместе pending checkpoint, первый rollout,
+`critic-adaptation.pt` и `critic-features.pt`; все они входят в обычный mirror.
+После `critic-ready` resume использует полный checkpoint и не повторяет подготовку.
+Для окончательного завершения — `run`/`resume` с уже установленным stop_reason,
+затем pull, аудит и удаление только отдельно разрешённого инстанса.
+
+### CPU-фильтр будущей аренды
+
+Этот фильтр применяется только к задачам, которым требуется CPU-зависимая
+фаза, например сбор боёв симулятором для PPO. Для обучения BC без такой фазы
+он не нужен. Применимость определяется составом планируемых фаз, а не только
+названием runner. Для задач с CPU-зависимой фазой, помимо согласованного
+GPU-профиля, цены, географии и сетевых требований, кандидат должен удовлетворять:
+
+```text
+cpu_score = cpu_cores_effective × (100 × PassMark Single Thread / 2067)
+cpu_score >= 1250
+```
+
+`cpu_cores_effective` — доступные логические CPU из конкретного предложения
+Vast.ai, включая дробную долю. Не подставлять полное число потоков процессора
+или физические ядра. 2067 — фиксированная база EPYC 7702 (100%); в формуле
+используются процентные пункты, например 229, а не 2,29. Для решения о допуске
+не округлять отношение. Это дополнительное правило отбора проекта; сама команда
+менеджера `search` этот вычисляемый фильтр пока не применяет. До аренды отсеивать
+неподходящие предложения и не выбирать их повторно по одной лишь низкой цене.
+
+Исходные Single Thread ниже предоставлены пользователем. Проценты округлены
+только для отображения. Если точной модели нет, найти её PassMark Single Thread
+на CPU Benchmark, дописать значение и ссылку на источник сюда, затем вычислить
+допуск. Не заменять неизвестную модель похожим названием или Multi Thread score.
+
+| CPU | PassMark Single Thread | К EPYC 7702 |
+|---|---:|---:|
+| Intel Core Ultra 9 285K | 5087 | 246% |
+| AMD Ryzen 9 9950X | 4726 | 229% |
+| Intel Core i9-13900K | 4594 | 222% |
+| AMD Threadripper PRO 9975WX | 4428 | 214% |
+| AMD Threadripper PRO 7975WX | 3989 | 193% |
+| AMD EPYC 9554 | 2774 | 134% |
+| AMD EPYC 9124 | 2613 | 126% |
+| AMD EPYC 7702 | 2067 | 100% |
+| AMD EPYC 7302 | 2024 | 98% |
+| AMD EPYC 7532 | 2015 | 97% |
+| AMD EPYC 7313P | 2576 | 125% |
+| AMD EPYC 7542 | 1957 | 95% |
+| AMD EPYC 9135 | 3228 | 156% |
+| AMD EPYC 9355 | 3747 | 181% |
+| Intel Core i9-14900KF | 4688 | 227% |
+| AMD Ryzen Threadripper 3960X | 2681 | 130% |
+| Intel Core Ultra 7 270K Plus | 5073 | 245% |
+| AMD Ryzen 9 9900X | 4670 | 226% |
+| AMD Ryzen 9 7900X3D | 4117 | 199% |
+| AMD EPYC 7713 | 2648 | 128% |
+
+Последние пять моделей дополнены по [PassMark Single Thread](https://www.cpubenchmark.net/singleThread.html)
+12 ноября 2026 года; исходные пользовательские значения выше не пересмотрены.
+
+Например, EPYC 7313P с долей 6,4 получает 797,6 и не проходит, а Ryzen 9950X
+с долей 32 получает 7316,5 и проходит. После аренды фактическая quota/cpuset
+фиксируется отдельно: рекламная доля и этот эвристический балл не гарантируют
+скорость симулятора или CPU-инференса. Новый фильтр не даёт разрешения на аренду.
+
 ### Разделение зон (`repositories`, `inputs`, `mirror`, `scratch`)
 
 1. **Код и зависимости (`prepare.json`)**: удалённая машина клонирует/обновляет публичный

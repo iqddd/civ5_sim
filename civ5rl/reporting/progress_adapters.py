@@ -75,6 +75,7 @@ class PPOAdapter:
         if limit is not None:
             limit += source.read("active-budget.json", {}).get("additional_active_seconds", 0)
             budgets["active"] = dict(limit_seconds=limit, spent_seconds=state.get("active_seconds", previous_active))
+        grouped = state.get("Adam_counters")
         return Observation(_status(source), _phase(source, state.get("phase", "unknown")), "decisions", previous_work, target,
                            samples=samples, budgets=budgets, work_budget="active",
                            stages=[] if complete or type(self) is not PPOAdapter else [Stage("unmodeled_remaining_phases", 1, None)],
@@ -82,7 +83,9 @@ class PPOAdapter:
                            details=dict(collected=state.get("decisions"), updates=state.get("updates"),
                                         adam_inherited=state.get("origin_Adam_counter", experiment.get("parent_optimizer_steps", 0)),
                                         adam_new_accepted=state.get("optimizer_steps", 0),
-                                        adam_total=state.get("origin_Adam_counter", experiment.get("parent_optimizer_steps", 0)) + state.get("optimizer_steps", 0),
+                                        **({"adam_counters": grouped,
+                                            "critic_preparation_steps": state.get("critic_progress", {}).get("steps", 0)}
+                                           if grouped is not None else {"adam_total": state.get("origin_Adam_counter", experiment.get("parent_optimizer_steps", 0)) + state.get("optimizer_steps", 0)}),
                                         rate_scope="collection_and_optimization_active_time",
                                         session_id=source.session.get("id")),
                            warnings=_warnings(source))

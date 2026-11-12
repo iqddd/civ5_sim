@@ -146,7 +146,15 @@ def verify_ppo_ledger(directory, *, offsets=None):
         "stop_kl": threshold,
         "pending_decisions": state.get("decisions", 0) - totals["decisions"],
     }
-    if adam_origin:
+    if config.get("experiment", {}).get("initial_value") == "adapt_parent_first_rollout":
+        from civ5rl.engine.ppo_adam import expected_counters
+        expected = expected_counters(state)
+        if state.get("Adam_counters") != expected:
+            raise ValueError("Grouped Adam counters differ from preparation + PPO")
+        result["adam"] = dict(inherited=adam_origin, new_accepted=totals["accepted"],
+                              preparation=state.get("critic_progress", {}).get("steps", 0),
+                              counters=expected)
+    elif adam_origin:
         result["adam"] = {"inherited": adam_origin, "new_accepted": totals["accepted"],
                           "total": adam_origin + totals["accepted"]}
     return result
@@ -293,12 +301,27 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
         ]
         groups = value["optimizer"]["param_groups"]
         ids = [index for group in groups for index in group["params"]]
-        if len(groups) != 1 or ids not in (
+        adapting = value["config"].get("experiment", {}).get("initial_value") == "adapt_parent_first_rollout"
+        if adapting:
+            named = dict(policy.named_parameters())
+            if [g.get("name") for g in groups] != ["shared_actor", "value"]:
+                raise ValueError(f"Expected shared_actor/value Adam groups: {path}")
+            lookup = {}
+            for group in groups:
+                expected_names = [n for n in named if n.startswith("value.") == (group["name"] == "value")]
+                if group.get("parameter_names") != expected_names:
+                    raise ValueError(f"Adam parameter names differ: {path}")
+                lookup.update(zip(group["params"], [named[n] for n in expected_names], strict=True))
+            if len(ids) != len(set(ids)) or len(lookup) != len(named):
+                raise ValueError(f"Incomplete or repeated Adam parameters: {path}")
+        elif len(groups) != 1 or ids not in (
             list(range(len(parameters))),
             non_value_ids,
         ):
             raise ValueError(f"Expected one sequential Adam parameter group: {path}")
-        if ids == non_value_ids:
+        if adapting:
+            pass
+        elif ids == non_value_ids:
             lookup = dict(zip(range(len(non_value_ids)), [parameters[i] for i in non_value_ids], strict=True))
         else:
             lookup = dict(zip(ids, parameters, strict=True))
@@ -362,7 +385,12 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
             if "Adam_steps" in state
             else None
         )
-        if (
+        if adapting:
+            from civ5rl.engine.ppo_adam import check_counters, expected_counters
+            check_counters(optimizer, state)
+            if state.get("Adam_counters") != expected_counters(state):
+                raise ValueError(f"Grouped Adam state counters differ: {path}")
+        elif (
             step_key is not None
             and (steps or adam_offset + state[step_key])
             and steps != {adam_offset + state[step_key]}
@@ -422,7 +450,18 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
             from civ5rl.provenance.common import file_sha256
             if file_sha256(parent_checkpoint) != initial["config"]["experiment"]["parent_sha256"]:
                 raise ValueError("Parent checkpoint SHA256 differs")
-            if not _equal(initial["optimizer"], parent["optimizer"]):
+            if initial["config"]["experiment"].get("initial_value") == "adapt_parent_first_rollout":
+                parent_ids = [i for g in parent["optimizer"]["param_groups"] for i in g["params"]]
+                parent_named = dict(zip(dict(policy.named_parameters()), parent_ids, strict=True))
+                for group in initial["optimizer"]["param_groups"]:
+                    for name, index in zip(group["parameter_names"], group["params"], strict=True):
+                        item = initial["optimizer"]["state"].get(index, {})
+                        if name.startswith("value."):
+                            if item:
+                                raise ValueError("Initial value Adam was not reset")
+                        elif not _equal(item, parent["optimizer"]["state"][parent_named[name]]):
+                            raise ValueError("Initial shared/actor Adam differs from parent")
+            elif not _equal(initial["optimizer"], parent["optimizer"]):
                 raise ValueError("Initial Adam differs from parent")
     return {
         "status": "verified",

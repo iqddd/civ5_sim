@@ -55,6 +55,7 @@ Before adding a test, identify the specific failure it catches and why a normal 
 ## Vast.ai machine selection
 
 - Unless explicitly agreed otherwise, search and prepare two parallel candidates (`--parallel 2`) when creating a Vast.ai instance. Keep the requested GPU profile and its other defaults unchanged. Follow the remote packaging, tuning, launch, and pull command sequence in `docs/rl-operations.md`.
+- For tasks requiring a CPU-bound phase (for example, PPO simulator collection), future Vast.ai candidates must additionally satisfy `cpu_cores_effective * (100 * PassMark Single Thread / 2067) >= 1250`, using the offer's available logical CPU allocation, not the processor's total core count. Do not apply this filter to BC training alone; determine applicability from the planned phases, not merely the runner name. Use the CPU reference table in `docs/rl-operations.md`; look up missing models in PassMark Single Thread and extend that table before selecting them. This CPU filter does not replace the other agreed rental filters or authorize a rental.
 
 ## Experiment planning and pre-launch checks
 

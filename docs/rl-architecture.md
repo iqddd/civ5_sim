@@ -308,6 +308,43 @@ active clock. Development-512 выполняется в нулевой точк�
 development-допуска +5 п.п./CI; родитель выбран — Additional не нужен.
 Additional не меняет выбор; закрытый test остаётся закрытым.
 
+### Ветка gamma=1 с адаптацией critic
+
+`configs/rl-ppo-c2-h60-gae-gamma1.json` сохраняет веса update 150, но задаёт
+gamma=1 и lambda=0,95. Labels critic равны `G_t=R` на всех позициях, включая
+forced. GAE сохраняет TD residual и множитель lambda: это не Monte Carlo
+advantage при lambda=1. Режим `initial_value=adapt_parent_first_rollout`
+сохраняет Adam общей сети/actor (step 12 644), очищая моменты и step только
+у `policy.value`. Группы Adam именуются `shared_actor` и `value`; исторический
+вклад critic в общие моменты encoder/GRU отделить нельзя, он сохраняется.
+
+Первый штатный rollout используется для value-only подготовки: encoder,
+GRU и actor заморожены; MSE по `G_t=R`, LR 1e-4, batch 1024, максимум четыре
+прохода или 300 активных секунд с учётом extraction/compilation. Начатый batch
+завершается. Признаки сохраняются один раз в `critic-features.pt`, используются
+во всех проходах и refresh без повторного spatial/GRU forward. При исчерпании
+лимита во время extraction кэш завершается для обязательного refresh, но
+новые fit batches не запускаются. Всё это расходует общий активный бюджет.
+
+`critic-adaptation.pt` атомарно сохраняет value weights, его Adam, курсор,
+RNG и время на каждом завершённом batch. После восстановления полной границы
+первого rollout капсула накладывается до продолжения fit; новый лимит 300 секунд
+не выдаётся. После refresh сохраняется полный `critic-ready.pt`. Действия и
+behavior probabilities неизменны, пересчитываются `old_value` и GAE. Новые
+моменты value Adam сохраняются, его LR становится 1e-5. После K fit-шагов и N
+принятых PPO-шагов физические steps — `shared_actor=12644+N`, `value=K+N`;
+`Adam_counters` заменяет единый total. K не входит в число PPO-шагов.
+KL rollback восстанавливает обе группы.
+
+Новый каталог, паспорт и RNG namespaces `ppo_c2_h60_gae_gamma1_v1_*`;
+episode ID начинается с 26 264. Лимит — 4 194 304 новых решения или 18 000
+активных секунд, включая первый rollout и подготовку. Development CUDA/FP32
+выполняется на 0/1/2/3/4 Mi с тем же закреплённым runtime. После 2 Mi лучший
+результат 1/2 Mi должен достигнуть W0+11, иначе `no_development_gain`.
+Выбор включает родителя, при равенстве остаётся более ранний checkpoint;
+новому кандидату — одно парное Additional-256. Оценки останавливают active
+clock, закрытый test не используется.
+
 ## Слой прогресса процесса
 
 `reporting/progress.py` задаёт независимые от алгоритма `Observation`, `Sample`
