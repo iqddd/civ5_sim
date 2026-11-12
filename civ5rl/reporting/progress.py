@@ -104,8 +104,11 @@ def format_progress(result):
     applied = control.get("applied") or {}
     revision = f" | budget revision {applied.get('revision', '?')}/{control['requested_revision']} applied/requested" if control else ""
     details = result.get("details", {})
-    adam = (f" | Adam {details['adam_total']} total ({details['adam_inherited']} inherited + {details['adam_new_accepted']} new)"
-            if details.get("adam_inherited") else "")
+    groups = details.get("adam_counters")
+    adam = (f" | Adam shared/actor {groups['shared_actor']}, value {groups['value']}"
+            if groups else
+            f" | Adam {details['adam_total']} total ({details['adam_inherited']} inherited + {details['adam_new_accepted']} new)"
+            if details.get("adam_inherited") and "adam_total" in details else "")
     return (f"{result['observed_at']} | {result['status']}/{result['phase']} | "
             f"{result['completed']:,.0f}/{target} {result['unit']} | EMA {rate_text}"
             f" {result['unit']}/s | ETA work {duration(result['eta_work_seconds'])} | "
