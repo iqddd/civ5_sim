@@ -364,18 +364,24 @@ def main():
             best = preferred(rows.values())
             if best and best.candidate.envs >= 2 * best.candidate.workers:
                 measure(replace(best.candidate, reply=2))
-        valid = sorted(
-            (r for r in rows.values() if r.status == "ok"), key=lambda r: r.median
-        )
-        best = preferred(valid)
-        if best:
-            # Include the simpler near-tie, rather than discard it on the probe.
+        while not exhausted:
+            valid = sorted(
+                (r for r in rows.values() if r.status == "ok"), key=lambda r: r.median
+            )
+            best = preferred(valid)
+            if best is None:
+                break
+            # If a finalist fails comparison, confirm its replacement too.
+            # Never promote an unconfirmed fallback while time remains.
             finalists = [best, *(r for r in valid if r is not best)][:2]
+            pending = [r for r in finalists if not r.confirmations]
+            if not pending:
+                break
             order = list(rows)
-            for row in sorted(
-                finalists, key=lambda r: order.index(r.candidate), reverse=True
-            ):
-                measure(row.candidate, confirmation=True)
+            row = max(pending, key=lambda r: order.index(r.candidate))
+            measure(row.candidate, confirmation=True)
+            if row.status == "ok" and not row.confirmations:
+                row.status = "confirmation_failed"
     finally:
         changed = [
             path
