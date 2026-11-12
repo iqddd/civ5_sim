@@ -10,6 +10,7 @@ from time import perf_counter
 
 import numpy as np
 
+from civ5rl.engine.budget import deadline_reached
 from civ5rl.core.context import context_from_spec
 from civ5rl.core.contracts import (
     Episode,
@@ -662,7 +663,7 @@ class Collector:
             if fixed_specs is None
             else fixed_offset < len(fixed_specs)
         ):
-            if (deadline is not None and perf_counter() >= deadline) or (
+            if (deadline_reached(deadline)) or (
                 max_decisions is not None and decisions >= max_decisions
             ):
                 break

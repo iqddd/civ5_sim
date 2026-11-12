@@ -19,6 +19,11 @@ def collect_progress(source, *, alpha=0.1, exclude_compilation=False):
     observation = adapter_for(source.config.get("kind", "")).observe(source)
     result = estimate(observation, alpha=alpha, exclude_compilation=exclude_compilation)
     result["kind"] = source.config.get("kind")
+    extension = source.read("active-budget.json", {})
+    result["budget_control"] = {
+        "requested_revision": len(extension.get("requests", [])),
+        "applied": source.read("budget-applied.json"),
+    }
     latest = source.read("derived/progress/latest.json", {})
     process = latest.get("process", {})
     if process.get("id") == source.session.get("id") and process:

@@ -206,7 +206,7 @@ def unit_cell_mask_from_cells(cells: torch.Tensor, cell_mask: torch.Tensor) -> t
 
 
 class BucketBias(torch.autograd.Function):
-    """table[:, buckets] with a dense deterministic backward (no sorted index_put)."""
+    """Table lookup with deterministic FP32 reductions, without scatter or one-hot."""
 
     @staticmethod
     def forward(ctx, table, buckets):
@@ -217,9 +217,17 @@ class BucketBias(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad):
         (buckets,) = ctx.saved_tensors
-        onehot = F.one_hot(buckets.reshape(-1), ctx.num_buckets).to(grad.dtype)
-        with torch.autocast(grad.device.type, enabled=False):
-            return grad.reshape(grad.shape[0], -1) @ onehot, None
+        ids = buckets.reshape(-1)
+        # Inductor fuses each mask into its reduction. Avoid a [B*N*N, buckets]
+        # one-hot and a huge FP32 GEMM just to compute heads*buckets scalars.
+        # Fixed reductions also avoid deterministic indexing_backward's sort.
+        values = (grad if grad.dtype == torch.float64 else grad.float()).reshape(grad.shape[0], -1)
+        table_grad = torch.stack(
+            [torch.where(ids == bucket, values, 0.0).sum(-1)
+             for bucket in range(ctx.num_buckets)],
+            -1,
+        )
+        return table_grad.to(grad.dtype), None
 
 
 class CellUnitAttention(nn.Module):

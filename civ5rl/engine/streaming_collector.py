@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from civ5rl.engine.budget import deadline_reached, resolve_deadline
 from civ5rl.core.context import context_from_spec
 from civ5rl.core.observation import ObservationEncoder
 
@@ -345,7 +346,7 @@ def _collect_streaming(
         nonlocal admitted
         if admission_closed is not None:
             return
-        if deadline is not None and perf_counter() >= deadline:
+        if deadline_reached(deadline):
             close_admission("deadline")
             return
         if (fixed_specs is None or max_decisions is not None) and wave.decisions >= target:
@@ -363,7 +364,7 @@ def _collect_streaming(
         load = Counter(locations[slot.slot_index][0] for slot in active_slots)
         assignments = [[] for _ in collector.workers]
         for _ in range(min(len(free), allowance)):
-            if deadline is not None and perf_counter() >= deadline:
+            if deadline_reached(deadline):
                 close_admission("deadline")
                 break
             slot = min(
@@ -500,7 +501,7 @@ def _collect_streaming(
         else:
             timeout = WORKER_TIMEOUT_SECONDS
         if admission_closed is None and deadline is not None:
-            timeout = min(timeout, max(0, deadline - now))
+            timeout = min(timeout, max(0, resolve_deadline(deadline) - now))
         tick = perf_counter()
         try:
             buffered.append(replies.queue.get(timeout=timeout))

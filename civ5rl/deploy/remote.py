@@ -259,6 +259,12 @@ def stage_inputs(
     ]
     if experiment.get("parent_manifest"):
         names.append(experiment["parent_manifest"])
+    if experiment.get("parent_final_state"):
+        names.append(experiment["parent_final_state"])
+        names.append(str(PurePosixPath(experiment["parent_run"]) / "run.json"))
+    historical = experiment.get("historical_active_time_estimate")
+    if historical:
+        names.append(historical["source"])
     corpus = experiment.get("corpus")
     if corpus:
         names.append(corpus)
@@ -338,7 +344,7 @@ def tail(name):
  return result
 state=read('state.json')
 if isinstance(state,dict):
- state={k:state.get(k) for k in ('rollouts','updates','decisions','optimizer_steps','attempted_steps','rejected_steps','active_seconds','active_seconds_limit','evaluation_seconds','phase','stop_reason','baseline_wins','latest','best','development_points','rollout_summary','critic','epoch','epoch_completed','batch_cursor','Adam_steps','free_labels_processed','epochs_history') if k in state}
+ state={k:state.get(k) for k in ('rollouts','updates','decisions','optimizer_steps','attempted_steps','rejected_steps','active_seconds','active_seconds_limit','budget_revision_applied','evaluation_seconds','phase','stop_reason','baseline_wins','latest','best','development_points','rollout_summary','critic','epoch','epoch_completed','batch_cursor','Adam_steps','free_labels_processed','epochs_history') if k in state}
 collection=read('collection.json')
 if isinstance(collection,dict):
  collection={k:collection.get(k) for k in ('status','stop_reason','labels','new_labels','old_labels','positions','new_positions','old_positions','seconds','waves','completed_waves','eta_seconds','physical_repeats','new_matches_count','old_matches_count') if k in collection}
@@ -346,7 +352,7 @@ training=read('training.json')
 if isinstance(training,dict):
  training={k:training.get(k) for k in ('status','stop_reason','epochs','Adam_steps','free_labels_processed','active_seconds','latest','microbatch','value_head_unchanged','GPU_utilization_review') if k in training}
 resources=tail('telemetry/resources.jsonl') or tail('training-telemetry/resources.jsonl')
-print(json.dumps({'status':read('status.json'),'state':state,'collection':collection,'training':training,'updates_tail':tail('updates.jsonl'),'steps_tail':tail('steps.jsonl'),'resources_tail':resources,'selected':read('selected.json') or read('selection.json'),'evaluations':read('evaluations.json'),'development':read('development.json'),'confirmation':read('confirmation.json'),'performance':read('performance.json'),'progress':read('derived/progress/latest.json')}))
+print(json.dumps({'status':read('status.json'),'state':state,'collection':collection,'training':training,'updates_tail':tail('updates.jsonl'),'steps_tail':tail('steps.jsonl'),'resources_tail':resources,'selected':read('selected.json') or read('selection.json'),'evaluations':read('evaluations.json'),'development':read('development.json'),'confirmation':read('confirmation.json'),'performance':read('performance.json'),'progress':read('derived/progress/latest.json'),'budget':read('active-budget.json'),'budget_applied':read('budget-applied.json')}))
 """
 
 

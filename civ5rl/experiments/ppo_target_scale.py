@@ -21,6 +21,7 @@ from civ5rl.core.context import context_from_spec
 from civ5rl.core.model import batch_inputs
 from civ5rl.core.observation import ObservationEncoder
 from civ5rl.engine.collector import Collector
+from civ5rl.engine.evaluation import evaluation_precision
 from civ5rl.engine.control import RunLock, assert_not_closed
 from civ5rl.engine.counters import TrainingCounters
 from civ5rl.engine.ppo import update
@@ -248,7 +249,7 @@ def calibrate(config, plan, out, device):
 def initialize(config, plan, out):
     configure(17,'cpu')
     policy,optimizer=shared.load_parent(config)
-    record={'kind':KIND,'config':config,'parent_sha256':config['experiment']['parent_sha256'],
+    record={'kind':KIND,'config':config,'evaluation_runtime_default':'auto','parent_sha256':config['experiment']['parent_sha256'],
             'initial_model_Adam_bitwise_equal':True,'parent_Adam_counter':45915,'critic_preserved':True,
             'python':platform.python_version(),'torch':torch.__version__,'cuda':torch.version.cuda,
             'GPU':torch.cuda.get_device_name(0),'seed':17,
@@ -295,7 +296,11 @@ def evaluation_task(task):
     return result
 
 
+@evaluation_precision()
 def evaluate(config,plan,out,path,purpose):
+    from civ5rl.engine.evaluation import EvaluationExecutor, runtime_for
+    runtime = runtime_for(out, config, cp_only=path == 'cp')
+    runtime_identity = runtime.identity()
     fingerprint=('cp_mirror_'+digest(config['teacher_search'])[:32] if path=='cp'
                  else policy_hash(torch.load(out/path,map_location='cpu',weights_only=False)['model']))
     cache=read_json(out/'evaluations.json') if (out/'evaluations.json').exists() else {}
@@ -310,20 +315,29 @@ def evaluate(config,plan,out,path,purpose):
         'planner':file_sha256(LIBRARY_PATH),
         'kernel':file_sha256(ROOT/'build'/('combat.dll' if sys.platform=='win32' else 'libcombat.so'))})
     key=digest({'purpose':purpose,'policy':fingerprint,'mode':'argmax','temperature':config.get('policy_temperature',1.0),
-        'cases':[c['case_hash'] for c in plan[purpose]], 'evaluator':evaluator, 'search':config['teacher_search']})
+        'cases':[c['case_hash'] for c in plan[purpose]], 'evaluator':evaluator,
+        'runtime':runtime_identity, 'search':config['teacher_search']})
     if key in cache:return cache[key]
     cases=plan[purpose]
     started=perf_counter()
     relative=f'evaluation/{purpose}/{fingerprint[:16]}/{key[:16]}/argmax/cp'
     directory=out/relative
-    workers=int(config.get('workers',4) or 4)
+    workers=runtime.workers
     checkpoint_arg='cp' if path=='cp' else str(out/path)
-    with pool(workers) as executor:
-        tasks=[(config,case,checkpoint_arg,str(directory/f"case-{case['case_id']:03}-side-{case['learner_side']}"))
-               for case in cases if not (directory/f"case-{case['case_id']:03}-side-{case['learner_side']}"/'metrics.json').exists()]
-        for first in range(0,len(tasks),workers):
-            list(executor.map(evaluation_task,tasks[first:first+workers]))
-            print(f'Evaluation {purpose}: {min(first+workers,len(tasks))}/{len(tasks)} new matches',flush=True)
+    tasks=[(config,case,checkpoint_arg,str(directory/f"case-{case['case_id']:03}-side-{case['learner_side']}"))
+           for case in cases if not (directory/f"case-{case['case_id']:03}-side-{case['learner_side']}"/'metrics.json').exists()]
+    inference_statistics = None
+    if runtime.device == 'cuda' and tasks:
+        executor = EvaluationExecutor(checkpoint_arg, runtime)
+        for count, _ in enumerate(executor.run(evaluation_task, tasks), 1):
+            if count % workers == 0 or count == len(tasks):
+                print(f'Evaluation {purpose}: {count}/{len(tasks)} new matches',flush=True)
+        inference_statistics = executor.statistics()
+    else:
+        with pool(workers) as executor:
+            for first in range(0,len(tasks),workers):
+                list(executor.map(evaluation_task,tasks[first:first+workers]))
+                print(f'Evaluation {purpose}: {min(first+workers,len(tasks))}/{len(tasks)} new matches',flush=True)
     summary=match_summary(directory,len(cases))
     rows=[read_json(p) for p in directory.glob('*/metrics.json')]
     slices={}
@@ -337,6 +351,7 @@ def evaluate(config,plan,out,path,purpose):
                                       'mean_rounds':float(np.mean([r['rounds'] for r in selected])),
                                       'draw_reasons':dict(Counter(r['reason'] for r in selected if r['winner'] is None))}
     result={'checkpoint':path,'policy_hash':fingerprint,'purpose':purpose,'seconds':perf_counter()-started,
+            'runtime':runtime_identity,'inference':inference_statistics,
             'runs':{'argmax':{'cp':{'directory':relative,'summary':summary}}},'slices':slices}
     cache[key]=result
     write_json(out/'evaluations.json',cache)

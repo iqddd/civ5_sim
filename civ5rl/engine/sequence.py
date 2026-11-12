@@ -6,6 +6,7 @@ from time import perf_counter
 import numpy as np
 import torch
 
+from civ5rl.engine.budget import deadline_reached
 from civ5rl.core.encoded_layout import ENCODED_FIELDS
 from civ5rl.core.model import batch_inputs
 from civ5rl.core.schema import INVALID_INDEX
@@ -99,7 +100,7 @@ class SequenceBuffer:
             self.required_bytes = sum(
                 int(np.prod(shapes[k])) * v.element_size() for k, v in template.items()
             )
-            if deadline is not None and perf_counter() >= deadline:
+            if deadline_reached(deadline):
                 raise TimeoutError("Resident preparation exceeded optimization budget")
             data = {}
             try:
@@ -112,7 +113,7 @@ class SequenceBuffer:
             self.data = data
             self.memory_admission = admission
             for first in range(0, rows, 256):
-                if deadline is not None and perf_counter() >= deadline:
+                if deadline_reached(deadline):
                     raise TimeoutError(
                         "Resident preparation exceeded optimization budget"
                     )

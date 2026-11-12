@@ -7,6 +7,7 @@ import zipfile
 from datetime import UTC, datetime
 from collections import Counter
 from pathlib import Path
+from uuid import uuid4
 
 from civ5rl.engine.control import RunLock, target_bc_evaluation_due
 from civ5rl.provenance.audit import (
@@ -39,37 +40,47 @@ def _read(path, default=None):
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else default
 
 
-def extend_budget(directory, additional_seconds, reason):
+def extend_budget(directory, additional_seconds, reason, *, request_id=None):
     """Record an authorized operational extension without rewriting saved config."""
     if type(additional_seconds) is not int or additional_seconds <= 0 or not reason.strip():
         raise ValueError("A positive integer extension and reason are required")
     directory = Path(directory)
-    with RunLock(directory):
+    from civ5rl.engine.budget import budget_base, read_extension
+    request_id = request_id or uuid4().hex
+    if not isinstance(request_id, str) or not request_id.strip():
+        raise ValueError("Request ID must be a nonempty string")
+    with RunLock(directory, "budget.lock"):
         record = _read(directory / "run.json")
         state = _read(directory / "state.json")
         status = _read(directory / "status.json", {})
-        if record["kind"] != "rl01.ppo_after_target_bc":
-            raise ValueError("Budget extension supports PPO after target BC only")
-        if status.get("status") not in ("paused", "technical_error") or state.get("stop_reason"):
-            raise ValueError("Extend only an inactive, resumable run")
-        base = record["config"]["experiment"]["active_seconds"]
-        previous = _read(directory / "active-budget.json", {})
-        if previous and (
-            previous.get("schema") != 1 or previous.get("run_id") != record["run_id"]
-            or previous.get("base_active_seconds") != base
-        ):
-            raise ValueError("Existing budget extension differs from this run")
-        value = {
-            "schema": 1, "run_id": record["run_id"], "base_active_seconds": base,
-            "additional_active_seconds": previous.get("additional_active_seconds", 0) + additional_seconds,
-            "requests": [*previous.get("requests", []), {
-                "at_utc": datetime.now(UTC).isoformat(), "additional_seconds": additional_seconds,
-                "reason": reason, "update": state["updates"],
-                "active_seconds": state["active_seconds"],
-            }],
-        }
-        write_json(directory / "active-budget.json", value)
-        return value
+        base = budget_base(record)
+        previous = read_extension(directory, record)
+        existing = next((r for r in previous.get("requests", []) if r.get("request_id") == request_id), None)
+        if existing:
+            if existing["additional_seconds"] != additional_seconds or existing["reason"] != reason:
+                raise ValueError("Request ID already used for a different extension")
+            value = previous
+        else:
+            if (status.get("status") not in ("training", "running", "evaluating", "paused", "technical_error")
+                    or state.get("stop_reason") or (directory / "closure.json").exists()
+                    or _read(directory / "training.json", {}).get("status") == "complete"):
+                raise ValueError("Cannot extend a completed, closed or stopped training run")
+            value = {
+                "schema": 1, "run_id": record["run_id"], "base_active_seconds": base,
+                "additional_active_seconds": previous.get("additional_active_seconds", 0) + additional_seconds,
+                "requests": [*previous.get("requests", []), {
+                    "at_utc": datetime.now(UTC).isoformat(), "additional_seconds": additional_seconds,
+                    "request_id": request_id, "reason": reason,
+                    "update": state.get("updates"), "epoch": state.get("epoch"),
+                    "active_seconds": state.get("active_seconds", 0),
+                }],
+            }
+            write_json(directory / "active-budget.json", value)
+        receipt = _read(directory / "budget-applied.json", {})
+        revision = next(i for i, request in enumerate(value["requests"], 1) if request.get("request_id") == request_id)
+        return {**value, "request_id": request_id, "requested_revision": revision,
+                "applied_revision": receipt.get("revision"),
+                "applied": receipt.get("run_id") == record["run_id"] and receipt.get("revision", -1) >= revision}
 
 
 def compare(before, after, expected_n, *, clusters=16, samples=10000, seed=20261103):
@@ -230,7 +241,11 @@ def _audit_stable(directory):
     )
     check(
         "checkpoints_adam_rng",
-        lambda: verify_checkpoint_chain(directory, adam_offset=offset),
+        lambda: verify_checkpoint_chain(
+            directory, adam_offset=offset,
+            parent_checkpoint=(Path(__file__).resolve().parents[2] / config["experiment"]["parent"])
+            if config.get("experiment", {}).get("parent_optimizer") == "preserve" else None,
+        ),
         None
         if (supported_ppo or supported_bc) and (directory / "checkpoints").exists()
         else "No supported checkpoint schema",

@@ -28,7 +28,9 @@ def _evaluations(source, purpose):
 def _evaluation_seconds(source, purpose):
     # Short records are cache hits, not measurements of this workload. Use only
     # this process's measurements when a recorder session is available.
-    values = [r["seconds"] for r in _evaluations(source, purpose) if r.get("seconds", 0) > 10]
+    rows = [r for r in _evaluations(source, purpose) if r.get("seconds", 0) > 10]
+    latest_runtime = rows[-1].get("runtime") if rows else None
+    values = [r["seconds"] for r in rows if r.get("runtime") == latest_runtime]
     return median(values[-3:]) if values else None
 
 
@@ -78,6 +80,9 @@ class PPOAdapter:
                            stages=[] if complete or type(self) is not PPOAdapter else [Stage("unmodeled_remaining_phases", 1, None)],
                            work_stopped=complete or bool(state.get("stop_reason")),
                            details=dict(collected=state.get("decisions"), updates=state.get("updates"),
+                                        adam_inherited=state.get("origin_Adam_counter", experiment.get("parent_optimizer_steps", 0)),
+                                        adam_new_accepted=state.get("optimizer_steps", 0),
+                                        adam_total=state.get("origin_Adam_counter", experiment.get("parent_optimizer_steps", 0)) + state.get("optimizer_steps", 0),
                                         rate_scope="collection_and_optimization_active_time",
                                         session_id=source.session.get("id")),
                            warnings=_warnings(source))
@@ -115,6 +120,8 @@ class TargetBCPPOAdapter(PPOAdapter):
             additional = seconds * 512 / matches if seconds is not None and matches else None
             observation.stages.append(Stage("additional_256_two_policies", 1, additional, conditional=True))
         observation.details["pending_development_points"] = pending
+        observation.details["early_gain_required_wins"] = state.get("early_gain_required_wins")
+        observation.details["evaluation_runtime"] = source.read("evaluation-runtime.json", {}).get("runtime")
         observation.warnings.append("Additional-256 depends on selection and the experiment's development gate.")
         return observation
 
@@ -154,7 +161,7 @@ class BCAdapter:
         active = max(state.get("active_seconds", 0), training.get("active_seconds", 0), previous_active)
         budgets = {}
         if cfg.get("training_seconds") is not None:
-            budgets["active"] = dict(limit_seconds=cfg["training_seconds"], spent_seconds=active,
+            budgets["active"] = dict(limit_seconds=cfg["training_seconds"] + source.read("active-budget.json", {}).get("additional_active_seconds", 0), spent_seconds=active,
                                      work_estimate_complete=has_active or training.get("status") == "complete")
         warnings = _warnings(source)
         if not has_active:

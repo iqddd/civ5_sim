@@ -1,0 +1,45 @@
+{
+  "base_config": "configs/rl-ppo-c2-h60-gae.json",
+  "output": "artifacts/rl/ppo-c2-h60-gae-continuation",
+  "evaluation_runtime": {
+    "device": "cuda",
+    "workers": 8,
+    "max_batch": 32,
+    "wait_seconds": 0.001
+  },
+  "experiment": {
+    "parent": "artifacts/inputs/ppo-c2-h60-gae/checkpoints/update-0150.pt",
+    "parent_label": "PPO C2 h60 GAE update 150",
+    "parent_sha256": "7f24121e2ec69578f8c1368389e1317d79f15c1e4d78a9829c0ef2d71b613a69",
+    "parent_policy_hash": "2e577d0361a9314944758ef81312a63969cd615af37529a7ca8f8e5a23c7619f",
+    "parent_manifest": "artifacts/inputs/ppo-c2-h60-gae/manifest.json",
+    "parent_manifest_sha256": "18019d9ea2ee5a36e3b890ab62e6733b76f786e01c2ed92f8ce708a8668ff272",
+    "parent_run": "artifacts/inputs/ppo-c2-h60-gae",
+    "parent_final_state": "artifacts/inputs/ppo-c2-h60-gae/state.json",
+    "parent_final_state_sha256": "1a2ab8a73725cb6f560835e995d7fc87af48e97221de2e97ab47e628d36a09c0",
+    "parent_run_sha256": "d020d7307253d102719172efdd7639aaa71ff67420fa44d5af9dfff62a75926a",
+    "parent_optimizer_steps": 12644,
+    "parent_optimizer": "preserve",
+    "initial_value": "preserve_parent",
+    "decisions": 8388608,
+    "active_seconds": 28800,
+    "milestones": [1048576, 2097152, 4194304, 6291456, 8388608],
+    "start_episode": 26264,
+    "training_namespace": "ppo_c2_h60_gae_continuation_v1_train",
+    "shuffle_namespace": "ppo_c2_h60_gae_continuation_v1_shuffle",
+    "torch_namespace": "ppo_c2_h60_gae_continuation_v1_torch",
+    "critic_namespace": "ppo_c2_h60_gae_continuation_v1_critic_unused",
+    "early_gain_decisions": 2097152,
+    "early_gain_min_wins": 11,
+    "confirmation_min_win_rate_delta": null,
+    "confirmation_min_ci95_low": null,
+    "time_budget_check": null,
+    "historical_active_time_estimate": {
+      "decisions_per_second_range": [323, 400],
+      "source": "artifacts/inputs/ppo-c2-h60-gae/derived/review-20261111/analysis.json",
+      "source_sha256": "3215d69b46f9346040195da0dac24af0c9e5fa5ecd2571fb99bd09ce8e1e58fe",
+      "includes": "collection, PPO and measured active overhead; historical late windows, not a new-machine guarantee"
+    },
+    "protocol": "docs/rl-architecture.md"
+  }
+}

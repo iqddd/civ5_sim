@@ -126,6 +126,7 @@ python tools/ctl_rl.py request-pause --run RUN --after-epoch 10
 python tools/ctl_rl.py wait-and-finalize --run RUN --out OUT --timeout 600
 python tools/ctl_rl.py close --run RUN --reason "Research stopped at saved boundary"
 python tools/ctl_rl.py extend-budget --run RUN --additional-seconds 3600 --reason "User requested one extra active hour"
+python tools/remote_rl.py extend-budget --deployment DEPLOYMENT --additional-seconds 3600 --reason "User requested one extra active hour" --request-id extra-hour-1
 ```
 
 Запрос — порог в `pause.request`, не сигнал процессу. PPO-after-target-BC
@@ -148,12 +149,73 @@ shuffle RNG, курсор batch и потраченный бюджет) без �
 pending evaluation, пишет closure/status. Model/Adam/RNG не меняет;
 закрытый запуск отказывает обычному train/resume.
 
-`extend-budget` применим к неработающему, возобновляемому after-target-BC PPO.
-Он добавляет согласованные секунды в отдельный `active-budget.json` с `run_id`,
-исходным лимитом и историей запросов; config, checkpoints и потраченное время
-не переписываются. Runner с поддержкой продления использует сумму лимитов,
-но лимит решений не меняет. Старому процессу нужен штатный pause/pull/resume
-на новой версии runner; смена кода записывается в `source-revisions/`.
+`extend-budget` поддерживает работающий либо возобновляемый after-target-BC PPO
+и target-scale BC, включая more-data/C2. Используется отдельный `budget.lock`,
+поэтому writer lock обучения не мешает запросу. Согласованные секунды добавляются
+в `active-budget.json` с `run_id`, исходным лимитом и историей запросов; config,
+checkpoints, model/Adam/RNG и потраченное время не переписываются. Лимит решений
+или эпох не меняется. Завершённое обучение, закрытый запуск и уже установленный
+stop_reason продлением не возобновляются; другим runners команда явно отказывает.
+
+`--request-id` позволяет безопасно повторить запрос после обрыва SSH: тот же ID,
+число секунд и причина не создают второй прибавки; изменение содержания под тем
+же ID отклоняется. Удалённая команда печатает ID перед SSH, в том числе когда он
+сгенерирован автоматически. Она меняет файл на удалённом хосте без pull/redeploy.
+
+`requested_revision` означает запись запроса, а `applied`/`applied_revision` —
+подтверждение runner в `budget-applied.json`. Runner читает изменения не чаще
+раза в секунду на безопасных проверках и применяет новый deadline внутри PPO
+update/collection или BC эпохи; GPU kernel и компиляцию не прерывает. Во время
+оценки active clock стоит, подтверждение может ждать следующей проверки обучения.
+Запрос на самом завершении может остаться pending: запись запроса сама по себе
+не гарантирует продление уже завершившегося процесса. Status/progress показывают
+обе ревизии и эффективный лимит. Старому процессу без этих hooks нужна штатная
+пауза и новая версия runner; смена кода оформляется через `source-revisions/`.
+
+## CPU/GPU-инференс оценок
+
+```powershell
+python tools/run_ppo.py run --config CONFIG --evaluation-device auto --evaluation-workers 8 --evaluation-max-batch 32 --evaluation-wait-seconds 0.001
+python tools/run_cp_imitation.py evaluate --config CONFIG --evaluation-device cuda
+python tools/remote_rl.py launch --deployment DEPLOYMENT --mode resume --evaluation-device cpu
+python tools/bench_rl.py evaluation --run RUN --checkpoint CHECKPOINT --out OUT --cases 2 --workers 4 --warmup 3 --steps 5 --trace-steps 3
+```
+
+Общий runtime подключён к Development/Additional target-scale BC (включая
+more-data/C2), target-scale PPO и after-target-BC PPO. Остальные исторические
+runners сохраняют прежний путь и отказывают явно переданным runtime-флагам.
+У нового запуска по умолчанию `auto`: CUDA при наличии, иначе CPU. `cuda` без
+CUDA выдаёт ошибку. CP–CP mirror исполняется на CPU. Первый выбор сохраняется
+в `evaluation-runtime.json`; новый run record отмечает default `auto`. У
+исторического run record без этого признака выбирается CPU, даже если evaluations
+ещё находятся в архиве. Явные CLI-флаги имеют приоритет над сохранённым выбором.
+Параметры не добавляются в научный config. По умолчанию workers берётся из него,
+max batch = 32, ожидание объединения готовых запросов = 1 мс. Remote launch
+передаёт те же флаги worker и сохраняет их в deployment.
+
+На GPU одна оценочная модель обслуживает запросы CPU-воркеров в основном
+процессе. Воркеры исполняют обычные симулятор/CP и пишут стандартные replay,
+final/result/case/metrics; CUDA-моделей в каждом воркере нет. Энкодер, RNG и GRU
+разделены по боям; forced actions обновляют память, reset обнуляет её. Оценочная
+модель отдельна от обучаемой; используется общий аллокатор основного процесса.
+Режим — deterministic FP32, без AMP/TF32 обучения; настройки вызывающего кода
+восстанавливаются после оценки. Побитовое совпадение CPU и GPU не обещается.
+
+Backend, численный режим, GPU, параметры пакетирования и hash inference service
+входят в ключ evaluation cache и metadata результата. CPU и GPU не разделяют
+результаты по одному только policy hash; явная смена режима создаёт отдельный
+каталог результатов. Cross-run reuse проверяет runtime, CPU archive baseline
+не используется как GPU baseline. При ошибке нет молчаливого CPU fallback:
+завершённые матчи остаются, повтор тем же runtime пропускает их по metrics.
+EMA длительности оценок не смешивает разные runtime identities.
+
+`bench_rl.py evaluation` выполняет ограниченное число сохранённых validation
+случаев на CPU и GPU, проверяет созданные replay и неизменность исходных
+checkpoints/ledger. Отдельно измеряет несколько прогретых inference batches,
+сверяет CPU/GPU logits/hidden на одинаковой публичной истории и при запросе
+сохраняет короткую Kineto-трассу. Для full-match wall учитываются также startup,
+CP, IPC и запись файлов; whole-pass NVML не выдаётся за чистый GPU-интервал.
+Короткий benchmark не доказывает пропускную способность полного Development-512.
 
 ## Производительность и GPU
 
@@ -209,6 +271,18 @@ Phase telemetry может включать неудачные попытки т
 `performance.json/.md` и `performance-last10.json/.md`.
 
 ## Replay, полный цикл и диагностика
+
+При сравнении новых attention/backward ядер отдельно измеряют оператор и полный
+PPO update. Для сравнения updates прогревают весь путь (не только backward):
+precheck, KL replay, Adam и допустимые CUDA Graphs. Между вариантами восстанавливают
+одни и те же model/Adam/RNG и behavior labels; измерения чередуют. Одиночный update
+с впервые исполняемыми ветвями не является оценкой устойчивого ускорения.
+Отбрасываемые диагностические фрагменты из публичных наблюдений проверяют путь
+вычисления, но не дают прогноз collection throughput или силу policy.
+Принятие нового численного режима следует правилам
+[корректности и replay](rl-architecture.md#численная-корректность-и-воспроизводимость-оптимизаций):
+градиенты сравнивают с допусками, behavior replay gate сохраняют. Закреплённый
+CUDA/FP32 runtime оценок продолжения не заимствует precision или TF32 из обучения.
 
 ```powershell
 python tools/bench_rl.py replay --run RUN --compare-git-rev HEAD --out OUT
@@ -281,6 +355,61 @@ rollout и фиксируются как условия исполнения.
 локальная очередь worker не измеряет задержку runnable-потока планировщиком ОС.
 
 ## Удалённое исполнение
+
+### Подготовленный профиль продолжения C2 от update 150
+
+`configs/rl-ppo-c2-h60-gae-continuation.json` — отдельный новый опыт, а не resume
+исторического каталога. Родительские входы извлечены из
+`artifacts/rl/ppo-c2-h60-gae/ppo-c2-h60-gae.7z` в
+`artifacts/inputs/ppo-c2-h60-gae/`: `checkpoints/update-0150.pt`, `manifest.json`,
+`state.json`, `run.json`, `derived/review-20261111/analysis.json`.
+Hashes и проверка подготовки: [отчёт](../artifacts/preparations/ppo-c2-h60-gae-continuation/report.md).
+Переупаковка родительских результатов, извлечение evaluation или test не нужны.
+`stage_inputs` автоматически включает родителя, manifest, конечный state,
+run record, исторический прогноз и только открытые карты.
+
+Подготовка кода не запускает научный каталог или полный Development. Будущие
+команды ниже исполняются только после отдельного согласования запуска;
+package требует чистого дерева и отправленного commit, инстанс выбирается
+отдельно по согласованному пресету. Для tune нужен существующий совместимый
+rollout-носитель (`CARRIER`); он только задаёт фиксированные открытые случаи.
+
+```powershell
+$cfg = 'configs/rl-ppo-c2-h60-gae-continuation.json'
+$dep = 'artifacts/deployments/ppo-c2-h60-gae-continuation'
+.venv/Scripts/python.exe tools/remote_rl.py package --config $cfg --out $dep --instance .tmp/instance.json --extra-input CARRIER
+.venv/Scripts/python.exe tools/remote_rl.py launch --deployment $dep --mode tune
+.venv/Scripts/python.exe tools/remote_rl.py pull --deployment $dep --keep-instance
+.venv/Scripts/python.exe tools/remote_rl.py launch --deployment $dep --mode run --evaluation-device cuda --evaluation-workers 8 --evaluation-max-batch 32 --evaluation-wait-seconds 0.001
+.venv/Scripts/python.exe tools/ctl_rl.py progress --deployment $dep --watch --interval 900
+```
+
+Если процесс оборвался, сначала `pull --keep-instance`, затем:
+
+```powershell
+.venv/Scripts/python.exe tools/remote_rl.py launch --deployment $dep --mode resume --evaluation-device cuda --evaluation-workers 8 --evaluation-max-batch 32 --evaluation-wait-seconds 0.001
+```
+
+Runtime оценок закреплён также конфигом: отсутствие флагов не включает auto,
+а отличающиеся значения отклоняются. Перед первым сбором выполняется новая
+CUDA/FP32 нулевая Development-512, задающая W0 и постоянный порог W0+11.
+Отдельный benchmark не нужен: эта оценка даёт длительность полного Development.
+Исторические поздние окна дают 5,8–7,2 активного часа на 8 Mi; оценки и возможные
+сбои добавляют wall time, на новой машине скорость не гарантируется.
+Первые 2–3 принятых шага проверяются короткими проверками, затем — раз в 15 минут.
+
+После окончательных Development/Additional выгрузить и проверить артефакты:
+
+```powershell
+.venv/Scripts/python.exe tools/remote_rl.py pull --deployment $dep --keep-instance
+.venv/Scripts/python.exe tools/ctl_rl.py audit --run artifacts/rl/ppo-c2-h60-gae-continuation --out artifacts/rl/ppo-c2-h60-gae-continuation/derived/audit
+```
+
+После подтверждения синхронизации и обязательных секций аудита удалить привязанный
+инстанс штатной командой Vast.ai из раздела ниже. Повтор `resume` завершённого
+обучения не начинает новые решения; завершённый Additional берётся из сохранённого
+результата. Контрольные проверки подготовки выполняются в отдельном временном
+каталоге и не являются ни первым rollout опыта, ни нулевой оценкой.
 
 `tools/remote_rl.py` работает с уже существующим инстансом поверх `remote-python-ssh`.
 Аренда и выбор машины выполняются отдельно; по умолчанию проекта при создании

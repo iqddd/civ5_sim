@@ -216,7 +216,7 @@ def main():
     parser.add_argument(
         "phase",
         nargs="?",
-        choices=("full-cycle", "replay", "bc"),
+        choices=("full-cycle", "replay", "bc", "evaluation"),
         default="full-cycle",
     )
     parser.add_argument(
@@ -293,7 +293,15 @@ def main():
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument("--cases", type=int, default=3, help="Evaluation benchmark only")
+    parser.add_argument("--workers", type=int, default=4, help="Evaluation benchmark only")
+    parser.add_argument("--max-batch", type=int, default=32, help="Evaluation benchmark only")
+    parser.add_argument("--wait-seconds", type=float, default=0.001, help="Evaluation benchmark only")
     args = parser.parse_args()
+    if args.phase == "evaluation":
+        from tools._evaluation_benchmark import run_evaluation_benchmark
+        run_evaluation_benchmark(args, parser)
+        return
     if args.phase == "bc":
         if args.config is None or args.checkpoint is None:
             parser.error("bc benchmark requires --config and --checkpoint")

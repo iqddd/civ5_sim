@@ -225,8 +225,9 @@ def play_case(
     if checkpoint_path == "cp":
         agent = CPAgent(search_config(config))
     else:
-        agent = RLAgent.from_checkpoint(
-            checkpoint_path, "cpu", mode, temperature=temperature,
+        from civ5rl.engine.evaluation import evaluation_agent
+        agent = evaluation_agent(
+            checkpoint_path, mode, temperature=temperature,
             collect_selection_metrics=collect_selection_metrics,
         )
     opponent = CPAgent(search_config(config)) if enemy == "cp" else "greedy"

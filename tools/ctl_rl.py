@@ -50,6 +50,7 @@ def main(argv=None):
             cmd.add_argument("--reason", required=True)
         if name == "extend-budget":
             cmd.add_argument("--additional-seconds", type=int, required=True)
+            cmd.add_argument("--request-id")
         if name == "wait-and-finalize":
             cmd.add_argument("--timeout", type=float, required=True)
     cmd = commands.add_parser("compare")
@@ -109,7 +110,7 @@ def main(argv=None):
     elif args.command == "close":
         result = close_run(args.run, args.reason)
     elif args.command == "extend-budget":
-        result = extend_budget(args.run, args.additional_seconds, args.reason)
+        result = extend_budget(args.run, args.additional_seconds, args.reason, request_id=args.request_id)
     else:
         result = wait_and_finalize(
             args.run,

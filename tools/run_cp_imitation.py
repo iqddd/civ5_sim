@@ -34,6 +34,10 @@ def main(argv=None):
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--cycle", type=int, choices=(1, 2))
     parser.add_argument("--game", type=Path)
+    parser.add_argument("--evaluation-device", choices=("auto", "cpu", "cuda"))
+    parser.add_argument("--evaluation-workers", type=int)
+    parser.add_argument("--evaluation-max-batch", type=int)
+    parser.add_argument("--evaluation-wait-seconds", type=float)
     args = parser.parse_args(argv)
     from civ5rl.config import load_config
 
@@ -70,6 +74,8 @@ def main(argv=None):
     }
     if kind not in modules:
         parser.error(f"Unsupported imitation kind: {kind!r}")
+    if any(v is not None for v in (args.evaluation_device, args.evaluation_workers, args.evaluation_max_batch, args.evaluation_wait_seconds)) and kind not in ("rl01.cp_imitation_target_scale", "rl01.cp_imitation_target_more_data", "rl01.cp_imitation_target_c2"):
+        parser.error("evaluation runtime options apply only to target-scale imitation")
     if args.cycle is not None and kind != "rl01.cp_imitation_own_states":
         parser.error("--cycle applies only to own-state imitation")
     if args.phase == "run" and kind not in (
@@ -97,9 +103,11 @@ def main(argv=None):
     ):
         config = module.load_config(args.config)
     from civ5rl.reporting.progress_process import ProcessProgress
+    from civ5rl.engine.evaluation import evaluation_options
 
     progress = ProcessProgress(out, config) if args.phase in ("collect", "train", "run", "resume", "evaluate") else nullcontext()
-    with progress:
+    with evaluation_options(device=args.evaluation_device, workers=args.evaluation_workers,
+                            max_batch=args.evaluation_max_batch, wait_seconds=args.evaluation_wait_seconds), progress:
         return _execute(args, config, kind, module, out, workers)
 
 

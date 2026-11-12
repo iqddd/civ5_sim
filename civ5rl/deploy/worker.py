@@ -43,6 +43,10 @@ def main(argv=None, *, root=ROOT):
     parser.add_argument("--tuning-rollout")
     parser.add_argument("--tuning-dir")
     parser.add_argument("--runtime-config")
+    parser.add_argument("--evaluation-device", choices=("auto", "cpu", "cuda"))
+    parser.add_argument("--evaluation-workers", type=int)
+    parser.add_argument("--evaluation-max-batch", type=int)
+    parser.add_argument("--evaluation-wait-seconds", type=float)
     args = parser.parse_args(argv)
 
     root = Path(root).resolve()
@@ -102,6 +106,10 @@ def main(argv=None, *, root=ROOT):
             "--config",
             args.config,
         ]
+        for name in ("device", "workers", "max_batch", "wait_seconds"):
+            value = getattr(args, "evaluation_" + name)
+            if value is not None:
+                command += ["--evaluation-" + name.replace("_", "-"), str(value)]
         if kind == "rl01.ppo_after_target_bc":
             if not args.runtime_config:
                 raise ValueError("--runtime-config is required for ppo_after_target_bc")

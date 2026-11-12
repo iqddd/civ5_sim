@@ -100,10 +100,17 @@ def format_progress(result):
     budgets = " ".join(f"{k} {duration(v['remaining_seconds'])} fits={v['fits']}" for k, v in result["budgets"].items())
     rate_text = f"{rate:.1f}" if rate is not None else "?"
     stages = ", ".join(f"{s['name']}:{s['count']}" for s in result["stages"] if not s["conditional"] and s["count"])
+    control = result.get("budget_control", {})
+    applied = control.get("applied") or {}
+    revision = f" | budget revision {applied.get('revision', '?')}/{control['requested_revision']} applied/requested" if control else ""
+    details = result.get("details", {})
+    adam = (f" | Adam {details['adam_total']} total ({details['adam_inherited']} inherited + {details['adam_new_accepted']} new)"
+            if details.get("adam_inherited") else "")
     return (f"{result['observed_at']} | {result['status']}/{result['phase']} | "
             f"{result['completed']:,.0f}/{target} {result['unit']} | EMA {rate_text}"
             f" {result['unit']}/s | ETA work {duration(result['eta_work_seconds'])} | "
             f"other {duration(result['eta_other_seconds'])} ({stages or 'none'}) | total {duration(result['eta_total_seconds'])} | "
             f"conditional +{duration(result['eta_conditional_seconds'])} | {budgets}" +
             (f" | finish ~{result['estimated_finish_at']}" if result["estimated_finish_at"] else "") +
+            revision + adam +
             (" | assumes resume" if result["eta_assumes_resume"] else ""))

@@ -1,4 +1,5 @@
 """One bounded local or remote CP--CP behavioral-cloning experiment on target armies."""
+
 import gc
 import inspect
 import io
@@ -19,6 +20,7 @@ import psutil
 import torch
 from torch.nn import functional as F
 
+from civ5rl.engine.budget import ActiveBudget
 from civ5rl.config import load_config as resolve_config
 from civ5rl.core.model import Policy
 from civ5rl.engine.control import RunLock, assert_not_closed, pause_due
@@ -235,7 +237,7 @@ def _evaluator_digest():
     )
 
 
-def _evaluation_key(config, plan, purpose, fingerprint):
+def _evaluation_key(config, plan, purpose, fingerprint, runtime=None):
     return digest(
         {
             "purpose": purpose,
@@ -245,6 +247,7 @@ def _evaluation_key(config, plan, purpose, fingerprint):
             "cases": [c["case_hash"] for c in plan[purpose]],
             "evaluator": _evaluator_digest(),
             "search": config["teacher_search"],
+            **({"runtime": runtime} if runtime is not None else {}),
         }
     )
 
@@ -404,6 +407,7 @@ def prepare(config, out):
     optimizer = adam(policy, config, "cpu")
     assert not optimizer.state
     run_record = {
+        "evaluation_runtime_default": "auto",
         "kind": kind,
         "config": config,
         "parent": config["parent"],
@@ -564,14 +568,18 @@ def _try_reuse_saved_evaluation(
         if (source_run_dir / "run.json").is_file()
         else {}
     )
-    candidate_keys = [_evaluation_key(config, plan, purpose, fingerprint)]
+    from civ5rl.engine.evaluation import runtime_for
+    runtime = runtime_for(out, config).identity()
+    candidate_keys = [_evaluation_key(config, plan, purpose, fingerprint, runtime)]
+    if runtime["device"] == "cpu":
+        candidate_keys.append(_evaluation_key(config, plan, purpose, fingerprint))
     if "policy_temperature" in source_cfg:
         candidate_keys.append(
             _evaluation_key(
                 {**config, "policy_temperature": source_cfg["policy_temperature"]},
                 plan,
                 purpose,
-                fingerprint,
+                fingerprint, runtime,
             )
         )
     saved_evals = read_json(evals_path)
@@ -581,6 +589,8 @@ def _try_reuse_saved_evaluation(
             point = saved_evals[key]
             break
     if not point:
+        return None
+    if point.get("runtime", {"device": "cpu"}) != runtime and not (point.get("runtime") is None and runtime["device"] == "cpu"):
         return None
     rel_dir = point["runs"]["argmax"]["cp"]["directory"]
     src_dir = source_run_dir / rel_dir
@@ -685,7 +695,8 @@ def baseline(config, plan, out):
     # A cheap check of saved data and exact evaluator sources. No reconstruction.
     reused = False
     archive = ROOT / config["baseline_archive"]
-    if archive.exists():
+    from civ5rl.engine.evaluation import runtime_for
+    if archive.exists() and runtime_for(out, config).device == "cpu":
         with zipfile.ZipFile(archive) as previous:
             prefix = "artifacts/rl/ppo-target-scale/"
             old_plan = json.loads(previous.read(prefix + "manifest.json"))
@@ -1154,6 +1165,7 @@ def train(config, plan, out, *, resume=False):
             )
             fixed.clear()
         clock = ActiveClock(clock_offset)
+        budget = ActiveBudget(out)
         reason = "epoch_limit"
         last_path = source
         utilization = (
@@ -1181,6 +1193,8 @@ def train(config, plan, out, *, resume=False):
                 "Adam_steps": steps,
                 "free_labels_processed": labels,
                 "active_seconds_at_save_start": clock.seconds(),
+                "active_seconds_limit": budget.limit(),
+                "budget_revision_applied": budget.revision,
                 "history_positions": cache.counters["history_positions"],
                 "prefix_positions": cache.counters["prefix_positions"],
                 "epochs_history": deepcopy(history),
@@ -1202,7 +1216,7 @@ def train(config, plan, out, *, resume=False):
             )
 
         for epoch in range(start_epoch, config["epochs"] + 1):
-            if clock.seconds() >= config["training_seconds"]:
+            if clock.seconds() >= budget.limit():
                 reason = "active_time_limit"
                 break
             if max_steps is not None and steps >= max_steps:
@@ -1228,7 +1242,7 @@ def train(config, plan, out, *, resume=False):
 
             def _check_stop():
                 nonlocal stop_hit
-                if clock.seconds() >= config["training_seconds"]:
+                if clock.seconds() >= budget.limit():
                     stop_hit = "active_time_limit"
                     return stop_hit
                 return None
@@ -1333,7 +1347,7 @@ def train(config, plan, out, *, resume=False):
                 )
                 terminal_step = (
                     (not completed and reason != "paused")
-                    or clock.seconds() >= config["training_seconds"]
+                    or clock.seconds() >= budget.limit()
                     or (max_steps is not None and steps >= max_steps)
                     or (completed and epoch == config["epochs"])
                 )
@@ -1341,7 +1355,7 @@ def train(config, plan, out, *, resume=False):
                     final_reason = None
                 elif max_steps is not None and steps >= max_steps:
                     final_reason = "max_adam_steps"
-                elif not completed or clock.seconds() >= config["training_seconds"]:
+                elif not completed or clock.seconds() >= budget.limit():
                     final_reason = "active_time_limit"
                 else:
                     final_reason = "epoch_limit"
@@ -1393,7 +1407,7 @@ def train(config, plan, out, *, resume=False):
                 return
             terminal = (
                 not completed
-                or clock.seconds() >= config["training_seconds"]
+                or clock.seconds() >= budget.limit()
                 or (max_steps is not None and steps >= max_steps)
             )
             if terminal and reason == "epoch_limit":
@@ -1494,7 +1508,7 @@ def train(config, plan, out, *, resume=False):
                 "Adam_steps": steps,
                 "free_labels_processed": labels,
                 "active_seconds": elapsed,
-                "time_overshoot": max(0, elapsed - config["training_seconds"]),
+                "time_overshoot": max(0, elapsed - budget.limit()),
                 "latest": last_path,
                 "microbatch": selected,
                 "cache": cache.statistics(),

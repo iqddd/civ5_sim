@@ -47,7 +47,9 @@ class ProgressTests(unittest.TestCase):
             self.write(root, "state.json", dict(decisions=300, active_seconds=115, development_points={"200": "h"}, evaluated={"h": {}}))
             self.write(root, "derived/progress/session.json", dict(id="new", ppo_rollout=1, evaluation_keys=["old"]))
             self.write(root, "evaluations.json", dict(old=dict(purpose="development", seconds=999),
-                                                      new=dict(purpose="development", seconds=20, runs=dict(argmax=dict(cp=dict(summary=dict(matches=512)))))))
+                                                      cpu=dict(purpose="development", seconds=500, runtime=dict(device="cpu")),
+                                                      new=dict(purpose="development", seconds=20, runtime=dict(device="cuda"),
+                                                               runs=dict(argmax=dict(cp=dict(summary=dict(matches=512)))))))
             rows = [dict(rollout=1, total_decisions=100, active_seconds=100),
                     dict(rollout=2, total_decisions=200, active_seconds=110, ppo=dict(runtime_compilation_seconds=5))]
             self.log(root, "updates.jsonl", rows)

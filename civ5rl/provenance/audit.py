@@ -47,6 +47,7 @@ def verify_ppo_ledger(directory, *, offsets=None):
         else []
     )
     totals = dict(offsets)
+    adam_origin = run.get("parent_Adam_counter", config.get("experiment", {}).get("parent_optimizer_steps", 0))
     previous_ids = {
         "update": offsets["updates"],
         "rollout": offsets.get("rollouts", offsets["updates"]),
@@ -120,6 +121,8 @@ def verify_ppo_ledger(directory, *, offsets=None):
             if key in row and row[key] != totals[name]:
                 raise ValueError(f"Ledger {key} inconsistent with totals")
     pending = state.get("phase") in ("ppo", "critic")
+    if "Adam_counter_total" in state and state["Adam_counter_total"] != adam_origin + state["optimizer_steps"]:
+        raise ValueError("Total Adam counter differs from inherited + new accepted steps")
     for name, key in (
         ("updates", "updates"),
         ("accepted", "optimizer_steps"),
@@ -136,13 +139,17 @@ def verify_ppo_ledger(directory, *, offsets=None):
             ):
                 continue
             raise ValueError(f"State {key} differs from committed ledger")
-    return {
+    result = {
         "status": "pending" if pending else "verified",
         "totals": totals,
         "offsets": offsets,
         "stop_kl": threshold,
         "pending_decisions": state.get("decisions", 0) - totals["decisions"],
     }
+    if adam_origin:
+        result["adam"] = {"inherited": adam_origin, "new_accepted": totals["accepted"],
+                          "total": adam_origin + totals["accepted"]}
+    return result
 
 
 def verify_bc_ledger(directory):
@@ -411,6 +418,12 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
         parent = torch.load(parent_checkpoint, map_location="cpu", weights_only=False)
         if not _equal(initial["model"], parent["model"]):
             raise ValueError("Initial model differs from parent")
+        if initial["config"].get("experiment", {}).get("parent_optimizer") == "preserve":
+            from civ5rl.provenance.common import file_sha256
+            if file_sha256(parent_checkpoint) != initial["config"]["experiment"]["parent_sha256"]:
+                raise ValueError("Parent checkpoint SHA256 differs")
+            if not _equal(initial["optimizer"], parent["optimizer"]):
+                raise ValueError("Initial Adam differs from parent")
     return {
         "status": "verified",
         "adam_offset": adam_offset,

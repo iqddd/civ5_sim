@@ -191,6 +191,8 @@ class ReplayStore:
         try:
             value = read_json(self.root / "summary.json")
             summary = value["summary"]
+            if isinstance(value.get("viewer_summary"), str):
+                return {"message": value["viewer_summary"], "checked": summary["matches"]}
             replacement = value.get("greedy_replacement")
             target = self.refresh_target()
             if target and (not replacement or replacement.get("run_signature") != target["run_signature"]):

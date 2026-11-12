@@ -94,6 +94,10 @@ class RLAgent:
     def act(self, observation, actions):
         actions = ordered_actions(actions)
         logits = self._infer(observation, actions)
+        return self.action_from_logits(logits, observation, actions)
+
+    def action_from_logits(self, logits, observation, actions):
+        """Finish a decision after single-agent or shared batched inference."""
         probabilities = (
             action_probabilities(
                 logits, 1.0 if self.mode == "argmax" else self.temperature

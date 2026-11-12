@@ -1,4 +1,4 @@
-"""One fixed local PPO experiment after target-army BC epoch ten."""
+"""Fixed target-army PPO profiles, including a preserved-Adam continuation."""
 
 import math
 
@@ -10,7 +10,9 @@ KIND = "rl01.ppo_after_target_bc"
 
 
 def validate_profile(config):
-    if config.get("output") == "artifacts/rl/ppo-c2-h60-gae":
+    if config.get("output") == "artifacts/rl/ppo-c2-h60-gae-continuation":
+        profile = "rl-ppo-c2-h60-gae-continuation.json"
+    elif config.get("output") == "artifacts/rl/ppo-c2-h60-gae":
         profile = "rl-ppo-c2-h60-gae.json"
     elif config.get("policy_temperature", 1) == 0.5:
         profile = "rl-ppo-target-bc-t05.json"
@@ -29,10 +31,11 @@ def validate_profile(config):
         or config["performance"]["worker_reply_size"] != 4
         or config["optimizer"]["lr"] != 1e-5
         or config["reward"]["loss"] != 0
-        or config["experiment"]["parent_optimizer_steps"] != 0
+        or (config["experiment"]["parent_optimizer_steps"] != 0
+            and config["experiment"].get("parent_optimizer") != "preserve")
     ):
         raise ValueError("Unsupported local PPO-after-target-BC conditions")
-    if "time_budget_check" in config.get("experiment", {}):
+    if config["experiment"].get("time_budget_check"):
         compute_time_budget_check(config)
 
 
@@ -41,6 +44,16 @@ def compute_time_budget_check(config):
     experiment = config["experiment"]
     spec = experiment.get("time_budget_check")
     if not spec:
+        historical = experiment.get("historical_active_time_estimate")
+        if historical:
+            low, high = historical["decisions_per_second_range"]
+            seconds = [experiment["decisions"] / rate for rate in (high, low)]
+            return {"basis": "historical_full_cycle_active_time", "source": historical["source"],
+                    "expected_active_seconds_range": seconds,
+                    "active_seconds_limit": experiment["active_seconds"],
+                    "reserve_seconds_range": [experiment["active_seconds"] - s for s in reversed(seconds)],
+                    "fits_historical_range": seconds[-1] <= experiment["active_seconds"],
+                    "warnings": ["Historical late-window throughput is not a guarantee for a new machine; evaluations pause active time."]}
         return None
     decisions_budget = int(experiment["decisions"])
     active_limit = float(experiment["active_seconds"])
@@ -191,11 +204,14 @@ def check_development_gain(state, config):
     )
     eval_purpose = config.get("ppo", {}).get("evaluation_purpose", "development")
     eval_matches = 512 if eval_purpose == "development_512" else 128
-    min_wins_gain = (
+    min_wins_gain = config["experiment"].get("early_gain_min_wins") or (
         math.ceil(min_delta * eval_matches - 1e-12) if min_delta > 0 else 1
     )
+    if state.get("baseline_wins") is None:
+        return
+    threshold = state.get("early_gain_required_wins", state["baseline_wins"] + min_wins_gain)
     if all(str(point) in state["development_points"] for point in required) and (
         state["decisions"] >= boundary
-        and state["best"]["wins"] - state["baseline_wins"] < min_wins_gain
+        and state["best"]["wins"] < threshold
     ):
         state["stop_reason"] = "no_development_gain"

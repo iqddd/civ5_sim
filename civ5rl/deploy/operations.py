@@ -319,7 +319,7 @@ def _attach(directory, deployment, transport):
     return result
 
 
-def launch(directory, mode, *, instance=None, transport=None):
+def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime=None):
     directory = Path(directory).resolve()
     transport = transport or Transport()
     with RunLock(directory):
@@ -328,6 +328,13 @@ def launch(directory, mode, *, instance=None, transport=None):
             raise ValueError("The bound instance has been deleted")
         if mode not in CAPABILITIES.get(deployment["kind"], set()):
             raise ValueError(f"Unsupported {mode} for {deployment['kind']}")
+        if evaluation_runtime and mode == "tune":
+            raise ValueError("Evaluation runtime options do not apply to collection tuning")
+        if evaluation_runtime and deployment["kind"] not in {
+            "rl01.ppo_after_target_bc", "rl01.ppo_target_scale", "rl01.cp_imitation_target_scale",
+            "rl01.cp_imitation_target_more_data", "rl01.cp_imitation_target_c2",
+        }:
+            raise ValueError("This runner does not support evaluation runtime options")
         target = _instance(instance) if instance else deployment.get("instance")
         if target is None:
             raise ValueError("Specify --instance at package time or first launch")
@@ -341,6 +348,8 @@ def launch(directory, mode, *, instance=None, transport=None):
             if phase == "prelaunch_interrupted":
                 deployment["job"] = None
             elif phase != "finalized":
+                if evaluation_runtime and evaluation_runtime != deployment.get("evaluation_runtime", {}):
+                    raise ValueError("Cannot change evaluation runtime while attaching to an active job")
                 return _attach(directory, deployment, transport)
             elif not deployment["job"].get("pulled"):
                 raise ValueError(
@@ -411,6 +420,11 @@ def launch(directory, mode, *, instance=None, transport=None):
                     "--runtime-config",
                     deployment["remote_root"] + "/tuning/recommended-runtime.json",
                 ]
+            for key, value in (evaluation_runtime or {}).items():
+                if key not in {"device", "workers", "max_batch", "wait_seconds"}:
+                    raise ValueError(f"Unknown evaluation runtime key {key!r}")
+                worker_args += ["--evaluation-" + key.replace("_", "-"), str(value)]
+            deployment["evaluation_runtime"] = evaluation_runtime or {}
 
         resolved_cfg = deployment["resolved_config"]
         budget_seconds = int(
@@ -481,6 +495,30 @@ def status(directory):
             deployment["remote_project"] + "/" + deployment["output"],
         ),
     }
+
+
+def extend_remote_budget(directory, additional_seconds, reason, *, request_id=None):
+    from uuid import uuid4
+    from civ5rl.deploy.remote import _connection, _remote_path, _ssh_json
+
+    deployment = _read(Path(directory) / "deployment.json")
+    if deployment.get("instance_deleted") or not deployment.get("instance"):
+        raise ValueError("Deployment has no live instance")
+    request_id = request_id or uuid4().hex
+    # Print the ID before SSH so an interrupted caller can retry exactly once.
+    print(f"Budget request ID: {request_id}", file=sys.stderr, flush=True)
+    code = """
+import json, sys
+from pathlib import Path
+p=json.load(sys.stdin)
+sys.path.insert(0,p['root'])
+from civ5rl.reporting.operations import extend_budget
+result=extend_budget(Path(p['root'])/p['output'],p['seconds'],p['reason'],request_id=p['request_id'])
+print(json.dumps(result,allow_nan=False))
+"""
+    return _ssh_json(_connection(deployment["instance"]), code, dict(
+        root=_remote_path(deployment["remote_project"]), output=deployment["output"],
+        seconds=additional_seconds, reason=reason, request_id=request_id))
 
 
 def pull(directory, *, delete_instance=False, transport=None):

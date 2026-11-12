@@ -10,8 +10,8 @@ from civ5rl.provenance.common import write_json
 
 
 class RunLock:
-    def __init__(self, directory):
-        self.path = Path(directory) / "run.lock"
+    def __init__(self, directory, filename="run.lock"):
+        self.path = Path(directory) / filename
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -33,7 +33,7 @@ class RunLock:
         except OSError as exc:
             self.stream.close()
             raise RuntimeError(
-                f"Training run already active: {self.path.parent}"
+                f"{'Training run already active' if self.path.name == 'run.lock' else 'Operational control busy'}: {self.path.parent}"
             ) from exc
         return self
 

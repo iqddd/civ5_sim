@@ -40,6 +40,9 @@ class RemoteTests(unittest.TestCase):
                         "experiment": {
                             "parent": "artifacts/rl/parent-run/parent.pt",
                             "parent_manifest": "artifacts/rl/corpus/manifest.json",
+                            "parent_run": "artifacts/rl/parent-run",
+                            "parent_final_state": "artifacts/rl/parent-run/state.json",
+                            "historical_active_time_estimate": {"source": "artifacts/rl/parent-run/analysis.json"},
                         },
                     }
                 ),
@@ -53,6 +56,9 @@ class RemoteTests(unittest.TestCase):
                 "build/combat_rules.json",
                 "build/cp_geometry.inc",
                 "artifacts/rl/parent-run/parent.pt",
+                "artifacts/rl/parent-run/state.json",
+                "artifacts/rl/parent-run/run.json",
+                "artifacts/rl/parent-run/analysis.json",
                 "artifacts/rl/corpus/open.json",
                 "artifacts/rl/corpus/closed.json",
             ):
@@ -115,6 +121,8 @@ class RemoteTests(unittest.TestCase):
                 (deploy_dir / "inputs-manifest.json").read_text(encoding="utf-8")
             )
             self.assertIn("artifacts/rl/corpus/open.json", manifest["staged_files"])
+            for name in ("state.json", "run.json", "analysis.json"):
+                self.assertIn("artifacts/rl/parent-run/" + name, manifest["staged_files"])
             self.assertNotIn("artifacts/rl/corpus/closed.json", manifest["staged_files"])
             self.assertNotIn("configs/run.json", manifest["staged_files"])
             self.assertIn("configs/run.json", manifest["tracked_inputs"])

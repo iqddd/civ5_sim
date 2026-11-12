@@ -76,6 +76,32 @@ class C2Tests(unittest.TestCase):
     def setUpClass(cls):
         configure(17, "cpu")
 
+    def test_bucket_bias_gradient_reduces_every_head_and_is_repeatable(self):
+        # A wrong bucket/head reduction silently changes the learned geometry.
+        # No archived corpus is needed for this gradient contract.
+        generator = torch.Generator().manual_seed(19)
+        buckets = torch.randint(0, 14, (3, 13, 13), generator=generator)
+        table = torch.randn(4, 16, generator=generator)
+        upstream = torch.randn(3, 4, 13, 13, generator=generator).permute(1, 0, 2, 3)
+        reference = table.double().requires_grad_()
+        (reference[:, buckets] * upstream.double()).sum().backward()
+        for device in ("cpu", *(["cuda"] if torch.cuda.is_available() else [])):
+            configure(17, device)
+            parameter = table.detach().to(device).clone().requires_grad_()
+            ids, gradient = buckets.to(device), upstream.to(device)
+            first = None
+            for _ in range(2):
+                parameter.grad = None
+                output = BucketBias.apply(parameter, ids)
+                self.assertTrue(torch.equal(output, parameter[:, ids]))
+                output.backward(gradient)
+                torch.testing.assert_close(parameter.grad.cpu().double(), reference.grad,
+                                           rtol=2e-5, atol=2e-5)
+                self.assertTrue(torch.equal(parameter.grad[:, 14:], torch.zeros_like(parameter.grad[:, 14:])))
+                if first is not None:
+                    self.assertTrue(torch.equal(parameter.grad, first))
+                first = parameter.grad.clone()
+
     def test_c2_no_hidden_enemy_leakage_in_cells_attention_and_outputs(self):
         """Hidden enemy positions/HP must have zero effect on C2 inputs, attention, and outputs."""
         left = make_scenario(12, row_parity=0)

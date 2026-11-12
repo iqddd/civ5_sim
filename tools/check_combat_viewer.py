@@ -59,7 +59,7 @@ def check(url, screenshot):
         fog_match = next((m for m in catalog if m["fog"]), None)
         if fog_match:
             page.get_by_title(fog_match["name"], exact=True).click()
-            page.wait_for_function("id=>currentId===id", arg=fog_match["id"])
+            page.wait_for_function("id=>currentId===id && document.getElementById('loading').hidden", arg=fog_match["id"])
             page.select_option("#vision", "0")
             expected = page.evaluate("data.roster.filter(u=>{const row=data.frames[index].units[u.id];return row[1]>0&&(u.side===0||data.frames[index].visibility[0][row[0]]==='1')}).length")
             assert page.locator(".unit").count() == expected

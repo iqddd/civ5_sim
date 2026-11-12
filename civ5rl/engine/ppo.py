@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 import numpy as np
 import torch
 
+from civ5rl.engine.budget import deadline_reached
 from civ5rl.core.context import context_from_spec
 from civ5rl.core.distributions import policy_logits
 from civ5rl.core.model import batch_inputs, distribution_stats
@@ -496,7 +497,7 @@ def update(
             )
             epoch_finished_clean = True
             for batch_index, minibatch in enumerate(batches):
-                if deadline is not None and perf_counter() >= deadline:
+                if deadline_reached(deadline):
                     stop_reason = "active_time_limit"
                     epoch_finished_clean = False
                     break
@@ -537,7 +538,7 @@ def update(
                 if minibatch_approx_kl > spike_threshold:
                     yellow_zone = True
                 is_last_batch = batch_index == len(batches) - 1
-                timed_out = deadline is not None and perf_counter() >= deadline
+                timed_out = deadline_reached(deadline)
                 if yellow_zone or is_last_batch or timed_out:
                     accepted, verified_snapshot, attempted_kl = _verify_batch_kl(
                         policy,
@@ -601,7 +602,7 @@ def update(
                 ]
             )
             for batch_index, minibatch in enumerate(batches):
-                if deadline is not None and perf_counter() >= deadline:
+                if deadline_reached(deadline):
                     stop_reason = "active_time_limit"
                     break
                 metrics.started_epochs = epoch + 1
@@ -618,7 +619,7 @@ def update(
                     on_step=on_step,
                 )
                 if per_step_kl:
-                    timed_out = deadline is not None and perf_counter() >= deadline
+                    timed_out = deadline_reached(deadline)
                     if (
                         timed_out
                         or not accepted

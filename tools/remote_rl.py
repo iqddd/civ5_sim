@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from civ5rl.deploy.operations import launch, package, pull, status
+from civ5rl.deploy.operations import launch, package, pull, status, extend_remote_budget
 
 
 def main(argv=None):
@@ -18,12 +18,20 @@ def main(argv=None):
     cmd.add_argument("--out", required=True)
     cmd.add_argument("--instance")
     cmd.add_argument("--extra-input", action="append", default=[])
-    for name in ("launch", "status", "pull"):
+    for name in ("launch", "status", "pull", "extend-budget"):
         cmd = commands.add_parser(name)
         cmd.add_argument("--deployment", required=True)
+        if name == "extend-budget":
+            cmd.add_argument("--additional-seconds", type=int, required=True)
+            cmd.add_argument("--reason", required=True)
+            cmd.add_argument("--request-id")
         if name == "launch":
             cmd.add_argument("--mode", choices=("tune", "run", "resume"), required=True)
             cmd.add_argument("--instance")
+            cmd.add_argument("--evaluation-device", choices=("auto", "cpu", "cuda"))
+            cmd.add_argument("--evaluation-workers", type=int)
+            cmd.add_argument("--evaluation-max-batch", type=int)
+            cmd.add_argument("--evaluation-wait-seconds", type=float)
         if name == "pull":
             flags = cmd.add_mutually_exclusive_group()
             flags.add_argument("--delete-instance", action="store_true")
@@ -34,9 +42,13 @@ def main(argv=None):
             args.config, args.out, instance=args.instance, extra_inputs=args.extra_input
         )
     elif args.command == "launch":
-        result = launch(args.deployment, args.mode, instance=args.instance)
+        result = launch(args.deployment, args.mode, instance=args.instance,
+                        evaluation_runtime={k: getattr(args, "evaluation_" + k) for k in ("device", "workers", "max_batch", "wait_seconds")
+                                            if getattr(args, "evaluation_" + k) is not None})
     elif args.command == "status":
         result = status(args.deployment)
+    elif args.command == "extend-budget":
+        result = extend_remote_budget(args.deployment, args.additional_seconds, args.reason, request_id=args.request_id)
     else:
         result = pull(args.deployment, delete_instance=args.delete_instance)
     print(json.dumps(result, indent=2, allow_nan=False))

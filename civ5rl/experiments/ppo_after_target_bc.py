@@ -1,4 +1,4 @@
-"""Bounded local PPO from BC, with a short value-only first-rollout fit."""
+"""Bounded PPO from BC or a preserved PPO boundary, with recoverable evaluation."""
 
 import gc
 import json
@@ -14,6 +14,7 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
+from civ5rl.engine.budget import ActiveBudget, deadline_reached, resolve_deadline
 from civ5rl.core.model import batch_inputs
 from civ5rl.engine.collector import Collector
 from civ5rl.engine.constants import DEFAULT_PINNED_REPLAY_BYTES
@@ -24,6 +25,7 @@ from civ5rl.engine.control import (
     target_bc_evaluation_due,
 )
 from civ5rl.engine.counters import TrainingCounters
+from civ5rl.engine.evaluation import runtime_for
 from civ5rl.engine.performance import performance_markdown, summarize_performance
 from civ5rl.engine.ppo import (
     encode_episode,
@@ -37,6 +39,7 @@ from civ5rl.engine.resources import ResourceMonitor
 from civ5rl.experiments.evaluation import paired_world_bootstrap
 from civ5rl.experiments.imitation_helpers import (
     CompilationClock,
+    assert_equal,
     isolated_rng,
     load_policy,
 )
@@ -254,7 +257,7 @@ def prepare_critic(
 ):
     """Fit only value parameters, then refresh old_value without rewriting behavior."""
     started = preparation_started if preparation_started is not None else perf_counter()
-    fit_deadline = min(started + settings["active_seconds"], deadline or float("inf"))
+    fit_deadline = lambda: min(started + settings["active_seconds"], resolve_deadline(deadline))
     original_policy_hash = policy_hash(policy.state_dict())
     original_behavior = behavior_digest(episodes)
     returns = np.concatenate(episode_returns(episodes, gamma=gamma))
@@ -305,17 +308,17 @@ def prepare_critic(
     try:
         portions = iter(recurrent_features(policy, episodes, device))
         trained = 0
-        while cached < len(returns) and perf_counter() < fit_deadline:
+        while cached < len(returns) and not deadline_reached(fit_deadline):
             _, _, features = next(portions)
             cache[cached : cached + len(features)] = features
             cached += len(features)
             if progress:
                 progress()
-            while cached - trained >= batch_size and perf_counter() < fit_deadline:
+            while cached - trained >= batch_size and not deadline_reached(fit_deadline):
                 fit_batch(trained, trained + batch_size)
                 trained += batch_size
         if cached == len(returns):
-            if trained < cached and perf_counter() < fit_deadline:
+            if trained < cached and not deadline_reached(fit_deadline):
                 fit_batch(trained, cached)
                 trained = cached
             if trained == cached:
@@ -323,7 +326,7 @@ def prepare_critic(
                 for _ in range(1, settings["epochs"]):
                     finished = True
                     for first in range(0, cached, batch_size):
-                        if perf_counter() >= fit_deadline:
+                        if deadline_reached(fit_deadline):
                             finished = False
                             break
                         fit_batch(first, min(first + batch_size, cached))
@@ -397,6 +400,7 @@ class ActiveClock:
         self.state = state
         self.out = out
         self.started = perf_counter()
+        self.budget = ActiveBudget(out, state)
 
     def sync(self):
         if self.started is not None:
@@ -416,22 +420,7 @@ class ActiveClock:
         self.started = perf_counter()
 
     def limit(self, config):
-        base = float(config["experiment"]["active_seconds"])
-        path = self.out / "active-budget.json"
-        additional = 0
-        if path.exists():
-            extension = read_json(path)
-            if (
-                extension.get("schema") != 1
-                or extension.get("run_id") != read_json(self.out / "run.json")["run_id"]
-                or extension.get("base_active_seconds") != base
-                or type(extension.get("additional_active_seconds")) is not int
-                or extension["additional_active_seconds"] < 0
-            ):
-                raise ValueError("Invalid recorded active-budget extension")
-            additional = extension["additional_active_seconds"]
-        self.state["active_seconds_limit"] = base + additional
-        return base + additional
+        return self.budget.limit()
 
     def deadline(self, config):
         self.sync()
@@ -457,6 +446,7 @@ def save_boundary(out, policy, optimizer, state, shuffle, config, identity, cloc
     counters = TrainingCounters.from_dict(state_dict, protocol=KIND)
     state_dict.update(counters.to_state_dict(protocol=KIND))
     state_dict.setdefault("updates", 0)
+    state_dict["Adam_counter_total"] = int(state_dict.get("origin_Adam_counter", 0)) + counters.adam_steps_accepted
     if isinstance(state_dict.get("phase"), Phase):
         state_dict["phase"] = state_dict["phase"].value
     checkpoint.save(
@@ -467,11 +457,64 @@ def save_boundary(out, policy, optimizer, state, shuffle, config, identity, cloc
     write_json(out / "state.json", state_dict)
 
 
+def load_initial_optimizer(policy, saved, config):
+    """Preserve a PPO parent's complete Adam, or start the original BC handoff."""
+    optimizer = optimizer_for(policy, config, "cpu")
+    experiment = config["experiment"]
+    if experiment.get("parent_optimizer") != "preserve":
+        if optimizer.state:
+            raise ValueError("New PPO Adam must be empty")
+        return optimizer
+    if (saved.get("variant") != policy.variant
+            or saved.get("variant") != config["model"]["variant"]
+            or not saved.get("state", {}).get("critic_complete")):
+        raise ValueError("PPO parent architecture/critic boundary is incompatible")
+    if saved["state"].get("phase") != "collect":
+        raise ValueError("PPO parent must be a completed update boundary")
+    source = saved["optimizer"]
+    optimizer.load_state_dict(source)
+    assert_equal(optimizer.state_dict(), source)
+    expected = int(experiment["parent_optimizer_steps"])
+    if saved["state"]["optimizer_steps"] != expected:
+        raise ValueError("Parent ledger and configured Adam counter differ")
+    if len(optimizer.state) != len(list(policy.parameters())):
+        raise ValueError("Parent Adam must contain all model and critic parameters")
+    for parameter, item in optimizer.state.items():
+        if float(item["step"]) != expected:
+            raise ValueError("Parent Adam counters differ")
+        for name in ("exp_avg", "exp_avg_sq"):
+            tensor = item[name]
+            if tensor.shape != parameter.shape or tensor.dtype != parameter.dtype or not torch.isfinite(tensor).all():
+                raise ValueError(f"Invalid parent Adam {name}")
+    for group in optimizer.param_groups:
+        for name in ("lr", "eps", "weight_decay"):
+            if group[name] != config["optimizer"][name]:
+                raise ValueError(f"Parent Adam {name} differs from experiment")
+        if tuple(group["betas"]) != tuple(config["optimizer"]["betas"]):
+            raise ValueError("Parent Adam betas differ from experiment")
+    return optimizer
+
+
 def initialize(config, out):
     experiment = config["experiment"]
     parent = ROOT / experiment["parent"]
     if file_sha256(parent) != experiment["parent_sha256"]:
-        raise ValueError("BC epoch-ten checkpoint SHA256 differs")
+        raise ValueError("Parent checkpoint SHA256 differs")
+    inherited = experiment.get("parent_optimizer") == "preserve"
+    if inherited:
+        for key in ("parent_manifest", "parent_final_state"):
+            if file_sha256(ROOT / experiment[key]) != experiment[key + "_sha256"]:
+                raise ValueError(f"Parent lineage input differs: {key}")
+        final = read_json(ROOT / experiment["parent_final_state"])
+        parent_record_path = ROOT / experiment["parent_run"] / "run.json"
+        if file_sha256(parent_record_path) != experiment["parent_run_sha256"]:
+            raise ValueError("Parent run record differs")
+        parent_record = read_json(parent_record_path)
+        if final["next_episode"] != experiment["start_episode"] or final.get("phase") != "collect" or not final.get("stop_reason"):
+            raise ValueError("Continuation must start after all collected parent episodes")
+        historical = experiment.get("historical_active_time_estimate")
+        if historical and file_sha256(ROOT / historical["source"]) != historical["source_sha256"]:
+            raise ValueError("Historical budget evidence differs")
     plan = read_json(ROOT / experiment["parent_manifest"])
     if digest({k: v for k, v in plan.items() if k != "hash"}) != plan["hash"]:
         raise ValueError("Target manifest hash differs")
@@ -493,34 +536,39 @@ def initialize(config, out):
     ):
         raise ValueError("Evaluation case max_rounds differs from environment config")
     write_json(out / "manifest.json", plan)
-    configure(17, "cpu")
+    torch_seed = seed_for(17, 0, "torch", namespace=experiment["torch_namespace"]) if inherited else 17
+    configure(torch_seed, "cpu")
     policy = make_policy(config, "cpu")
     saved = torch.load(parent, map_location="cpu", weights_only=False)
+    if inherited and saved["identity"].get("run_id") != parent_record["run_id"]:
+        raise ValueError("Parent checkpoint and final run lineage differ")
     if not all(
         torch.equal(value, saved["model"][name])
         for name, value in policy.state_dict().items()
     ):
-        raise ValueError("Initial model differs from BC epoch ten")
+        raise ValueError("Initial model differs from parent")
     if policy_hash(policy.state_dict()) != experiment["parent_policy_hash"]:
         raise ValueError("Initial behavior hash differs")
-    optimizer = optimizer_for(policy, config, "cpu")
-    if optimizer.state:
-        raise ValueError("New PPO Adam must be empty")
+    optimizer = load_initial_optimizer(policy, saved, config)
     shuffle_seed = seed_for(17, 0, "shuffle", namespace=experiment["shuffle_namespace"])
     budget_check = compute_time_budget_check(config)
     if budget_check is not None:
         print("Active-time budget check: " + json.dumps(budget_check, ensure_ascii=False), flush=True)
     record = {
+        "evaluation_runtime_default": "auto",
         "kind": KIND,
         "config": config,
         **({"time_budget_check": budget_check} if budget_check is not None else {}),
         "parent_sha256": experiment["parent_sha256"],
         "parent_model_equal": True,
-        "new_Adam_empty": True,
+        "new_Adam_empty": not inherited,
+        "parent_Adam_counter": int(experiment["parent_optimizer_steps"]),
+        "critic_preserved": inherited,
         "behavior_hash": policy_hash(policy.state_dict()),
         "manifest_hash": plan["hash"],
         "seed": 17,
         "shuffle_seed": shuffle_seed,
+        "torch_seed": torch_seed,
         "GPU": torch.cuda.get_device_name(0),
         "torch": torch.__version__,
         "implementation_sha256": {
@@ -536,17 +584,26 @@ def initialize(config, out):
         .strip(),
     }
     record["run_id"] = digest(record)
+    identity = {"run_id": record["run_id"]}
+    if inherited:
+        identity.update(checkpoint.passport(out, config, plan))
+        record["checkpoint_identity"] = identity
+        record["lineage"] = {key: experiment[key] for key in (
+            "parent", "parent_sha256", "parent_manifest", "parent_manifest_sha256",
+            "parent_final_state", "parent_final_state_sha256", "parent_run_sha256", "start_episode")}
+        runtime_for(out, config)
     counters = TrainingCounters()
     state = {
         **counters.to_state_dict(protocol=KIND),
         "updates": 0,
         "decisions": 0,
-        "next_episode": 0,
+        "next_episode": experiment["start_episode"],
+        "origin_Adam_counter": int(experiment["parent_optimizer_steps"]),
         "winless_streak": 0,
         "zero_accepted_streak": 0,
         "active_seconds": 0.0,
         "evaluation_seconds": 0.0,
-        "critic_complete": False,
+        "critic_complete": inherited,
         "phase": "collect",
         "latest": "checkpoints/initial.pt",
         "stop_reason": None,
@@ -563,7 +620,7 @@ def initialize(config, out):
         state,
         random.Random(shuffle_seed),
         config,
-        {"run_id": record["run_id"]},
+        identity,
     )
     RolloutBoundary.from_state(state).validate_sufficiency(out)
     return plan
@@ -585,6 +642,8 @@ def development(config, plan, out, state, shuffle, clock=None):
         wins = result["runs"]["argmax"]["cp"]["summary"]["W"]
         if state["baseline_wins"] is None:
             state["baseline_wins"] = wins
+            if config["experiment"].get("early_gain_min_wins") is not None:
+                state["early_gain_required_wins"] = wins + config["experiment"]["early_gain_min_wins"]
         if wins > state["best"]["wins"]:
             state["best"] = {
                 "path": result["checkpoint"],
@@ -625,7 +684,9 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
     boundary.validate_sufficiency(out)
     configure(17, device)
     record = read_json(out / "run.json")
-    identity = {"run_id": record["run_id"]}
+    identity = record.get("checkpoint_identity", {"run_id": record["run_id"]})
+    if "checkpoint_identity" in record:
+        checkpoint.verify_execution_passport(out, config, plan)
     shuffle = random.Random(record["shuffle_seed"])
     clock = ActiveClock(state, out)
     try:
@@ -744,8 +805,8 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                 if max_updates is not None and state["updates"] >= max_updates:
                     write_json(out / "status.json", {"status": "paused", "reason": "max_updates"})
                     return
-                deadline = clock.deadline(config)
-                if perf_counter() >= deadline:
+                deadline = lambda: clock.deadline(config)
+                if deadline_reached(deadline):
                     state["stop_reason"] = "active_time_limit"
                     break
                 if pause_due(out, "update", state["updates"], at_boundary=state["phase"] == "collect"):
@@ -835,7 +896,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                         "Critic preparation: " + json.dumps(state["critic"]), flush=True
                     )
 
-                if not state["stop_reason"] and perf_counter() < deadline:
+                if not state["stop_reason"] and not deadline_reached(deadline):
                     monitor.mark("ppo", rollout=state["rollouts"])
 
                     def inspect_step(step, optimizer=optimizer):
@@ -847,10 +908,12 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                             counters = {
                                 int(value["step"]) for value in optimizer.state.values()
                             }
-                            expected_counter = int(step["committed_accepted_steps"])
+                            expected_counter = (int(state.get("origin_Adam_counter", 0))
+                                                + int(state["optimizer_steps"])
+                                                + int(step["committed_accepted_steps"]))
                             if (
                                 counters != {expected_counter}
-                                or int(step["accepted_step"]) != expected_counter
+                                or int(step["accepted_step"]) != int(step["committed_accepted_steps"])
                             ):
                                 raise RuntimeError(
                                     f"First PPO Adam counter differs from committed steps: {counters} != {{{expected_counter}}}"
@@ -859,7 +922,8 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                                 out / "first-accepted-step.json",
                                 {
                                     "Adam_counter": expected_counter,
-                                    "committed_accepted_steps": expected_counter,
+                                    "inherited_Adam_counter": int(state.get("origin_Adam_counter", 0)),
+                                    "committed_accepted_steps": state["optimizer_steps"] + int(step["committed_accepted_steps"]),
                                     "step": step,
                                 },
                             )
@@ -961,7 +1025,11 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
 
 
 def finish(config, plan, out):
+    if (out / "confirmation.json").exists():
+        return
     state = read_json(out / "state.json")
+    if target_bc_evaluation_due(config, state):
+        raise ValueError("Cannot select a candidate while Development is incomplete")
     write_json(out / "selected.json", state["best"])
     if state["best"]["path"] == "checkpoints/initial.pt":
         write_json(out / "confirmation.json", {"status": "not_run_parent_selected"})
@@ -1046,6 +1114,7 @@ def report(config, out):
         f"Статус: {state['stop_reason'] or state['phase']}; решения {state['decisions']}; active {state['active_seconds']:.2f} с.",
         f"Лимит active: {state.get('active_seconds_limit', config['experiment']['active_seconds']):.0f} с; исходный бюджет {config['experiment']['active_seconds']} с; продления в active-budget.json.",
         f"Sampling rollouts {state['rollouts']}; PPO updates {state['updates']}; accepted/rejected Adam {state['optimizer_steps']}/{state['rejected_steps']}.",
+        f"Adam: inherited {state.get('origin_Adam_counter', 0)}; new accepted {state['optimizer_steps']}; total {state.get('origin_Adam_counter', 0) + state['optimizer_steps']}.",
         f"GPU {read_json(out / 'run.json')['GPU']}; T={config.get('policy_temperature', 1)}; max_rounds={max_rounds}; gamma={gamma}; gae_lambda={gae_lambda}; microbatch {config['ppo']['sequences_per_microbatch']}; обычный CP; reward 1/0/0.",
         "",
         f"| Решения | Checkpoint | W/D/L {eval_purpose} |",
@@ -1099,7 +1168,7 @@ def report(config, out):
         lines += ["", "Прироста в установленном раннем бюджете не получено."]
     lines += [
         "",
-        "Одна новая development-победа разрешает продолжение; полезность оценивается по парному additional-приросту и CI.",
+        f"Ранний порог: {state.get('early_gain_required_wins', 'по конфигу')} побед после {config['experiment']['early_gain_decisions']} новых решений; полезность оценивается по парному additional-приросту и CI.",
     ]
     for name in ("critic-preparation.json", "confirmation.json"):
         if (out / name).exists():
@@ -1131,6 +1200,8 @@ def run(phase, config, out, device, runtime_path=None, max_updates=None):
                 initialize(config, out)
             if read_json(out / "run.json")["config"] != config:
                 raise ValueError("Run configuration changed")
+            if config.get("evaluation_runtime"):
+                runtime_for(out, config)
             plan = read_json(out / "manifest.json")
             if phase in ("train", "run", "resume"):
                 write_json(out / "status.json", {"status": "training"})
