@@ -560,6 +560,9 @@ Development 0/1/2/4/6/8 Mi и gate W0+11 на 2 Mi. Нулевую оценку 
 
 ### Gamma1 lambda=0,99 от update147
 
+Этот опыт завершён по gate на2Mi; инстанс удалён. Итоги — в [ledger](experiment-ledger.md).
+Команды ниже описывают подготовленный профиль и не означают новую аренду.
+
 `configs/rl-ppo-c2-h60-gae-gamma1-lambda099.json`: отдельный опыт, 4 Mi новых
 решений или 18000 active seconds, gamma1/lambda.99, полный Adam25171/12615
 и critic родителя без подготовки. Episode64387 подтверждён отдельным
