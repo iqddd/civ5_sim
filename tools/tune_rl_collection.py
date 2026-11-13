@@ -130,7 +130,7 @@ def main():
     if args.dry_run:
         print(json.dumps(report, indent=2))
         return
-    if args.out.exists() and any(args.out.iterdir()):
+    if args.out.exists() and any(p.name != "run.lock" for p in args.out.iterdir()):
         parser.error(
             "Output directory must be empty; use a new directory for each search"
         )
