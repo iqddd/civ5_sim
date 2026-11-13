@@ -616,13 +616,14 @@ Vast.ai, включая дробную долю. Не подставлять п�
 | AMD EPYC 9254 | 2998 | 145% |
 | AMD Ryzen 7 3700X | 2654 | 128% |
 | AMD Ryzen 9 9950X3D | 4737 | 229% |
+| AMD Ryzen 9 5950X | 3476 | 168% |
 
 Threadripper 3960X, Ultra 7 270K Plus, Ryzen 9900X/7900X3D и EPYC 7713 дополнены по [PassMark Single Thread](https://www.cpubenchmark.net/singleThread.html)
 12 ноября 2026 года; исходные пользовательские значения выше не пересмотрены.
 Ryzen 9800X3D — [4420](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+9800X3D),
 EPYC 9115 — [3360](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9115),
 EPYC 8224P — [2341](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+8224P)
-добавлены по PassMark 13 ноября 2026 года. Ryzen 9950X3D: [4737](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+9950X3D&id=6549); не путать с X3D2.
+добавлены по PassMark 13 ноября 2026 года. Ryzen 9950X3D: [4737](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+9950X3D&id=6549); не путать с X3D2. Ryzen 5950X: [3476](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+5950X&id=3862).
 При свежем отборе также проверены [Intel Core i5-13600K: 4110](https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i5-13600K), [Intel Core i7-13700K: 4324](https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i7-13700K), [AMD EPYC 9254: 2998](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9254), [AMD Ryzen 7 3700X: 2654](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+3700X).
 
 Например, EPYC 7313P с долей 6,4 получает 797,6 и не проходит, а Ryzen 9950X
