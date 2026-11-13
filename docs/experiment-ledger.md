@@ -42,6 +42,8 @@ Development, additional validation, sampling и argmax нельзя объеди
 
 | PPO C2 h60 gamma=1 continuation | `rl-ppo-c2-h60-gae-gamma1-continuation.json` | Gamma1 update147; полный Adam shared/actor25171, value12615 и critic сохранены | **Завершён 13 ноября: no_development_gain.** 2 097 907 решений, 92 updates, active6498,48с. Development0/1/2Mi: **318/23/171**, **299/28/185**, **316/30/166**; порог329 не достигнут, выбран родитель, Additional пропущен. Adam+7915/20 отклонённых; итог33086/20530. Один процесс, без OOM; все7723 файла выгружены, аудит passed, instance60496476 удалён. Test закрыт | [Отчёт](../artifacts/rl/ppo-c2-h60-gae-gamma1-continuation/report.md), [аудит](../artifacts/rl/ppo-c2-h60-gae-gamma1-continuation/derived/audit-final/audit.json), [удаление](../artifacts/deployments/ppo-c2-h60-gae-gamma1-continuation-5090/instance-deletion.json), [подготовка](../artifacts/preparations/ppo-c2-h60-gae-gamma1-continuation/report.md) |
 
+| PPO C2 gamma1 lambda0.99 | `rl-ppo-c2-h60-gae-gamma1-lambda099.json` | Gamma1 update147; Adam25171/12615 и critic сохранены | **Подготовлен, не запущен.** Изменение lambda.95→.99; 4Mi/18000active seconds, Development0/1/2/3/4Mi, gateW0+11 на2Mi. Новые RNG seed17, episode64387. Без плановых перезапусков; test закрыт | [Подготовка](../artifacts/preparations/ppo-c2-h60-gae-gamma1-lambda099/report.md), [команды](rl-operations.md#gamma1-lambda099-от-update147) |
+
 Сила на целевых картах 10/12/16 с армиями 5–13 не следует из побед на 10×10.
 Выбор по development и проверка additional отражают процедуру конкретного
 протокола, а не независимое закрытое подтверждение обобщения.

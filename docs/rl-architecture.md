@@ -444,6 +444,11 @@ Config/checkpoints и накопленный расход не переписы�
 без новой подготовки critic. `experiment.parent_optimizer_counters` задаёт
 исходные `shared_actor`/`value`; `state.origin_Adam_counters` фиксирует их,
 а `Adam_counters` прибавляет к каждому только принятые PPO-шаги нового этапа.
+При ответвлении от прежнего best checkpoint после более позднего опыта
+`experiment.episode_id_source` отдельно закрепляет state/run record и их SHA256
+для границы episode ID. Источник должен быть завершён, ссылаться на тот же
+parent checkpoint и начинаться после родительского диапазона; start_episode
+равен его конечному next_episode. Это не заменяет происхождение весов/Adam.
 `parent_optimizer_steps=0` в таком профиле — не используемое одиночное смещение;
 проверка наследования опирается на именованные группы, их parameter_names,
 моменты и счётчики checkpoint. У старта с адаптацией value остаётся прежняя

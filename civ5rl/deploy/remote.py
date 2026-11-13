@@ -263,6 +263,9 @@ def stage_inputs(
         names.append(experiment["parent_final_state"])
         names.append(str(PurePosixPath(experiment["parent_run"]) / "run.json"))
     historical = experiment.get("historical_active_time_estimate")
+    episode_source = experiment.get("episode_id_source")
+    if episode_source:
+        names.extend(episode_source[key] for key in ("state", "run"))
     if historical:
         names.append(historical["source"])
     corpus = experiment.get("corpus")

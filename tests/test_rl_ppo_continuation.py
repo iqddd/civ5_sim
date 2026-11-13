@@ -24,6 +24,54 @@ import test_rl_ppo_after_target_bc as fixtures
 
 
 class PPOContinuationTests(unittest.TestCase):
+    def test_lambda099_full_episode_signal_and_episode_frontier(self):
+        # Fragment-local GAE could silently erase distant reward at BPTT=128.
+        import numpy as np
+        from civ5rl.engine.ppo import raw_gae_advantages, episode_returns, targets
+        from civ5rl.engine.ppo_fast import RolloutCache
+        from civ5rl.provenance.common import file_sha256, ROOT
+
+        cfg = load_config("configs/rl-ppo-c2-h60-gae-gamma1-lambda099.json")
+        values = np.linspace(0.1, 0.7, 263)
+        episodes = [dict(chosen=[0] * len(values), old_value=values.tolist(),
+                         actions=[[0] if i % 3 else [0, 1] for i in range(len(values))],
+                         result=dict(reward=1)),
+                    dict(chosen=[0, 0], old_value=[0.4, 0.3], result=dict(reward=0))]
+        actual = raw_gae_advantages(episodes, gamma=1, gae_lambda=.99)
+        delta = np.r_[values[1:], 0.] - values
+        delta[-1] += 1
+        expected = np.array([sum(.99 ** j * delta[i + j] for j in range(len(delta) - i))
+                             for i in range(len(delta))])
+        np.testing.assert_allclose(actual[0], expected, rtol=1e-6, atol=1e-7)
+        np.testing.assert_allclose(actual[1], [-.4 + .01 * .3, -.3], atol=1e-7)
+        self.assertFalse(np.allclose(actual[0], raw_gae_advantages(episodes, gamma=1, gae_lambda=.95)[0]))
+        np.testing.assert_array_equal(episode_returns(episodes, gamma=1)[0], np.ones(263))
+        normalized = np.concatenate(targets(episodes, gamma=1, gae_lambda=.99))
+        self.assertAlmostEqual(float(normalized.mean()), 0., places=6)
+        self.assertAlmostEqual(float(normalized.std()), 1., places=6)
+        # Exercise the actual cache-label path: lambda changes advantages only.
+        policy = Policy()
+        real = self.episodes(policy)
+        before = RolloutCache(real, "C", "cpu", resident=False, gamma=1, gae_lambda=.95)
+        after = RolloutCache(real, "C", "cpu", resident=False, gamma=1, gae_lambda=.99)
+        self.assertTrue(torch.equal(before.labels["returns"], after.labels["returns"]))
+        self.assertFalse(torch.equal(before.labels["advantages"], after.labels["advantages"]))
+        e = cfg["experiment"]
+        parent_final = read_json(ROOT / e["parent_final_state"])
+        runner.validate_episode_origin(e, parent_final)
+        self.assertEqual(e["start_episode"], 64387)
+        for change in ({"start_episode": 64386}, {"episode_id_source": {**e["episode_id_source"], "state_sha256": "bad"}}):
+            with self.assertRaises(ValueError):
+                runner.validate_episode_origin({**e, **change}, parent_final)
+        with tempfile.TemporaryDirectory() as tmp:
+            record = read_json(ROOT / e["episode_id_source"]["run"])
+            record["config"]["experiment"]["parent_sha256"] = "unrelated"
+            path = Path(tmp) / "run.json"
+            write_json(path, record)
+            source = {**e["episode_id_source"], "run": str(path), "run_sha256": file_sha256(path)}
+            with self.assertRaises(ValueError):
+                runner.validate_episode_origin({**e, "episode_id_source": source}, parent_final)
+
     def test_two_inherited_adam_origins_survive_update_rollback_and_resume(self):
         # A single origin silently corrupts the adapted critic's Adam clock.
         from civ5rl.engine.ppo_adam import grouped_optimizer, check_counters, expected_counters

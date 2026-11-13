@@ -1,0 +1,37 @@
+{
+  "base_config": "configs/rl-ppo-c2-h60-gae-gamma1-continuation.json",
+  "output": "artifacts/rl/ppo-c2-h60-gae-gamma1-lambda099",
+  "ppo": {
+    "gae_lambda": 0.99
+  },
+  "experiment": {
+    "decisions": 4194304,
+    "active_seconds": 18000,
+    "milestones": [
+      1048576,
+      2097152,
+      3145728,
+      4194304
+    ],
+    "start_episode": 64387,
+    "episode_id_source": {
+      "state": "artifacts/inputs/ppo-c2-h60-gae-gamma1-continuation/state.json",
+      "state_sha256": "f545e2e587373f5a305412cb03fe1b2ebf56e5759b7aee8731555785291ddbaa",
+      "run": "artifacts/inputs/ppo-c2-h60-gae-gamma1-continuation/run.json",
+      "run_sha256": "26b1da791cb591ad10cd2f76144fec0015cf68a394b2464d3cfecd6e1723d9b1"
+    },
+    "historical_active_time_estimate": {
+      "decisions_per_second_range": [
+        264.79191919191913,
+        323.63456790123456
+      ],
+      "source": "artifacts/inputs/ppo-c2-h60-gae-gamma1-continuation/lambda099-budget.json",
+      "source_sha256": "f2dda84d14e9410e5d0c3953a286ebe321656e4078d7e449f2201c6a4329569e",
+      "includes": "Conservative 3.6\u20134.4h estimate from recent gamma1 runs; full-cycle measured windows retained as evidence; not a new-machine or lambda99 guarantee"
+    },
+    "training_namespace": "ppo_c2_h60_gae_gamma1_lambda099_v1_training",
+    "shuffle_namespace": "ppo_c2_h60_gae_gamma1_lambda099_v1_shuffle",
+    "torch_namespace": "ppo_c2_h60_gae_gamma1_lambda099_v1_torch",
+    "critic_namespace": "ppo_c2_h60_gae_gamma1_lambda099_v1_critic"
+  }
+}

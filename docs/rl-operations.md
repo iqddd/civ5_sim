@@ -558,6 +558,24 @@ Development 0/1/2/4/6/8 Mi и gate W0+11 на 2 Mi. Нулевую оценку 
 Прогноз по родительским поздним окнам 7,9–9,4 активного часа на 8 Mi, без
 гарантии новой машины. Оценки не расходуют active budget.
 
+### Gamma1 lambda=0,99 от update147
+
+`configs/rl-ppo-c2-h60-gae-gamma1-lambda099.json`: отдельный опыт, 4 Mi новых
+решений или 18000 active seconds, gamma1/lambda.99, полный Adam25171/12615
+и critic родителя без подготовки. Episode64387 подтверждён отдельным
+`episode_id_source` завершённого продолжения; packaging включает оба его файла.
+Остальные условия C2/PPO неизменны. GAE по полным эпизодам, BPTT128.
+
+Использовать штатные package/tune/pull/run с deployment
+`artifacts/deployments/ppo-c2-h60-gae-gamma1-lambda099-5090` и носителем
+`--extra-input artifacts/rl/ppo-c2-h60-gae-gamma1-continuation/rollouts/latest.pt`.
+Режим CUDA FP32 оценок закреплён: 8 workers, max batch32, wait0.001.
+Development0/1/2/3/4Mi, новая нулевая оценка W0, gateW0+11 после2Mi.
+Один pairedAdditional относительно update147 для нового победителя; при
+победе родителя пропуск. Test закрыт. Без плановых перезапусков, с телеметрией
+VRAM; после2–3 принятых шагов проверки каждые15мин. После финальных оценок
+pull/audit и удаление инстанса. Прогноз3,6–4,4 активного часа без гарантии.
+
 ### CPU-фильтр будущей аренды
 
 Этот фильтр применяется только к задачам, которым требуется CPU-зависимая
@@ -611,6 +629,8 @@ Vast.ai, включая дробную долю. Не подставлять п�
 | AMD Ryzen 9 9900X | 4670 | 226% |
 | AMD Ryzen 9 7900X3D | 4117 | 199% |
 | AMD EPYC 7713 | 2648 | 128% |
+| AMD EPYC 7402P | 1992 | 96% |
+| AMD EPYC 7B13 | 2555 | 124% |
 | AMD Ryzen 7 9800X3D | 4420 | 214% |
 | AMD EPYC 9115 | 3360 | 163% |
 | AMD EPYC 8224P | 2341 | 113% |
@@ -627,7 +647,7 @@ Threadripper 3960X, Ultra 7 270K Plus, Ryzen 9900X/7900X3D и EPYC 7713 допо
 Ryzen 9800X3D — [4420](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+9800X3D),
 EPYC 9115 — [3360](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9115),
 EPYC 8224P — [2341](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+8224P)
-добавлены по PassMark 13 ноября 2026 года. Ryzen 9950X3D: [4737](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+9950X3D&id=6549); не путать с X3D2. Ryzen 7940HX: [3925](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+7940HX). Ryzen 5950X: [3476](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+5950X&id=3862).
+добавлены по PassMark 13 ноября 2026 года. EPYC7402P: [1992](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7402P), EPYC7B13: [2555](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7B13). Ryzen 9950X3D: [4737](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+9950X3D&id=6549); не путать с X3D2. Ryzen 7940HX: [3925](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+7940HX). Ryzen 5950X: [3476](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+5950X&id=3862).
 При свежем отборе также проверены [Intel Core i5-13600K: 4110](https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i5-13600K), [Intel Core i7-13700K: 4324](https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i7-13700K), [AMD EPYC 9254: 2998](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9254), [AMD Ryzen 7 3700X: 2654](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+3700X).
 
 Например, EPYC 7313P с долей 6,4 получает 797,6 и не проходит, а Ryzen 9950X

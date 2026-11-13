@@ -528,6 +528,27 @@ def load_initial_optimizer(policy, saved, config):
     return optimizer
 
 
+def validate_episode_origin(experiment, parent_final):
+    """Weights may branch from an older best checkpoint than the data frontier."""
+    frontier = parent_final
+    source = experiment.get("episode_id_source")
+    if source:
+        for key in ("state", "run"):
+            if file_sha256(ROOT / source[key]) != source[key + "_sha256"]:
+                raise ValueError(f"Episode ID source {key} hash differs")
+        record = read_json(ROOT / source["run"])
+        frontier = read_json(ROOT / source["state"])
+        origin = record.get("config", {}).get("experiment", {})
+        if (origin.get("parent_sha256") != experiment["parent_sha256"]
+                or origin.get("start_episode", -1) < parent_final["next_episode"]):
+            raise ValueError("Episode ID source does not extend the same parent lineage")
+    if (parent_final.get("phase") != "collect" or not parent_final.get("stop_reason")
+            or frontier.get("phase") != "collect" or not frontier.get("stop_reason")
+            or frontier["next_episode"] != experiment["start_episode"]
+            or experiment["start_episode"] < parent_final["next_episode"]):
+        raise ValueError("Continuation must start after all collected lineage episodes")
+
+
 def initialize(config, out):
     experiment = config["experiment"]
     parent = ROOT / experiment["parent"]
@@ -543,8 +564,7 @@ def initialize(config, out):
         if file_sha256(parent_record_path) != experiment["parent_run_sha256"]:
             raise ValueError("Parent run record differs")
         parent_record = read_json(parent_record_path)
-        if final["next_episode"] != experiment["start_episode"] or final.get("phase") != "collect" or not final.get("stop_reason"):
-            raise ValueError("Continuation must start after all collected parent episodes")
+        validate_episode_origin(experiment, final)
         historical = experiment.get("historical_active_time_estimate")
         if historical and file_sha256(ROOT / historical["source"]) != historical["source_sha256"]:
             raise ValueError("Historical budget evidence differs")
@@ -627,6 +647,8 @@ def initialize(config, out):
         record["lineage"] = {key: experiment[key] for key in (
             "parent", "parent_sha256", "parent_manifest", "parent_manifest_sha256",
             "parent_final_state", "parent_final_state_sha256", "parent_run_sha256", "start_episode")}
+        if experiment.get("episode_id_source"):
+            record["lineage"]["episode_id_source"] = experiment["episode_id_source"]
         runtime_for(out, config)
     counters = TrainingCounters()
     state = {
