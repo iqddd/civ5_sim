@@ -536,6 +536,9 @@ config и deployment на gamma1. Сначала выгрузить заверш
 
 ### Продолжение gamma=1 от update 147
 
+Этот опыт завершён по gate на 2 Mi; повторная аренда для него не требуется.
+Результаты и проверенные артефакты — в [ledger](experiment-ledger.md).
+
 `configs/rl-ppo-c2-h60-gae-gamma1-continuation.json` — новый опыт, не resume
 завершённого gamma1. Родительские checkpoint/manifest/final state/run record
 зафиксированы в `artifacts/inputs/ppo-c2-h60-gae-gamma1/`. Сохраняются actor/shared

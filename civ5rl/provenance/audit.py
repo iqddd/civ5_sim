@@ -303,7 +303,7 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
         groups = value["optimizer"]["param_groups"]
         ids = [index for group in groups for index in group["params"]]
         from civ5rl.engine.ppo_adam import uses_grouped_adam
-        adapting = uses_grouped_adam(value["config"])
+        adapting = uses_grouped_adam(value.get("config", {}))
         if adapting:
             named = dict(policy.named_parameters())
             if [g.get("name") for g in groups] != ["shared_actor", "value"]:

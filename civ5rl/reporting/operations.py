@@ -324,6 +324,19 @@ def _audit_stable(directory):
         )
 
     def confirmation_check():
+        if confirmation.get("status") == "not_run_parent_selected":
+            selected = _read(directory / "selected.json", {})
+            points = list(state.get("evaluated", {}).values())
+            baseline = next((p for p in points if p.get("checkpoint") == "checkpoints/initial.pt"), None)
+            if (not state.get("stop_reason") or selected != state.get("best")
+                    or selected.get("path") != "checkpoints/initial.pt" or baseline is None):
+                raise ValueError("Skipped Additional does not have a selected parent boundary")
+            wins = baseline["runs"]["argmax"]["cp"]["summary"]["W"]
+            if (selected.get("wins") != wins or selected.get("policy_hash") != baseline.get("policy_hash")
+                    or any(p["runs"]["argmax"]["cp"]["summary"]["W"] > wins for p in points)):
+                raise ValueError("Skipped Additional despite a better Development candidate")
+            return {"status": "not_run_parent_selected", "bootstrap_required": False,
+                    "best_development_wins": wins, "evaluated_checkpoints": len(points)}
         if confirmation.get("status") in (
             "not_run_no_development_improvement",
             "not_run_development_512_gate_not_met",
@@ -358,6 +371,7 @@ def _audit_stable(directory):
         if {"baseline", "candidate"} <= confirmation.keys()
         or confirmation.get("status")
         in (
+            "not_run_parent_selected",
             "not_run_no_development_improvement",
             "not_run_development_512_gate_not_met",
         )
