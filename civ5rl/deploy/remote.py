@@ -418,7 +418,7 @@ def _remote_path(path):
     return path
 
 
-def _ssh_json(connection, code, payload):
+def _ssh_json(connection, code, payload, *, timeout=120):
     host, port, user, key = connection
     command = [
         "ssh",
@@ -438,7 +438,7 @@ def _ssh_json(connection, code, payload):
         input=json.dumps(payload),
         text=True,
         capture_output=True,
-        timeout=120,
+        timeout=timeout,
         check=False,
     )
     if result.returncode:

@@ -1,6 +1,7 @@
 """Remote execution entrypoint inside the prepared repository worktree."""
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -43,6 +44,10 @@ def main(argv=None, *, root=ROOT):
     parser.add_argument("--tuning-rollout")
     parser.add_argument("--tuning-dir")
     parser.add_argument("--runtime-config")
+    parser.add_argument("--transfer-dir")
+    parser.add_argument("--transfer-token")
+    parser.add_argument("--transfer-destination")
+    parser.add_argument("--input-transfer", action="append", default=[])
     parser.add_argument("--evaluation-device", choices=("auto", "cpu", "cuda"))
     parser.add_argument("--evaluation-workers", type=int)
     parser.add_argument("--evaluation-max-batch", type=int)
@@ -50,6 +55,17 @@ def main(argv=None, *, root=ROOT):
     args = parser.parse_args(argv)
 
     root = Path(root).resolve()
+    if args.transfer_dir:
+        from civ5rl.deploy.archive import seven_zip, unpack
+
+        # Fail before training if the machine cannot package the eventual JSON output.
+        seven_zip()
+        for raw_transfer in args.input_transfer:
+            item = json.loads(raw_transfer)
+            unpack(item["packet"], item["destination"], token=item["token"], direction="upload")
+        unpack(args.transfer_dir, args.transfer_destination,
+               token=args.transfer_token, direction="upload")
+        _write(Path(args.transfer_dir) / "applied.json", {"token": args.transfer_token})
     ensure_native_libraries(root)
     raw, _ = _resolve_config(root, args.config)
     cfg = raw.get("config", raw)

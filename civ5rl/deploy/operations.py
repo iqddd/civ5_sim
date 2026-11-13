@@ -3,8 +3,12 @@
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
+import shlex
+import tempfile
+from uuid import uuid4
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
@@ -156,19 +160,31 @@ def package(
         ).encode()
     ).hexdigest()
 
+    from civ5rl.deploy.archive import needs_archive, pack as pack_transfer
+
+    input_packets = []
+    input_sync = []
+    for index, group in enumerate(staged["groups"]):
+        source = inputs_dir / group
+        if needs_archive(source):
+            packet = output / "input-packets" / str(index)
+            pack_transfer(source, packet, token=fingerprint, direction="upload")
+            remote = f"transport/inputs/{index}"
+            input_sync.append({"local": str(packet), "remote": remote})
+            input_packets.append(dict(packet=remote, destination=group, token=fingerprint))
+        else:
+            input_sync.append({"local": str(source.resolve()), "remote": f"{repo_name}/{group}"})
+    input_packet_files = {
+        path.relative_to(output).as_posix(): _sha(path)
+        for path in (output / "input-packets").rglob("*") if path.is_file()
+    }
     prepare_spec = {
         "execution_subdir": repo_name,
         "revision": fingerprint,
         "python": "3.13",
         "repositories": [{"repo": repo_spec, "commit": commit}],
         "requirements": [f"{repo_name}/requirements-rl.txt"],
-        "sync": [
-            {
-                "local": str((inputs_dir / group).resolve()),
-                "remote": f"{repo_name}/{group}",
-            }
-            for group in staged["groups"]
-        ],
+        "sync": input_sync,
     }
     prepare_path = output / "prepare.json"
     _write(prepare_path, prepare_spec)
@@ -185,6 +201,9 @@ def package(
     ]
     deployment = {
         "schema": 2,
+        "archive_transport": 1,
+        "input_packets": input_packets,
+        "input_packet_files": input_packet_files,
         "kind": resolved_config["kind"],
         "config": name,
         "resolved_config": resolved_config,
@@ -233,6 +252,9 @@ def verify_package(directory, deployment):
                 actual[rel] = _sha(path)
     if actual != manifest["staged_files"]:
         raise ValueError("Staged input files differ from inputs-manifest.json")
+    for name, digest in deployment.get("input_packet_files", {}).items():
+        if _sha(directory / name) != digest:
+            raise ValueError(f"Frozen input packet changed: {name}")
 
 
 class Transport:
@@ -284,6 +306,49 @@ class Transport:
             [sys.executable, str(script), "delete", str(instance["instance_id"])],
             check=True,
         )
+
+    def download_packet(self, deployment, transfer):
+        from civ5rl.deploy.archive import unpack
+        from civ5rl.deploy.remote import _connection, _remote_path, _ssh_json
+
+        connection = _connection(deployment["instance"])
+        code = """
+import json, sys
+from pathlib import Path
+p=json.load(sys.stdin)
+sys.path.insert(0,p['root'])
+from civ5rl.deploy.archive import pack
+from civ5rl.deploy.remote import _sha
+from civ5rl.deploy.remote import _read
+from civ5rl.engine.control import RunLock
+if not Path(p['source']).is_dir() or _read(Path(p['upload'])/'applied.json').get('token') != p['token']:
+    raise ValueError('Scientific upload was not applied; refusing to replace local results')
+with RunLock(p['source']):
+    m=pack(p['source'],p['packet'],token=p['token'],direction='download')
+print(json.dumps({'files':len(m['files']),'archived_files':len(m['archived']),
+                 'manifest_sha256':_sha(Path(p['packet'])/'manifest.json')}))
+"""
+        print("Packaging stopped remote run for verified transfer...", flush=True)
+        packed = _ssh_json(connection, code, dict(root=_remote_path(deployment["remote_project"]),
+                  source=_remote_path(transfer["destination"]), packet=_remote_path(transfer["remote_download"]),
+                  upload=_remote_path(transfer["remote_upload"]), token=transfer["token"]), timeout=7200)
+        host, port, user, key = connection
+        # One SCP session for the packet (one JSON archive plus uncompressed non-JSON files).
+        # -O makes the explicitly shell-quoted remote pathname unambiguous across SCP versions.
+        local_parent = Path(transfer["local"])
+        local_parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="download-", dir=local_parent) as temporary:
+            subprocess.run(["scp", "-O", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                            "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+                            "-P", str(port), "-i", key,
+                            f"{user}@{host}:" + shlex.quote(transfer["remote_download"] + "/."),
+                            temporary], stdin=subprocess.DEVNULL, check=True)
+            if _sha(Path(temporary) / "manifest.json") != packed["manifest_sha256"]:
+                raise ValueError("Downloaded manifest SHA-256 mismatch; instance retained")
+            verified = unpack(temporary, transfer["local_destination"],
+                              token=transfer["token"], direction="download")
+            shutil.copyfile(Path(temporary) / "manifest.json", local_parent / "download-manifest.json")
+            return {**verified, "manifest_sha256": packed["manifest_sha256"]}
 
 
 def _job_result(directory, deployment):
@@ -427,6 +492,31 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
             deployment["evaluation_runtime"] = evaluation_runtime or {}
 
         resolved_cfg = deployment["resolved_config"]
+        if deployment.get("archive_transport") == 1:
+            from civ5rl.deploy.archive import pack as pack_transfer
+
+            scientific_destination = local_sync_dir
+            remote_destination = remote_sync_dir
+            token = uuid4().hex
+            transfer_dir = directory / "transfers" / f"job-{sequence}"
+            local_sync_dir = transfer_dir / "upload"
+            remote_sync_dir = deployment["remote_root"] + f"/transport/job-{sequence}/upload"
+            from civ5rl.engine.control import is_active
+
+            if is_active(scientific_destination):
+                raise ValueError("Cannot transfer an actively written local training run")
+            # Windows byte-range locks prevent even reading run.lock while held.
+            # pack independently checks that the entire source stayed unchanged.
+            pack_transfer(scientific_destination, local_sync_dir, token=token, direction="upload")
+            job["transfer"] = dict(local=str(transfer_dir), remote_upload=remote_sync_dir,
+                                   remote_download=remote_sync_dir.rsplit("/", 1)[0] + "/download",
+                                   destination=remote_destination, local_destination=str(scientific_destination), token=token)
+            worker_args += ["--transfer-dir", remote_sync_dir, "--transfer-token", token,
+                            "--transfer-destination", remote_destination]
+            for item in deployment.get("input_packets", []):
+                worker_args += ["--input-transfer", json.dumps(dict(
+                    packet=deployment["remote_root"] + "/" + item["packet"],
+                    destination=deployment["remote_project"] + "/" + item["destination"], token=item["token"]))]
         budget_seconds = int(
             resolved_cfg.get("experiment", {}).get("active_seconds", 0)
             or (
@@ -542,6 +632,15 @@ def pull(directory, *, delete_instance=False, transport=None):
         if result.get("job_id") != deployment["job"]["id"]:
             raise ValueError("Final transport metadata belongs to a different job")
 
+        transferred = None
+        if deployment["job"].get("transfer"):
+            # The durable job mirrors only its upload packet. Fetch the authoritative output
+            # after exit, including after hard failures, before auditing or enabling deletion.
+            transferred = deployment["job"].get("transfer_verified")
+            if transferred is None:
+                transferred = transport.download_packet(deployment, deployment["job"]["transfer"])
+                deployment["job"]["transfer_verified"] = transferred
+
         exit_code = execution.get("exit_code")
         mode = deployment["job"]["mode"]
         if mode == "tune":
@@ -587,6 +686,9 @@ def pull(directory, *, delete_instance=False, transport=None):
             "instance_deleted": bool(deployment.get("instance_deleted")),
             "runner_exit_code": exit_code,
         }
+        if transferred is not None:
+            receipt.update(transferred)
+            receipt["copied_files"] = None  # SCP packet counts differ from scientific file counts.
         if audit is not None:
             receipt["scientific_audit"] = audit["status"]
         _receipt(deployment, "pull", **receipt)
