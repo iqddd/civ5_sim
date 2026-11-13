@@ -7,9 +7,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from civ5rl.deploy.operations import launch, package, pull, status, extend_remote_budget
-
-
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "rent":
@@ -18,6 +15,8 @@ def main(argv=None):
         if code:
             raise SystemExit(code)
         return code
+    from civ5rl.deploy.operations import launch, package, pull, status, extend_remote_budget
+
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("rent", help="stock Vast create options plus optional --cpu-score-min")
