@@ -55,18 +55,26 @@ def batch_inputs(items, device, *, non_blocking=False, spatial_only=False, min_c
         targets = sources.copy()
         action_mask = np.zeros((batch_size, num_actions), bool)
         features = np.zeros((batch_size, num_actions, ACTION_DIM), np.float32)
+        has_previews = [item.attack_preview is not None for item in items]
+        if any(has_previews) and not all(has_previews):
+            raise ValueError("Mixed recorded/missing attack preview inputs")
+        previews = np.zeros((batch_size, num_actions, 5), np.float32) if all(has_previews) else None
         for i, item in enumerate(items):
             action_count = len(item.sources)
             sources[i, :action_count] = item.sources
             targets[i, :action_count] = item.targets
             action_mask[i, :action_count] = True
             features[i, :action_count] = item.action_features
+            if item.attack_preview is not None:
+                previews[i, :action_count] = item.attack_preview
         values.update(
             sources=sources,
             targets=targets,
             action_features=features,
             action_mask=action_mask,
         )
+        if previews is not None:
+            values["attack_preview"] = previews
     return {k: torch.from_numpy(v).to(device, non_blocking=non_blocking) for k, v in values.items()}
 
 
@@ -361,6 +369,8 @@ class _PolicyExecutor:
         if self.heads_runner is None:
             return policy.heads(batch, x, h)
         action_keys = ("sources", "targets", "action_features", "action_mask")
+        if policy.variant_spec.attack_preview:
+            action_keys += ("attack_preview",)
         action_batch = {key: batch[key] for key in action_keys}
         num_rows, num_actions = len(x), action_batch["sources"].shape[1]
         if num_rows == 1:
@@ -428,6 +438,9 @@ class Policy(nn.Module):
         self.coalesced_spatial = False
         self.coalesced_accumulation = False
         self._initialize()
+        if self.variant_spec.attack_preview:
+            self.attack_preview = nn.Linear(5, HEX_DIM, bias=False)
+            nn.init.zeros_(self.attack_preview.weight)
 
     @property
     def is_recurrent(self) -> bool:
@@ -648,9 +661,12 @@ class Policy(nn.Module):
         )
         # Preserve action probabilities across different rollout/replay batches.
         with torch.autocast(h.device.type, enabled=False):
-            logits = (
-                self.action(action_input.float()).squeeze(-1).masked_fill(~batch["action_mask"], -torch.inf)
-            )
+            if self.variant_spec.attack_preview:
+                first = self.action[0](action_input.float()) + self.attack_preview(batch["attack_preview"].float())
+                scores = self.action[2](self.action[1](first))
+            else:
+                scores = self.action(action_input.float())
+            logits = scores.squeeze(-1).masked_fill(~batch["action_mask"], -torch.inf)
             value = self.value(h.float()).squeeze(-1)
         return logits, value
 

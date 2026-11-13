@@ -1,0 +1,31 @@
+{
+  "base_config": "configs/rl-ppo-c2-h60-gae-gamma1-lambda099.json",
+  "output": "artifacts/rl/ppo-c2-h60-gae-gamma1-lambda099-attack-preview",
+  "model": {
+    "variant": "C2P"
+  },
+  "experiment": {
+    "parent": "artifacts/inputs/ppo-c2-h60-gae-gamma1-lambda099/checkpoints/update-0048.pt",
+    "parent_label": "PPO C2 gamma1 lambda0.99 update 48",
+    "parent_sha256": "5202c2607df62f5755301d74b3f3b0be4f8150ffa5e9b0fa0409cf5afbf0711a",
+    "parent_policy_hash": "b55f0818fa5e56f4c7eecb2b52829b548e2f4c2470dac27c44897307c510ca9d",
+    "parent_manifest": "artifacts/inputs/ppo-c2-h60-gae-gamma1-lambda099/manifest.json",
+    "parent_manifest_sha256": "18019d9ea2ee5a36e3b890ab62e6733b76f786e01c2ed92f8ce708a8668ff272",
+    "parent_run": "artifacts/inputs/ppo-c2-h60-gae-gamma1-lambda099",
+    "parent_final_state": "artifacts/inputs/ppo-c2-h60-gae-gamma1-lambda099/state.json",
+    "parent_final_state_sha256": "735db57fe93d051d7a5d7074a4bbe4a3876652ae33b9d3d1943c2d5ed2403d6d",
+    "parent_run_sha256": "23fbbbd84e53307f11ca37689cfc32beba7cc93a31350e037c2dfc73593fcf2e",
+    "parent_optimizer_counters": {
+      "shared_actor": 29390,
+      "value": 16834
+    },
+    "model_extension": "attack_preview_v1",
+    "episode_id_source": null,
+    "start_episode": 76733,
+    "historical_active_time_estimate": null,
+    "training_namespace": "ppo_c2_h60_gae_gamma1_lambda099_attack_preview_v1_training",
+    "shuffle_namespace": "ppo_c2_h60_gae_gamma1_lambda099_attack_preview_v1_shuffle",
+    "torch_namespace": "ppo_c2_h60_gae_gamma1_lambda099_attack_preview_v1_torch",
+    "critic_namespace": "ppo_c2_h60_gae_gamma1_lambda099_attack_preview_v1_critic"
+  }
+}

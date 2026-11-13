@@ -28,4 +28,5 @@ ENCODED_FIELDS = (
     EncodedField("sources", np.dtype(np.int64), "actions", ()),
     EncodedField("targets", np.dtype(np.int64), "actions", ()),
     EncodedField("action_features", np.dtype(np.float32), "actions", (ACTION_DIM,)),
+    EncodedField("attack_preview", np.dtype(np.float32), "actions", (5,)),
 )

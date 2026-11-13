@@ -131,7 +131,7 @@ class ProxyAgent:
 
     def reset(self, context):
         self.events = []
-        self.call("reset", context, self.mode, self.temperature, self.collect_selection_metrics)
+        self.requires_attack_preview = self.call("reset", context, self.mode, self.temperature, self.collect_selection_metrics)
 
     def act(self, observation, actions):
         action, events = self.call("act", observation, actions)
@@ -246,7 +246,7 @@ class EvaluationExecutor:
                             collect_selection_metrics=metrics)
             agent.reset(context)
             self.connections[connection] = agent
-            connection.send(("ok", None))
+            connection.send(("ok", agent.requires_attack_preview))
             return None
         agent = self.connections[connection]
         if agent is None:

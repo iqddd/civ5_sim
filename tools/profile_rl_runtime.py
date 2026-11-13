@@ -82,10 +82,16 @@ def load_collection_policy(config, checkpoint):
     import torch
 
     from civ5rl.core.model import Policy
+    from civ5rl.core.preview import extends_parent, load_parent_model
 
     saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    policy = Policy(saved["variant"]).cuda().eval()
-    policy.load_state_dict(saved["model"])
+    variant = config["model"]["variant"] if extends_parent(config) and saved["variant"] == "C2" else saved["variant"]
+    policy = Policy(variant)
+    if variant != saved["variant"]:
+        load_parent_model(policy, saved, config)
+    else:
+        policy.load_state_dict(saved["model"])
+    policy = policy.cuda().eval()
     performance = config.get("performance", {})
     policy.spatial_cell_padding = performance.get("spatial_cell_padding", 0)
     policy.enable_amp(

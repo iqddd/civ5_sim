@@ -579,6 +579,27 @@ Development0/1/2/3/4Mi, новая нулевая оценка W0, gateW0+11 п�
 VRAM; после2–3 принятых шагов проверки каждые15мин. После финальных оценок
 pull/audit и удаление инстанса. Прогноз3,6–4,4 активного часа без гарантии.
 
+### C2P attack preview от lambda0.99 update48
+
+Профиль `configs/rl-ppo-c2-h60-gae-gamma1-lambda099-attack-preview.json` расширяет
+родителя C2 пятью публичными признаками атак и нулевой проекцией5→128. Прежние
+Adam29390/16834 и critic сохраняются, новая группа attack_preview пуста.
+Первый принятый шаг:29391/16835/1. Новые namespaces seed17, episode76733.
+Лимиты4Mi/18000active seconds; gamma1/lambda.99, LR1e-5,T.5 и условия боёв прежние.
+Development0/1/2/3/4Mi, CUDA FP32/8workers/batch32/wait.001. Gate после2Mi:
+max(W1,W2)≥W0+11 по новой нулевой оценке;330 не является фиксированным порогом.
+Один pairedAdditional нового победителя относительно начальной модели,
+эквивалентной update48; при выборе родителя пропуск. Закрытый test не используется.
+
+Использовать стандартную последовательность rent/package/tune/pull/run с deployment
+`artifacts/deployments/ppo-c2-h60-gae-gamma1-lambda099-attack-preview-5090` и носителем
+`--extra-input artifacts/rl/ppo-c2-h60-gae-gamma1-lambda099/rollouts/latest.pt`.
+Носитель задаёт случаи; tuning собирает новые признаки через C2P, не принимает
+старые записи без preview за C2P-rollout. Runtime CUDA оценок закреплён профилем.
+Для публикации нового пакета нужен чистый отправленный commit. Архивный транспорт
+требует7zz/7z на обеих машинах. После2–3 шагов проверять раз в15мин; без плановых
+перезапусков, с диагностикой VRAM. После оценок pull/audit и удаление инстанса.
+
 ### CPU-фильтр будущей аренды
 
 Этот фильтр применяется только к задачам, которым требуется CPU-зависимая
@@ -644,6 +665,12 @@ Vast.ai, включая дробную долю. Не подставлять п�
 | AMD Ryzen 9 9950X3D | 4737 | 229% |
 | AMD Ryzen 9 5950X | 3476 | 168% |
 | AMD Ryzen 9 7940HX with Radeon Graphics | 3925 | 190% |
+| AMD EPYC 7642 | 2008 | 97% |
+| Intel Core i7-14700K | 4453 | 215% |
+| AMD EPYC 9354 | 2766 | 134% |
+| AMD Ryzen 7 7700 | 4050 | 196% |
+| AMD EPYC 7763 | 2518 | 122% |
+| AMD EPYC 9135 Emb | unrated | Не допускается |
 
 Threadripper 3960X, Ultra 7 270K Plus, Ryzen 9900X/7900X3D и EPYC 7713 дополнены по [PassMark Single Thread](https://www.cpubenchmark.net/singleThread.html)
 12 ноября 2026 года; исходные пользовательские значения выше не пересмотрены.
@@ -652,6 +679,16 @@ EPYC 9115 — [3360](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9115),
 EPYC 8224P — [2341](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+8224P)
 добавлены по PassMark 13 ноября 2026 года. EPYC7402P: [1992](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7402P), EPYC7B13: [2555](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7B13). Ryzen 9950X3D: [4737](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+9950X3D&id=6549); не путать с X3D2. Ryzen 7940HX: [3925](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+7940HX). Ryzen 5950X: [3476](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+5950X&id=3862).
 При свежем отборе также проверены [Intel Core i5-13600K: 4110](https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i5-13600K), [Intel Core i7-13700K: 4324](https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i7-13700K), [AMD EPYC 9254: 2998](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9254), [AMD Ryzen 7 3700X: 2654](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+3700X).
+
+При отборе C2P проверены [EPYC7642:2008](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7642&id=4336)
+и [Core i7-14700K:4453](https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i7-14700K&id=5719),
+[EPYC9354:2766](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9354&id=5625),
+[Ryzen7700:4050](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+7700&id=5169).
+Также [EPYC7763:2518](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7763&id=4207).
+Для EPYC9135 Emb точного результата не найдено в [PassMark AMD list](https://www.cpubenchmark.net/cpu-list/amd).
+`unrated` означает выполненный поиск без подтверждённого балла и исключение из
+допуска; это не нулевой измеренный результат и не балл обычного9135. Неизвестные
+модели без такой записи по-прежнему останавливают отбор для проверки.
 
 Например, EPYC 7313P с долей 6,4 получает 797,6 и не проходит, а Ryzen 9950X
 с долей 32 получает 7316,5 и проходит. После аренды фактическая quota/cpuset

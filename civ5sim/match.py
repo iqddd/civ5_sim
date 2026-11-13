@@ -262,12 +262,18 @@ def run_match(config, agents, *, metrics=None, diagnostics="off", scenario=None,
                 }
                 break
             with measure(metrics, "prepare_actions", side=side, turn=completed_turns):
-                actions = tuple(battle.available_actions())
+                previews = None
+                if getattr(agents[side], "requires_attack_preview", False):
+                    actions, previews = battle.actions_with_previews()
+                else:
+                    actions = tuple(battle.available_actions())
             calls_this_turn += 1
             agent_calls[side] += 1
             try:
                 with measure(metrics, "prepare_observation", side=side, turn=completed_turns):
                     observation = battle.observe(side)
+                    if previews is not None:
+                        observation["attack_previews"] = previews.tolist()
                 if recording is not None:
                     recording.begin(commands + 1, side, observation, agents[side])
                 if callable(getattr(agents[side], "act_with_planning", None)):

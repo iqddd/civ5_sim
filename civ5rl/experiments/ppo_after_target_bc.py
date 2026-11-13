@@ -467,14 +467,16 @@ def load_initial_optimizer(policy, saved, config):
     """Preserve a PPO parent's complete Adam, or start the original BC handoff."""
     experiment = config["experiment"]
     origins = experiment.get("parent_optimizer_counters")
+    from civ5rl.core.preview import extends_parent
+    extension = extends_parent(config)
     optimizer = (grouped_optimizer(policy, config, "cpu") if origins
                  else optimizer_for(policy, config, "cpu"))
     if experiment.get("parent_optimizer") != "preserve":
         if optimizer.state:
             raise ValueError("New PPO Adam must be empty")
         return optimizer
-    if (saved.get("variant") != policy.variant
-            or saved.get("variant") != config["model"]["variant"]
+    if ((saved.get("variant") != policy.variant and not (extension and saved.get("variant") == "C2" and policy.variant == "C2P"))
+            or policy.variant != config["model"]["variant"]
             or not saved.get("state", {}).get("critic_complete")):
         raise ValueError("PPO parent architecture/critic boundary is incompatible")
     if saved["state"].get("phase") != "collect":
@@ -486,20 +488,24 @@ def load_initial_optimizer(policy, saved, config):
             raise ValueError("Invalid inherited Adam group counters")
         if saved["state"].get("Adam_counters") != origins:
             raise ValueError("Parent ledger and inherited Adam group counters differ")
-        expected_groups = optimizer.state_dict()["param_groups"]
+        expected_groups = optimizer.state_dict()["param_groups"][:2] if extension else optimizer.state_dict()["param_groups"]
         if len(source["param_groups"]) != len(expected_groups):
             raise ValueError("Parent Adam group count differs")
         for actual, expected_group in zip(source["param_groups"], expected_groups, strict=True):
             if any(actual.get(k) != expected_group[k] for k in ("name", "parameter_names", "params")):
                 raise ValueError("Parent Adam parameter layout differs")
+    if extension:
+        from copy import deepcopy
+        source = deepcopy(source)
+        source["param_groups"].append(optimizer.state_dict()["param_groups"][2])
     optimizer.load_state_dict(source)
     assert_equal(optimizer.state_dict(), source)
     expected = int(experiment["parent_optimizer_steps"])
     if not origins and saved["state"]["optimizer_steps"] != expected:
         raise ValueError("Parent ledger and configured Adam counter differ")
-    if len(optimizer.state) != len(list(policy.parameters())):
+    if len(optimizer.state) != len(list(policy.parameters())) - int(extension):
         raise ValueError("Parent Adam must contain all model and critic parameters")
-    expected_by_parameter = {p: origins[g["name"]] if origins else expected
+    expected_by_parameter = {p: origins.get(g["name"], 0) if origins else expected
                              for g in optimizer.param_groups for p in g["params"]}
     for parameter, item in optimizer.state.items():
         if float(item["step"]) != expected_by_parameter[parameter]:
@@ -595,12 +601,13 @@ def initialize(config, out):
     saved = torch.load(parent, map_location="cpu", weights_only=False)
     if inherited and saved["identity"].get("run_id") != parent_record["run_id"]:
         raise ValueError("Parent checkpoint and final run lineage differ")
-    if not all(
-        torch.equal(value, saved["model"][name])
-        for name, value in policy.state_dict().items()
-    ):
+    from civ5rl.core.preview import extends_parent, inherited_model
+    extension = extends_parent(config)
+    if extension:
+        inherited_model(policy.state_dict(), saved["model"])
+    elif not all(torch.equal(value, saved["model"][name]) for name, value in policy.state_dict().items()):
         raise ValueError("Initial model differs from parent")
-    if policy_hash(policy.state_dict()) != experiment["parent_policy_hash"]:
+    if policy_hash(saved["model"]) != experiment["parent_policy_hash"]:
         raise ValueError("Initial behavior hash differs")
     optimizer = load_initial_optimizer(policy, saved, config)
     shuffle_seed = seed_for(17, 0, "shuffle", namespace=experiment["shuffle_namespace"])
@@ -671,6 +678,8 @@ def initialize(config, out):
         "baseline_wins": None,
         "best": {"path": "checkpoints/initial.pt", "wins": -1, "update": 0},
     }
+    if extension:
+        state["origin_Adam_counters"]["attack_preview"] = 0
     write_json(out / "run.json", record)
     save_boundary(
         out,

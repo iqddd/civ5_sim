@@ -158,7 +158,7 @@ class SequenceBuffer:
 
     def _gather(self, indices, width):
         data = {key: value.index_select(0, indices) for key, value in self.data.items()}
-        for key in ("sources", "targets", "action_features", "action_mask"):
+        for key in ("sources", "targets", "action_features", "action_mask", "attack_preview"):
             data[key] = data[key][:, :width].contiguous()
         return data
 

@@ -10,7 +10,9 @@ KIND = "rl01.ppo_after_target_bc"
 
 
 def validate_profile(config):
-    if config.get("output") == "artifacts/rl/ppo-c2-h60-gae-gamma1-lambda099":
+    if config.get("output") == "artifacts/rl/ppo-c2-h60-gae-gamma1-lambda099-attack-preview":
+        profile = "rl-ppo-c2-h60-gae-gamma1-lambda099-attack-preview.json"
+    elif config.get("output") == "artifacts/rl/ppo-c2-h60-gae-gamma1-lambda099":
         profile = "rl-ppo-c2-h60-gae-gamma1-lambda099.json"
     elif config.get("output") == "artifacts/rl/ppo-c2-h60-gae-gamma1-continuation":
         profile = "rl-ppo-c2-h60-gae-gamma1-continuation.json"

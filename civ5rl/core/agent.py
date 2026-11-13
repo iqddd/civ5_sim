@@ -37,6 +37,7 @@ class RLAgent:
         self.mode = mode
         self.temperature = temperature
         self.collect_selection_metrics = collect_selection_metrics
+        self.requires_attack_preview = policy.variant_spec.attack_preview
         self.policy.eval()
 
     @classmethod

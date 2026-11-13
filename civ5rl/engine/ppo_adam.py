@@ -11,12 +11,17 @@ def uses_grouped_adam(config):
     return adapts_value(config) or bool(config.get("experiment", {}).get("parent_optimizer_counters"))
 
 
+def parameter_group(name):
+    return "attack_preview" if name.startswith("attack_preview.") else "value" if name.startswith("value.") else "shared_actor"
+
+
 def grouped_optimizer(policy, config, device):
     settings = config["optimizer"]
     named = list(policy.named_parameters())
     groups = []
-    for name, is_value in (("shared_actor", False), ("value", True)):
-        members = [(n, p) for n, p in named if n.startswith("value.") == is_value]
+    names = ["shared_actor", "value"] + (["attack_preview"] if policy.variant_spec.attack_preview else [])
+    for name in names:
+        members = [(n, p) for n, p in named if parameter_group(n) == name]
         groups.append(dict(params=[p for _, p in members], name=name,
                            parameter_names=[n for n, _ in members]))
     return torch.optim.Adam(groups, lr=settings["lr"], betas=tuple(settings["betas"]),
@@ -34,8 +39,9 @@ def expected_counters(state, extra_ppo_steps=0):
 
 def check_counters(optimizer, state, extra_ppo_steps=0):
     expected = expected_counters(state, extra_ppo_steps)
-    if [g.get("name") for g in optimizer.param_groups] != ["shared_actor", "value"]:
-        raise ValueError("Expected shared_actor/value Adam groups")
+    names = ["shared_actor", "value"] + (["attack_preview"] if "attack_preview" in expected else [])
+    if [g.get("name") for g in optimizer.param_groups] != names:
+        raise ValueError("Adam groups differ from recorded origins")
     for group in optimizer.param_groups:
         count = expected[group["name"]]
         for parameter in group["params"]:

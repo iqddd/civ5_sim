@@ -59,6 +59,7 @@ def terminal_result(battle, completed_turns, max_rounds):
 class DecisionEnv:
     def __init__(self, spec: ScenarioSpec):
         self.spec = spec
+        self.attack_preview = False
         self.learner_decisions = 0
         self.learner_decision_limit = spec.get("learner_decision_limit")
         if self.learner_decision_limit is not None and (
@@ -270,10 +271,15 @@ class DecisionEnv:
         observation = self.battle.observe(self.side)
         if self.first_contact_turn is None and any(u["side"] != self.side for u in observation["units"]):
             self.first_contact_turn = self.turns
+        if self.attack_preview:
+            actions, previews = self.battle.actions_with_previews()
+            observation["attack_previews"] = previews
+        else:
+            actions = ordered_actions(self.battle.available_actions())
         return {
             "done": False,
             "observation": observation,
-            "actions": ordered_actions(self.battle.available_actions()),
+            "actions": actions,
         }
 
     def reproduction(self):

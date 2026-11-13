@@ -425,6 +425,30 @@ class Battle:
             self._lib.sim_preview(self._handle, action_value(action).native())
         )
 
+    def actions_with_previews(self):
+        """Sorted legal commands and owned public FP32 fixed-roll features.
+
+        One native call; no state mutation, RNG use or hidden-information payload.
+        Returned arrays remain valid after subsequent steps and buffer reuse.
+        """
+        import numpy as np
+
+        self._require_open()
+        if self._action_buffer is None:
+            capacity = 1 + len(self._units()) * (len(self._map["tiles"]) + 27)
+            self._action_buffer = (N.Action * capacity)()
+        if not hasattr(self, "_preview_buffer"):
+            self._preview_buffer = (C.c_float * (5 * len(self._action_buffer)))()
+            self._preview_array = np.ctypeslib.as_array(self._preview_buffer).reshape(-1, 5)
+        count = self._lib.sim_actions_with_previews(
+            self._handle, self._action_buffer, self._preview_buffer, len(self._action_buffer)
+        )
+        if not 0 <= count <= len(self._action_buffer):
+            raise RuntimeError("Native preview buffer overflow")
+        actions = tuple(Action(KINDS[a.kind], a.unit, a.target) for a in self._action_buffer[:count])
+        features = self._preview_array[:count].copy()
+        return actions, features
+
     def step(self, action):
         self._require_open()
         action = action_value(action)

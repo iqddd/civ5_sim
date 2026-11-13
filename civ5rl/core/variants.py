@@ -9,9 +9,10 @@ class PolicyVariant(StrEnum):
     CONTACTS_MLP = "B"
     CONTACTS_GRU = "C"
     CONTACTS_GRU_C2 = "C2"
+    CONTACTS_GRU_C2_PREVIEW = "C2P"
 
 
-RECURRENT_VARIANTS = (PolicyVariant.CONTACTS_GRU, PolicyVariant.CONTACTS_GRU_C2)
+RECURRENT_VARIANTS = (PolicyVariant.CONTACTS_GRU, PolicyVariant.CONTACTS_GRU_C2, PolicyVariant.CONTACTS_GRU_C2_PREVIEW)
 
 
 @dataclass(frozen=True)
@@ -22,9 +23,15 @@ class VariantSpec:
     hex_blocks: int
     uses_unit_attention: bool
     bounded_time_features: bool
+    attack_preview: bool = False
 
 
 VARIANT_SPECS: dict[PolicyVariant, VariantSpec] = {
+    PolicyVariant.CONTACTS_GRU_C2_PREVIEW: VariantSpec(
+        variant=PolicyVariant.CONTACTS_GRU_C2_PREVIEW, uses_contact_history=True,
+        is_recurrent=True, hex_blocks=C2_HEX_BLOCKS, uses_unit_attention=True,
+        bounded_time_features=True, attack_preview=True,
+    ),
     PolicyVariant.CURRENT_ONLY_MLP: VariantSpec(
         variant=PolicyVariant.CURRENT_ONLY_MLP,
         uses_contact_history=False,

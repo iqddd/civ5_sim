@@ -42,6 +42,8 @@ SIM_API int sim_restore_visibility(void*, const int* masks, int count);
 SIM_API int sim_visibility_history(void*, int side, int*);
 SIM_API int sim_info(void*, Info*);
 SIM_API int sim_actions(void*, Action*, int capacity);
+// Public fixed-roll attack features [present, damage/100, retaliation/100, kill, death].
+SIM_API int sim_actions_with_previews(void*, Action*, float*, int capacity);
 SIM_API Result sim_step(void*, Action);
 SIM_API Result sim_preview(void*, Action);
 SIM_API void sim_batch(void** states, const Action*, Result*, int count);

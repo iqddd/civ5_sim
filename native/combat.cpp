@@ -162,6 +162,10 @@ int sim_actions(void* p, Action* out, int cap) {
   if (!p || cap < 0) return -1;
   return static_cast<Battle*>(p)->actions(out, cap);
 }
+int sim_actions_with_previews(void* p, Action* out, float* features, int cap) {
+  if (!p || !out || !features || cap < 0) return -1;
+  return static_cast<Battle*>(p)->actions_with_previews(out, features, cap);
+}
 
 Result sim_step(void* p, Action a) {
   if (!p) return {BAD_ACTION, 0, 0, 0, 0, 0};

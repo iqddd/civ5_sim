@@ -19,8 +19,11 @@ def cpu_ratings(document):
     ratings = {}
     for line in Path(document).read_text(encoding="utf-8").splitlines():
         fields = [part.strip() for part in line.strip("|").split("|")]
-        if line.startswith("| ") and len(fields) == 3 and fields[1].isdigit():
-            ratings[normalize_cpu(fields[0])] = int(fields[1])
+        if line.startswith("| ") and len(fields) == 3:
+            if fields[1].isdigit():
+                ratings[normalize_cpu(fields[0])] = int(fields[1])
+            elif fields[1] == "unrated":
+                ratings[normalize_cpu(fields[0])] = None
     return ratings
 
 
@@ -31,6 +34,8 @@ def admit_offers(offers, ratings, minimum):
         raise ValueError("PassMark Single Thread lookup required before selection: " + "; ".join(unknown))
     result = []
     for offer in offers:
+        if ratings[normalize_cpu(offer["cpu_name"])] is None:
+            continue  # Explicitly researched but unverified model; never borrow another CPU's score.
         score = float(offer.get("cpu_cores_effective") or 0) * 100 * ratings[normalize_cpu(offer["cpu_name"])] / 2067
         if math.isfinite(score) and score >= minimum:
             result.append(offer)

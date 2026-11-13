@@ -90,6 +90,7 @@ class Encoded:
     sources: np.ndarray
     targets: np.ndarray
     action_features: np.ndarray
+    attack_preview: np.ndarray | None = None
 
 
 class ObservationEncoder:
@@ -201,7 +202,14 @@ class ObservationEncoder:
         sources, targets, features = self._encode_actions(actions, own)
         self.last_clock = clock
         self.last_turn = turn
-        return Encoded(cells, globals_, previous, self.neighbors, sources, targets, features)
+        previews = np.zeros((len(actions), 5), dtype=np.float32)
+        if self.variant_spec.attack_preview:
+            if "attack_previews" not in observation:
+                raise ValueError("C2P requires recorded public attack previews")
+            previews = np.array(observation["attack_previews"], dtype=np.float32, copy=True)
+            if previews.shape != (len(actions), 5) or not np.isfinite(previews).all():
+                raise ValueError("Public attack preview shape/values differ from legal actions")
+        return Encoded(cells, globals_, previous, self.neighbors, sources, targets, features, previews)
 
     def _encode_cells(self, observation, clock):
         visibility = np.asarray(observation["visibility"], dtype=bool)

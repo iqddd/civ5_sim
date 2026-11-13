@@ -440,4 +440,34 @@ std::vector<Action> State::actions() const {
   emit_actions([&](Action a) { result.push_back(a); });
   return result;
 }
+
+int State::actions_with_previews(Action* out, float* features, int capacity) const {
+  int count = 0;
+  emit_actions([&](Action action) {
+    if (count < capacity) out[count] = action;
+    ++count;
+  });
+  const int stored = std::min(count, capacity);
+  std::sort(out, out + stored, [](const Action& a, const Action& b) {
+    if (a.kind != b.kind) return a.kind < b.kind;
+    if (a.unit != b.unit) return a.unit < b.unit;
+    return a.target < b.target;
+  });
+  for (int i = 0; i < stored; ++i) {
+      const Action action = out[i];
+      float* row = features + 5 * i;
+      std::fill(row, row + 5, 0.f);
+      if (action.kind == MELEE || action.kind == RANGED) {
+        // emit_actions already validated the command against public information.
+        const int defender = occupied[action.target];
+        const auto result = combat(action.unit, defender, action.kind == RANGED, true);
+        row[0] = 1.f;
+        row[1] = result.damage / 100.f;
+        row[2] = result.retaliation / 100.f;
+        row[3] = result.damage >= units[defender].hp ? 1.f : 0.f;
+        row[4] = result.retaliation >= units[action.unit].hp ? 1.f : 0.f;
+      }
+  }
+  return count;
+}
 }  // namespace combat_rules

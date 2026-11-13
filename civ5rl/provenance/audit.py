@@ -306,11 +306,13 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
         adapting = uses_grouped_adam(value.get("config", {}))
         if adapting:
             named = dict(policy.named_parameters())
-            if [g.get("name") for g in groups] != ["shared_actor", "value"]:
-                raise ValueError(f"Expected shared_actor/value Adam groups: {path}")
+            from civ5rl.engine.ppo_adam import parameter_group
+            names = ["shared_actor", "value"] + (["attack_preview"] if policy.variant_spec.attack_preview else [])
+            if [g.get("name") for g in groups] != names:
+                raise ValueError(f"Adam groups differ: {path}")
             lookup = {}
             for group in groups:
-                expected_names = [n for n in named if n.startswith("value.") == (group["name"] == "value")]
+                expected_names = [n for n in named if parameter_group(n) == group["name"]]
                 if group.get("parameter_names") != expected_names:
                     raise ValueError(f"Adam parameter names differ: {path}")
                 lookup.update(zip(group["params"], [named[n] for n in expected_names], strict=True))
@@ -446,7 +448,11 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
             weights_only=False,
         )
         parent = torch.load(parent_checkpoint, map_location="cpu", weights_only=False)
-        if not _equal(initial["model"], parent["model"]):
+        from civ5rl.core.preview import extends_parent, inherited_model
+        extension = extends_parent(initial.get("config", {}))
+        if extension:
+            inherited_model(initial["model"], parent["model"])
+        elif not _equal(initial["model"], parent["model"]):
             raise ValueError("Initial model differs from parent")
         if initial["config"].get("experiment", {}).get("parent_optimizer") == "preserve":
             from civ5rl.provenance.common import file_sha256
@@ -463,6 +469,13 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
                                 raise ValueError("Initial value Adam was not reset")
                         elif not _equal(item, parent["optimizer"]["state"][parent_named[name]]):
                             raise ValueError("Initial shared/actor Adam differs from parent")
+            elif extension:
+                original = {**initial["optimizer"], "param_groups": initial["optimizer"]["param_groups"][:2]}
+                if not _equal(original, parent["optimizer"]):
+                    raise ValueError("Initial inherited Adam differs from parent")
+                extra = initial["optimizer"]["param_groups"][2]
+                if extra.get("name") != "attack_preview" or any(i in original["state"] for i in extra["params"]):
+                    raise ValueError("Initial preview Adam must be empty")
             elif not _equal(initial["optimizer"], parent["optimizer"]):
                 raise ValueError("Initial Adam differs from parent")
     return {

@@ -39,7 +39,9 @@ class _WorkerRuntime:
         self.envs = []
         self.encoders = []
         for spec in specs:
-            self.envs.append(DecisionEnv(spec))
+            env = DecisionEnv(spec)
+            env.attack_preview = variant == "C2P"
+            self.envs.append(env)
             if self.shared is not None:
                 self.encoders.append(ObservationEncoder(context_from_spec(spec), variant))
         self.previous = [None] * len(self.envs)
@@ -71,6 +73,7 @@ class _WorkerRuntime:
         if self.envs[slot] is not None:
             self.envs[slot].close()
         self.envs[slot] = DecisionEnv(spec)
+        self.envs[slot].attack_preview = variant == "C2P"
         if self.shared is not None:
             self.encoders[slot] = ObservationEncoder(context_from_spec(spec), variant)
         self.previous[slot] = None

@@ -32,9 +32,11 @@ def load_policy(config, path, device):
     from civ5rl.core.model import Policy
 
     saved = torch.load(path, weights_only=False, map_location="cpu")
-    variant = saved.get("variant") or config.get("model", {}).get("variant", "C")
-    policy = Policy(variant).to(device)
-    policy.load_state_dict(saved["model"])
+    from civ5rl.core.preview import extends_parent, load_parent_model
+    variant = config["model"]["variant"] if extends_parent(config) else saved.get("variant") or config.get("model", {}).get("variant", "C")
+    policy = Policy(variant)
+    load_parent_model(policy, saved, config)
+    policy = policy.to(device)
     policy.spatial_cell_padding = config['performance'].get('spatial_cell_padding',0)
     policy.enable_amp(str(device).startswith("cuda"), spatial_batch_size=32)
     if config["performance"].get("inverse_routing", False):

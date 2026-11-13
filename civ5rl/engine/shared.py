@@ -68,6 +68,9 @@ class EncodedSlots:
         for key, array in self.arrays.items():
             value = getattr(encoded, key)
             target = array[slot]
+            if value is None and key == "attack_preview":
+                target[:num_actions] = 0
+                continue
             if self.axis_kind[key] != "fixed":
                 target = target[: len(value)]
             target[...] = value

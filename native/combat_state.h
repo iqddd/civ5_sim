@@ -63,6 +63,7 @@ struct State {
   Result step(Action a, const std::function<int()>& roll = {},
               StepEvents* events = nullptr);
   int actions(Action* out, int capacity) const;
+  int actions_with_previews(Action* out, float* features, int capacity) const;
   std::vector<Action> actions() const;
 
  private:

@@ -14,7 +14,7 @@ def worker(connection, profile_path=None, shared_descriptor=None):
             if kind == "reset":
                 specs = payload["specs"] if isinstance(payload, dict) else payload
                 runtime.reset(
-                    specs, payload["variant"] if runtime.shared is not None else None
+                    specs, payload.get("variant") if isinstance(payload, dict) else None
                 )
                 reported_done = [False] * len(specs)
             elif kind == "step":
