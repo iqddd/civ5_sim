@@ -331,7 +331,8 @@ print(json.dumps({'files':len(m['files']),'archived_files':len(m['archived']),
         print("Packaging stopped remote run for verified transfer...", flush=True)
         packed = _ssh_json(connection, code, dict(root=_remote_path(deployment["remote_project"]),
                   source=_remote_path(transfer["destination"]), packet=_remote_path(transfer["remote_download"]),
-                  upload=_remote_path(transfer["remote_upload"]), token=transfer["token"]), timeout=7200)
+                  upload=_remote_path(transfer["remote_upload"]), token=transfer["token"]), timeout=7200,
+                  python_bin=deployment["remote_root"] + "/.venv/bin/python")
         host, port, user, key = connection
         # One SCP session for the packet (one JSON archive plus uncompressed non-JSON files).
         # -O makes the explicitly shell-quoted remote pathname unambiguous across SCP versions.
@@ -341,13 +342,14 @@ print(json.dumps({'files':len(m['files']),'archived_files':len(m['archived']),
             subprocess.run(["scp", "-O", "-r", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
                             "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
                             "-P", str(port), "-i", key,
-                            f"{user}@{host}:" + shlex.quote(transfer["remote_download"] + "/."),
+                            f"{user}@{host}:" + shlex.quote(transfer["remote_download"]),
                             temporary], stdin=subprocess.DEVNULL, check=True)
-            if _sha(Path(temporary) / "manifest.json") != packed["manifest_sha256"]:
+            packet = Path(temporary) / PurePosixPath(transfer["remote_download"]).name
+            if _sha(packet / "manifest.json") != packed["manifest_sha256"]:
                 raise ValueError("Downloaded manifest SHA-256 mismatch; instance retained")
-            verified = unpack(temporary, transfer["local_destination"],
+            verified = unpack(packet, transfer["local_destination"],
                               token=transfer["token"], direction="download")
-            shutil.copyfile(Path(temporary) / "manifest.json", local_parent / "download-manifest.json")
+            shutil.copyfile(packet / "manifest.json", local_parent / "download-manifest.json")
             return {**verified, "manifest_sha256": packed["manifest_sha256"]}
 
 

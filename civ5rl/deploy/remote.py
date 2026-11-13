@@ -418,7 +418,7 @@ def _remote_path(path):
     return path
 
 
-def _ssh_json(connection, code, payload, *, timeout=120):
+def _ssh_json(connection, code, payload, *, timeout=120, python_bin="python3"):
     host, port, user, key = connection
     command = [
         "ssh",
@@ -431,7 +431,7 @@ def _ssh_json(connection, code, payload, *, timeout=120):
         "-i",
         key,
         f"{user}@{host}",
-        "python3 -c " + shlex.quote(code),
+        shlex.quote(python_bin) + " -c " + shlex.quote(code),
     ]
     result = subprocess.run(
         command,
@@ -442,7 +442,7 @@ def _ssh_json(connection, code, payload, *, timeout=120):
         check=False,
     )
     if result.returncode:
-        raise RuntimeError(f"SSH operation failed (exit {result.returncode})")
+        raise RuntimeError(f"SSH operation failed (exit {result.returncode}): {result.stderr[-3000:].strip()}")
     return json.loads(result.stdout)
 
 
