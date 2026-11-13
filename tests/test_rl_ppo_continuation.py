@@ -24,14 +24,12 @@ import test_rl_ppo_after_target_bc as fixtures
 
 
 class PPOContinuationTests(unittest.TestCase):
-    def test_lambda099_full_episode_signal_and_episode_frontier(self):
+    def test_lambda099_full_episode_signal(self):
         # Fragment-local GAE could silently erase distant reward at BPTT=128.
         import numpy as np
         from civ5rl.engine.ppo import raw_gae_advantages, episode_returns, targets
         from civ5rl.engine.ppo_fast import RolloutCache
-        from civ5rl.provenance.common import file_sha256, ROOT
 
-        cfg = load_config("configs/rl-ppo-c2-h60-gae-gamma1-lambda099.json")
         values = np.linspace(0.1, 0.7, 263)
         episodes = [dict(chosen=[0] * len(values), old_value=values.tolist(),
                          actions=[[0] if i % 3 else [0, 1] for i in range(len(values))],
@@ -56,21 +54,32 @@ class PPOContinuationTests(unittest.TestCase):
         after = RolloutCache(real, "C", "cpu", resident=False, gamma=1, gae_lambda=.99)
         self.assertTrue(torch.equal(before.labels["returns"], after.labels["returns"]))
         self.assertFalse(torch.equal(before.labels["advantages"], after.labels["advantages"]))
-        e = cfg["experiment"]
-        parent_final = read_json(ROOT / e["parent_final_state"])
-        runner.validate_episode_origin(e, parent_final)
-        self.assertEqual(e["start_episode"], 64387)
-        for change in ({"start_episode": 64386}, {"episode_id_source": {**e["episode_id_source"], "state_sha256": "bad"}}):
-            with self.assertRaises(ValueError):
-                runner.validate_episode_origin({**e, **change}, parent_final)
+
+    def test_episode_frontier_prevents_reusing_collected_ids(self):
+        # Reusing IDs after branching from an older best checkpoint can silently
+        # reuse episode streams; no historical run files are needed to check it.
+        from civ5rl.provenance.common import file_sha256
+
+        parent_final = dict(next_episode=12, phase="collect", stop_reason="decisions_limit")
         with tempfile.TemporaryDirectory() as tmp:
-            record = read_json(ROOT / e["episode_id_source"]["run"])
+            state_path = Path(tmp) / "state.json"
+            run_path = Path(tmp) / "run.json"
+            write_json(state_path, dict(next_episode=18, phase="collect", stop_reason="no_development_gain"))
+            record = dict(config=dict(experiment=dict(parent_sha256="parent", start_episode=12)))
+            write_json(run_path, record)
+            source = dict(state=str(state_path), state_sha256=file_sha256(state_path),
+                          run=str(run_path), run_sha256=file_sha256(run_path))
+            experiment = dict(parent_sha256="parent", start_episode=18, episode_id_source=source)
+            runner.validate_episode_origin(experiment, parent_final)
+            for change in ({"start_episode": 17},
+                           {"episode_id_source": {**source, "state_sha256": "bad"}}):
+                with self.assertRaises(ValueError):
+                    runner.validate_episode_origin({**experiment, **change}, parent_final)
             record["config"]["experiment"]["parent_sha256"] = "unrelated"
-            path = Path(tmp) / "run.json"
-            write_json(path, record)
-            source = {**e["episode_id_source"], "run": str(path), "run_sha256": file_sha256(path)}
+            write_json(run_path, record)
+            source = {**source, "run_sha256": file_sha256(run_path)}
             with self.assertRaises(ValueError):
-                runner.validate_episode_origin({**e, "episode_id_source": source}, parent_final)
+                runner.validate_episode_origin({**experiment, "episode_id_source": source}, parent_final)
 
     def test_two_inherited_adam_origins_survive_update_rollback_and_resume(self):
         # A single origin silently corrupts the adapted critic's Adam clock.
