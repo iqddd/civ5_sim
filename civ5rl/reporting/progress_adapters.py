@@ -81,7 +81,7 @@ class PPOAdapter:
                            stages=[] if complete or type(self) is not PPOAdapter else [Stage("unmodeled_remaining_phases", 1, None)],
                            work_stopped=complete or bool(state.get("stop_reason")),
                            details=dict(collected=state.get("decisions"), updates=state.get("updates"),
-                                        adam_inherited=state.get("origin_Adam_counter", experiment.get("parent_optimizer_steps", 0)),
+                                        adam_inherited=state.get("origin_Adam_counters", state.get("origin_Adam_counter", experiment.get("parent_optimizer_steps", 0))),
                                         adam_new_accepted=state.get("optimizer_steps", 0),
                                         **({"adam_counters": grouped,
                                             "critic_preparation_steps": state.get("critic_progress", {}).get("steps", 0)}

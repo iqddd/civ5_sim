@@ -1,0 +1,53 @@
+{
+  "base_config": "configs/rl-ppo-c2-h60-gae-gamma1.json",
+  "output": "artifacts/rl/ppo-c2-h60-gae-gamma1-continuation",
+  "experiment": {
+    "parent": "artifacts/inputs/ppo-c2-h60-gae-gamma1/checkpoints/update-0147.pt",
+    "parent_label": "PPO C2 gamma=1 update 147",
+    "parent_sha256": "a103f23d9a31480553b790853bf4d30d60f15d43fdfaed50c62fac3940197e9d",
+    "parent_policy_hash": "61127d718f9c3f40a1f5cf3ee49db3ea40d88e0362dfa46ec2f7d8f8341ac940",
+    "parent_manifest": "artifacts/inputs/ppo-c2-h60-gae-gamma1/manifest.json",
+    "parent_manifest_sha256": "18019d9ea2ee5a36e3b890ab62e6733b76f786e01c2ed92f8ce708a8668ff272",
+    "parent_run": "artifacts/inputs/ppo-c2-h60-gae-gamma1",
+    "parent_final_state": "artifacts/inputs/ppo-c2-h60-gae-gamma1/state.json",
+    "parent_final_state_sha256": "8b1484be536c704971096a286d7a28a37e3e4ea1a5d0beedb77bacfd9d305cce",
+    "parent_run_sha256": "3d74b2068d146ab64af54b33f8c540ac8e797ab8c4df7420a589b5312a901ea8",
+    "parent_optimizer_steps": 0,
+    "parent_optimizer": "preserve",
+    "initial_value": "preserve_parent",
+    "decisions": 8388608,
+    "active_seconds": 36000,
+    "milestones": [
+      1048576,
+      2097152,
+      4194304,
+      6291456,
+      8388608
+    ],
+    "start_episode": 52399,
+    "training_namespace": "ppo_c2_h60_gae_gamma1_continuation_v1_training",
+    "shuffle_namespace": "ppo_c2_h60_gae_gamma1_continuation_v1_shuffle",
+    "torch_namespace": "ppo_c2_h60_gae_gamma1_continuation_v1_torch",
+    "critic_namespace": "ppo_c2_h60_gae_gamma1_continuation_v1_critic",
+    "early_gain_decisions": 2097152,
+    "early_gain_min_wins": 11,
+    "confirmation_min_win_rate_delta": null,
+    "confirmation_min_ci95_low": null,
+    "time_budget_check": null,
+    "historical_active_time_estimate": {
+      "decisions_per_second_range": [
+        247.12731879456942,
+        293.6466500980146
+      ],
+      "source": "artifacts/inputs/ppo-c2-h60-gae-gamma1/continuation-budget.json",
+      "source_sha256": "855bc8e1b0439fef248bc2edb0b75178a581b4475c639782b202113a3d8c5c04",
+      "includes": "Late completed gamma=1 full-cycle active-time windows including overhead; not a new-machine guarantee"
+    },
+    "protocol": "docs/rl-architecture.md",
+    "value_optimizer": "preserve",
+    "parent_optimizer_counters": {
+      "shared_actor": 25171,
+      "value": 12615
+    }
+  }
+}

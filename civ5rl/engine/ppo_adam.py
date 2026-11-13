@@ -1,10 +1,14 @@
-"""Adam layout and counters for a PPO branch with a readapted value head."""
+"""Named Adam groups and inherited counters for PPO branches."""
 
 import torch
 
 
 def adapts_value(config):
     return config.get("experiment", {}).get("initial_value") == "adapt_parent_first_rollout"
+
+
+def uses_grouped_adam(config):
+    return adapts_value(config) or bool(config.get("experiment", {}).get("parent_optimizer_counters"))
 
 
 def grouped_optimizer(policy, config, device):
@@ -22,6 +26,8 @@ def grouped_optimizer(policy, config, device):
 
 def expected_counters(state, extra_ppo_steps=0):
     accepted = int(state.get("optimizer_steps", 0)) + extra_ppo_steps
+    if "origin_Adam_counters" in state:
+        return {name: count + accepted for name, count in state["origin_Adam_counters"].items()}
     return dict(shared_actor=int(state.get("origin_Adam_counter", 0)) + accepted,
                 value=int(state.get("critic_progress", {}).get("steps", 0)) + accepted)
 

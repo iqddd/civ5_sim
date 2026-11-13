@@ -11,8 +11,16 @@ from civ5rl.deploy.operations import launch, package, pull, status, extend_remot
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "rent":
+        from civ5rl.deploy.vast_cpu import rent
+        code = rent(argv[1:])
+        if code:
+            raise SystemExit(code)
+        return code
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("rent", help="stock Vast create options plus optional --cpu-score-min")
     cmd = commands.add_parser("package")
     cmd.add_argument("--config", required=True)
     cmd.add_argument("--out", required=True)

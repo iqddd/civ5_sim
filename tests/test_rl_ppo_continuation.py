@@ -24,6 +24,66 @@ import test_rl_ppo_after_target_bc as fixtures
 
 
 class PPOContinuationTests(unittest.TestCase):
+    def test_two_inherited_adam_origins_survive_update_rollback_and_resume(self):
+        # A single origin silently corrupts the adapted critic's Adam clock.
+        from civ5rl.engine.ppo_adam import grouped_optimizer, check_counters, expected_counters
+
+        configure(17)
+        cfg = load_config("configs/rl-ppo-c2-h60-gae-gamma1-continuation.json")
+        cfg["model"]["variant"] = "C"
+        cfg["performance"].update(compile=False, resident_rollout=False)
+        cfg["ppo"].update(epochs=1, sequence_length=4, valid_tokens_per_minibatch=8,
+                          sequences_per_microbatch=1, stop_kl=0.05)
+        policy = Policy()
+        adam = grouped_optimizer(policy, cfg, "cpu")
+        for p in policy.parameters():
+            p.grad = torch.full_like(p, 0.01)
+        adam.step()
+        adam.zero_grad(set_to_none=True)
+        origins = cfg["experiment"]["parent_optimizer_counters"]
+        for group in adam.param_groups:
+            for p in group["params"]:
+                adam.state[p]["step"].fill_(origins[group["name"]])
+        saved = dict(model=deepcopy(policy.state_dict()), optimizer=deepcopy(adam.state_dict()),
+                     variant="C", state=dict(optimizer_steps=12527, critic_complete=True, phase="collect",
+                                             Adam_counters=origins))
+        inherited = runner.load_initial_optimizer(policy, saved, cfg)
+        assert_equal(inherited.state_dict(), saved["optimizer"])
+        rng = random.Random(987)
+        metrics = update(policy, inherited, self.episodes(policy), cfg, 0, "cpu", rng, _backend=BatchedBackend)
+        self.assertEqual(metrics["optimizer_steps"], 1)
+        state = dict(optimizer_steps=1, attempted_steps=1, rejected_steps=0, updates=1,
+                     phase="collect", decisions=8, origin_Adam_counters=origins,
+                     latest="checkpoints/update-0001.pt", critic_complete=True)
+        state["Adam_counters"] = expected_counters(state)
+        self.assertEqual(check_counters(inherited, state), dict(shared_actor=25172, value=12616))
+        weights, moments = deepcopy(policy.state_dict()), deepcopy(inherited.state_dict())
+        rejecting = deepcopy(cfg)
+        rejecting["ppo"]["stop_kl"] = 1e-12
+        rejected = update(policy, inherited, self.episodes(policy), rejecting, 0, "cpu", rng, _backend=BatchedBackend)
+        self.assertEqual(rejected["optimizer_steps"], 0)
+        assert_equal(policy.state_dict(), weights)
+        assert_equal(inherited.state_dict(), moments)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            identity = {"run_id": "two-origin-test"}
+            checkpoint.save(out / state["latest"], policy, inherited, state, rng, cfg, identity)
+            rng_before = checkpoint.capture_rng(rng)
+            restored_policy = Policy()
+            restored_adam = grouped_optimizer(restored_policy, cfg, "cpu")
+            restored_state = checkpoint.restore(out / state["latest"], restored_policy, restored_adam,
+                                                 rng, cfg, identity)
+            assert_equal(checkpoint.capture_rng(rng), rng_before)
+            assert_equal(restored_policy.state_dict(), weights)
+            assert_equal(restored_adam.state_dict(), moments)
+            self.assertEqual(check_counters(restored_adam, restored_state), state["Adam_counters"])
+            write_json(out / "state.json", state)
+            write_json(out / "run.json", dict(config=cfg, parent_Adam_counters=origins))
+            (out / "updates.jsonl").write_text(__import__("json").dumps(
+                dict(rollout=1, decisions=8, total_decisions=8, ppo=metrics)) + "\n")
+            self.assertEqual(verify_ppo_ledger(out)["adam"]["counters"], state["Adam_counters"])
+            self.assertEqual(verify_checkpoint_chain(out)["status"], "verified")
+
     def episodes(self, policy):
         episodes = fixtures.TargetBCPPOTests.episodes(self, policy)
         for ep in episodes:

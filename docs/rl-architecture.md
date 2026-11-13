@@ -215,6 +215,14 @@ resident inputs, 4 GiB для целиком кешируемого replay); б�
 допуска и после PPO. Host fallback переиспользует уже закреплённые части replay.
 `gather` ограничивает ширину дополнения команд текущим batch.
 
+After-target-BC runner также ставит телеметрические границы collection/PPO,
+освобождения rollout и оценки через `ResourceMonitor`. Пассивное измерение
+в `reporting/cuda_memory.py` читает allocator/private-pool counters и связывает
+pool IDs с GRU-кэшем и существующим Inductor manager; не изменяет аллокатор,
+графы или RNG и не выполняется внутри optimizer loop. Только при CUDA OOM
+сохраняется полный layout аллокатора. Формат и ограничения измерений описаны
+в [операторском справочнике](rl-operations.md#производительность-и-gpu).
+
 PPO выполняется единым циклом `engine/ppo.py` через `BatchedBackend` из
 `engine/ppo_fast.py`. Без batched-режима используются нерезидентные входы
 и одна последовательность на microbatch; это не отдельный ReferenceBackend.
@@ -431,6 +439,15 @@ optimizer loop разрешают его заново на безопасных 
 Config/checkpoints и накопленный расход не переписываются; лимиты решений/эпох
 не увеличиваются. CLI управления и SSH находятся в excluded reporting/deploy,
 исполняемый механизм бюджета и deadline hooks закреплены в execution identity.
+
+Для продолжения от уже адаптированного gamma=1 parent группы Adam сохраняются
+без новой подготовки critic. `experiment.parent_optimizer_counters` задаёт
+исходные `shared_actor`/`value`; `state.origin_Adam_counters` фиксирует их,
+а `Adam_counters` прибавляет к каждому только принятые PPO-шаги нового этапа.
+`parent_optimizer_steps=0` в таком профиле — не используемое одиночное смещение;
+проверка наследования опирается на именованные группы, их parameter_names,
+моменты и счётчики checkpoint. У старта с адаптацией value остаётся прежняя
+семантика critic_progress; сохранение групп не включает эту подготовку.
 
 ## Исполнение оценок
 

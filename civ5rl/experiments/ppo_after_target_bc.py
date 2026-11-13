@@ -35,7 +35,7 @@ from civ5rl.engine.ppo import (
     update,
 )
 from civ5rl.engine.ppo_fast import BatchedBackend
-from civ5rl.engine.ppo_adam import adapts_value, grouped_optimizer, expected_counters, check_counters
+from civ5rl.engine.ppo_adam import adapts_value, uses_grouped_adam, grouped_optimizer, expected_counters, check_counters
 from civ5rl.experiments.ppo_critic_adaptation import adapt_critic
 from civ5rl.engine.resources import ResourceMonitor
 from civ5rl.experiments.evaluation import paired_world_bootstrap
@@ -448,7 +448,7 @@ def save_boundary(out, policy, optimizer, state, shuffle, config, identity, cloc
     counters = TrainingCounters.from_dict(state_dict, protocol=KIND)
     state_dict.update(counters.to_state_dict(protocol=KIND))
     state_dict.setdefault("updates", 0)
-    if adapts_value(config):
+    if uses_grouped_adam(config):
         state_dict.pop("Adam_counter_total", None)
         state_dict["Adam_counters"] = expected_counters(state_dict)
     else:
@@ -465,8 +465,10 @@ def save_boundary(out, policy, optimizer, state, shuffle, config, identity, cloc
 
 def load_initial_optimizer(policy, saved, config):
     """Preserve a PPO parent's complete Adam, or start the original BC handoff."""
-    optimizer = optimizer_for(policy, config, "cpu")
     experiment = config["experiment"]
+    origins = experiment.get("parent_optimizer_counters")
+    optimizer = (grouped_optimizer(policy, config, "cpu") if origins
+                 else optimizer_for(policy, config, "cpu"))
     if experiment.get("parent_optimizer") != "preserve":
         if optimizer.state:
             raise ValueError("New PPO Adam must be empty")
@@ -478,15 +480,29 @@ def load_initial_optimizer(policy, saved, config):
     if saved["state"].get("phase") != "collect":
         raise ValueError("PPO parent must be a completed update boundary")
     source = saved["optimizer"]
+    if origins:
+        if (set(origins) != {"shared_actor", "value"}
+                or any(type(n) is not int or n < 0 for n in origins.values())):
+            raise ValueError("Invalid inherited Adam group counters")
+        if saved["state"].get("Adam_counters") != origins:
+            raise ValueError("Parent ledger and inherited Adam group counters differ")
+        expected_groups = optimizer.state_dict()["param_groups"]
+        if len(source["param_groups"]) != len(expected_groups):
+            raise ValueError("Parent Adam group count differs")
+        for actual, expected_group in zip(source["param_groups"], expected_groups, strict=True):
+            if any(actual.get(k) != expected_group[k] for k in ("name", "parameter_names", "params")):
+                raise ValueError("Parent Adam parameter layout differs")
     optimizer.load_state_dict(source)
     assert_equal(optimizer.state_dict(), source)
     expected = int(experiment["parent_optimizer_steps"])
-    if saved["state"]["optimizer_steps"] != expected:
+    if not origins and saved["state"]["optimizer_steps"] != expected:
         raise ValueError("Parent ledger and configured Adam counter differ")
     if len(optimizer.state) != len(list(policy.parameters())):
         raise ValueError("Parent Adam must contain all model and critic parameters")
+    expected_by_parameter = {p: origins[g["name"]] if origins else expected
+                             for g in optimizer.param_groups for p in g["params"]}
     for parameter, item in optimizer.state.items():
-        if float(item["step"]) != expected:
+        if float(item["step"]) != expected_by_parameter[parameter]:
             raise ValueError("Parent Adam counters differ")
         for name in ("exp_avg", "exp_avg_sq"):
             tensor = item[name]
@@ -579,7 +595,8 @@ def initialize(config, out):
         "parent_sha256": experiment["parent_sha256"],
         "parent_model_equal": True,
         "new_Adam_empty": not inherited,
-        "parent_Adam_counter": int(experiment["parent_optimizer_steps"]),
+        **({"parent_Adam_counters": experiment["parent_optimizer_counters"]}
+           if experiment.get("parent_optimizer_counters") else {"parent_Adam_counter": int(experiment["parent_optimizer_steps"])}),
         "critic_preserved": inherited,
         **({"value_optimizer": "reset_then_preserve", "Adam_counter_groups": ["shared_actor", "value"]}
            if adapts_value(config) else {}),
@@ -617,7 +634,8 @@ def initialize(config, out):
         "updates": 0,
         "decisions": 0,
         "next_episode": experiment["start_episode"],
-        "origin_Adam_counter": int(experiment["parent_optimizer_steps"]),
+        **({"origin_Adam_counters": dict(experiment["parent_optimizer_counters"])}
+           if experiment.get("parent_optimizer_counters") else {"origin_Adam_counter": int(experiment["parent_optimizer_steps"])}),
         "winless_streak": 0,
         "zero_accepted_streak": 0,
         "active_seconds": 0.0,
@@ -710,12 +728,12 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
     clock = ActiveClock(state, out)
     try:
         policy = make_policy(config, device)
-        optimizer = (grouped_optimizer(policy, config, device) if adapts_value(config)
+        optimizer = (grouped_optimizer(policy, config, device) if uses_grouped_adam(config)
                      else optimizer_for(policy, config, device))
         restored = checkpoint.restore(
             out / state["latest"], policy, optimizer, shuffle, config, identity
         )
-        if adapts_value(config):
+        if uses_grouped_adam(config):
             check_counters(optimizer, restored)
             # A value-only capsule, if present, is restored by adapt_critic below.
             state["critic_progress"] = restored.get("critic_progress", {})
@@ -823,6 +841,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                 inference_min_batch=runtime.get("inference_min_batch", 0),
                 inference_wait_seconds=runtime.get("inference_wait_seconds", 0),
             ) as collector,
+            monitor.capture_cuda_oom(policy),
         ):
             while not state["stop_reason"]:
                 critic_started = perf_counter() if state["phase"] == "critic" else None
@@ -841,6 +860,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                         state["stop_reason"] = "decision_limit"
                         break
                     monitor.mark("collection", rollout=state["rollouts"] + 1)
+                    monitor.record_cuda_memory(policy, "before_collection")
                     episodes, following, timing = collector.collect(
                         policy,
                         None,
@@ -886,6 +906,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                     episodes = load_rollout(out / state["pending_rollout"])
 
                 metrics = skipped_metrics(state["stop_reason"] or "active_time_limit")
+                monitor.record_cuda_memory(policy, "before_optimization", rollout=state["rollouts"])
                 if not state["stop_reason"] and state["phase"] == "critic":
                     monitor.mark("critic_preparation")
                     with CompilationClock() as compiler:
@@ -939,7 +960,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                             expected_counter = (int(state.get("origin_Adam_counter", 0))
                                                 + int(state["optimizer_steps"])
                                                 + int(step["committed_accepted_steps"]))
-                            if adapts_value(config):
+                            if uses_grouped_adam(config):
                                 grouped = check_counters(optimizer, state, int(step["committed_accepted_steps"]))
                             elif (
                                 counters != {expected_counter}
@@ -951,9 +972,9 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                             write_json(
                                 out / "first-accepted-step.json",
                                 {
-                                    **({"Adam_counters": grouped} if adapts_value(config)
+                                    **({"Adam_counters": grouped} if uses_grouped_adam(config)
                                        else {"Adam_counter": expected_counter}),
-                                    "inherited_Adam_counter": int(state.get("origin_Adam_counter", 0)),
+                                    "inherited_Adam_counter": state.get("origin_Adam_counters", int(state.get("origin_Adam_counter", 0))),
                                     "committed_accepted_steps": state["optimizer_steps"] + int(step["committed_accepted_steps"]),
                                     "step": step,
                                 },
@@ -990,6 +1011,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                     state["stop_reason"] = "active_time_limit"
                 del episodes
                 gc.collect()
+                monitor.record_cuda_memory(policy, "after_update_release")
                 clock.sync()
                 if state["active_seconds"] >= clock.limit(config):
                     state["stop_reason"] = state["stop_reason"] or "active_time_limit"
@@ -1040,6 +1062,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                 if due or (state["stop_reason"] and changed):
                     monitor.mark("evaluation")
                     development(config, plan, out, state, shuffle, clock)
+                    monitor.record_cuda_memory(policy, "after_evaluation")
                 if pause_due(out, "update", state["updates"]):
                     write_json(out / "status.json", {"status": "paused", "checkpoint": state["latest"]})
                     return
@@ -1050,6 +1073,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                     return
             if policy_hash(policy.state_dict()) not in state["evaluated"]:
                 development(config, plan, out, state, shuffle, clock)
+                monitor.record_cuda_memory(policy, "after_evaluation")
             clock.progress()
     finally:
         clock.progress()
@@ -1146,7 +1170,7 @@ def report(config, out):
         f"Лимит active: {state.get('active_seconds_limit', config['experiment']['active_seconds']):.0f} с; исходный бюджет {config['experiment']['active_seconds']} с; продления в active-budget.json.",
         f"Sampling rollouts {state['rollouts']}; PPO updates {state['updates']}; accepted/rejected Adam {state['optimizer_steps']}/{state['rejected_steps']}.",
         (f"Adam groups: {state.get('Adam_counters', expected_counters(state))}; critic preparation {state.get('critic_progress', {}).get('steps', 0)}; new PPO accepted {state['optimizer_steps']}."
-         if adapts_value(config) else f"Adam: inherited {state.get('origin_Adam_counter', 0)}; new accepted {state['optimizer_steps']}; total {state.get('origin_Adam_counter', 0) + state['optimizer_steps']}."),
+         if uses_grouped_adam(config) else f"Adam: inherited {state.get('origin_Adam_counter', 0)}; new accepted {state['optimizer_steps']}; total {state.get('origin_Adam_counter', 0) + state['optimizer_steps']}."),
         f"GPU {read_json(out / 'run.json')['GPU']}; T={config.get('policy_temperature', 1)}; max_rounds={max_rounds}; gamma={gamma}; gae_lambda={gae_lambda}; microbatch {config['ppo']['sequences_per_microbatch']}; обычный CP; reward 1/0/0.",
         "",
         f"| Решения | Checkpoint | W/D/L {eval_purpose} |",

@@ -146,12 +146,13 @@ def verify_ppo_ledger(directory, *, offsets=None):
         "stop_kl": threshold,
         "pending_decisions": state.get("decisions", 0) - totals["decisions"],
     }
-    if config.get("experiment", {}).get("initial_value") == "adapt_parent_first_rollout":
+    from civ5rl.engine.ppo_adam import uses_grouped_adam
+    if uses_grouped_adam(config):
         from civ5rl.engine.ppo_adam import expected_counters
         expected = expected_counters(state)
         if state.get("Adam_counters") != expected:
             raise ValueError("Grouped Adam counters differ from preparation + PPO")
-        result["adam"] = dict(inherited=adam_origin, new_accepted=totals["accepted"],
+        result["adam"] = dict(inherited=state.get("origin_Adam_counters", adam_origin), new_accepted=totals["accepted"],
                               preparation=state.get("critic_progress", {}).get("steps", 0),
                               counters=expected)
     elif adam_origin:
@@ -301,7 +302,8 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
         ]
         groups = value["optimizer"]["param_groups"]
         ids = [index for group in groups for index in group["params"]]
-        adapting = value["config"].get("experiment", {}).get("initial_value") == "adapt_parent_first_rollout"
+        from civ5rl.engine.ppo_adam import uses_grouped_adam
+        adapting = uses_grouped_adam(value["config"])
         if adapting:
             named = dict(policy.named_parameters())
             if [g.get("name") for g in groups] != ["shared_actor", "value"]:

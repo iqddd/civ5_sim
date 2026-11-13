@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
@@ -41,6 +42,51 @@ class ResourceMonitor:
         self.gpu_index = gpu_index
         self.session_id = uuid4().hex
         self.phase_stream = None
+        self.last_sample = None
+
+    def record_cuda_memory(self, policy, boundary, *, snapshot=False, **state):
+        """Read host counters between updates; failures never mask training errors."""
+        started = time.perf_counter()
+        try:
+            from civ5rl.reporting.cuda_memory import dump_oom_snapshot, sample_cuda_memory
+
+            row = sample_cuda_memory(policy)
+            if row is None:
+                return
+            with self.lock:
+                phase = self.state.copy()
+            recent = self.last_sample or {}
+            row.update(
+                schema=1, session_id=self.session_id, boundary=boundary,
+                timestamp_utc=datetime.now(UTC).isoformat(),
+                elapsed_seconds=time.monotonic() - self.started,
+                **{**phase, **state},
+                nvml_sample={key: recent.get(key) for key in (
+                    "timestamp_utc", "elapsed_seconds", "vram_used_bytes", "vram_total_bytes"
+                )},
+            )
+            if snapshot:
+                path = self.directory / f"cuda-oom-{self.session_id}-{time.monotonic_ns()}.json.gz"
+                try:
+                    dump_oom_snapshot(path)
+                    row["snapshot"] = path.name
+                except Exception as error:
+                    row["snapshot_error"] = repr(error)
+            row["sampling_seconds"] = time.perf_counter() - started
+            with (self.directory / "cuda-memory.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(row, allow_nan=False) + "\n")
+        except Exception as error:
+            self.errors["cuda_memory"] = f"{type(error).__name__}: {error}"
+
+    @contextmanager
+    def capture_cuda_oom(self, policy):
+        import torch
+
+        try:
+            yield
+        except torch.cuda.OutOfMemoryError:
+            self.record_cuda_memory(policy, "oom", snapshot=True)
+            raise
 
     def mark(self, phase, **state):
         with self.lock:
@@ -197,6 +243,7 @@ class ResourceMonitor:
         while True:
             try:
                 row = self.sample()
+                self.last_sample = row
                 self.stream.write(json.dumps(row, allow_nan=False) + "\n")
                 self.samples += 1
                 for key, value in row.items():

@@ -21,6 +21,20 @@ python tools/run_cp_imitation.py prepare-corpus --config configs/rl-v1.json --ou
 
 ## Анализ сохранённого запуска
 
+Для повторного просмотра открытой серии на тех же сохранённых картах,
+расстановках и seeds с новым checkpoint:
+
+```powershell
+python tools/ctl_rl.py play-cases --manifest SHOWCASE_MANIFEST --checkpoint CHECKPOINT --out NEW_MATCH_DIRECTORY
+python tools/view_combat.py NEW_MATCH_DIRECTORY --port 8767
+```
+
+`play-cases` принимает manifest серии `civ5rl.showcase` только с открытыми
+случаями и новым пустым OUT. Использует прежние правила CP и seeds, argmax,
+CUDA deterministic FP32, 8 workers/max batch 32/wait 0,001 с; проверяет каждый
+сохранённый replay и неизменность checkpoint. Это просмотр, не Development
+или Additional. Файлы исходной серии не изменяются.
+
 ```powershell
 python tools/ctl_rl.py audit --run RUN --out OUT
 python tools/ctl_rl.py compare --before BEFORE --after AFTER --expected-n 128 --out OUT --clusters 16 --samples 10000 --seed 20261103
@@ -270,6 +284,40 @@ Phase telemetry может включать неудачные попытки т
 включая отфильтрованные фазы. У after-target-BC report также формируются
 `performance.json/.md` и `performance-last10.json/.md`.
 
+При накопительном CUDA OOM сначала различают рост живых тензоров, резерв
+аллокатора и удержание CUDA Graphs: сопоставляют driver-free, allocated,
+reserved/inactive split на одинаковых границах updates. Один большой reserved
+не доказывает утечку, а устойчивый allocated не исключает расход графов.
+`empty_cache()` не освобождает живые приватные пулы графов; отключение проверки
+резерва не устраняет источник расхода памяти.
+
+Если подтверждённого исправления нет, согласованные плановые перезапуски
+выполняют через `request-pause --after-update`, дожидаются `paused`, затем
+`pull --keep-instance` и `launch --mode resume` на том же deployment. Обычная
+пауза не добавляет final evaluation. Сохраняются model/Adam/RNG, счётчики и
+потраченный active budget; новый процесс заново прогревает и компилирует графы.
+Интервал выбирают с запасом по наблюдённому тренду VRAM, не дожидаясь OOM.
+Не сбрасывать внутренние CUDA Graphs/компилятор в работающем шаге.
+
+After-target-BC PPO автоматически пишет `telemetry/cuda-memory.jsonl` перед
+collection, перед оптимизацией, после существующего `gc.collect()` и после
+оценки. Это чтение host-счётчиков аллокатора, включая private pools по pool ID,
+retry/OOM/device allocation counters, формы и pool IDs GRU-кэша. Счётчик записей
+Inductor и его pool ID доступны как необязательные version-specific metadata;
+это все графы устройства в текущем потоке, не только один spatial policy.
+Счётчики накоплены за процесс, не сбрасываются на каждом update. NVML-данные
+берутся из последней фоновой выборки с её собственным временем, не синхронно
+с границей. Не складывать allocated/reserved/private pools как независимые
+объёмы. Неподдерживаемые поля остаются null/status unavailable.
+
+Нормальные записи не запускают CUDA kernels, `synchronize()`, `.item()`,
+`empty_cache()` или memory history; стоимость чтения и записи мала, но не нулевая.
+`sampling_seconds` включает сбор данных, а не последующую сериализацию/запись.
+При CUDA OOM отдельно сохраняется сжатый layout аллокатора
+`telemetry/cuda-oom-SESSION-TIME.json.gz`, без предварительного включения истории
+каждой аллокации и её стеков. Эта более дорогая операция выполняется только
+после сбоя; ошибка диагностики не заменяет исходное исключение.
+
 ## Replay, полный цикл и диагностика
 
 При сравнении новых attention/backward ядер отдельно измеряют оператор и полный
@@ -463,7 +511,7 @@ Development 0/1/2/3/4 Mi и gate W0+11 на 2 Mi. Подготовка critic в
 запуск с компиляцией дал около 282 dec/s (около 4,13 часа при экстраполяции).
 Дополнительно учесть до 300 секунд подготовки и refresh; скорость новой машины
 не гарантируется. Отдельный benchmark и полный Development при подготовке
-не запускаются. Статус профиля — подготовлен, не запущен.
+не запускаются. Исторический запуск gamma1 завершён; результат и выбранный update 147 см. в ledger.
 
 Локальный запуск после отдельного согласования:
 
@@ -486,6 +534,27 @@ config и deployment на gamma1. Сначала выгрузить заверш
 Для окончательного завершения — `run`/`resume` с уже установленным stop_reason,
 затем pull, аудит и удаление только отдельно разрешённого инстанса.
 
+### Продолжение gamma=1 от update 147
+
+`configs/rl-ppo-c2-h60-gae-gamma1-continuation.json` — новый опыт, не resume
+завершённого gamma1. Родительские checkpoint/manifest/final state/run record
+зафиксированы в `artifacts/inputs/ppo-c2-h60-gae-gamma1/`. Сохраняются actor/shared
+Adam 25171 и value Adam 12615, critic не готовится повторно. Первый episode ID
+52399; новые namespaces и seed 17. Бюджет 8 Mi или 36000 active seconds;
+Development 0/1/2/4/6/8 Mi и gate W0+11 на 2 Mi. Нулевую оценку пересчитать
+на арендованной машине; при выборе нового кандидата обе модели получают
+один paired Additional-256. Test закрыт.
+
+Использовать последовательность package/tune/pull/run выше с новым config и
+отдельным deployment `artifacts/deployments/ppo-c2-h60-gae-gamma1-continuation-5090`.
+Для tune передать `--extra-input artifacts/rl/ppo-c2-h60-gae-gamma1/rollouts/latest.pt`.
+Родительский rollout служит только носителем открытых случаев подбора.
+Плановые перезапуски отключены; `--max-updates` и pause.request при запуске
+не задаются. Телеметрия cuda-memory включена; после 2–3 подтверждённых шагов
+проверки раз в 15 минут. После финальных оценок — pull, аудит, удаление инстанса.
+Прогноз по родительским поздним окнам 7,9–9,4 активного часа на 8 Mi, без
+гарантии новой машины. Оценки не расходуют active budget.
+
 ### CPU-фильтр будущей аренды
 
 Этот фильтр применяется только к задачам, которым требуется CPU-зависимая
@@ -504,7 +573,12 @@ Vast.ai, включая дробную долю. Не подставлять п�
 или физические ядра. 2067 — фиксированная база EPYC 7702 (100%); в формуле
 используются процентные пункты, например 229, а не 2,29. Для решения о допуске
 не округлять отношение. Это дополнительное правило отбора проекта; сама команда
-менеджера `search` этот вычисляемый фильтр пока не применяет. До аренды отсеивать
+менеджера `search` этот вычисляемый фильтр не применяет. Проектный вызов
+`python tools/remote_rl.py rent --cpu-score-min 1250` принимает остальные флаги
+штатного `create`, включая `--profile`, и накладывает CPU-допуск на каждый
+свежий отбор. Неизвестная доступная по цене модель останавливает выбор с
+перечнем для PassMark lookup, а не молча исключается. Без `--cpu-score-min`
+дополнительного CPU-фильтра нет (например, для BC). До аренды отсеивать
 неподходящие предложения и не выбирать их повторно по одной лишь низкой цене.
 
 Исходные Single Thread ниже предоставлены пользователем. Проценты округлены
@@ -534,9 +608,16 @@ Vast.ai, включая дробную долю. Не подставлять п�
 | AMD Ryzen 9 9900X | 4670 | 226% |
 | AMD Ryzen 9 7900X3D | 4117 | 199% |
 | AMD EPYC 7713 | 2648 | 128% |
+| AMD Ryzen 7 9800X3D | 4420 | 214% |
+| AMD EPYC 9115 | 3360 | 163% |
+| AMD EPYC 8224P | 2341 | 113% |
 
-Последние пять моделей дополнены по [PassMark Single Thread](https://www.cpubenchmark.net/singleThread.html)
+Threadripper 3960X, Ultra 7 270K Plus, Ryzen 9900X/7900X3D и EPYC 7713 дополнены по [PassMark Single Thread](https://www.cpubenchmark.net/singleThread.html)
 12 ноября 2026 года; исходные пользовательские значения выше не пересмотрены.
+Ryzen 9800X3D — [4420](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+9800X3D),
+EPYC 9115 — [3360](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9115),
+EPYC 8224P — [2341](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+8224P)
+добавлены по PassMark 13 ноября 2026 года.
 
 Например, EPYC 7313P с долей 6,4 получает 797,6 и не проходит, а Ryzen 9950X
 с долей 32 получает 7316,5 и проходит. После аренды фактическая quota/cpuset
