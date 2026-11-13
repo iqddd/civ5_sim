@@ -17,6 +17,10 @@ from civ5rl.reporting.snapshot import write_snapshot
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    cmd = commands.add_parser("play-cases")
+    cmd.add_argument("--manifest", type=Path, required=True)
+    cmd.add_argument("--checkpoint", type=Path, required=True)
+    cmd.add_argument("--out", type=Path, required=True)
     for name in (
         "snapshot",
         "performance",
@@ -70,7 +74,10 @@ def main(argv=None):
     cmd.add_argument("--exclude-compilation", action="store_true")
     cmd.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    if args.command == "progress":
+    if args.command == "play-cases":
+        from civ5rl.reporting.showcase import play_cases
+        result = play_cases(args.manifest, args.checkpoint, args.out)
+    elif args.command == "progress":
         from civ5rl.reporting.progress_process import watch_progress
         return watch_progress(run=args.run, deployment=args.deployment, watch=args.watch,
                               interval=args.interval, alpha=args.alpha,
