@@ -443,6 +443,15 @@ attack_preview начинается пустой. `origin_Adam_counters` нов�
 | Execution / resume / новые матчи | Замороженные свидетельства, затем текущие исполняемые исходники, config/corpus и среда |
 | Миграция | Отдельная именованная политика и allowlist; нельзя считать её обычным resume |
 
+`provenance/host_resume.py` задаёт узкую политику переноса paused PPO на другой
+Linux kernel при прежних architecture/glibc, Python/packages/CUDA/GPU и полном
+совпадении config/corpus. Нужна явная, привязанная к before/after identity запись
+`source-revisions/host-ID/`, сохраняющая checkpoint/state/ledger границы и архив
+изменённых файлов самого verifier. Исторический паспорт не заменяется.
+Все прочие execution sources должны совпадать; обычный resume без записи
+не разрешает отличие среды. Изменение физики или оптимизатора не относится
+к переносу хоста и не допускается этим механизмом.
+
 Из execution-role исключены Markdown, reporting/deploy, tests, read-only
 report/audit/inspect/benchmark/profiler tools и чистые отчётные модули.
 Core, engine, protocols, simulator/map/native, provenance и смешанные runners

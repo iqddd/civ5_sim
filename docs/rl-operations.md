@@ -507,6 +507,25 @@ Resume сохраняет model/Adam/RNG, потраченный бюджет и
 исторического каталога. Архивированные локальные оценки перед resume восстановите
 командой `restore-evaluations`.
 
+При переносе paused after-target-BC PPO на другой Linux-хост создайте новый
+deployment на том же CONFIG, повторите tuning и запустите:
+
+```powershell
+python tools/remote_rl.py launch --deployment NEW_DEPLOYMENT --mode resume --host-resume-reason "Transfer to another host requested by user"
+```
+
+Опция явно записывает `source-revisions/host-INSTANCE_ID/`: неизменённый
+checkpoint границы, state/ledger, полную новую identity и архив поддержки переноса.
+Паспорт, прежний sources.zip и исходные checkpoints не переписываются.
+Разрешено различие ядра Linux при той же архитектуре/glibc; Python, packages,
+CUDA, GPU, config и corpus остаются строгими. Изменения execution source допустимы
+только для добавления verifier `provenance/host_resume.py` и его вызова из
+`provenance/checkpoint.py`, с точными before/after hashes в записи.
+Модель, optimizer, алгоритм и эмулятор менять этой опцией нельзя. Без явной
+опции и проверенной записи несовпадающая identity по-прежнему блокирует resume.
+Для предварительной записи на уже подготовленном хосте есть
+`ctl_rl.py record-host-resume --run RUN --host-id INSTANCE_ID --reason REASON`.
+
 После финальных Development/Additional выполните `pull --keep-instance`.
 Проверьте delivery receipt и обязательные секции научного аудита; затем удалите
 только привязанный ID:

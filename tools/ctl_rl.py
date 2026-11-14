@@ -17,6 +17,10 @@ from civ5rl.reporting.snapshot import write_snapshot
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    cmd = commands.add_parser("record-host-resume")
+    cmd.add_argument("--run", type=Path, required=True)
+    cmd.add_argument("--host-id", required=True)
+    cmd.add_argument("--reason", required=True)
     for name in ("archive-evaluations", "restore-evaluations"):
         cmd = commands.add_parser(name)
         cmd.add_argument("--run", type=Path, required=True)
@@ -91,7 +95,10 @@ def main(argv=None):
     cmd.add_argument("--exclude-compilation", action="store_true")
     cmd.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    if args.command in ("archive-evaluations", "restore-evaluations"):
+    if args.command == "record-host-resume":
+        from civ5rl.reporting.host_resume import record_host_resume
+        result = record_host_resume(args.run, args.host_id, args.reason)
+    elif args.command in ("archive-evaluations", "restore-evaluations"):
         from civ5rl.reporting.evaluation_storage import archive_evaluations, restore_evaluations
         result = (archive_evaluations if args.command == "archive-evaluations" else restore_evaluations)(args.run)
     elif args.command == "play-cases":

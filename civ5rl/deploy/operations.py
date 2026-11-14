@@ -386,7 +386,7 @@ def _attach(directory, deployment, transport):
     return result
 
 
-def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime=None):
+def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime=None, host_resume_reason=None):
     directory = Path(directory).resolve()
     transport = transport or Transport()
     with RunLock(directory):
@@ -448,6 +448,8 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
                     "Confirmed comparable tuning of this exact package/config is required"
                 )
 
+        if host_resume_reason and mode != "resume":
+            raise ValueError("--host-resume-reason applies only to resume")
         sequence = len(deployment["operations"])
         job = {
             "mode": mode,
@@ -487,6 +489,9 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
                     "--runtime-config",
                     deployment["remote_root"] + "/tuning/recommended-runtime.json",
                 ]
+            if host_resume_reason:
+                worker_args += ["--host-resume-id", str(deployment["instance"]["instance_id"]),
+                                "--host-resume-reason", host_resume_reason]
             for key, value in (evaluation_runtime or {}).items():
                 if key not in {"device", "workers", "max_batch", "wait_seconds"}:
                     raise ValueError(f"Unknown evaluation runtime key {key!r}")

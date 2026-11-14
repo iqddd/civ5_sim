@@ -12,6 +12,27 @@ from civ5rl.provenance import checkpoint
 
 
 class PassportSourceRoleTests(unittest.TestCase):
+    def test_host_transfer_cannot_silently_change_math_or_dependencies(self):
+        # A blanket environment bypass would silently permit a different training run.
+        from copy import deepcopy
+        from civ5rl.provenance.host_resume import host_delta
+        before = dict(platform="Linux-6.8-generic-x86_64-with-glibc2.39", python="3.13.16",
+                      packages={"torch": "2.15.0"}, cuda="13.2", gpu="RTX 5090",
+                      config_hash="config", corpus_hash="cases",
+                      source_hashes={"civ5rl/core/model.py": "unchanged"})
+        after = deepcopy(before)
+        after["platform"] = "Linux-7.0-generic-x86_64-with-glibc2.39"
+        self.assertEqual(host_delta(before, after), {})
+        changed = deepcopy(after)
+        changed["source_hashes"]["civ5rl/core/model.py"] = "different"
+        with self.assertRaises(ValueError):
+            host_delta(before, changed)
+        changed = deepcopy(after)
+        changed["packages"]["torch"] = "different"
+        with self.assertRaises(ValueError):
+            host_delta(before, changed)
+        self.assertEqual(before["source_hashes"], {"civ5rl/core/model.py": "unchanged"})
+
     def fixture(self, root):
         names = {
             "civ5rl/core/model.py": "model = 1\n",

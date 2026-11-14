@@ -172,7 +172,8 @@ def verify_execution_passport(directory, config, manifest):
     with tempfile.TemporaryDirectory(prefix="civ5-identity-") as temporary:
         current = passport(temporary, config, manifest)
     if not same_execution_identity(frozen, current):
-        raise ValueError("Training source/corpus/environment identity changed")
+        from civ5rl.provenance.host_resume import require_host_revision
+        require_host_revision(directory, frozen, current)
     return frozen
 
 

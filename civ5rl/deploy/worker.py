@@ -52,6 +52,8 @@ def main(argv=None, *, root=ROOT):
     parser.add_argument("--evaluation-workers", type=int)
     parser.add_argument("--evaluation-max-batch", type=int)
     parser.add_argument("--evaluation-wait-seconds", type=float)
+    parser.add_argument("--host-resume-id")
+    parser.add_argument("--host-resume-reason")
     args = parser.parse_args(argv)
 
     root = Path(root).resolve()
@@ -74,6 +76,12 @@ def main(argv=None, *, root=ROOT):
     has_progress = any(
         (output / name).exists() for name in ("state.json", "collection.json", "run.json")
     )
+    if args.host_resume_reason:
+        if args.mode != "resume" or kind != "rl01.ppo_after_target_bc":
+            raise ValueError("Host resume revision is supported only for paused after-target-BC PPO")
+        from civ5rl.reporting.host_resume import record_host_resume
+        revision = record_host_resume(output, args.host_resume_id, args.host_resume_reason)
+        print(json.dumps({"host_resume": revision}), flush=True)
 
     if args.mode == "tune":
         if has_progress:
