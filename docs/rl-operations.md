@@ -444,10 +444,12 @@ milestones и результаты конкретных опытов наход�
 `vastai-instance-manager`; проектный wrapper добавляет CPU-допуск:
 
 ```powershell
-python tools/remote_rl.py rent --profile 5090 --parallel 2 --cpu-score-min 1250 --save-instance .tmp/instance.json
+python tools/remote_rl.py rent --profile 5090 --parallel 2 --cpu-score-min 1250
 ```
 
 Остальные согласованные фильтры передавайте именованными флагами менеджера.
+Из строки `SUCCESS` сохраните отдельный JSON подключения с `instance_id`,
+`host` и `port`; этот файл передаётся в `package --instance`.
 По умолчанию проекта готовятся два параллельных кандидата; сохраняется один
 успешный, остальные удаляются. Для CPU-зависимых фаз, включая PPO collection,
 требуется `cpu_cores_effective * (100 * SingleThread / 2067) >= 1250`.
