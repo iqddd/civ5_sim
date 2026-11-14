@@ -242,6 +242,12 @@
       "single_thread": 2950,
       "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9354P+Emb",
       "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "Intel Xeon w5-3433",
+      "single_thread": 2498,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=Intel+Xeon+w5-3433&id=6078",
+      "provenance": "PassMark lookup 2026-11-14"
     }
   ]
 }
