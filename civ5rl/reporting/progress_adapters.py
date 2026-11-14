@@ -123,9 +123,10 @@ class TargetBCPPOAdapter(PPOAdapter):
             additional = seconds * 512 / matches if seconds is not None and matches else None
             observation.stages.append(Stage("additional_256_two_policies", 1, additional, conditional=True))
         observation.details["pending_development_points"] = pending
-        observation.details["early_gain_required_wins"] = state.get("early_gain_required_wins")
+        observation.details["early_gain_required_wins"] = state.get("early_gain_required_wins") if experiment.get("early_gain_enabled", True) else None
+        observation.details["turn_reset_mode"] = cfg.get("environment", {}).get("turn_reset_mode", "legacy")
         observation.details["evaluation_runtime"] = source.read("evaluation-runtime.json", {}).get("runtime")
-        observation.warnings.append("Additional-256 depends on selection and the experiment's development gate.")
+        observation.warnings.append("Additional-256 depends on selection" + (" and the experiment's development gate." if experiment.get("early_gain_enabled", True) else "; no continuation gate in this experiment."))
         return observation
 
 

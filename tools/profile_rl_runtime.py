@@ -280,6 +280,18 @@ def main():
                 from civ5sim.engine import digest
 
                 config = load_config(args.config)
+                from copy import deepcopy
+                from civ5rl.protocols.turn_reset import mode
+                selected_mode = mode(config)
+                # Saved episodes carry layouts only in collection benchmarks, never replay labels.
+                # Build fresh rollouts in the requested physics without changing source evidence.
+                episodes = deepcopy(episodes)
+                for episode in episodes:
+                    scenario = episode["spec"]["scenario"]
+                    if selected_mode != "legacy" or "turn_reset_mode" in scenario:
+                        scenario["turn_reset_mode"] = selected_mode
+                    episode["spec"]["scenario_hash"] = digest(scenario)
+                result["turn_reset_mode"] = selected_mode
                 policy = load_collection_policy(config, args.checkpoint)
                 manifest = case_manifest(
                     [ep["spec"] for ep in episodes],

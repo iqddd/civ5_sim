@@ -1,0 +1,43 @@
+{
+  "base_config": "configs/rl-ppo-c2-h60-gae-gamma1-lambda099-attack-preview.json",
+  "output": "artifacts/rl/ppo-c2p-h60-end-turn",
+  "environment": {
+    "turn_reset_mode": "end_turn"
+  },
+  "model": {
+    "expected_parameter_count": 2167362
+  },
+  "experiment": {
+    "parent": "artifacts/inputs/ppo-c2p-end-turn-parent/checkpoints/update-0171.pt",
+    "parent_label": "C2P attack preview update 171, legacy parent",
+    "parent_sha256": "ca34ae02dcfa9784155a1b977e2def188dccb8d672425402b27b528735b1f9a9",
+    "parent_policy_hash": "bf5a2ab7c4f421192566b2bea0c708404345455b81ae189aceb2b213d84378b2",
+    "parent_run": "artifacts/inputs/ppo-c2p-end-turn-parent",
+    "parent_run_sha256": "d708d49e0ef04812de792e7116f41923e70f04233cfd613bc11520c0c1b32614",
+    "parent_manifest": "artifacts/inputs/ppo-c2p-end-turn-parent/manifest.json",
+    "parent_manifest_sha256": "18019d9ea2ee5a36e3b890ab62e6733b76f786e01c2ed92f8ce708a8668ff272",
+    "parent_final_state": "artifacts/inputs/ppo-c2p-end-turn-parent/state.json",
+    "parent_final_state_sha256": "3c8b3aa7905e986ba358be24088d1bfc2a3c885fc9875ad4ff8425c1f1b78313",
+    "parent_optimizer_counters": {
+      "shared_actor": 41882,
+      "value": 29326,
+      "attack_preview": 12492
+    },
+    "model_extension": null,
+    "episode_id_source": null,
+    "start_episode": 100008,
+    "decisions": 2097152,
+    "active_seconds": 10800,
+    "milestones": [
+      1048576,
+      2097152
+    ],
+    "early_gain_enabled": false,
+    "early_gain_min_wins": null,
+    "historical_active_time_estimate": null,
+    "training_namespace": "ppo_c2p_end_turn_v1_training",
+    "shuffle_namespace": "ppo_c2p_end_turn_v1_shuffle",
+    "torch_namespace": "ppo_c2p_end_turn_v1_torch",
+    "critic_namespace": "ppo_c2p_end_turn_v1_critic"
+  }
+}

@@ -1,0 +1,247 @@
+{
+  "schema": 1,
+  "baseline_single_thread": 2067,
+  "minimum_score": 1250,
+  "processors": [
+    {
+      "name": "Intel Core Ultra 9 285K",
+      "single_thread": 5087,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+Ultra+9+285K",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "AMD Ryzen 9 9950X",
+      "single_thread": 4726,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+9950X",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "Intel Core i9-13900K",
+      "single_thread": 4594,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i9-13900K",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "AMD Threadripper PRO 9975WX",
+      "single_thread": 4428,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Threadripper+PRO+9975WX",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "AMD Threadripper PRO 7975WX",
+      "single_thread": 3989,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Threadripper+PRO+7975WX",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "AMD EPYC 9554",
+      "single_thread": 2774,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9554",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "AMD EPYC 9124",
+      "single_thread": 2613,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9124",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "AMD EPYC 7702",
+      "single_thread": 2067,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7702",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "AMD EPYC 7302",
+      "single_thread": 2024,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7302",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "AMD EPYC 7532",
+      "single_thread": 2015,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7532",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "AMD EPYC 7313P",
+      "single_thread": 2576,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7313P",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "AMD EPYC 7542",
+      "single_thread": 1957,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7542",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "AMD EPYC 9135",
+      "single_thread": 3228,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9135",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "AMD EPYC 9355",
+      "single_thread": 3747,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9355",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "Intel Core i9-14900KF",
+      "single_thread": 4688,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i9-14900KF",
+      "provenance": "User-provided Single Thread score; retained without refreshing"
+    },
+    {
+      "name": "AMD Ryzen Threadripper 3960X",
+      "single_thread": 2681,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+Threadripper+3960X",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "Intel Core Ultra 7 270K Plus",
+      "single_thread": 5073,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+Ultra+7+270K+Plus",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD Ryzen 9 9900X",
+      "single_thread": 4670,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+9900X",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD Ryzen 9 7900X3D",
+      "single_thread": 4117,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+7900X3D",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD EPYC 7713",
+      "single_thread": 2648,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7713",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD EPYC 7402P",
+      "single_thread": 1992,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7402P",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD EPYC 7B13",
+      "single_thread": 2555,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7B13",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD Ryzen 7 9800X3D",
+      "single_thread": 4420,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+9800X3D",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD EPYC 9115",
+      "single_thread": 3360,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9115",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD EPYC 8224P",
+      "single_thread": 2341,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+8224P",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "Intel Core i5-13600K",
+      "single_thread": 4110,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i5-13600K",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "Intel Core i7-13700K",
+      "single_thread": 4324,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i7-13700K",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD EPYC 9254",
+      "single_thread": 2998,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9254",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD Ryzen 7 3700X",
+      "single_thread": 2654,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+3700X",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD Ryzen 9 9950X3D",
+      "single_thread": 4737,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+9950X3D",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD Ryzen 9 5950X",
+      "single_thread": 3476,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+5950X",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD Ryzen 9 7940HX with Radeon Graphics",
+      "single_thread": 3925,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+7940HX+with+Radeon+Graphics",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD EPYC 7642",
+      "single_thread": 2008,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7642",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "Intel Core i7-14700K",
+      "single_thread": 4453,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i7-14700K",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD EPYC 9354",
+      "single_thread": 2766,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9354",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD Ryzen 7 7700",
+      "single_thread": 4050,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+7700",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD EPYC 7763",
+      "single_thread": 2518,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7763",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD EPYC 9135 Emb",
+      "single_thread": null,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9135+Emb",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD EPYC 7282",
+      "single_thread": 1958,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7282",
+      "provenance": "PassMark lookup recorded in project reference"
+    },
+    {
+      "name": "AMD EPYC 9354P Emb",
+      "single_thread": 2950,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9354P+Emb",
+      "provenance": "PassMark lookup recorded in project reference"
+    }
+  ]
+}

@@ -10,7 +10,9 @@ KIND = "rl01.ppo_after_target_bc"
 
 
 def validate_profile(config):
-    if config.get("output") == "artifacts/rl/ppo-c2-h60-gae-gamma1-lambda099-attack-preview":
+    if config.get("output") == "artifacts/rl/ppo-c2p-h60-end-turn":
+        profile = "rl-ppo-c2p-h60-end-turn.json"
+    elif config.get("output") == "artifacts/rl/ppo-c2-h60-gae-gamma1-lambda099-attack-preview":
         profile = "rl-ppo-c2-h60-gae-gamma1-lambda099-attack-preview.json"
     elif config.get("output") == "artifacts/rl/ppo-c2-h60-gae-gamma1-lambda099":
         profile = "rl-ppo-c2-h60-gae-gamma1-lambda099.json"
@@ -207,6 +209,8 @@ def record_optimization(state, metrics, config):
 
 
 def check_development_gain(state, config):
+    if config["experiment"].get("early_gain_enabled", True) is False:
+        return
     boundary = config["experiment"]["early_gain_decisions"]
     required = [
         point for point in config["experiment"]["milestones"] if point <= boundary

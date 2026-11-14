@@ -2,6 +2,7 @@
 
 import argparse
 import importlib.util
+import json
 import math
 import re
 import sys
@@ -17,13 +18,12 @@ def normalize_cpu(name):
 
 def cpu_ratings(document):
     ratings = {}
-    for line in Path(document).read_text(encoding="utf-8").splitlines():
-        fields = [part.strip() for part in line.strip("|").split("|")]
-        if line.startswith("| ") and len(fields) == 3:
-            if fields[1].isdigit():
-                ratings[normalize_cpu(fields[0])] = int(fields[1])
-            elif fields[1] == "unrated":
-                ratings[normalize_cpu(fields[0])] = None
+    data = json.loads(Path(document).read_text(encoding="utf-8"))
+    for item in data["processors"]:
+        name, score = normalize_cpu(item["name"]), item["single_thread"]
+        if name in ratings or (score is not None and (type(score) is not int or score <= 0)):
+            raise ValueError(f"Invalid/duplicate CPU rating: {item['name']}")
+        ratings[name] = score
     return ratings
 
 
@@ -57,7 +57,7 @@ def rent(argv):
     if args.cpu_score_min is not None:
         config = manager.config_from_args(manager.parser().parse_args(["create", *stock_args]))
         select = manager.select_candidates
-        document = Path(__file__).resolve().parents[2] / "docs/rl-operations.md"
+        document = Path(__file__).resolve().parents[2] / "configs/vast-cpu-ratings.json"
 
         def filtered(offers, banned):
             affordable = [o for o in select(offers, banned) if manager.price_allowed(o.get("dph_total"), config)]

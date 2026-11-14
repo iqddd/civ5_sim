@@ -411,7 +411,9 @@ def audit_run(directory, output):
         else:
             try:
                 try:
-                    result = _audit_stable(directory)
+                    from civ5rl.reporting.evaluation_storage import readable_evaluations
+                    with readable_evaluations(directory):
+                        result = _audit_stable(directory)
                 except ARTIFACT_ERRORS as exc:
                     result = {
                         "status": "failed",

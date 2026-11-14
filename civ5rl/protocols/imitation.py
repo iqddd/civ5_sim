@@ -117,6 +117,7 @@ def run_imitation_match(config, case, agents, directory):
                 case["armies"],
                 30,
                 max_calls_per_turn=config["max_calls_per_turn"],
+                turn_reset_mode=case["scenario"].get("turn_reset_mode", "legacy"),
             ),
             agents,
             scenario=case["scenario"],

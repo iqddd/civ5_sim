@@ -243,6 +243,7 @@ def play_case(
                 case["armies"],
                 int(case["max_rounds"]),
                 max_calls_per_turn=config["environment"]["max_calls_per_turn"],
+                turn_reset_mode=case["scenario"].get("turn_reset_mode", "legacy"),
             ),
             agents,
             scenario=case["scenario"],

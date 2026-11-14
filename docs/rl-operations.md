@@ -1,14 +1,11 @@
 # Работа с RL-запусками
 
-Сверено с CLI и реализацией 11 ноября 2026 года. Команды выполняются из корня
-репозитория в окружении опыта. `RUN`, `CONFIG`, `CHECKPOINT`, `ROLLOUT` и
+Команды выполняются из корня репозитория в окружении опыта. `RUN`, `CONFIG`, `CHECKPOINT`, `ROLLOUT` и
 `OUT` ниже — подставляемые пути. Условия обучения, parent и критерии выбора
 модели ищите в [журнале](experiment-ledger.md), устройство паспортов — в
 [архитектуре](rl-architecture.md#паспорта-исходники-и-resume).
 
-Общий пайплайн RL-01 и его отдельные CLI обучения, управления, оценки,
-профилирования и отчётов удалены. Текущие BC/PPO runners исполняют фазы своих
-протоколов; они не являются способом возобновить старый пилот с изменённым кодом.
+Текущие BC/PPO runners исполняют фазы своих протоколов.
 Для генерации корпуса служит отдельная фаза без обучения:
 
 ```powershell
@@ -64,6 +61,39 @@ Training win rate объединяется по эпизодам, PPO-метри
 `RUN/snapshots/`, `RUN/interim-snapshot/`. Исходные checkpoints, RNG,
 ledger и результаты не редактируются. Неполный исторический формат не
 становится сертифицированным от наличия Markdown-отчёта.
+
+### Замена команды в policy–CP реплее
+
+```powershell
+python tools/ctl_rl.py branch-replay --source MATCH_DIRECTORY --command 30 --action move --unit 8 --target 4 3 --check-only
+python tools/ctl_rl.py branch-replay --source MATCH_DIRECTORY --command 30 --action move --unit 8 --target 4 3 --checkpoint CHECKPOINT --out NEW_MATCH_DIRECTORY
+```
+
+Номер команды — с единицы, координаты — с нуля. Для `skip`/`fortify` цель не нужна.
+`--continue-to-round 90` вместо замены продолжает полный сохранённый префикс
+до увеличенного лимита; `--command` не нужен. Model/CP reset получают исходный
+горизонт, поэтому у C2P после60 раундов elapsed=1 и remaining=0 (clamp),
+а реальные state.turn,таймер контактов и хронология продолжаются.
+`--forbid-move-to X Y` вместо замены маскирует цели move/swap на заданную
+клетку для всех юнитов модели с `--command` до конца текущего хода. На
+следующих ходах ограничение снимается; промежуточные клетки пути не запрещены.
+Forward получает исходный список легальных действий, маска применяется к logits
+при выборе argmax. Ограничение и номер хода записываются в experiment реплея.
+Вместо `--action/--unit/--target` можно указать `--actions FILE.json`: непустой
+JSON-массив команд `{ "kind": "move", "unit": 8, "target": 39 }`, где target —
+линейный индекс клетки `y*width+x`. Вся последовательность исполняется подряд
+начиная с `--command`, затем управление возвращается модели. Каждая команда
+проверяется до загрузки модели; переход на сторону CP внутри последовательности запрещён.
+`--check-only` проверяет точный префикс и законность, не загружает модель и не
+пишет результаты. Исполнение требует новый OUT, `case.json` рядом с исходным
+реплеем и checkpoint той же политики. По умолчанию CUDA FP32 argmax без AMP/TF32;
+`--device cpu` задаётся явно. Сохраняются seeds и режим сброса хода источника.
+Память модели восстанавливается по исполненным командам, включая прежние ручные
+замены; CP исполняет и сверяет свои решения префикса, сохраняя координатор.
+Несовпадение результатов/hash префикса или незаконная замена блокируют ветку.
+Выход содержит replay/result/final, case, происхождение и проверку реплея.
+Модуль относится к reporting и не меняет training execution identity. Команда
+не открывает браузер; новая ветка в каталоге серии появляется после обновления панели.
 
 ## Прогресс процесса, EMA и ETA
 
@@ -404,296 +434,98 @@ rollout и фиксируются как условия исполнения.
 
 ## Удалённое исполнение
 
-### Подготовленный профиль продолжения C2 от update 150
+Выберите научный CONFIG и отдельный пустой DEPLOYMENT. Условия, parent,
+milestones и результаты конкретных опытов находятся в [ledger](experiment-ledger.md)
+и конфигурациях; эта инструкция задаёт только порядок исполнения.
 
-`configs/rl-ppo-c2-h60-gae-continuation.json` — отдельный новый опыт, а не resume
-исторического каталога. Родительские входы извлечены из
-`artifacts/rl/ppo-c2-h60-gae/ppo-c2-h60-gae.7z` в
-`artifacts/inputs/ppo-c2-h60-gae/`: `checkpoints/update-0150.pt`, `manifest.json`,
-`state.json`, `run.json`, `derived/review-20261111/analysis.json`.
-Hashes и проверка подготовки: [отчёт](../artifacts/preparations/ppo-c2-h60-gae-continuation/report.md).
-Переупаковка родительских результатов, извлечение evaluation или test не нужны.
-`stage_inputs` автоматически включает родителя, manifest, конечный state,
-run record, исторический прогноз и только открытые карты.
+### Аренда и CPU-допуск
 
-Подготовка кода не запускает научный каталог или полный Development. Будущие
-команды ниже исполняются только после отдельного согласования запуска;
-package требует чистого дерева и отправленного commit, инстанс выбирается
-отдельно по согласованному пресету. Для tune нужен существующий совместимый
-rollout-носитель (`CARRIER`); он только задаёт фиксированные открытые случаи.
+Аренда требует согласованного профиля и фильтров. Используйте штатный
+`vastai-instance-manager`; проектный wrapper добавляет CPU-допуск:
 
 ```powershell
-$cfg = 'configs/rl-ppo-c2-h60-gae-continuation.json'
-$dep = 'artifacts/deployments/ppo-c2-h60-gae-continuation'
-.venv/Scripts/python.exe tools/remote_rl.py package --config $cfg --out $dep --instance .tmp/instance.json --extra-input CARRIER
-.venv/Scripts/python.exe tools/remote_rl.py launch --deployment $dep --mode tune
-.venv/Scripts/python.exe tools/remote_rl.py pull --deployment $dep --keep-instance
-.venv/Scripts/python.exe tools/remote_rl.py launch --deployment $dep --mode run --evaluation-device cuda --evaluation-workers 8 --evaluation-max-batch 32 --evaluation-wait-seconds 0.001
-.venv/Scripts/python.exe tools/ctl_rl.py progress --deployment $dep --watch --interval 900
+python tools/remote_rl.py rent --profile 5090 --parallel 2 --cpu-score-min 1250 --save-instance .tmp/instance.json
 ```
 
-Если процесс оборвался, сначала `pull --keep-instance`, затем:
+Остальные согласованные фильтры передавайте именованными флагами менеджера.
+По умолчанию проекта готовятся два параллельных кандидата; сохраняется один
+успешный, остальные удаляются. Для CPU-зависимых фаз, включая PPO collection,
+требуется `cpu_cores_effective * (100 * SingleThread / 2067) >= 1250`.
+Используется доступная логическая квота конкретного offer, включая дробную,
+а не полное число потоков модели CPU. Для одного BC этот фильтр не нужен.
 
-```powershell
-.venv/Scripts/python.exe tools/remote_rl.py launch --deployment $dep --mode resume --evaluation-device cuda --evaluation-workers 8 --evaluation-max-batch 32 --evaluation-wait-seconds 0.001
-```
+Единственный машинный справочник —
+[configs/vast-cpu-ratings.json](../configs/vast-cpu-ratings.json): модель,
+Single Thread, источник. Неизвестный CPU останавливает отбор: найдите точную
+модель в PassMark Single Thread и добавьте запись перед повтором аренды.
+`single_thread: null` означает выполненный поиск без подтверждённого результата;
+такая модель не допускается. Не подменяйте Emb обычной моделью или Single Thread
+значением Multi Thread. CPU-балл — эвристика отбора; реальная quota/cpuset и
+скорость фиксируются на арендованной машине при tuning.
 
-Runtime оценок закреплён также конфигом: отсутствие флагов не включает auto,
-а отличающиеся значения отклоняются. Перед первым сбором выполняется новая
-CUDA/FP32 нулевая Development-512, задающая W0 и постоянный порог W0+11.
-Отдельный benchmark не нужен: эта оценка даёт длительность полного Development.
-Исторические поздние окна дают 5,8–7,2 активного часа на 8 Mi; оценки и возможные
-сбои добавляют wall time, на новой машине скорость не гарантируется.
-Первые 2–3 принятых шага проверяются короткими проверками, затем — раз в 15 минут.
+### Подготовка, tuning и запуск
 
-После окончательных Development/Additional выгрузить и проверить артефакты:
-
-```powershell
-.venv/Scripts/python.exe tools/remote_rl.py pull --deployment $dep --keep-instance
-.venv/Scripts/python.exe tools/ctl_rl.py audit --run artifacts/rl/ppo-c2-h60-gae-continuation --out artifacts/rl/ppo-c2-h60-gae-continuation/derived/audit
-```
-
-После подтверждения синхронизации и обязательных секций аудита удалить привязанный
-инстанс штатной командой Vast.ai из раздела ниже. Повтор `resume` завершённого
-обучения не начинает новые решения; завершённый Additional берётся из сохранённого
-результата. Контрольные проверки подготовки выполняются в отдельном временном
-каталоге и не являются ни первым rollout опыта, ни нулевой оценкой.
-
-`tools/remote_rl.py` работает с уже существующим инстансом поверх `remote-python-ssh`.
-Аренда и выбор машины выполняются отдельно; по умолчанию проекта при создании
-Vast-инстанса готовятся два кандидата (`--parallel 2`). При запуске удалённого
-опыта не нужно перечитывать исходники `civ5rl/deploy/` или `tools/tune_rl_collection.py` —
-выполняется сразу штатная последовательность команд ниже.
-
-На Windows инструменты репозитория (`tools/remote_rl.py`, `tools/ctl_rl.py`)
-запускаются через `.venv\Scripts\python.exe` (где установлены `lupa`, `torch` и
-зависимости симулятора), а менеджер инстансов `vastai_instance.py` — через
-системный `python` (где установлен `keyring` для Vast API ключа; поэтому при
-завершении удобнее вызвать `pull --keep-instance` через `.venv\Scripts\python.exe`,
-а затем явно удалить инстанс через `vastai_instance.py delete <ID>`). Для
-`rl01.ppo_after_target_bc` при упаковке с `--mode tune` в `--extra-input`
-передаётся готовый роллаут-носитель расстановок (например,
-`artifacts/rl/ppo-target-bc-t05/rollouts/rollout-0001.pt`).
+На Windows команды проекта выполняйте через `.venv\Scripts\python.exe`,
+менеджер Vast — через системный Python с keyring. `package` требует чистого
+рабочего дерева и HEAD, отправленного в origin. Parent checkpoint, manifest,
+конечные state/run и только открытые карты упаковываются автоматически.
+Для after-target-BC PPO нужен CARRIER — сохранённый rollout с открытыми
+расстановками для tuning; его веса и labels не становятся новым training rollout.
+Collection benchmark применяет режим физики текущего CONFIG к копии сценариев.
 
 ```powershell
 git push origin HEAD
-python C:\Users\Roman\.codex\skills\vastai-instance-manager\scripts\vastai_instance.py create --profile 4090 --parallel 2 --save-instance .tmp/instance.json
-.venv\Scripts\python.exe tools/remote_rl.py package --config configs/rl-ppo-c2-h60-gae.json --out artifacts/deployments/ppo-c2-h60-gae --instance .tmp/instance.json --extra-input artifacts/rl/ppo-target-bc-t05/rollouts/rollout-0001.pt
-.venv\Scripts\python.exe tools/remote_rl.py launch --deployment artifacts/deployments/ppo-c2-h60-gae --mode tune
-.venv\Scripts\python.exe tools/remote_rl.py pull --deployment artifacts/deployments/ppo-c2-h60-gae --keep-instance
-.venv\Scripts\python.exe tools/remote_rl.py launch --deployment artifacts/deployments/ppo-c2-h60-gae --mode run
-.venv\Scripts\python.exe tools/remote_rl.py status --deployment artifacts/deployments/ppo-c2-h60-gae
-.venv\Scripts\python.exe tools/remote_rl.py pull --deployment artifacts/deployments/ppo-c2-h60-gae --keep-instance
-.venv\Scripts\python.exe tools/remote_rl.py launch --deployment artifacts/deployments/ppo-c2-h60-gae --mode resume
-python C:\Users\Roman\.codex\skills\vastai-instance-manager\scripts\vastai_instance.py delete INSTANCE_ID
+.venv\Scripts\python.exe tools/remote_rl.py package --config CONFIG --out DEPLOYMENT --instance .tmp/instance.json --extra-input CARRIER
+.venv\Scripts\python.exe tools/remote_rl.py launch --deployment DEPLOYMENT --mode tune
+.venv\Scripts\python.exe tools/remote_rl.py pull --deployment DEPLOYMENT --keep-instance
+.venv\Scripts\python.exe tools/remote_rl.py launch --deployment DEPLOYMENT --mode run --evaluation-device cuda --evaluation-workers 8 --evaluation-max-batch 32 --evaluation-wait-seconds 0.001
+.venv\Scripts\python.exe tools/ctl_rl.py progress --deployment DEPLOYMENT --watch --interval 900
 ```
+
+Runtime оценок должен соответствовать CONFIG. Закреплённые значения нельзя
+изменить при resume; отсутствие CLI-флага не отменяет закрепление в профиле.
+Для другого разрешённого runtime передавайте соответствующие значения.
+После запуска короткими проверками подтвердите 2–3 принятых шага Adam,
+затем используйте прерываемые ожидания по15минут. Сообщение пользователя
+прерывает ожидание, но не процесс обучения.
+
+### Восстановление и завершение
+
+При потере SSH повтор `launch` активного job выполняет attach, не новый запуск.
+После завершения или ошибки сначала выгрузите актуальное состояние, затем resume:
+
+```powershell
+.venv\Scripts\python.exe tools/remote_rl.py status --deployment DEPLOYMENT
+.venv\Scripts\python.exe tools/remote_rl.py pull --deployment DEPLOYMENT --keep-instance
+.venv\Scripts\python.exe tools/remote_rl.py launch --deployment DEPLOYMENT --mode resume
+```
+
+Resume сохраняет model/Adam/RNG, потраченный бюджет и счётчики. Новый опыт от
+родителя имеет отдельный профиль, output и RNG; не используйте для него resume
+исторического каталога. Архивированные локальные оценки перед resume восстановите
+командой `restore-evaluations`.
+
+После финальных Development/Additional выполните `pull --keep-instance`.
+Проверьте delivery receipt и обязательные секции научного аудита; затем удалите
+только привязанный ID:
+
+```powershell
+python C:\Users\Roman\.codex\skills\vastai-instance-manager\scripts\vastai_instance.py delete INSTANCE_ID
+python C:\Users\Roman\.codex\skills\vastai-instance-manager\scripts\vastai_instance.py inspect INSTANCE_ID
+```
+
+`pull --delete-instance` совмещает выгрузку, аудит и удаление, если среда Python
+имеет credentials/keyring менеджера. Ошибка доставки или аудита сохраняет инстанс.
+Отчёт и результаты остаются в artifacts, краткая запись со ссылками — в ledger.
 
 | Kind | run | tune | resume |
 |---|---|---|---|
 | `rl01.ppo_after_target_bc` | Да | Да | Да |
 | `rl01.ppo_target_scale` | Да | Нет | Да |
-| `rl01.ppo_scale_up`, включая continuation | Да | Нет | Нет |
+| `rl01.ppo_scale_up` | Да | Нет | Нет |
 | `rl01.cp_imitation_target_more_data` | Да | Нет | Да |
+| `rl01.cp_imitation_target_c2` | Да | Нет | Да |
 | `rl01.cp_imitation_target_scale` | Да | Нет | Нет |
-
-Каталог `--out` (`DEPLOYMENT`) должен быть пустым и располагаться **вне** `config["output"]`
-(например, `artifacts/deployments/<name>`): научный каталог и транспортные пакеты
-не должны пересекаться.
-Перед `package` рабочее дерево Git должно быть чистым, а `HEAD` — отправлен в `origin` (`git push`).
-
-### Подготовленная ветка gamma=1
-
-`configs/rl-ppo-c2-h60-gae-gamma1.json` ответвляется от того же update 150,
-сохраняет Adam общей сети/actor и адаптирует value head под недисконтированный
-исход. Это отдельный опыт: 4 Mi новых решений или пять активных часов,
-Development 0/1/2/3/4 Mi и gate W0+11 на 2 Mi. Подготовка critic входит в бюджет.
-Исторический темп 323–400 dec/s даёт 2,91–3,61 часа на 4 Mi; полный недавний
-запуск с компиляцией дал около 282 dec/s (около 4,13 часа при экстраполяции).
-Дополнительно учесть до 300 секунд подготовки и refresh; скорость новой машины
-не гарантируется. Отдельный benchmark и полный Development при подготовке
-не запускаются. Исторический запуск gamma1 завершён; результат и выбранный update 147 см. в ledger.
-
-Локальный запуск после отдельного согласования:
-
-```powershell
-$cfg = 'configs/rl-ppo-c2-h60-gae-gamma1.json'
-$run = 'artifacts/rl/ppo-c2-h60-gae-gamma1'
-.venv/Scripts/python.exe tools/run_ppo.py run --config $cfg --runtime-config RUNTIME
-.venv/Scripts/python.exe tools/ctl_rl.py progress --run $run --watch --interval 900
-.venv/Scripts/python.exe tools/ctl_rl.py request-pause --run $run --after-update UPDATE
-.venv/Scripts/python.exe tools/run_ppo.py resume --config $cfg --runtime-config RUNTIME
-.venv/Scripts/python.exe tools/ctl_rl.py audit --run $run --out artifacts/rl/ppo-c2-h60-gae-gamma1/derived/audit
-```
-
-CUDA/FP32 runtime оценок закреплён самим профилем. Для удалённого исполнения
-использовать ту же последовательность package/tune/pull/run/resume выше, заменив
-config и deployment на gamma1. Сначала выгрузить завершившийся job, затем resume.
-При сбое подготовки сохранять вместе pending checkpoint, первый rollout,
-`critic-adaptation.pt` и `critic-features.pt`; все они входят в обычный mirror.
-После `critic-ready` resume использует полный checkpoint и не повторяет подготовку.
-Для окончательного завершения — `run`/`resume` с уже установленным stop_reason,
-затем pull, аудит и удаление только отдельно разрешённого инстанса.
-
-### Продолжение gamma=1 от update 147
-
-Этот опыт завершён по gate на 2 Mi; повторная аренда для него не требуется.
-Результаты и проверенные артефакты — в [ledger](experiment-ledger.md).
-
-`configs/rl-ppo-c2-h60-gae-gamma1-continuation.json` — новый опыт, не resume
-завершённого gamma1. Родительские checkpoint/manifest/final state/run record
-зафиксированы в `artifacts/inputs/ppo-c2-h60-gae-gamma1/`. Сохраняются actor/shared
-Adam 25171 и value Adam 12615, critic не готовится повторно. Первый episode ID
-52399; новые namespaces и seed 17. Бюджет 8 Mi или 36000 active seconds;
-Development 0/1/2/4/6/8 Mi и gate W0+11 на 2 Mi. Нулевую оценку пересчитать
-на арендованной машине; при выборе нового кандидата обе модели получают
-один paired Additional-256. Test закрыт.
-
-Использовать последовательность package/tune/pull/run выше с новым config и
-отдельным deployment `artifacts/deployments/ppo-c2-h60-gae-gamma1-continuation-5090`.
-Для tune передать `--extra-input artifacts/rl/ppo-c2-h60-gae-gamma1/rollouts/latest.pt`.
-Родительский rollout служит только носителем открытых случаев подбора.
-Плановые перезапуски отключены; `--max-updates` и pause.request при запуске
-не задаются. Телеметрия cuda-memory включена; после 2–3 подтверждённых шагов
-проверки раз в 15 минут. После финальных оценок — pull, аудит, удаление инстанса.
-Прогноз по родительским поздним окнам 7,9–9,4 активного часа на 8 Mi, без
-гарантии новой машины. Оценки не расходуют active budget.
-
-### Gamma1 lambda=0,99 от update147
-
-Этот опыт завершён по gate на2Mi; инстанс удалён. Итоги — в [ledger](experiment-ledger.md).
-Команды ниже описывают подготовленный профиль и не означают новую аренду.
-
-`configs/rl-ppo-c2-h60-gae-gamma1-lambda099.json`: отдельный опыт, 4 Mi новых
-решений или 18000 active seconds, gamma1/lambda.99, полный Adam25171/12615
-и critic родителя без подготовки. Episode64387 подтверждён отдельным
-`episode_id_source` завершённого продолжения; packaging включает оба его файла.
-Остальные условия C2/PPO неизменны. GAE по полным эпизодам, BPTT128.
-
-Использовать штатные package/tune/pull/run с deployment
-`artifacts/deployments/ppo-c2-h60-gae-gamma1-lambda099-5090` и носителем
-`--extra-input artifacts/rl/ppo-c2-h60-gae-gamma1-continuation/rollouts/latest.pt`.
-Режим CUDA FP32 оценок закреплён: 8 workers, max batch32, wait0.001.
-Development0/1/2/3/4Mi, новая нулевая оценка W0, gateW0+11 после2Mi.
-Один pairedAdditional относительно update147 для нового победителя; при
-победе родителя пропуск. Test закрыт. Без плановых перезапусков, с телеметрией
-VRAM; после2–3 принятых шагов проверки каждые15мин. После финальных оценок
-pull/audit и удаление инстанса. Прогноз3,6–4,4 активного часа без гарантии.
-
-### C2P attack preview от lambda0.99 update48
-
-Профиль `configs/rl-ppo-c2-h60-gae-gamma1-lambda099-attack-preview.json` расширяет
-родителя C2 пятью публичными признаками атак и нулевой проекцией5→128. Прежние
-Adam29390/16834 и critic сохраняются, новая группа attack_preview пуста.
-Первый принятый шаг:29391/16835/1. Новые namespaces seed17, episode76733.
-Лимиты4Mi/18000active seconds; gamma1/lambda.99, LR1e-5,T.5 и условия боёв прежние.
-Development0/1/2/3/4Mi, CUDA FP32/8workers/batch32/wait.001. Gate после2Mi:
-max(W1,W2)≥W0+11 по новой нулевой оценке;330 не является фиксированным порогом.
-Один pairedAdditional нового победителя относительно начальной модели,
-эквивалентной update48; при выборе родителя пропуск. Закрытый test не используется.
-
-Использовать стандартную последовательность rent/package/tune/pull/run с deployment
-`artifacts/deployments/ppo-c2-h60-gae-gamma1-lambda099-attack-preview-5090` и носителем
-`--extra-input artifacts/rl/ppo-c2-h60-gae-gamma1-lambda099/rollouts/latest.pt`.
-Носитель задаёт случаи; tuning собирает новые признаки через C2P, не принимает
-старые записи без preview за C2P-rollout. Runtime CUDA оценок закреплён профилем.
-Для публикации нового пакета нужен чистый отправленный commit. Архивный транспорт
-требует7zz/7z на обеих машинах. После2–3 шагов проверять раз в15мин; без плановых
-перезапусков, с диагностикой VRAM. После оценок pull/audit и удаление инстанса.
-
-### CPU-фильтр будущей аренды
-
-Этот фильтр применяется только к задачам, которым требуется CPU-зависимая
-фаза, например сбор боёв симулятором для PPO. Для обучения BC без такой фазы
-он не нужен. Применимость определяется составом планируемых фаз, а не только
-названием runner. Для задач с CPU-зависимой фазой, помимо согласованного
-GPU-профиля, цены, географии и сетевых требований, кандидат должен удовлетворять:
-
-```text
-cpu_score = cpu_cores_effective × (100 × PassMark Single Thread / 2067)
-cpu_score >= 1250
-```
-
-`cpu_cores_effective` — доступные логические CPU из конкретного предложения
-Vast.ai, включая дробную долю. Не подставлять полное число потоков процессора
-или физические ядра. 2067 — фиксированная база EPYC 7702 (100%); в формуле
-используются процентные пункты, например 229, а не 2,29. Для решения о допуске
-не округлять отношение. Это дополнительное правило отбора проекта; сама команда
-менеджера `search` этот вычисляемый фильтр не применяет. Проектный вызов
-`python tools/remote_rl.py rent --cpu-score-min 1250` принимает остальные флаги
-штатного `create`, включая `--profile`, и накладывает CPU-допуск на каждый
-свежий отбор. Неизвестная доступная по цене модель останавливает выбор с
-перечнем для PassMark lookup, а не молча исключается. Без `--cpu-score-min`
-дополнительного CPU-фильтра нет (например, для BC). До аренды отсеивать
-неподходящие предложения и не выбирать их повторно по одной лишь низкой цене.
-
-Исходные Single Thread ниже предоставлены пользователем. Проценты округлены
-только для отображения. Если точной модели нет, найти её PassMark Single Thread
-на CPU Benchmark, дописать значение и ссылку на источник сюда, затем вычислить
-допуск. Не заменять неизвестную модель похожим названием или Multi Thread score.
-
-| CPU | PassMark Single Thread | К EPYC 7702 |
-|---|---:|---:|
-| Intel Core Ultra 9 285K | 5087 | 246% |
-| AMD Ryzen 9 9950X | 4726 | 229% |
-| Intel Core i9-13900K | 4594 | 222% |
-| AMD Threadripper PRO 9975WX | 4428 | 214% |
-| AMD Threadripper PRO 7975WX | 3989 | 193% |
-| AMD EPYC 9554 | 2774 | 134% |
-| AMD EPYC 9124 | 2613 | 126% |
-| AMD EPYC 7702 | 2067 | 100% |
-| AMD EPYC 7302 | 2024 | 98% |
-| AMD EPYC 7532 | 2015 | 97% |
-| AMD EPYC 7313P | 2576 | 125% |
-| AMD EPYC 7542 | 1957 | 95% |
-| AMD EPYC 9135 | 3228 | 156% |
-| AMD EPYC 9355 | 3747 | 181% |
-| Intel Core i9-14900KF | 4688 | 227% |
-| AMD Ryzen Threadripper 3960X | 2681 | 130% |
-| Intel Core Ultra 7 270K Plus | 5073 | 245% |
-| AMD Ryzen 9 9900X | 4670 | 226% |
-| AMD Ryzen 9 7900X3D | 4117 | 199% |
-| AMD EPYC 7713 | 2648 | 128% |
-| AMD EPYC 7402P | 1992 | 96% |
-| AMD EPYC 7B13 | 2555 | 124% |
-| AMD Ryzen 7 9800X3D | 4420 | 214% |
-| AMD EPYC 9115 | 3360 | 163% |
-| AMD EPYC 8224P | 2341 | 113% |
-| Intel Core i5-13600K | 4110 | 199% |
-| Intel Core i7-13700K | 4324 | 209% |
-| AMD EPYC 9254 | 2998 | 145% |
-| AMD Ryzen 7 3700X | 2654 | 128% |
-| AMD Ryzen 9 9950X3D | 4737 | 229% |
-| AMD Ryzen 9 5950X | 3476 | 168% |
-| AMD Ryzen 9 7940HX with Radeon Graphics | 3925 | 190% |
-| AMD EPYC 7642 | 2008 | 97% |
-| Intel Core i7-14700K | 4453 | 215% |
-| AMD EPYC 9354 | 2766 | 134% |
-| AMD Ryzen 7 7700 | 4050 | 196% |
-| AMD EPYC 7763 | 2518 | 122% |
-| AMD EPYC 9135 Emb | unrated | Не допускается |
-
-Threadripper 3960X, Ultra 7 270K Plus, Ryzen 9900X/7900X3D и EPYC 7713 дополнены по [PassMark Single Thread](https://www.cpubenchmark.net/singleThread.html)
-12 ноября 2026 года; исходные пользовательские значения выше не пересмотрены.
-Ryzen 9800X3D — [4420](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+9800X3D),
-EPYC 9115 — [3360](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9115),
-EPYC 8224P — [2341](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+8224P)
-добавлены по PassMark 13 ноября 2026 года. EPYC7402P: [1992](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7402P), EPYC7B13: [2555](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7B13). Ryzen 9950X3D: [4737](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+9950X3D&id=6549); не путать с X3D2. Ryzen 7940HX: [3925](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+7940HX). Ryzen 5950X: [3476](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+5950X&id=3862).
-При свежем отборе также проверены [Intel Core i5-13600K: 4110](https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i5-13600K), [Intel Core i7-13700K: 4324](https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i7-13700K), [AMD EPYC 9254: 2998](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9254), [AMD Ryzen 7 3700X: 2654](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+3700X).
-
-При отборе C2P проверены [EPYC7642:2008](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7642&id=4336)
-и [Core i7-14700K:4453](https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i7-14700K&id=5719),
-[EPYC9354:2766](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9354&id=5625),
-[Ryzen7700:4050](https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+7700&id=5169).
-Также [EPYC7763:2518](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7763&id=4207).
-Для EPYC9135 Emb точного результата не найдено в [PassMark AMD list](https://www.cpubenchmark.net/cpu-list/amd).
-`unrated` означает выполненный поиск без подтверждённого балла и исключение из
-допуска; это не нулевой измеренный результат и не балл обычного9135. Неизвестные
-модели без такой записи по-прежнему останавливают отбор для проверки.
-
-Например, EPYC 7313P с долей 6,4 получает 797,6 и не проходит, а Ryzen 9950X
-с долей 32 получает 7316,5 и проходит. После аренды фактическая quota/cpuset
-фиксируется отдельно: рекламная доля и этот эвристический балл не гарантируют
-скорость симулятора или CPU-инференса. Новый фильтр не даёт разрешения на аренду.
 
 ### Разделение зон (`repositories`, `inputs`, `mirror`, `scratch`)
 
@@ -722,6 +554,25 @@ EPYC 8224P — [2341](https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+8224P)
    между `resume` на том же хосте и никогда не выгружаются при `post-sync`.
 
 ### Передача больших наборов JSON
+
+Завершённые оценки можно хранить на диске в PPMd без распакованного дерева:
+
+```powershell
+python tools/ctl_rl.py archive-evaluations --run RUN
+python tools/ctl_rl.py restore-evaluations --run RUN
+```
+
+Первая команда под writer lock создаёт `RUN/evaluation.storage/json.7z` и manifest
+с SHA-256 всех файлов, проверяет полное извлечение и только затем удаляет
+`evaluation/`. Параметры: PPMd, 256 МиБ, order 32, solid 4 ГиБ.
+Аудит временно извлекает архив и убирает неизменённую копию после проверки.
+Для просмотра, сравнения каталогов и возобновления сначала выполните
+`restore-evaluations`, после работы — `archive-evaluations`. Восстановление
+сохраняет архив; повторное архивирование обновляет его проверенной копией.
+Финальный `pull` после успешного аудита запуска со статусом `complete`
+автоматически архивирует локальные оценки. Активные и paused запуски
+автоматически не архивируются. Исторические научные байты не переписываются.
+
 
 Перед передачей огромных наборов JSON в любом направлении упаковывать их в **7z,
 PPMd, словарь 256 МиБ, размер слова (order) 32, solid-блок 4 ГиБ**:

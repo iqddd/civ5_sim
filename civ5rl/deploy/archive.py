@@ -100,7 +100,7 @@ def _root(path):
     return resolved
 
 
-def pack(source, packet, *, token, direction):
+def pack(source, packet, *, token, direction, force=False):
     source, packet = _root(source), _root(packet)
     _separate(source, packet)
     if direction not in ("upload", "download") or not token:
@@ -112,7 +112,7 @@ def pack(source, packet, *, token, direction):
     compressed = (
         json_files
         if (
-            len(json_files) >= JSON_MIN_FILES
+            force or len(json_files) >= JSON_MIN_FILES
             or sum(files[name]["size"] for name in json_files) >= JSON_MIN_BYTES
         )
         else []

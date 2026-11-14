@@ -14,6 +14,7 @@ from civ5rl.protocols.common import (
     own_state_physical_hash,
 )
 from civ5rl.protocols.corpus import ScenarioFactory, map_path
+from civ5rl.protocols.turn_reset import mode as turn_reset_mode
 from civ5rl.provenance.common import ROOT, read_json, seed_for
 from civ5sim import Battle
 from civ5sim.engine import digest
@@ -244,6 +245,9 @@ class TargetFactory:
                     for kind, tile in zip(roster, positions[s])
                 ],
             }
+            selected_mode = turn_reset_mode(self.config)
+            if selected_mode != "legacy":
+                scenario["turn_reset_mode"] = selected_mode
             with Battle(scenario) as battle:
                 seen = [any(u["side"] != s for u in battle.observe(s)["units"]) for s in (0, 1)]
             if seen != [bool(contact), bool(contact)]:

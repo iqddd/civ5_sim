@@ -176,6 +176,7 @@ def save_replays(policy, specs, device, directory, count=8, outcomes=None):
             s["armies"],
             s["max_rounds"],
             max_calls_per_turn=s["max_calls_per_turn"],
+            turn_reset_mode=s["scenario"].get("turn_reset_mode", "legacy"),
         )
         outcome = run_match(config, agents, scenario=s["scenario"], agent_seeds=s["agent_seeds"])
         if outcome.result["status"] != "completed":

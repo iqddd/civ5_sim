@@ -11,6 +11,7 @@ experiment conditions and results. Historical documents do not authorize new run
 - [combat-ai.md](combat-ai.md) — Current Combat AI interfaces, coordinator rules, group recovery, porting limitations, and diagnostic tools.
 - [rl-architecture.md](rl-architecture.md) — RL modules, information boundaries, observation tensors, network architecture, training, passports, and run resumption requirements.
 - [rl-operations.md](rl-operations.md) — Run control, result auditing, reporting, performance measurement, collection tuning, and remote experiment packaging.
+- [vast-cpu-ratings.json](../configs/vast-cpu-ratings.json) — Machine-readable CPU Single Thread ratings and sources used for Vast.ai admission filtering.
 - [experiment-ledger.md](experiment-ledger.md) — Experiment lineage, configurations, parent models, verified results, conflicting evidence, and links to saved reports.
 
 ## Detailed contracts and provenance

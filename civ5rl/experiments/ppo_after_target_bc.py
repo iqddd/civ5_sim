@@ -483,7 +483,10 @@ def load_initial_optimizer(policy, saved, config):
         raise ValueError("PPO parent must be a completed update boundary")
     source = saved["optimizer"]
     if origins:
-        if (set(origins) != {"shared_actor", "value"}
+        expected_names = {g["name"] for g in optimizer.param_groups}
+        if extension:
+            expected_names.remove("attack_preview")
+        if (set(origins) != expected_names
                 or any(type(n) is not int or n < 0 for n in origins.values())):
             raise ValueError("Invalid inherited Adam group counters")
         if saved["state"].get("Adam_counters") != origins:
@@ -594,6 +597,8 @@ def initialize(config, out):
         int(c.get("max_rounds", 30)) != expected_rounds for c in plan["confirmation"]
     ):
         raise ValueError("Evaluation case max_rounds differs from environment config")
+    from civ5rl.protocols.turn_reset import evaluation_plan
+    plan = evaluation_plan(plan, config)
     write_json(out / "manifest.json", plan)
     torch_seed = seed_for(17, 0, "torch", namespace=experiment["torch_namespace"]) if inherited else 17
     configure(torch_seed, "cpu")
@@ -1255,7 +1260,9 @@ def report(config, out):
         lines += ["", "Прироста в установленном раннем бюджете не получено."]
     lines += [
         "",
-        f"Ранний порог: {state.get('early_gain_required_wins', 'по конфигу')} побед после {config['experiment']['early_gain_decisions']} новых решений; полезность оценивается по парному additional-приросту и CI.",
+        (f"Ранний порог: {state.get('early_gain_required_wins', 'по конфигу')} побед после {config['experiment']['early_gain_decisions']} новых решений; полезность оценивается по парному additional-приросту и CI."
+         if config['experiment'].get('early_gain_enabled', True)
+         else "Ранний порог продолжения отключён; выбор по Development, проверка нового кандидата на парном Additional."),
     ]
     for name in ("critic-preparation.json", "confirmation.json"):
         if (out / name).exists():
@@ -1290,6 +1297,10 @@ def run(phase, config, out, device, runtime_path=None, max_updates=None):
             if config.get("evaluation_runtime"):
                 runtime_for(out, config)
             plan = read_json(out / "manifest.json")
+            from civ5rl.protocols.turn_reset import validate_case
+            for purpose in ("development", "development_512", "confirmation"):
+                for case in plan.get(purpose, []):
+                    validate_case(case, config)
             if phase in ("train", "run", "resume"):
                 write_json(out / "status.json", {"status": "training"})
                 train(config, plan, out, device, runtime_path=runtime_path, max_updates=max_updates)

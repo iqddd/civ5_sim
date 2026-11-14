@@ -30,6 +30,52 @@ CONFIG = "configs/rl-ppo-c2-h60-gae-gamma1-lambda099-attack-preview.json"
 
 
 class AttackPreviewTests(unittest.TestCase):
+    def test_c2p_continuation_preserves_all_three_adam_origins(self):
+        # Dropping the third group's moments silently changes a continuation's optimization.
+        cfg = load_config("configs/rl-ppo-c2p-h60-end-turn.json")
+        parent = Policy("C2P")
+        old = grouped_optimizer(parent, cfg, "cpu")
+        origins = cfg["experiment"]["parent_optimizer_counters"]
+        for parameter in parent.parameters():
+            parameter.grad = torch.full_like(parameter, .01)
+        old.step()
+        for group in old.param_groups:
+            for parameter in group["params"]:
+                old.state[parameter]["step"].fill_(origins[group["name"]])
+        saved = dict(variant="C2P", model=deepcopy(parent.state_dict()),
+                     optimizer=deepcopy(old.state_dict()),
+                     state=dict(critic_complete=True, phase="collect", Adam_counters=origins))
+        child = Policy("C2P")
+        load_parent_model(child, saved, cfg)
+        adam = load_initial_optimizer(child, saved, cfg)
+        assert_equal(adam.state_dict(), saved["optimizer"])
+        transaction = AdamSnapshot(child, adam)
+        for parameter in child.parameters():
+            parameter.grad = torch.full_like(parameter, .01)
+        adam.step()
+        self.assertEqual(check_counters(adam, dict(origin_Adam_counters=origins, optimizer_steps=1)),
+                         {key: value + 1 for key, value in origins.items()})
+        transaction.restore()
+        assert_equal(child.state_dict(), saved["model"])
+        assert_equal(adam.state_dict(), saved["optimizer"])
+
+    def test_end_turn_plan_changes_physics_without_changing_layouts(self):
+        # Unchanged case hashes could silently reuse legacy evaluation results.
+        from civ5rl.protocols.turn_reset import evaluation_plan, validate_case
+        from civ5sim.engine import digest
+        case = dict(scenario=scenario(unit(), unit(side=1, x=3)), split="validation")
+        case["case_hash"] = digest(case)
+        parent = dict(development_512=[case], hash="source")
+        cfg = {"environment": {"turn_reset_mode": "end_turn"}}
+        plan = evaluation_plan(parent, cfg)
+        converted = plan["development_512"][0]
+        self.assertNotEqual(converted["case_hash"], case["case_hash"])
+        self.assertNotIn("turn_reset_mode", case["scenario"])
+        self.assertEqual(converted["scenario"]["units"], case["scenario"]["units"])
+        validate_case(converted, cfg)
+        with self.assertRaises(ValueError):
+            validate_case(case, cfg)
+
     def test_public_batch_matches_scalar_without_state_or_hidden_information(self):
         # A fast native path could accidentally use omniscient strengths or mutate RNG.
         left = scenario(unit(hp=24), unit(side=1, x=3, hp=15), unit(side=1, x=8),

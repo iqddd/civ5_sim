@@ -9,6 +9,31 @@ from civ5rl.deploy.archive import pack, seven_zip, unpack, _inventory
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_storage_preserves_scientific_bytes_and_rejects_damaged_archive(self):
+        # Deleting unpacked results before verifying a durable copy silently loses evidence.
+        from civ5rl.reporting.evaluation_storage import archive_evaluations, restore_evaluations, readable_evaluations
+        from civ5rl.engine.control import RunLock
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            source = run / "evaluation"
+            source.mkdir()
+            (source / "replay.json").write_bytes(b'{"steps":[]}\n')
+            before = _inventory(source)
+            archive_evaluations(run)
+            self.assertFalse(source.exists())
+            with RunLock(run), readable_evaluations(run):
+                self.assertEqual(_inventory(source), before)
+            self.assertFalse(source.exists())
+            archive = run / "evaluation.storage/json.7z"
+            original = archive.read_bytes()
+            archive.write_bytes(original + b'damage')
+            with self.assertRaises(ValueError):
+                restore_evaluations(run)
+            self.assertFalse(source.exists())
+            archive.write_bytes(original)
+            restore_evaluations(run)
+            self.assertEqual(_inventory(source), before)
+
     def test_ppmd_roundtrip_exact_tree_and_stale_files(self):
         # A transport that reports success but omits/mutates matches invalidates later audits.
         seven_zip()

@@ -298,6 +298,9 @@ def evaluation_task(task):
 
 @evaluation_precision()
 def evaluate(config,plan,out,path,purpose):
+    from civ5rl.protocols.turn_reset import validate_case
+    for case in plan[purpose]:
+        validate_case(case, config)
     from civ5rl.engine.evaluation import EvaluationExecutor, runtime_for
     runtime = runtime_for(out, config, cp_only=path == 'cp')
     runtime_identity = runtime.identity()

@@ -674,6 +674,9 @@ def pull(directory, *, delete_instance=False, transport=None):
             audit = audit_run(
                 destination, directory / "audits" / deployment["job"]["id"]
             )
+            if audit["status"] == "passed" and _read(destination / "status.json").get("status") in ("complete", "completed", "finished", "closed"):
+                from civ5rl.reporting.evaluation_storage import archive_evaluations
+                archive_evaluations(destination)
             deployment["run_started"] = any(
                 (destination / name).is_file()
                 for name in ("state.json", "collection.json", "run.json")
