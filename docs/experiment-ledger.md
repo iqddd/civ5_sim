@@ -9,13 +9,6 @@ Development, additional validation, sampling и argmax нельзя объеди
 
 ## Цепочка RL
 
-Новый этап **PPO C2P end_turn adaptation**: `configs/rl-ppo-c2p-h60-end-turn.json`,
-родитель C2P update171, Adam41882/29326/12492 и critic сохранены.
-**Подготовлен, не запущен**:2Mi/10800 активных секунд,Dev0/1/2Mi,
-свежие RNG/episode100008,без раннего gate;Additional нового кандидата против
-родителя в end_turn,test закрыт. [Подготовка](../artifacts/rl/ppo-c2p-end-turn-preparation/report.md),
-[прогноз бюджета](../artifacts/rl/ppo-c2p-end-turn-preparation/budget.json).
-
 В столбце «Родитель» сокращён префикс `artifacts/rl/`; имена конфигов находятся
 в `configs/`. Родительские пути описывают сохранённую lineage, а не обещают
 наличие весов на диске: ранние D0/D1 и BC checkpoints локально отсутствуют. Для завершённых опытов числа сверены с доступными сохранёнными
@@ -23,6 +16,7 @@ Development, additional validation, sampling и argmax нельзя объеди
 
 | Этап | Конфиг | Родитель / старт | Статус и главный результат | Артефакт и протокол |
 |---|---|---|---|---|
+| PPO C2P end_turn adaptation | `rl-ppo-c2p-h60-end-turn.json` | C2P update171; Adam41882/29326/12492 и critic сохранены | **Запущен14ноября**, RTX5090/EPYC9355,instance60677932,$0.6433/ч;80env/16workers/reply1,tune подтверждён.2Mi/10800active секунд,Dev0/1/2Mi;episode100008,свежие RNG;без раннего gate,Additional нового кандидата против родителя в end_turn,test закрыт | [Подготовка](../artifacts/rl/ppo-c2p-end-turn-preparation/report.md), [бюджет](../artifacts/rl/ppo-c2p-end-turn-preparation/budget.json), [deployment](../artifacts/deployments/ppo-c2p-h60-end-turn-5090/deployment.json) |
 | D0, общая диагностика | `rl-diagnostic.json` | Начальная сеть | Локальный отчёт не найден; проверенного W/D/L здесь нет | `artifacts/rl/diagnostic-results/`; [протокол](rl-diagnostic-protocol.md) |
 | D0, одно решение | `rl-diagnostic-one-decision.json` | `diagnostic-results/seed-17/checkpoints/initial.pt` | Локальный отчёт не найден; наличие протокола не доказывает завершение | `artifacts/rl/diagnostic-one-decision/`; [протокол](rl-d0-one-decision-protocol.md) |
 | D1, перенос | `rl-diagnostic-d1.json` | `diagnostic-one-decision/seed-17/checkpoints/update-000006.pt` | Локальный отчёт не найден; позднее направление сообщает ноль training-побед, это не итоговый evaluation W/D/L | `artifacts/rl/diagnostic-d1/`; [протокол](rl-d1-transfer-protocol.md) |
