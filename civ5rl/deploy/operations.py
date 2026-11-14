@@ -412,7 +412,15 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
         if deployment.get("job"):
             previous = _job_result(directory, deployment)
             phase = previous.get("lifecycle", {}).get("phase")
-            if phase == "prelaunch_interrupted":
+            cancelled_before_launch = (
+                phase == "cancelled_before_launch"
+                and previous.get("job_id") == deployment["job"].get("id")
+                and previous.get("execution", {}).get("status") == "not_started"
+                and previous.get("pre_sync", {}).get("status") == "not_started"
+            )
+            if phase == "prelaunch_interrupted" or cancelled_before_launch:
+                _receipt(deployment, "prelaunch_retry", job_id=deployment["job"].get("id"),
+                         previous_status=previous.get("status"))
                 deployment["job"] = None
             elif phase != "finalized":
                 if evaluation_runtime and evaluation_runtime != deployment.get("evaluation_runtime", {}):
