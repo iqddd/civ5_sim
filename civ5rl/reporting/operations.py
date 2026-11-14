@@ -377,6 +377,14 @@ def _audit_stable(directory):
         )
         else "No recognized paired confirmation; special historical analyses are not covered",
     )
+    revisions = sorted((directory / "source-revisions").glob("host-*/revision.json"))
+    if revisions:
+        def host_resume_check():
+            from civ5rl.provenance.host_resume import verify_revision
+            before = _read(directory / "passport.json")
+            return [verify_revision(path, before, _read(path.parent / "identity-after.json"))
+                    for path in revisions]
+        check("host_resume_revisions", host_resume_check)
     statuses = {value["status"] for value in sections.values()}
     return {
         "status": "failed"
