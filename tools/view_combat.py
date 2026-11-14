@@ -4,6 +4,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import secrets
 import sys
 import threading
 from collections import OrderedDict
@@ -233,19 +234,72 @@ class ReplayStore:
             return encoded
 
 
-def create_server(root, port=8765):
+def create_server(root, port=8765, policies=None):
     store = ReplayStore(root)
+    from civ5rl.reporting.viewer_policy import ViewerPolicies
+
+    policy_store = ViewerPolicies(policies or store.root / "viewer-policies.json", ROOT)
+
+    from civ5rl.reporting.viewer_manual import ManualViewer
+    manual = ManualViewer(store, policy_store, ROOT)
+    shutdown_token = secrets.token_urlsafe(32)
+
+    class ViewerServer(ThreadingHTTPServer):
+        # Finish active requests (including inference) before releasing models.
+        daemon_threads = False
+
+        def server_close(self):
+            super().server_close()
+            policy_store.close()
+            store.cache.clear()
 
     class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            route = urlsplit(self.path).path
+            if not secrets.compare_digest(self.headers.get("X-Viewer-Token", ""), shutdown_token):
+                self.problem(HTTPStatus.FORBIDDEN, "Invalid viewer token")
+                return
+            if route == "/api/shutdown":
+                self.respond(200, b'{"status":"closing"}')
+                threading.Thread(target=self.server.shutdown, name="viewer-shutdown", daemon=True).start()
+                return
+            if route not in ("/api/manual-preview", "/api/manual-create"):
+                self.problem(HTTPStatus.NOT_FOUND, "Not found")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 131072:
+                    raise ValueError("Invalid request size")
+                payload = json.loads(self.rfile.read(length))
+                result = manual.preview(payload) if route.endswith("preview") else manual.create(payload)
+                self.respond(200, json.dumps(result, ensure_ascii=False).encode("utf-8"))
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                self.problem(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc))
+
         def do_GET(self):
             request = urlsplit(self.path)
             try:
                 if request.path in ("/", "/index.html"):
-                    self.respond(200, TEMPLATE.read_bytes(), "text/html; charset=utf-8")
+                    self.respond(200, TEMPLATE.read_bytes().replace(b"__VIEWER_SHUTDOWN_TOKEN__", shutdown_token.encode("ascii")), "text/html; charset=utf-8")
                 elif request.path == "/api/matches":
                     self.respond(200, json.dumps(store.catalog(), ensure_ascii=False).encode("utf-8"))
                 elif request.path == "/api/status":
                     self.respond(200, json.dumps(store.status(), ensure_ascii=False).encode("utf-8"))
+                elif request.path == "/api/policies":
+                    self.respond(200, json.dumps(policy_store.catalog(), ensure_ascii=False).encode("utf-8"))
+                elif request.path == "/api/probabilities":
+                    query = parse_qs(request.query)
+                    key = query.get("id", [""])[0]
+                    path = store.paths().get(key)
+                    if path is None:
+                        raise FileNotFoundError("Матч не найден")
+                    store.load(key)  # Verify the physical replay before any inference.
+                    result = policy_store.probabilities(
+                        path, query.get("model", [""])[0],
+                        int(query.get("frame", ["0"])[0]),
+                        float(query.get("temperature", ["0.5"])[0]),
+                    )
+                    self.respond(200, json.dumps(result, ensure_ascii=False).encode("utf-8"))
                 elif request.path == "/api/replay":
                     key = parse_qs(request.query).get("id", [""])[0]
                     self.respond(200, store.load(key))
@@ -273,15 +327,16 @@ def create_server(root, port=8765):
         def log_message(self, _format, *_args):
             pass
 
-    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    return ViewerServer(("127.0.0.1", port), Handler)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path, help="Match directory, evaluation directory, or replay.json")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--policies", type=Path, help="Viewer model configuration (default: ROOT/viewer-policies.json)")
     args = parser.parse_args()
-    with create_server(args.root, args.port) as server:
+    with create_server(args.root, args.port, args.policies) as server:
         print(f"Combat viewer: http://127.0.0.1:{server.server_port}", flush=True)
         try:
             server.serve_forever()

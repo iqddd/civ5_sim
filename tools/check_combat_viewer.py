@@ -20,6 +20,9 @@ def check(url, screenshot):
         if page.evaluate("data.experiment?.kind==='continuation'"):
             assert int(page.locator("#timeline").input_value()) == page.evaluate("data.experiment.resume_after")
             page.click("#first")
+        elif page.evaluate("data.experiment?.kind==='counterfactual_action'"):
+            assert int(page.locator("#timeline").input_value()) == page.evaluate("data.experiment.prefix_commands")
+            page.click("#first")
         assert page.locator(".match").count() > 0
         assert page.locator(".unit").count() > 0
         page.locator(".unit").first.click()
@@ -39,7 +42,7 @@ def check(url, screenshot):
         assert page.locator("#timeline").input_value() == paused
         page.click("#last")
         label = page.locator("#turnLabel").inner_text()
-        if page.evaluate("Boolean(data.experiment)&&data.experiment.kind!=='continuation'"):
+        if page.evaluate("Boolean(data.experiment?.base_stats)"):
             assert "Конец найденного плана" in label
         else:
             assert "Матч завершён" in label

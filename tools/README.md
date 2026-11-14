@@ -130,3 +130,7 @@ records low-level performance data for those tools.
 reports. Do not create Python or other executable helpers there. Narrow one-off
 experiment scripts may use disposable `.tmp/`; durable workflows must not depend
 on its contents. Historical tool descriptions are in the [archive index](archive/README.md).
+
+`ctl_rl.py branch-replay` creates a verified one-command policy–CP branch with
+model/CP history restoration; `--check-only` inspects legality without inference.
+See [operations](../docs/rl-operations.md#замена-команды-в-policycp-реплее).
