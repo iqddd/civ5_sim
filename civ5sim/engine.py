@@ -267,6 +267,11 @@ class Battle:
             )
         return result
 
+    @property
+    def turn_reset_mode(self):
+        self._require_open()
+        return ("legacy", "end_turn")[self._lib.sim_turn_reset_mode(self._handle)]
+
     def _restore_state(self, scenario, units):
         masks = None
         if scenario["kind"] == "civ5sim.snapshot":
@@ -298,12 +303,16 @@ class Battle:
                 0,
                 integer(scenario.get("seed", 0), "seed", 0, 2**64 - 1),
             )
+        mode = (scenario["state"] if scenario["kind"] == "civ5sim.snapshot" else scenario).get("turn_reset_mode", "legacy")
+        if mode not in ("legacy", "end_turn"):
+            raise ValueError("turn_reset_mode must be legacy or end_turn")
         temporary = self._lib.sim_clone(self._handle)
         if not temporary:
             raise MemoryError("Cannot restore battle")
         try:
             if self._lib.sim_reset(temporary, units, len(units), C.byref(info)):
                 raise ValueError("Invalid snapshot or scenario state")
+            self._lib.sim_set_turn_reset_mode(temporary, int(mode == "end_turn"))
             if masks is not None and self._lib.sim_restore_visibility(temporary, masks, len(masks)):
                 raise ValueError("Snapshot visibility excludes a current sight source")
         except BaseException:
@@ -483,6 +492,7 @@ class Battle:
             "map": deepcopy(self._map) if copy_static else self._map,
             "units": units,
             "state": {
+                **({"turn_reset_mode": "end_turn"} if self.turn_reset_mode == "end_turn" else {}),
                 "side": info.side,
                 "turn": info.turn,
                 "fog": bool(info.fog),

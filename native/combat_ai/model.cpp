@@ -125,7 +125,7 @@ void validate_header(const CaiBattleState& state) {
   require(state.width >= 1 && state.width <= 128 && state.height >= 1 && state.height <= 128 &&
               state.tile_count == state.width * state.height && state.tile_count <= 4096 &&
               state.tiles && bit(state.row_parity) && bit(state.wrap_x) && bit(state.fog) &&
-              bit(state.active_side) && state.turn >= 0 && state.unit_count >= 0 &&
+              bit(state.active_side) && bit(state.turn_reset_mode) && state.turn >= 0 && state.unit_count >= 0 &&
               state.unit_count <= 512 && (!state.unit_count || state.units) && state.visibility &&
               state.visibility_count == state.tile_count,
           "invalid battle snapshot");
@@ -204,7 +204,7 @@ class OwnedBranch final : public Branch {
                 units.data(),      int32_t(units.size()),
                 visibility.data(), int32_t(visibility.size()),
                 rules.side,        rules.turn,
-                rules.fog, visibility_history.data(), int32_t(visibility_history.size())};
+                rules.fog, visibility_history.data(), int32_t(visibility_history.size()), rules.turn_reset_mode};
     snapshot_valid = true;
     return snapshot;
   }
@@ -325,6 +325,7 @@ class Adapter final : public RulesAdapter {
     position->rules.side = state.active_side;
     position->rules.turn = state.turn;
     position->rules.fog = state.fog;
+    position->rules.turn_reset_mode = state.turn_reset_mode;
     position->rules.rebuild();
     // A mid-turn root also owns sight left by departed units. The request's
     // public mask is authoritative history, and must include current sources.

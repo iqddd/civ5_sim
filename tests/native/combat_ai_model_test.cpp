@@ -35,7 +35,7 @@ struct Fixture {
   std::vector<int32_t> visibility;
   CaiBattleState input{};
   void* real = nullptr;
-  int observer = 0;
+  int observer = 0, turn_reset_mode = 0;
   std::unique_ptr<RulesAdapter> adapter;
   std::unique_ptr<Branch> branch;
   ~Fixture() { sim_free(real); }
@@ -43,6 +43,7 @@ struct Fixture {
     observer = observing_side;
     real = sim_new(w,h,parity,wrap,tiles.data(),units.data(),int(units.size()),fog,random,42);
     CHECK(real);
+    CHECK(sim_set_turn_reset_mode(real,turn_reset_mode)==0);
     input_tiles.clear(); input_units.clear();
     for (auto t : tiles) input_tiles.push_back({t.terrain,t.elevation,t.feature,t.rivers});
     for (int i=0;i<int(units.size());++i) {
@@ -54,12 +55,14 @@ struct Fixture {
     sim_visibility(real,observer,visibility.data());
     input = {w,h,parity,wrap,input_tiles.data(),int32_t(tiles.size()),input_units.data(),
              int32_t(units.size()),visibility.data(),int32_t(visibility.size()),0,0,fog};
+    input.turn_reset_mode = turn_reset_mode;
     adapter = make_rules_adapter(input,observer);
     branch = adapter->root(input,memory);
     equal();
   }
   void equal() const {
     const auto& s = branch->state();
+    CHECK(s.turn_reset_mode == sim_turn_reset_mode(real));
     std::vector<Unit> actual(s.unit_count);
     CHECK(sim_units(real,-1,actual.data()) == s.unit_count);
     for (int i=0;i<s.unit_count;++i) { CHECK(s.units[i].id == i); CHECK(same(actual[i],s.units[i])); }
@@ -192,6 +195,18 @@ void combat() {
 }
 
 void turn_and_healing() {
+  for (int mode : {0,1}) {
+    Fixture t; t.turn_reset_mode=mode;
+    t.units={unit(0,0,26,50),unit(0,1,80,60)};t.start();
+    t.step({SKIP,0,-1});t.step({END_TURN,-1,-1});
+    CHECK(t.branch->state().units[0].hp==(mode?60:50));
+    CHECK(t.branch->state().units[0].fortified==mode);
+    CHECK(t.branch->state().units[1].hp==(mode?60:70));
+    auto exported=t.branch->state();
+    auto reroot=t.adapter->root(exported,t.branch->contacts());
+    CHECK(reroot->state().turn_reset_mode==mode);
+    t.step({END_TURN,-1,-1});
+  }
   Fixture f; f.fog=1;f.units={unit(0,0,26,50),unit(4,1,80,60)};f.start();
   f.step({FORTIFY,0,-1}); CHECK(f.branch->state().units[0].waiting);
   CHECK(f.adapter->reachable(*f.branch,0).empty());

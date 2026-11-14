@@ -113,6 +113,7 @@ class PlanningState:
     wrap_x: bool = False
     fog: bool = True
     visibility_history: tuple[tuple[int, ...], ...] = ()
+    turn_reset_mode: str = "legacy"
 
     @classmethod
     def from_battle(cls, battle: Battle, side: int, *, observation: dict | None = None):
@@ -144,6 +145,7 @@ class PlanningState:
             row_parity=battle._map["row_parity"],
             wrap_x=battle._map["wrap_x"],
             fog=bool(battle._info().fog),
+            turn_reset_mode=battle.turn_reset_mode,
             visibility_history=tuple(tuple(map(int, row)) for row in battle.visibility_history()),
         )
 
@@ -380,6 +382,7 @@ class _State(C.Structure):
         ("fog", C.c_int32),
         ("visibility_history", C.POINTER(C.c_int32)),
         ("visibility_history_count", C.c_int32),
+        ("turn_reset_mode", C.c_int32),
     ]
 
 
@@ -447,7 +450,7 @@ def _library():
     ):
         fn = getattr(lib, name)
         fn.argtypes, fn.restype = arguments, result
-    if lib.cai_abi() != 7:
+    if lib.cai_abi() != 8:
         raise RuntimeError("Unsupported combat AI ABI; rebuild the planner")
     lib.cai_support.argtypes = [C.c_void_p, C.POINTER(_Request), C.c_int32,
                                C.POINTER(_Assignment), C.c_int32, C.POINTER(_Result)]
@@ -593,6 +596,8 @@ class Planner:
             raise RuntimeError("Planner is closed")
         boolean(s.wrap_x, "wrap_x")
         boolean(s.fog, "fog")
+        if s.turn_reset_mode not in ("legacy", "end_turn"):
+            raise ValueError("turn_reset_mode must be legacy or end_turn")
         # Bound Python-side allocations before constructing any ctypes array.
         if len(s.tiles) > 4096 or len(s.units) > 512 or len(s.visibility) > 4096:
             raise ValueError("Planning state exceeds kernel limits")
@@ -631,6 +636,7 @@ class Planner:
             int(s.fog),
             history if history_values else None,
             len(history_values),
+            int(s.turn_reset_mode == "end_turn"),
         )
         return _PackedState(state, (tiles, units, visibility, history))
 

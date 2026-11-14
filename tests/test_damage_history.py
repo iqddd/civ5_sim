@@ -136,7 +136,7 @@ class DamageHistoryTests(unittest.TestCase):
         # Keep the damaged participant available so the public result exposes
         # its role; otherwise root pruning may legitimately exclude it.
         with Planner(SearchConfig(aggression=Aggression.BRAVEHEART, risk_budget_base=13)) as planner:
-            self.assertEqual(planner._lib.cai_abi(), 7)
+            self.assertEqual(planner._lib.cai_abi(), 8)
             result = planner.search(request)
             initial = next(a for a in result.assignments if a.kind == AssignmentKind.INITIAL)
             self.assertEqual(initial.movement_role, 3)

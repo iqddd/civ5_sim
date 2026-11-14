@@ -36,6 +36,7 @@ struct State {
   // Keep current sight counts separately for the turn-boundary reset.
   std::array<std::vector<uint8_t>, 2> visible_this_turn;
   int side = 0, turn = 0, fog = 1;
+  int turn_reset_mode = 0;  // 0: legacy incoming side; 1: outgoing side.
   explicit State(std::shared_ptr<const Geometry> geo);
   void sight(const Unit& u, int delta);
   bool known(int observer, int tile) const;

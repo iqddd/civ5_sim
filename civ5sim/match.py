@@ -22,6 +22,7 @@ class MatchConfig:
     fog: bool = True
     random_damage: bool = True
     max_calls_per_turn: int = 10_000
+    turn_reset_mode: str = "legacy"
 
 
 def load_match_config(path):
@@ -114,6 +115,7 @@ def create_scenario(config):
         "seed": seeds["battle"],
         "fog": config.fog,
         "random_damage": config.random_damage,
+        **({"turn_reset_mode": config.turn_reset_mode} if config.turn_reset_mode != "legacy" else {}),
         "active_side": 0,
     }
 
@@ -149,12 +151,16 @@ def run_match(config, agents, *, metrics=None, diagnostics="off", scenario=None,
     """
     from .decision_diagnostics import recorder
     recording = recorder(diagnostics)
+    if config.turn_reset_mode not in ("legacy", "end_turn"):
+        raise ValueError("turn_reset_mode must be legacy or end_turn")
     if scenario is None:
         scenario = create_scenario(config)
     else:
         scenario = deepcopy(scenario)
         if scenario.get("kind") != "civ5sim.scenario" or scenario.get("active_side", 0) != 0:
             raise ValueError("Prepared match must start at side 0 in a scenario")
+        if scenario.get("turn_reset_mode", "legacy") != config.turn_reset_mode:
+            raise ValueError("Prepared scenario turn_reset_mode disagrees with MatchConfig")
         if scenario.get("fog") != config.fog or scenario.get("random_damage") != config.random_damage:
             raise ValueError("Prepared scenario flags disagree with MatchConfig")
         if [[u["type"] for u in scenario["units"] if u["side"] == s] for s in (0, 1)] != config.armies:

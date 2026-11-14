@@ -396,6 +396,57 @@ class CombatTests(unittest.TestCase):
         b.step(Action("move", 0, 25))
         self.assertEqual(b.snapshot()["units"][0]["moves"], 180)
 
+    def test_turn_reset_modes_apply_to_the_correct_side_and_survive_restore(self):
+        # Wrong boundary silently changes attacks/healing; normal matches do not flag it.
+        for mode in ("legacy", "end_turn"):
+            with self.subTest(mode=mode):
+                sc = scenario(unit(hp=50), unit(side=1, x=8, hp=60))
+                sc["turn_reset_mode"] = mode
+                with Battle(sc, log=True) as b:
+                    b.step(Action("skip", 0))
+                    b.step(Action("end_turn"))
+                    own, enemy = b.snapshot()["units"]
+                    self.assertEqual((own["hp"], own["fortified"]),
+                                     (60, True) if mode == "end_turn" else (50, False))
+                    self.assertEqual((enemy["hp"], enemy["fortified"]),
+                                     (60, False) if mode == "end_turn" else (70, True))
+                    snapshot = b.snapshot()
+                    with b.clone() as clone, Battle(snapshot) as restored:
+                        for other in (clone, restored):
+                            self.assertEqual(other.turn_reset_mode, mode)
+                            other.step(Action("end_turn"))
+                        b.step(Action("end_turn"))
+                        self.assertEqual(b.snapshot(), clone.snapshot())
+                        self.assertEqual(b.snapshot(), restored.snapshot())
+                    with Battle(b.replay()["initial"]) as replayed:
+                        for step in b.replay()["steps"]:
+                            replayed.step(step["action"])
+                            self.assertEqual(digest(replayed.snapshot()), step["state_sha256"])
+                    b.reset(scenario(unit()))
+                    self.assertEqual(b.turn_reset_mode, "legacy")
+                    self.assertNotIn("turn_reset_mode", b.snapshot()["state"])
+
+    def test_end_turn_fortification_protects_against_the_immediate_response(self):
+        for mode in ("legacy", "end_turn"):
+            for action in ("skip", "fortify", "none", "move", "melee"):
+                with self.subTest(mode=mode, action=action):
+                    sc = scenario(unit(), unit(side=1, x=3))
+                    sc["turn_reset_mode"] = mode
+                    with Battle(sc) as b:
+                        if action in ("skip", "fortify"):
+                            b.step(Action(action, 0))
+                        elif action == "move":
+                            b.step(Action("move", 0, 25))
+                        elif action == "melee":
+                            b.step(Action("melee", 0, 27))
+                        b.step(Action("end_turn"))
+                        expected = mode == "end_turn" and action in ("skip", "fortify", "none")
+                        self.assertEqual(bool(b.snapshot()["units"][0]["fortified"]), expected)
+                        if action in ("skip", "fortify", "none"):
+                            result = b.step(Action("melee", 1, 26))
+                            self.assertTrue(result.ok)
+                            self.assertEqual(result.defender_strength, 960 if expected else 800)
+
     def test_fortification_and_healing_at_owner_turn_reset(self):
         b = self.battle(unit(hp=50), unit(side=1, x=8))
         b.step(Action("fortify", 0))

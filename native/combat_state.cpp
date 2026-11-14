@@ -238,6 +238,7 @@ Result State::step(Action a, const std::function<int()>& roll,
     int error = validate(a);
     if (error) return {error, 0, 0, 0, 0, 0};
     if (a.kind == END_TURN) {
+      const int reset_side = turn_reset_mode ? side : 1 - side;
       flip_visibility(side);
       side = 1 - side;
       flip_visibility(side);
@@ -249,7 +250,7 @@ Result State::step(Action a, const std::function<int()>& roll,
         unit.damage_taken_this_turn = 0;
       }
       for (Unit& u : units)
-        if (u.side == side && u.hp > 0) {
+        if (u.side == reset_side && u.hp > 0) {
           if (!u.acted) {
             u.hp = std::min(100, u.hp + NEUTRAL_HEAL_RATE);
             if (u.type != 2 && u.type != 4) u.fortified = 1;

@@ -189,3 +189,12 @@ void sim_batch(void** states, const Action* actions, Result* out, int n) {
   if (!states || !actions || !out || n < 0) return;
   for (int i = 0; i < n; ++i) out[i] = sim_step(states[i], actions[i]);
 }
+
+int sim_turn_reset_mode(void* p) {
+  return p ? static_cast<Battle*>(p)->turn_reset_mode : -1;
+}
+int sim_set_turn_reset_mode(void* p, int mode) {
+  if (!p || mode < 0 || mode > 1) return BAD_ACTION;
+  static_cast<Battle*>(p)->turn_reset_mode = mode;
+  return OK;
+}

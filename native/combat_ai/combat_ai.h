@@ -26,7 +26,7 @@ enum CaiAssignmentKind {
 enum CaiMovementRole { CAI_ROLE_NONE, CAI_FIRST_LINE, CAI_SECOND_LINE, CAI_THIRD_LINE };
 enum CaiSupportMode { CAI_HEAL_BEFORE, CAI_HEAL_AFTER, CAI_APPROACH, CAI_RECOVERY };
 enum CaiRecoveryKind { CAI_RECOVERY_NONE, CAI_RECOVERY_ATTACK, CAI_RECOVERY_RETREAT, CAI_RECOVERY_WAIT };
-enum { CAI_ABI = 7, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
+enum { CAI_ABI = 8, CAI_NO_ID = -1, CAI_MAX_SELECTED = 13, CAI_FIXED_ROLL = 600 };
 
 typedef struct CaiConfig {
   int32_t position_capacity, max_completed, max_branches, choices_per_unit;
@@ -53,6 +53,7 @@ typedef struct CaiBattleState {
   int32_t active_side, turn, fog;
   const int32_t* visibility_history; /* Optional raw rows: side 0 then side 1. */
   int32_t visibility_history_count; /* 0, or 2*tile_count. Not public observations. */
+  int32_t turn_reset_mode; /* 0 legacy, 1 outgoing-side reset. */
 } CaiBattleState;
 typedef struct CaiContact { int32_t id, last_seen_own_turn; } CaiContact;
 typedef struct CaiContactMemory {

@@ -29,6 +29,11 @@ C++17 исполняет физические правила, Python загру�
 Физическая законность, движение, видимость и RNG принадлежат ядру;
 AI предлагает команды, а не заменяет их исполнение.
 
+`turn_reset_mode` в сценарии или конфигурации матча: `"legacy"` по умолчанию
+сохраняет сброс начинающей ход стороны; `"end_turn"` включает исправленный
+сброс заканчивающей ход стороны. Он охватывает укрепление, лечение и
+восстановление движения. Снимки/реплеи и планировщик CP сохраняют режим.
+
 ```powershell
 .venv/Scripts/python.exe -m civ5sim match scenarios/match-example.json --out build/match-example
 .venv/Scripts/python.exe -m civ5sim replay build/match-example/replay.json --out build/match-example/verified.json
