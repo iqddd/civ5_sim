@@ -36,6 +36,7 @@ def main():
 
     import torch
     from civ5rl.engine.collector import Collector
+    from civ5rl.engine.optimizer_transaction import AdamSnapshot
     from civ5rl.engine.ppo import update
     from civ5rl.engine.ppo_adam import grouped_optimizer
     from civ5rl.engine.ppo_fast import BatchedBackend
@@ -46,7 +47,7 @@ def main():
     from civ5rl.protocols.ppo_target_scale import TargetFactory
     from civ5rl.provenance import checkpoint
     from civ5rl.provenance.common import configure, file_sha256, write_json
-    from civ5rl.provenance.rng import restore_rng
+    from civ5rl.provenance.rng import capture_rng, restore_rng
 
     inputs = [args.checkpoint.resolve(), args.settings.resolve(), args.base.resolve()]
     if any(p == args.out or p.is_relative_to(args.out) for p in inputs):
@@ -78,7 +79,7 @@ def main():
         **identity, runtime=runtime, protected_sha256=hashes,
         turn_reset_mode=cfg['environment'].get('turn_reset_mode', 'legacy'),
         starting_next_episode=next_episode, starting_decisions=decisions,
-        cycles=args.cycles, warmup_cycles=1,
+        cycles=args.cycles, warmup_cycles=1, identical_ppo_passes_per_rollout=2,
         scientific_training_extended=False, fresh_scenarios=True))
     factory = TargetFactory(cfg, base)
 
@@ -109,13 +110,35 @@ def main():
             artifact = save_rollout(episodes, args.out / 'rollouts', cycle + 1)
             save_state('ppo', cycle)
             prepared = perf_counter()
-            monitor.mark('warmup_ppo' if warmup else 'ppo', rollout=cycle)
-            with CompilationClock() as compiler:
-                compiler.monitor = monitor
-                metrics = update(policy, optimizer, episodes, cfg, decisions, 'cuda', shuffle,
-                                 monitor=monitor, _backend=partial(BatchedBackend, pinned_replay=True))
+            before_update = AdamSnapshot(policy, optimizer)
+            before_rng = capture_rng(shuffle)
+            passes = []
+            for replay_pass in range(2):
+                if replay_pass:
+                    before_update.restore()
+                    restore_rng(before_rng, shuffle)
+                monitor.mark('warmup_ppo' if replay_pass == 0 or warmup else 'ppo',
+                             rollout=cycle, identical_pass=replay_pass+1)
                 torch.cuda.synchronize()
-            updated = perf_counter()
+                pass_started = perf_counter()
+                with CompilationClock() as compiler:
+                    compiler.monitor = monitor
+                    metrics = update(policy, optimizer, episodes, cfg, decisions, 'cuda', shuffle,
+                                     monitor=monitor, _backend=partial(BatchedBackend, pinned_replay=True))
+                    torch.cuda.synchronize()
+                updated = perf_counter()
+                passes.append(dict(pass_number=replay_pass+1, seconds=updated-pass_started,
+                                   compilation_seconds=compiler.seconds(pass_started,updated),
+                                   metrics=metrics))
+                print('PPO_PASS '+json.dumps(dict(cycle=cycle, pass_number=replay_pass+1,
+                    seconds=updated-pass_started, compilation_seconds=passes[-1]['compilation_seconds'],
+                    accepted=metrics['optimizer_steps'], rejected=metrics['rejected_optimizer_steps'])),flush=True)
+            # Same episodes, labels, model, Adam and RNG; only the second pass advances this copy.
+            for key in ('optimizer_steps','rejected_optimizer_steps'):
+                if passes[0]['metrics'][key] != passes[1]['metrics'][key]:
+                    raise AssertionError('Identical PPO passes changed accepted/rejected step counts')
+            pair_overhead = updated-prepared-sum(p['seconds'] for p in passes)
+            del before_update
             monitor.mark('checkpoint_save', rollout=cycle)
             save_state('collect', cycle)
             # Match the runner's release and collection of Python objects.
@@ -125,9 +148,13 @@ def main():
             row = dict(cycle=cycle, warmup=warmup, decisions=n,
                        episodes=artifact['episodes'], collection_seconds=collected-start,
                        collection_compilation_seconds=collection_compiler.seconds(start,collected),
-                       save_pending_seconds=prepared-collected, ppo_seconds=updated-prepared,
-                       ppo_compilation_seconds=compiler.seconds(prepared,updated),
-                       save_release_seconds=stopped-updated, full_seconds=stopped-start,
+                       save_pending_seconds=prepared-collected, ppo_seconds=passes[1]['seconds'],
+                       ppo_compilation_seconds=passes[1]['compilation_seconds'],
+                       first_ppo_pass_seconds=passes[0]['seconds'], ppo_passes=passes,
+                       pair_reset_snapshot_seconds=pair_overhead,
+                       save_release_seconds=stopped-updated,
+                       full_seconds=(collected-start)+(prepared-collected)+passes[1]['seconds']+(stopped-updated),
+                       total_diagnostic_wall_seconds=stopped-start,
                        accepted_steps=metrics['optimizer_steps'],
                        rejected_steps=metrics['rejected_optimizer_steps'],
                        collection=timings, ppo=metrics, rollout=artifact,
@@ -136,7 +163,7 @@ def main():
             rows.append(row)
             write_json(args.out / 'cycles.json', rows)
             monitor.record_cuda_memory(policy, 'after_update_release')
-            print('CYCLE ' + json.dumps({k:v for k,v in row.items() if k not in ('collection','ppo','rollout')}), flush=True)
+            print('CYCLE ' + json.dumps({k:v for k,v in row.items() if k not in ('collection','ppo','rollout','ppo_passes')}), flush=True)
 
         # Separate short real-data trace; its wall time never enters cycle rates.
         monitor.mark('trace_preparation')
