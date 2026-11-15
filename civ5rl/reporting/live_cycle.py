@@ -82,7 +82,29 @@ def main():
         starting_next_episode=next_episode, starting_decisions=decisions,
         cycles=args.cycles, warmup_cycles=1, identical_ppo_passes_per_rollout=2,
         scientific_training_extended=False, fresh_scenarios=True))
-    factory = TargetFactory(cfg, base)
+    class MeasuredFactory(TargetFactory):
+        def reset_measurement(self):
+            self.generation_seconds = self.visibility_seconds = 0.0
+            self.visibility_misses = 0
+
+        def make(self, *arguments, **keywords):
+            tick = perf_counter()
+            try:
+                return super().make(*arguments, **keywords)
+            finally:
+                self.generation_seconds += perf_counter() - tick
+
+        def _get_visibility_conflicts(self, key, *arguments, **keywords):
+            missing = key not in self.visibility_conflicts
+            tick = perf_counter()
+            try:
+                return super()._get_visibility_conflicts(key, *arguments, **keywords)
+            finally:
+                if missing:
+                    self.visibility_seconds += perf_counter() - tick
+                    self.visibility_misses += 1
+
+    factory = MeasuredFactory(cfg, base)
 
     def save_state(phase, cycle):
         state.update(phase=phase, next_episode=next_episode, decisions=decisions,
@@ -95,6 +117,8 @@ def main():
     ) as collector, monitor.capture_cuda_oom(policy):
         for cycle in range(args.cycles + 1):
             warmup = cycle == 0
+            factory.reset_measurement()
+            cache_before = dict(maps=len(factory.maps), visibility=len(factory.visibility_conflicts))
             monitor.mark('warmup_collection' if warmup else 'collection', rollout=cycle)
             monitor.record_cuda_memory(policy, 'before_collection')
             torch.cuda.synchronize()
@@ -147,6 +171,11 @@ def main():
             gc.collect()
             stopped = perf_counter()
             row = dict(cycle=cycle, warmup=warmup, decisions=n,
+                       factory_generation_seconds=factory.generation_seconds,
+                       factory_visibility_seconds=factory.visibility_seconds,
+                       factory_visibility_misses=factory.visibility_misses,
+                       factory_cache_before=cache_before,
+                       factory_cache_after=dict(maps=len(factory.maps), visibility=len(factory.visibility_conflicts)),
                        episodes=artifact['episodes'], collection_seconds=collected-start,
                        collection_compilation_seconds=collection_compiler.seconds(start,collected),
                        save_pending_seconds=prepared-collected, ppo_seconds=passes[1]['seconds'],
