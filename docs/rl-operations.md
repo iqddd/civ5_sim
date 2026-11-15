@@ -407,6 +407,24 @@ Python/NumPy/Torch/CUDA RNG; optimizer не создаётся, новых ма�
 `full-cycle` действительно собирает данные и выполняет отбрасываемые updates.
 Нужен совместимый PPO boundary checkpoint с PPO Adam; BC Adam не сбрасывается
 молча. Входы защищаются hashes, состояния/RNG восстанавливаются между trials.
+
+Для сравнения полных исторических checkout с реальной генерацией новых
+TargetFactory-эпизодов и штатным after-target-BC PPO используйте:
+
+```powershell
+python tools/bench_rl.py live-cycle --source-root CHECKOUT --checkpoint CHECKPOINT --settings RESOLVED_CONFIG --base TRAINING_BASE_MANIFEST --out OUT --cycles 5 --envs 80 --workers 24
+```
+
+Сбор streaming/reply1, завершённые эпизоды, четыре эпохи и KL-контроль берутся
+из штатных execution modules выбранного checkout. Один полный прогревочный
+цикл исключён; следующие cycles последовательно изменяют диагностическую
+копию модели/Adam, как при обучении. Учитываются сериализация rollout и
+два checkpoint на цикл. Новые формы могут компилироваться и после прогрева:
+это время записывается отдельно и остаётся в фактической скорости. Короткая
+Kineto-трасса на реальных данных выполняется после измерений. Входной checkpoint
+и научный каталог не изменяются; результаты нельзя использовать как научное
+продолжение или штатный resume. Base manifest должен содержать только открытые
+training-карты с доступными путями; закрытый test не нужен.
 `bc` прогревает компиляцию вне замеряемого окна, затем измеряет итеративное BC-обучение по NVML (`60s` и интеграл интервала), при `--trace-steps` сохраняет Chrome-трассу Kineto CPU+CUDA и `*-trace-summary.json`, а при `--verify-parity` сверяет CE, норму градиента и обновлённые веса с синхронным baseline-циклом, не модифицируя каталог научного прогона. На Windows при включённом `torch.compile` команду запускают с активированным MSVC (`vcvars64.bat`, чтобы `cl.exe` был в `PATH`). Для предстартовой проверки достаточно короткого прогона (`--warmup 3 --steps 5 --trace-steps 3`): помимо NVML Core Load проверяют `% TDP` и `top_kernels` в сводке трейса (должны доминировать GEMM и Triton-ядра, а не детерминированный `indexing_backward` или `DeviceRadixSort`), после чего сверяют `steps_per_epoch × step_seconds × epochs` с лимитом `training_seconds`. Для запусков PPO (`rl01.ppo_after_target_bc`) предстартовая сверка бюджета (`compute_time_budget_check` в `protocols/ppo_after_target_bc.py`, сохраняемая в `run.json` при `initialize`) дополнительно учитывает превышение номинального числа шагов из-за неполных последних minibatch в каждой эпохе (`+epochs` шагов на каждый rollout при упаковке `pack_minibatches`) и доигрывания начатых эпизодов на границе бюджета, а также число полных replay-проверок KL. Для `whole_rollout_after_epoch_or_minibatch_spike` измеренный прогноз задаётся `expected_kl_checks_per_rollout`; без него ожидаемое попадание в бюджет остаётся неизвестным. Отдельно показывается пессимистичный сценарий: precheck, проверка после каждого шага при защёлкнутой жёлтой зоне и возможная проверка отката. Старый резерв «одна проверка на всплеск» не является верхней границей. Превышение выводится предупреждением с числами, а не автоматическим запретом из-за одного худшего сценария.
 Для `--compare-git-rev` поддержан только replay. Диагностика CP воспроизводит
 сохранённый эпизод; `--trace-from` требует trace-enabled native library.
