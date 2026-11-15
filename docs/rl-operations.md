@@ -350,6 +350,25 @@ Inductor и его pool ID доступны как необязательные 
 
 ## Replay, полный цикл и диагностика
 
+Для короткого сравнения PPO при искусственно одинаковых формах:
+
+```powershell
+python tools/bench_rl.py fixed-shapes --source-root CHECKOUT --checkpoint CHECKPOINT --settings RESOLVED_CONFIG --template ENCODED_TEMPLATE --out OUT --warmup 3 --steps 5
+```
+
+Команда в отдельном Python-процессе импортирует execution code выбранного
+checkout; settings задаются готовым resolved config, template — сохранённый
+публичный Encoded вход256клеток. Создаётся синтетический rollout128×128решений
+с одинаковым числом действий и minibatch8×128. Измеряется backward, Adam,
+finite-state check и один полный KL replay после каждого шага. Это диагностика
+операций, не прогноз реального decisions/s или оценка обучения. Разные checkout
+сравнивайте сначала на тех же checkpoint/settings/template, затем отдельно
+на состояниях своих опытов. Полные исторические конфиги/паспорта не меняются.
+Компиляция и запись CUDA Graphs должны завершиться до измерения; иначе
+команда прекращает замер с просьбой увеличить warmup. Пять измерений и
+отдельная короткая Kineto-трасса сохраняются вместе с формами, hashes и NVML.
+В конце веса/Adam восстанавливаются, неизменность входных файлов проверяется.
+
 При сравнении новых attention/backward ядер отдельно измеряют оператор и полный
 PPO update. Для сравнения updates прогревают весь путь (не только backward):
 precheck, KL replay, Adam и допустимые CUDA Graphs. Между вариантами восстанавливают

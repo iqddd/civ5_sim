@@ -212,6 +212,11 @@ def full_cycle(args, parser, config, inputs):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "fixed-shapes":
+        import subprocess
+        subprocess.run([sys.executable, str(ROOT / "civ5rl/reporting/fixed_shapes.py"),
+                        *sys.argv[2:]], check=True)
+        return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "phase",

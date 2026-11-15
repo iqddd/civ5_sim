@@ -248,6 +248,30 @@
       "single_thread": 2498,
       "source": "https://www.cpubenchmark.net/cpu.php?cpu=Intel+Xeon+w5-3433&id=6078",
       "provenance": "PassMark lookup 2026-11-14"
+    },
+    {
+      "name": "AMD EPYC 9654",
+      "single_thread": 2876,
+      "source": "https://www.cpubenchmark.net/cpu.php?id=5088",
+      "provenance": "PassMark lookup 2026-11-15"
+    },
+    {
+      "name": "AMD Ryzen 7 5700X3D",
+      "single_thread": 2969,
+      "source": "https://www.cpubenchmark.net/cpu.php?id=5884",
+      "provenance": "PassMark lookup 2026-11-15"
+    },
+    {
+      "name": "AMD Ryzen 7 7700X",
+      "single_thread": 4175,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+7700X&id=5036",
+      "provenance": "PassMark lookup 2026-11-15"
+    },
+    {
+      "name": "AMD Ryzen 7 9700X",
+      "single_thread": 4643,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+9700X&id=6205",
+      "provenance": "PassMark lookup 2026-11-15"
     }
   ]
 }
