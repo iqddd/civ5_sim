@@ -17,6 +17,7 @@ def main():
     parser.add_argument('--cycles', type=int, default=5)
     parser.add_argument('--envs', type=int, default=80)
     parser.add_argument('--workers', type=int, default=24)
+    parser.add_argument('--reply-size', type=int, default=1)
     args = parser.parse_args()
     if args.cycles < 1:
         parser.error('cycles must be positive')
@@ -72,7 +73,7 @@ def main():
     identity = dict(diagnostic=True, source_commit=subprocess.check_output(
         ['git', 'rev-parse', 'HEAD'], cwd=args.source_root, text=True).strip())
     rows = []
-    runtime = dict(num_envs=args.envs, cpu_workers=args.workers, reply_size=1,
+    runtime = dict(num_envs=args.envs, cpu_workers=args.workers, reply_size=args.reply_size,
                    collection_scheduler='streaming', inference_min_batch=0,
                    inference_wait_seconds=0)
     write_json(args.out / 'conditions.json', dict(

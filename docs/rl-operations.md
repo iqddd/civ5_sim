@@ -415,7 +415,7 @@ TargetFactory-эпизодов и штатным after-target-BC PPO испол�
 python tools/bench_rl.py live-cycle --source-root CHECKOUT --checkpoint CHECKPOINT --settings RESOLVED_CONFIG --base TRAINING_BASE_MANIFEST --out OUT --cycles 5 --envs 80 --workers 24
 ```
 
-Сбор streaming/reply1, завершённые эпизоды, четыре эпохи и KL-контроль берутся
+Сбор streaming (reply1 по умолчанию, меняется --reply-size), завершённые эпизоды, четыре эпохи и KL-контроль берутся
 из штатных execution modules выбранного checkout. Один полный прогревочный
 цикл исключён; следующие cycles последовательно изменяют диагностическую
 копию модели/Adam, как при обучении. Каждый PPO update выполняется дважды
