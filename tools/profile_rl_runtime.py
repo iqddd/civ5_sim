@@ -30,6 +30,7 @@ def behavior_hash(episodes):
 
 def replay(episodes):
     from civ5rl.core.env import DecisionEnv
+    from civ5rl.experiments.imitation_helpers import assert_equal
     from civ5sim.engine import digest
 
     results = []
@@ -39,11 +40,9 @@ def replay(episodes):
         try:
             for index, chosen in enumerate(ep["chosen"]):
                 state = env.request()
-                if (
-                    state["actions"] != ep["actions"][index]
-                    or state["observation"] != ep["observations"][index]
-                ):
+                if state["actions"] != ep["actions"][index]:
                     raise AssertionError("Replay changed legal actions or public observation")
+                assert_equal(state["observation"], ep["observations"][index])
                 action = state["actions"][chosen]
                 env.step(action)
             state = env.request()
