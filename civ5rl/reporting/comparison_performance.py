@@ -36,43 +36,46 @@ def measured_match(task):
     # Per-worker wall scopes include RPC waiting; process CPU is reported separately.
     import civ5rl.experiments.comparison_collection as module
 
-    original = module.run_match
+    # This replacement is process-wide within the worker and is always restored.
+    original_run_match = module.run_match
+    _, case, match_output, _, _ = task
+    learner_side = case["learner_side"]
     scopes = []
-    prefix = 0.0
+    prefix_hook_seconds = 0.0
 
-    def run(*args, **kwargs):
-        nonlocal prefix
+    def run_match_with_measurements(*args, **kwargs):
+        nonlocal prefix_hook_seconds
         hook = kwargs.get("before_decision")
 
         def timed_hook(*args):
-            nonlocal prefix
+            nonlocal prefix_hook_seconds
             start = perf_counter()
             result = hook(*args)
-            prefix += perf_counter() - start
+            prefix_hook_seconds += perf_counter() - start
             return result
 
         if hook is not None:
             kwargs["before_decision"] = timed_hook
-        return original(*args, **kwargs, metrics=scopes.append)
+        return original_run_match(*args, **kwargs, metrics=scopes.append)
 
-    module.run_match = run
-    wall = perf_counter()
-    cpu = process_time()
+    module.run_match = run_match_with_measurements
+    wall_started = perf_counter()
+    cpu_started = process_time()
     try:
         result = match_task(task)
     finally:
-        module.run_match = original
+        module.run_match = original_run_match
     grouped = defaultdict(float)
     for row in scopes:
         grouped[f"{row['kind']}/side{row['side']}"] += row["ns"] / 1e9
     write_json(
-        Path(task[2]) / "measurement.json",
+        Path(match_output) / "measurement.json",
         dict(
-            wall_seconds=perf_counter() - wall,
-            cpu_seconds=process_time() - cpu,
+            wall_seconds=perf_counter() - wall_started,
+            cpu_seconds=process_time() - cpu_started,
             scopes=dict(grouped),
-            prefix_hook_seconds=prefix,
-            learner_side=task[1]["learner_side"],
+            prefix_hook_seconds=prefix_hook_seconds,
+            learner_side=learner_side,
         ),
     )
     return result
@@ -226,8 +229,40 @@ def trace_summary(path):
     )
 
 
+TELEMETRY_FIELDS = (
+    "gpu_core_load_percent",
+    "gpu_memory_controller_load_percent",
+    "gpu_power_watts",
+    "gpu_power_percent_tdp",
+    "cpu_tree_percent",
+    "cpu_system_percent",
+    "vram_used_bytes",
+)
+
+
+def aggregate_telemetry(rows, phase):
+    """Return phase samples and measured means/maxima; missing values stay unknown."""
+    samples = [row for row in rows if row.get("phase") == phase]
+    aggregates = {}
+    for name in TELEMETRY_FIELDS:
+        values = [row[name] for row in samples if row.get(name) is not None]
+        aggregates[name] = (
+            {"mean": statistics.mean(values), "max": max(values)}
+            if values else {"mean": None, "max": None}
+        )
+    return samples, aggregates
+
+
+def format_measurement(aggregates, name, *, scale=1, suffix="", precision=1):
+    value = aggregates.get(name, {}).get("mean")
+    return "n/a" if value is None else f"{value / scale:.{precision}f}{suffix}"
+
+
 def finish_report(out):
     result = read_json(out / "summary.json")
+    hardware = read_json(out / "identity.json")["hardware"]
+    factory_results = read_json(out / "factory.json")
+    map_sizes = result["training"]["map_sizes"]
     traces = {
         name: trace_summary(out / (name + "-trace.json"))
         for name in ("training", "inference")
@@ -236,42 +271,48 @@ def finish_report(out):
     rows = [
         "# CPU/GPU rollout-comparison benchmark",
         "",
-        "Local RTX4060Ti (165W), CUDA deterministic FP32 inference / mixed BF16 spatial training. No scientific training or evaluation; all measured Adam steps are discarded. Startup/warmup excluded.",
+        f"Local {hardware['gpu']} ({hardware['gpu_limit_watts']:g}W limit), CUDA deterministic FP32 inference / mixed BF16 spatial training. No scientific training or evaluation; all measured Adam steps are discarded. Startup/warmup excluded.",
         "",
         "| Phase | Wall | GPU Core | Memory Controller | Power | CPU logical cores |",
         "|---|---:|---:|---:|---:|---:|",
     ]
     for key, label in [
-        ("source_collection", "8 source matches,171+107"),
-        ("continuations", "16 continuations,171"),
-        ("training", "32 pairs+64 anchors per batch"),
+        (
+            "source_collection",
+            f"{result['source_collection']['matches']} source matches",
+        ),
+        ("continuations", f"{result['continuations']['matches']} continuations"),
+        (
+            "training",
+            f"{result['training']['logical_pairs']} pairs+{result['training']['logical_anchors']} anchors per batch",
+        ),
     ]:
         r = result[key]
         m = r["nvml_cpu"]
         seconds = r.get("seconds", r.get("mean_seconds"))
         rows.append(
-            f"| {label} | {seconds:.2f}s | {m['gpu_core_load_percent']['mean']:.1f}% | {m['gpu_memory_controller_load_percent']['mean']:.1f}% | {m['gpu_power_watts']['mean']:.1f}W | {m['cpu_tree_percent']['mean'] / 100:.2f} |"
+            f"| {label} | {seconds:.2f}s | {format_measurement(m, 'gpu_core_load_percent', suffix='%')} | {format_measurement(m, 'gpu_memory_controller_load_percent', suffix='%')} | {format_measurement(m, 'gpu_power_watts', suffix='W')} | {format_measurement(m, 'cpu_tree_percent', scale=100, precision=2)} |"
         )
     rows += [
         "",
         "Memory Controller Load measures activity, not occupied VRAM or percent of peak GB/s. CPU cores are process-tree CPU percent/100, not hardware occupancy. Collection CP worker scopes and inference service overlap and must not be added to phase wall time. CP search is nested inside act.",
         "",
-        "The source workload is dominated by central inference service wall time: "
+        "Source inference service measurements: "
         + str(result["source_collection"]["service"])
         + ". Continuations: "
         + str(result["continuations"]["service"])
         + ". Worker model-act scopes include RPC waiting; worker process CPU time separates actual CPU consumption from waiting.",
         "",
-        f"Training uses {result['training']['unique_targets']} distinct target positions across eight episodes/maps10/12/16. {len(result['training']['samples'])} timed batches follow warmup; samples and NVML are in summary.json/telemetry. Timed training excludes reference preparation and full KL checks. Each batch starts from the same restored model/Adam.",
+        f"Training uses {result['training']['unique_targets']} distinct target positions across {len(map_sizes)} episodes; map sizes: {', '.join(str(size) for size in sorted(set(map_sizes)))}. {len(result['training']['step_samples'])} timed batches follow warmup; samples and NVML are in summary.json/telemetry. Timed training excludes reference preparation and full KL checks. Each batch starts from the same restored model/Adam.",
         "",
         "Kineto traces are short, separate profiled fragments and include profiler overhead: their GPU busy ratio is not the unprofiled phase utilization. Inspect top kernels, CPU launch gaps, DMA and synchronization times in trace-summary.json to attribute the remaining cost.",
         "",
-        "Local system background CPU load varied; inspect cpu_system_percent before extrapolating to another machine. The measured GPU phases are shorter than10minutes and were not extended to meet utilization policy.",
+        "Inspect cpu_system_percent before extrapolating to another machine. Assess each iterative GPU phase against the utilization policy using its measured duration.",
         "",
         "The measurement uses the recorded compiled runtime, compact attention and batched independent histories. Logical batch, training budget and precision are unchanged; the execution strategy is recorded in identity.json.",
         "",
-        "CPU-only cold/warm scenario generation of eight cases: "
-        + str(read_json(out / "factory.json"))
+        "CPU-only cold/warm scenario generation: "
+        + str(factory_results)
         + ". This cost is separate from saved-case match timing.",
         "",
         "Raw match JSON and Kineto traces are stored in the sibling PPMd packet after verified packing; summary, telemetry and this report remain readable.",
@@ -280,20 +321,18 @@ def finish_report(out):
 
 
 def archive_evidence(out):
-    from civ5rl.deploy.archive import pack, _extract, _inventory
-    import tempfile, shutil
+    from civ5rl.reporting.storage import pack_verified
+    import shutil
 
     out = Path(out).resolve()
     packet = out.with_name(out.name + "-packet")
-    manifest = pack(
-        out, packet, token="comparison-performance", direction="download", force=True
+    manifest = pack_verified(
+        out,
+        packet,
+        token="comparison-performance",
+        temporary_prefix="verify-comparison-performance-",
+        changed_message="Measurement changed during packing",
     )
-    with tempfile.TemporaryDirectory(
-        prefix="verify-comparison-performance-"
-    ) as temporary:
-        _extract(packet, Path(temporary), manifest)
-    if _inventory(out) != (manifest["files"], manifest["directories"]):
-        raise RuntimeError("Measurement changed during packing")
     for name in ("matches", "training-trace.json", "inference-trace.json"):
         target = (out / name).resolve()
         if not target.is_relative_to(out) or target == out:
@@ -311,6 +350,173 @@ def archive_evidence(out):
             bytes=sum(p.stat().st_size for p in packet.rglob("*") if p.is_file()),
         ),
     )
+
+
+def measure_source_collection(cfg, config, episodes, runtime, scratch, out, monitor):
+    monitor.mark("source_startup")
+    with ProposalExecutor(cfg["parents"], runtime) as executor:
+        episode_cases = [
+            (episode, read_json(scratch / "sources" / str(episode) / "case.json"))
+            for episode in episodes
+        ]
+        warmup_tasks = [
+            (
+                config,
+                case,
+                str(out / "matches" / "warmup" / str(episode)),
+                cfg["parents"][0],
+                None,
+            )
+            for episode, case in episode_cases
+        ]
+        list(executor.run(measured_match, warmup_tasks))
+        tasks = [
+            (
+                config,
+                case,
+                str(out / "matches" / "source" / str(episode)),
+                cfg["parents"][0],
+                None,
+            )
+            for episode, case in episode_cases
+        ]
+        monitor.mark("source_collection")
+        start = perf_counter()
+        with ServiceMeter(executor) as service:
+            list(executor.run(measured_match, tasks))
+        result = dict(
+            seconds=perf_counter() - start,
+            service=service.result(),
+            matches=len(tasks),
+        )
+        monitor.mark("source_cleanup")
+    return result
+
+
+def measure_continuations(cfg, config, collection, runtime, scratch, out, monitor):
+    monitor.mark("continuation_startup")
+    fork = collection["forks"][0]
+    case = read_json(scratch / "sources" / str(fork["episode"]) / "case.json")
+
+    def continuation_tasks(label):
+        tasks = []
+        for repetition in range(8):
+            for action_index in range(2):
+                branch = read_json(
+                    scratch
+                    / "continuations"
+                    / str(fork["id"])
+                    / f"{repetition}-{action_index}"
+                    / "branch.json"
+                )
+                branch["source"] = str(
+                    (scratch / "sources" / str(fork["episode"])).resolve()
+                )
+                tasks.append(
+                    (
+                        config,
+                        case,
+                        str(out / "matches" / label / f"{repetition}-{action_index}"),
+                        cfg["parents"][0],
+                        branch,
+                    )
+                )
+        return tasks
+
+    with EvaluationExecutor(cfg["parents"][0], runtime) as executor:
+        warmup_tasks = continuation_tasks("continuation-warmup")
+        tasks = continuation_tasks("continuations")
+        list(executor.run(measured_match, warmup_tasks))
+        monitor.mark("continuations")
+        start = perf_counter()
+        with ServiceMeter(executor) as service:
+            list(executor.run(measured_match, tasks))
+        result = dict(
+            seconds=perf_counter() - start, service=service.result(), matches=len(tasks)
+        )
+        monitor.mark("continuation_cleanup")
+    return result
+
+
+def measure_training(cfg, episodes, scratch, out, monitor, warmup, steps):
+    monitor.mark("training_prepare")
+    histories = Histories(scratch, capacity=8)
+    pairs = []
+    anchors = []
+    for episode in episodes:
+        _, rows = histories.get(episode)
+        eligible = [i for i, r in enumerate(rows) if i >= 127 and len(r["actions"]) > 1]
+        if not eligible:
+            eligible = [i for i, r in enumerate(rows) if len(r["actions"]) > 1]
+        indices = [
+            eligible[min(len(eligible) - 1, int(k * len(eligible) / 12))]
+            for k in range(12)
+        ]
+        for index in indices[:4]:
+            row = rows[index]
+            pairs.append(
+                dict(
+                    episode=episode,
+                    index=index,
+                    better=(row["chosen"] + 1) % len(row["actions"]),
+                    worse=row["chosen"],
+                    weight=0.5,
+                )
+            )
+        anchors.extend((episode, i) for i in indices[4:])
+    policy = configure_policy(cfg["parents"][0])
+    references = prepare_references(policy, histories, anchors, out / "references.pt")
+    optimizer = torch.optim.Adam(
+        [p for p in policy.parameters() if p.requires_grad],
+        lr=1e-5,
+        betas=(0.9, 0.999),
+        eps=1e-5,
+    )
+    initial = AdamSnapshot(policy, optimizer)
+    timings = []
+    for step in range(warmup + steps):
+        initial.restore()
+        monitor.mark("training_warmup" if step < warmup else "training", update=step)
+        start = perf_counter()
+        metrics = logical_step(
+            policy, optimizer, histories, pairs, anchors, references["mixed"]
+        )
+        seconds = perf_counter() - start
+        print(f"Comparison batch {step + 1}: {seconds:.3f}s", flush=True)
+        if step >= warmup:
+            timings.append(dict(seconds=seconds, **metrics))
+    initial.restore()
+    monitor.mark("trace")
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
+    ) as profiler:
+        optimizer.zero_grad(set_to_none=True)
+        row = pairs[-1]
+        history, _ = histories.get(row["episode"])
+        logits = target_logits(policy, history, row["index"], gradient=True)
+        pair_loss(logits, row["better"], row["worse"], 0.5).backward()
+    profiler.export_chrome_trace(str(out / "training-trace.json"))
+    initial.restore()
+    result = dict(
+        logical_pairs=len(pairs),
+        logical_anchors=len(anchors),
+        step_samples=timings,
+        mean_seconds=statistics.mean(r["seconds"] for r in timings),
+        median_seconds=statistics.median(r["seconds"] for r in timings),
+        unique_targets=len(
+            set((p["episode"], p["index"]) for p in pairs) | set(anchors)
+        ),
+        map_sizes=[
+            read_json(scratch / "sources" / str(e) / "case.json")["map_size"]
+            for e in episodes
+        ],
+        synthetic_preferences=True,
+    )
+    monitor.mark("finished")
+    return result
 
 
 def run_benchmark(args, parser):
@@ -402,191 +608,23 @@ def run_benchmark(args, parser):
         ResourceMonitor(out / "telemetry", interval=0.25) as monitor,
         evaluation_precision(),
     ):
-        monitor.mark("source_startup")
-        with ProposalExecutor(cfg["parents"], runtime) as executor:
-            tasks = [
-                (
-                    config,
-                    read_json(scratch / "sources" / str(e) / "case.json"),
-                    str(out / "matches" / "warmup" / str(e)),
-                    cfg["parents"][0],
-                    None,
-                )
-                for e in episodes
-            ]
-            list(executor.run(measured_match, tasks))
-            monitor.mark("source_collection")
-            start = perf_counter()
-            tasks = [
-                (
-                    config,
-                    t[1],
-                    str(out / "matches" / "source" / str(e)),
-                    cfg["parents"][0],
-                    None,
-                )
-                for e, t in zip(episodes, tasks)
-            ]
-            with ServiceMeter(executor) as service:
-                list(executor.run(measured_match, tasks))
-            results["source_collection"] = dict(
-                seconds=perf_counter() - start,
-                service=service.result(),
-                matches=len(tasks),
-            )
-            monitor.mark("source_cleanup")
-        monitor.mark("continuation_startup")
-        fork = collection["forks"][0]
-        case = read_json(scratch / "sources" / str(fork["episode"]) / "case.json")
-
-        def continuation_tasks(label):
-            tasks = []
-            for j in range(8):
-                for a in range(2):
-                    branch = read_json(
-                        scratch
-                        / "continuations"
-                        / str(fork["id"])
-                        / f"{j}-{a}"
-                        / "branch.json"
-                    )
-                    branch["source"] = str(
-                        (scratch / "sources" / str(fork["episode"])).resolve()
-                    )
-                    tasks.append(
-                        (
-                            config,
-                            case,
-                            str(out / "matches" / label / f"{j}-{a}"),
-                            cfg["parents"][0],
-                            branch,
-                        )
-                    )
-            return tasks
-
-        with EvaluationExecutor(cfg["parents"][0], runtime) as executor:
-            list(
-                executor.run(measured_match, continuation_tasks("continuation-warmup"))
-            )
-            monitor.mark("continuations")
-            start = perf_counter()
-            with ServiceMeter(executor) as service:
-                list(executor.run(measured_match, continuation_tasks("continuations")))
-            results["continuations"] = dict(
-                seconds=perf_counter() - start, service=service.result(), matches=16
-            )
-            monitor.mark("continuation_cleanup")
-        monitor.mark("training_prepare")
-        histories = Histories(scratch, capacity=8)
-        pairs = []
-        anchors = []
-        for episode in episodes:
-            _, rows = histories.get(episode)
-            eligible = [
-                i for i, r in enumerate(rows) if i >= 127 and len(r["actions"]) > 1
-            ]
-            if not eligible:
-                eligible = [i for i, r in enumerate(rows) if len(r["actions"]) > 1]
-            indices = [
-                eligible[min(len(eligible) - 1, int(k * len(eligible) / 12))]
-                for k in range(12)
-            ]
-            for index in indices[:4]:
-                row = rows[index]
-                pairs.append(
-                    dict(
-                        episode=episode,
-                        index=index,
-                        better=(row["chosen"] + 1) % len(row["actions"]),
-                        worse=row["chosen"],
-                        weight=0.5,
-                    )
-                )
-            anchors.extend((episode, i) for i in indices[4:])
-        policy = configure_policy(cfg["parents"][0])
-        references = prepare_references(
-            policy, histories, anchors, out / "references.pt"
+        results["source_collection"] = measure_source_collection(
+            cfg, config, episodes, runtime, scratch, out, monitor
         )
-        optimizer = torch.optim.Adam(
-            [p for p in policy.parameters() if p.requires_grad],
-            lr=1e-5,
-            betas=(0.9, 0.999),
-            eps=1e-5,
+        results["continuations"] = measure_continuations(
+            cfg, config, collection, runtime, scratch, out, monitor
         )
-        initial = AdamSnapshot(policy, optimizer)
-        timings = []
-        for step in range(args.warmup + args.steps):
-            initial.restore()
-            monitor.mark(
-                "training_warmup" if step < args.warmup else "training", update=step
-            )
-            start = perf_counter()
-            metrics = logical_step(
-                policy, optimizer, histories, pairs, anchors, references["mixed"]
-            )
-            seconds = perf_counter() - start
-            print(f"Comparison batch {step + 1}: {seconds:.3f}s", flush=True)
-            if step >= args.warmup:
-                timings.append(dict(seconds=seconds, **metrics))
-        initial.restore()
-        monitor.mark("trace")
-        with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ]
-        ) as profiler:
-            optimizer.zero_grad(set_to_none=True)
-            row = pairs[-1]
-            history, _ = histories.get(row["episode"])
-            logits = target_logits(policy, history, row["index"], gradient=True)
-            pair_loss(logits, row["better"], row["worse"], 0.5).backward()
-        profiler.export_chrome_trace(str(out / "training-trace.json"))
-        initial.restore()
-        results["training"] = dict(
-            logical_pairs=len(pairs),
-            logical_anchors=len(anchors),
-            samples=timings,
-            mean_seconds=statistics.mean(r["seconds"] for r in timings),
-            median_seconds=statistics.median(r["seconds"] for r in timings),
-            unique_targets=len(
-                set((p["episode"], p["index"]) for p in pairs) | set(anchors)
-            ),
-            map_sizes=[
-                read_json(scratch / "sources" / str(e) / "case.json")["map_size"]
-                for e in episodes
-            ],
-            synthetic_preferences=True,
+        results["training"] = measure_training(
+            cfg, episodes, scratch, out, monitor, args.warmup, args.steps
         )
-        monitor.mark("finished")
     rows = [
         json.loads(line)
         for line in (out / "telemetry/resources.jsonl").read_text().splitlines()
     ]
     for phase in ("source_collection", "continuations", "training"):
-        samples = [r for r in rows if r["phase"] == phase]
-        names = (
-            "gpu_core_load_percent",
-            "gpu_memory_controller_load_percent",
-            "gpu_power_watts",
-            "gpu_power_percent_tdp",
-            "cpu_tree_percent",
-            "cpu_system_percent",
-            "vram_used_bytes",
-        )
-        results[phase]["nvml_cpu"] = {
-            name: dict(
-                mean=statistics.mean(
-                    r[name] for r in samples if r.get(name) is not None
-                ),
-                max=max(r[name] for r in samples if r.get(name) is not None),
-            )
-            for name in names
-            if any(r.get(name) is not None for r in samples)
-        }
-        results[phase]["samples"] = (
-            samples if phase != "training" else results[phase]["samples"]
-        )
+        telemetry_samples, aggregates = aggregate_telemetry(rows, phase)
+        results[phase]["telemetry_samples"] = telemetry_samples
+        results[phase]["nvml_cpu"] = aggregates
     for phase, label in [
         ("source_collection", "source"),
         ("continuations", "continuations"),
@@ -623,7 +661,7 @@ def run_benchmark(args, parser):
     print(
         json.dumps(
             {
-                k: {x: v for x, v in r.items() if x not in ("samples",)}
+                k: {x: v for x, v in r.items() if x not in ("telemetry_samples", "step_samples")}
                 for k, r in results.items()
             },
             indent=2,

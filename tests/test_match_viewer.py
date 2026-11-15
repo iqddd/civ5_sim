@@ -209,6 +209,50 @@ class MatchViewerTests(unittest.TestCase):
         self.assertEqual(row["resume_after"], 1)
         self.assertEqual(prepare_replay(path)["experiment"], replay["experiment"])
 
+    def test_policy_continuation_uses_recorded_horizon_and_historical_fallback(self):
+        import torch
+        from civ5rl.core.observation import ObservationEncoder
+        from civ5rl.core.schema import GLOBAL
+        from civ5rl.core.variants import PolicyVariant
+        from civ5rl.reporting.viewer_policy import ViewerPolicies
+
+        path, _, _ = self.write_replay(self.root / "continued")
+        replay = json.loads(path.read_text(encoding="utf-8"))
+        replay["experiment"] = {"model_time_horizon": 30}
+        path.write_text(json.dumps(replay), encoding="utf-8")
+        result_path = path.with_name("result.json")
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        result["config"]["max_rounds"] = 90
+        result["seeds"] = {"agent0": 17}
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+
+        class EncoderAgent:
+            requires_attack_preview = False
+            device = "cpu"
+            def reset(self, context):
+                self.horizon = context["max_rounds"]
+                self.encoder = ObservationEncoder(context, PolicyVariant.CONTACTS_GRU_C2)
+            def _infer(self, observation, actions):
+                self.features = self.encoder.encode(observation, actions).globals
+                return torch.zeros((1, len(actions)))
+            def observe_step(self, observation, actions, action):
+                self._infer(observation, actions)
+                self.encoder.remember_action(action, observation)
+
+        viewer = ViewerPolicies(self.root / "missing.json", self.root)
+        agent = EncoderAgent()
+        key = ("model", 1, 1)
+        viewer.policies[key] = agent
+        model = {"id": "model", "side": 0}
+        self.assertTrue(viewer._infer(path, model, key, 1)["available"])
+        self.assertEqual(agent.horizon, 30)
+        self.assertAlmostEqual(agent.features[GLOBAL["max_rounds"]], 0.5)
+        del replay["experiment"]
+        path.write_text(json.dumps(replay), encoding="utf-8")
+        self.assertTrue(viewer._infer(path, model, key, 1)["available"])
+        self.assertEqual(agent.horizon, 90)
+        self.assertAlmostEqual(agent.features[GLOBAL["max_rounds"]], 1.0)
+
     def test_http_catalog_verified_frames_and_not_found(self):
         self.write_replay(self.root / "match")
         server = create_server(self.root, 0)

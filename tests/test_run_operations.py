@@ -133,6 +133,81 @@ class OperationsTest(unittest.TestCase):
             self.assertEqual(len(report["development_argmax_cp"]), 1)
             self.assertAlmostEqual(report["training_blocks"][0]["win_rate"], 10 / 15)
 
+    def test_snapshot_preserves_purpose_series_in_data_and_plot(self):
+        from matplotlib.axes import Axes
+        from civ5rl.reporting.snapshot import write_snapshot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, state = self.fixture(tmp)
+            def point(purpose, wins):
+                row = {"checkpoint": "checkpoints/initial.pt", "decisions": 5,
+                       "runs": {"argmax": {"cp": {"summary": {"W": wins, "D": 0, "L": 4 - wins}}}}}
+                if purpose is not None:
+                    row["purpose"] = purpose
+                return row
+            state["evaluated"] = {"old": point(None, 1), "large": point("development_512", 3)}
+            write(root / "state.json", state)
+            write(root / "evaluations.json", {"duplicate": point("development", 1)})
+            plotted = []
+            original_plot = Axes.plot
+            def capture_plot(axis, *args, **kwargs):
+                plotted.append((axis, args, kwargs.get("label")))
+                return original_plot(axis, *args, **kwargs)
+            with patch.object(Axes, "plot", capture_plot):
+                report = write_snapshot(root, root / "derived" / "snapshot")
+            self.assertEqual({(p["purpose"], p["W"]) for p in report["development_argmax_cp"]},
+                             {("development", 1), ("development_512", 3)})
+            self.assertEqual(len(report["development_argmax_cp"]), 2)
+            saved = json.loads((root / "derived" / "snapshot" / "snapshot.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["development_argmax_cp"], report["development_argmax_cp"])
+            markdown = (root / "derived" / "snapshot" / "snapshot.md").read_text(encoding="utf-8")
+            self.assertIn("| development | checkpoints/initial.pt", markdown)
+            self.assertIn("| development_512 | checkpoints/initial.pt", markdown)
+            series = [(args, label) for _, args, label in plotted if label and "argmax vs CP" in label]
+            self.assertEqual(len(series), 2)
+            self.assertEqual({label.split(":")[0] for _, label in series}, {"development", "development_512"})
+            self.assertTrue(all(len(args[0]) == 1 for args, _ in series))
+            epoch_point = point("development_512", 3)
+            epoch_point.pop("decisions")
+            epoch_point["epoch"] = 7
+            no_x = point("development", 2)
+            no_x["checkpoint"] = "checkpoints/unknown.pt"
+            no_x.pop("decisions")
+            state["evaluated"] = {"old": point(None, 1), "large": epoch_point, "unknown": no_x}
+            write(root / "state.json", state)
+            plotted.clear()
+            with patch.object(Axes, "plot", capture_plot):
+                report = write_snapshot(root, root / "derived" / "snapshot")
+            series = [(axis, args, label) for axis, args, label in plotted if label and "argmax vs CP" in label]
+            self.assertEqual(len(series), 2)
+            self.assertIsNot(series[0][0], series[1][0])
+            self.assertTrue(any("without decisions or epoch" in text.get_text()
+                                for axis, _, _ in series for text in axis.figure.texts))
+            self.assertEqual({axis.get_xlabel() for axis, _, _ in series},
+                             {"Cumulative learner decisions", "Completed training epoch"})
+            self.assertEqual({label.split(":")[0]: args[0] for _, args, label in series},
+                             {"development": [5], "development_512": [7]})
+            markdown = (root / "derived" / "snapshot" / "snapshot.md").read_text(encoding="utf-8")
+            self.assertIn("1 development point(s) have no decisions or epoch", markdown)
+            self.assertIn("checkpoints/unknown.pt", markdown)
+            self.assertEqual(len(report["development_argmax_cp"]), 3)
+            # Blocks without decision coordinates must not suppress an epoch plot.
+            (root / "updates.jsonl").write_text(json.dumps({"update": 1}) + "\n", encoding="utf-8")
+            state["evaluated"] = {"large": epoch_point}
+            write(root / "state.json", state)
+            write(root / "evaluations.json", {})
+            plotted.clear()
+            with patch.object(Axes, "plot", capture_plot):
+                write_snapshot(root, root / "derived" / "snapshot")
+            series = [(axis, args) for axis, args, label in plotted if label and "argmax vs CP" in label]
+            self.assertEqual(len(series), 1)
+            self.assertEqual(series[0][0].get_xlabel(), "Completed training epoch")
+            state["evaluated"] = {"old": point(None, 1)}
+            write(root / "state.json", state)
+            write(root / "evaluations.json", {"conflict": point("development", 2)})
+            with self.assertRaisesRegex(ValueError, "Conflicting development results"):
+                build_snapshot(root)
+
     def test_snapshot_ignores_only_trailing_partial_update(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, _ = self.fixture(tmp)

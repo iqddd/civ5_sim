@@ -114,7 +114,8 @@ class ViewerPolicies:
         from civ5rl.core.observation import public_map
 
         agent.reset({"map": public_map(replay["initial"]["map"]), "side": side,
-                     "armies": config["armies"], "max_rounds": config["max_rounds"],
+                     "armies": config["armies"],
+                     "max_rounds": replay.get("experiment", {}).get("model_time_horizon", config["max_rounds"]),
                      "fog": config["fog"], "random_damage": config["random_damage"],
                      "seed": result["seeds"][f"agent{side}"]})
 

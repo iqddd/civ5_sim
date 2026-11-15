@@ -232,28 +232,51 @@ class C2BCAdapter(BCAdapter):
 
 
 class RolloutComparisonAdapter:
-    def observe(self,source):
-        status=_status(source)
-        collection=source.read('collection.json',{})
-        training=source.read('training.json',{})
-        data=source.read('dataset.json',{})
-        if not collection.get('complete'):
-            samples=[Sample(v['work'],v['seconds']) for v in collection.get('samples',[])]
-            budget=source.read('phase-budgets/collection.json',{})
-            return Observation(status,'collection','forks',sum(f['status']=='completed' for f in collection.get('forks',[])),source.config.get('max_forks',1024),samples=samples,
-                stages=[Stage('comparative_training',1,None),Stage('development_512',1,None,conditional=True)],
-                budgets={'collection':dict(limit_seconds=7200,spent_seconds=budget.get('seconds',collection.get('seconds',0)),work_estimate_complete=False)},work_budget='collection',
-                details=dict(selected_forks=len(collection.get('forks',[])),source_battles=len(collection.get('sources',[]))),
-                warnings=['Collection ETA excludes future source-battle waves; completion is also bounded by the collection deadline.'])
-        target=2*((len(data.get('pairs',[]))+31)//32)
-        rows=source.rows('steps.jsonl')
-        samples=[Sample(1,r['step_seconds']) for r in rows if r.get('step_seconds',0)>0]
-        budget=source.read('phase-budgets/training.json',{})
-        stages=[] if status=='complete' or training.get('status')=='no_accepted_pairs' else [Stage('development_512',1,None,conditional=True),Stage('additional_256_two_policies',1,None,conditional=True)]
-        return Observation(status,'training' if training.get('status')!='complete' else 'evaluation','steps',training.get('training_steps',training.get('steps',0)),target,samples=samples,
+    def observe(self, source):
+        status = _status(source)
+        collection = source.read("collection.json", {})
+        training = source.read("training.json", {})
+        dataset = source.read("dataset.json", {})
+        if not collection.get("complete"):
+            forks = collection.get("forks", [])
+            completed_forks = sum(fork["status"] == "completed" for fork in forks)
+            samples = [Sample(row["work"], row["seconds"]) for row in collection.get("samples", [])]
+            budget = source.read("phase-budgets/collection.json", {})
+            spent_seconds = budget.get("seconds", collection.get("seconds", 0))
+            return Observation(
+                status, "collection", "forks", completed_forks,
+                source.config.get("max_forks", 1024), samples=samples,
+                stages=[Stage("comparative_training", 1, None),
+                        Stage("development_512", 1, None, conditional=True)],
+                budgets={"collection": dict(limit_seconds=7200, spent_seconds=spent_seconds,
+                                            work_estimate_complete=False)},
+                work_budget="collection",
+                details=dict(selected_forks=len(forks), source_battles=len(collection.get("sources", []))),
+                warnings=["Collection ETA excludes future source-battle waves; completion is also bounded by the collection deadline."],
+            )
+
+        pairs = dataset.get("pairs", [])
+        target_steps = 2 * ((len(pairs) + 31) // 32)
+        rows = source.rows("steps.jsonl")
+        samples = [Sample(1, row["step_seconds"]) for row in rows if row.get("step_seconds", 0) > 0]
+        budget = source.read("phase-budgets/training.json", {})
+        training_status = training.get("status")
+        training_finished = training_status in ("complete", "no_accepted_pairs")
+        phase = "evaluation" if training_status == "complete" else "training"
+        completed_steps = training.get("training_steps", training.get("steps", 0))
+        stages = []
+        if status != "complete" and training_status != "no_accepted_pairs":
+            stages = [Stage("development_512", 1, None, conditional=True),
+                      Stage("additional_256_two_policies", 1, None, conditional=True)]
+        return Observation(
+            status, phase, "steps", completed_steps, target_steps, samples=samples,
             stages=stages,
-            budgets={'training':dict(limit_seconds=1800,spent_seconds=budget.get('seconds',0),work_estimate_complete=False)},work_budget='training',work_stopped=training.get('status') in ('complete','no_accepted_pairs'),
-            details=dict(accepted_pairs=len(data.get('pairs',[])),selected_forks=data.get('selected_forks'),completed_forks=data.get('completed_forks')))
+            budgets={"training": dict(limit_seconds=1800, spent_seconds=budget.get("seconds", 0),
+                                      work_estimate_complete=False)},
+            work_budget="training", work_stopped=training_finished,
+            details=dict(accepted_pairs=len(pairs), selected_forks=dataset.get("selected_forks"),
+                         completed_forks=dataset.get("completed_forks")),
+        )
 
 
 class UnknownAdapter:

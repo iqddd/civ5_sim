@@ -168,12 +168,25 @@ def load_eval_rows(directory, expected_n=None, *, plan=None, require_artifacts=T
     return rows
 
 
+def _slice_keys(rows):
+    """Group rows by placement and side; each row requires a known placement."""
+    if any(row[1].get("placement") not in ("contact", "separated") for row in rows.values()):
+        raise ValueError("Evaluation slices require contact or separated placement")
+    return {
+        "contact": [key for key, row in rows.items() if row[1].get("placement") == "contact"],
+        "separated": [key for key, row in rows.items() if row[1].get("placement") == "separated"],
+        "side0": [key for key in rows if key[2] == 0],
+        "side1": [key for key in rows if key[2] == 1],
+    }
+
+
 def clustered_paired_bootstrap(before, after, *, clusters=16, samples=10000, seed=20261103):
     """Compare matched saved rows, resampling whole parent worlds."""
     if before.keys() != after.keys() or any(before[k][1] != after[k][1] for k in before):
         raise ValueError("Unpaired validation cases or metadata")
     if not before or len(before) % clusters:
         raise ValueError("Unequal cases per parent world")
+    slice_keys = _slice_keys(after)
     win = lambda row: float(outcome(row[0]) == "W")
     report = paired_world_bootstrap(
         {k: win(v) for k, v in before.items()},
@@ -193,13 +206,7 @@ def clustered_paired_bootstrap(before, after, *, clusters=16, samples=10000, see
         for world in sorted({k[0] for k in before})
     }
     report["slices"] = {}
-    for name, predicate in (
-        ("contact", lambda k: after[k][1]["placement"] == "contact"),
-        ("separated", lambda k: after[k][1]["placement"] == "separated"),
-        ("side0", lambda k: k[2] == 0),
-        ("side1", lambda k: k[2] == 1),
-    ):
-        keys = [k for k in after if predicate(k)]
+    for name, keys in slice_keys.items():
         outcomes = Counter(outcome(after[k][0]) for k in keys)
         report["slices"][name] = {
             "matches": len(keys),
@@ -219,8 +226,7 @@ def compare_paired_directories(before_path, after_path, *, samples, seed, requir
     return report, slices, before, after
 
 
-def eval_wdl_summary(rows_or_directory, expected_n=None, *, plan=None, require_artifacts=True):
-    """Compute W/D/L counts and win rate from loaded rows or an evaluation directory."""
+def _summary_rows(rows_or_directory, expected_n, plan, require_artifacts):
     if isinstance(rows_or_directory, (str, Path)):
         rows = load_eval_rows(
             rows_or_directory,
@@ -232,6 +238,12 @@ def eval_wdl_summary(rows_or_directory, expected_n=None, *, plan=None, require_a
         rows = rows_or_directory
         if expected_n is not None and len(rows) != expected_n:
             raise ValueError(f"Expected {expected_n} matches, found {len(rows)}")
+    return rows
+
+
+def eval_wdl_summary(rows_or_directory, expected_n=None, *, plan=None, require_artifacts=True):
+    """Compute W/D/L counts and win rate from loaded rows or an evaluation directory."""
+    rows = _summary_rows(rows_or_directory, expected_n, plan, require_artifacts)
     counts = Counter(outcome(v[0]) for v in rows.values())
     n = len(rows)
     return {
@@ -248,25 +260,9 @@ wdl_summary = eval_wdl_summary
 
 def eval_slices_summary(rows_or_directory, expected_n=None, *, plan=None, require_artifacts=True):
     """Compute placement and side slices from loaded rows or an evaluation directory."""
-    if isinstance(rows_or_directory, (str, Path)):
-        rows = load_eval_rows(
-            rows_or_directory,
-            expected_n=expected_n,
-            plan=plan,
-            require_artifacts=require_artifacts,
-        )
-    else:
-        rows = rows_or_directory
-        if expected_n is not None and len(rows) != expected_n:
-            raise ValueError(f"Expected {expected_n} matches, found {len(rows)}")
+    rows = _summary_rows(rows_or_directory, expected_n, plan, require_artifacts)
     slices = {}
-    for name, predicate in (
-        ("contact", lambda k: rows[k][1].get("placement") == "contact"),
-        ("separated", lambda k: rows[k][1].get("placement") == "separated"),
-        ("side0", lambda k: k[2] == 0),
-        ("side1", lambda k: k[2] == 1),
-    ):
-        keys = [k for k in rows if predicate(k)]
+    for name, keys in _slice_keys(rows).items():
         outcomes = Counter(outcome(rows[k][0]) for k in keys)
         slices[name] = {
             "matches": len(keys),

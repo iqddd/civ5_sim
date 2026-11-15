@@ -10,6 +10,7 @@ from civ5rl.engine.performance import (
     summarize_performance,
 )
 from civ5rl.provenance.common import write_json
+from civ5rl.reporting.output_paths import derived_output
 
 
 def _read(path, default):
@@ -51,21 +52,23 @@ def build_snapshot(directory, *, block_size=10, last=None):
     extra = _read(directory / "evaluations.json", {})
     sources += list(extra.values()) if isinstance(extra, dict) else list(extra)
     for item in sources:
-        if not isinstance(item, dict) or item.get("purpose", "development") != "development":
+        if not isinstance(item, dict) or item.get("purpose", "development") not in ("development", "development_512"):
             continue
+        purpose = item.get("purpose", "development")
         checkpoint = item.get("checkpoint")
         summary = item.get("runs", {}).get("argmax", {}).get("cp", {}).get("summary")
         if checkpoint and summary and all(k in summary for k in ("W", "D", "L")):
             total = sum(summary[k] for k in ("W", "D", "L"))
-            point = {"checkpoint": checkpoint, "decisions": item.get("decisions"),
+            point = {"purpose": purpose, "checkpoint": checkpoint, "decisions": item.get("decisions"),
                      "epoch": item.get("epoch"), **{k: summary[k] for k in ("W", "D", "L")},
                      "matches": total, "win_rate": summary["W"] / total if total else None}
-            if checkpoint in points and any(points[checkpoint][k] != point[k] for k in ("W", "D", "L")):
-                raise ValueError(f"Conflicting development results for {checkpoint}")
-            if checkpoint not in points or (points[checkpoint]["decisions"] is None and point["decisions"] is not None):
-                points[checkpoint] = point
+            key = (purpose, checkpoint)
+            if key in points and any(points[key][k] != point[k] for k in ("W", "D", "L")):
+                raise ValueError(f"Conflicting {purpose} results for {checkpoint}")
+            if key not in points or (points[key]["decisions"] is None and point["decisions"] is not None):
+                points[key] = point
     evals = list(points.values())
-    evals.sort(key=lambda p: (p["decisions"] is None, p["decisions"] or 0, p["epoch"] or 0, p["checkpoint"]))
+    evals.sort(key=lambda p: (p["decisions"] is None, p["decisions"] or 0, p["epoch"] or 0, p["purpose"], p["checkpoint"]))
     performance = None
     if path.exists() and all("rollout" in row for row in rows):
         performance = summarize_performance(directory, last=last)
@@ -78,11 +81,7 @@ def build_snapshot(directory, *, block_size=10, last=None):
 
 def write_snapshot(directory, output=None, *, block_size=10, last=None):
     directory = Path(directory).resolve()
-    output = Path(output).resolve() if output else directory / "derived" / "snapshot"
-    if output == directory or directory.is_relative_to(output):
-        raise ValueError("Snapshot output must be separate from the run root")
-    if output.is_relative_to(directory) and output.relative_to(directory).parts[0] not in ("derived", "snapshots", "interim-snapshot"):
-        raise ValueError("Inside a run, use derived/, snapshots/ or interim-snapshot/")
+    output = derived_output(directory, output if output else directory / "derived" / "snapshot")
     result = build_snapshot(directory, block_size=block_size, last=last)
     output.mkdir(parents=True, exist_ok=True)
     write_json(output / "snapshot.json", result)
@@ -113,10 +112,14 @@ def write_snapshot(directory, output=None, *, block_size=10, last=None):
                       "sampled_kl_mean", "full_kl_free_mean")
             values = " | ".join(metric(b[field]) for field in fields)
             lines.append(f"| {b['last_update']} | {values} | {b['attempted_steps']} | {b['rejected_steps']} |")
-    lines += ["", "Development: fixed cases, argmax policy against CP.", "", "| Checkpoint | Decisions | W/D/L | Win rate |", "|---|---:|---:|---:|"]
+    lines += ["", "Development: fixed cases, argmax policy against CP.", "", "| Purpose | Checkpoint | Decisions | Epoch | W/D/L | Win rate |", "|---|---|---:|---:|---:|---:|"]
     for p in result["development_argmax_cp"]:
         rate = f"{p['win_rate']:.2%}" if p['win_rate'] is not None else "n/a"
-        lines.append(f"| {p['checkpoint']} | {p['decisions']} | {p['W']}/{p['D']}/{p['L']} | {rate} |")
+        lines.append(f"| {p['purpose']} | {p['checkpoint']} | {p['decisions']} | {p['epoch']} | {p['W']}/{p['D']}/{p['L']} | {rate} |")
+    no_coordinates = sum(p["decisions"] is None and p["epoch"] is None
+                         for p in result["development_argmax_cp"])
+    if no_coordinates:
+        lines += ["", f"{no_coordinates} development point(s) have no decisions or epoch and cannot be plotted."]
     if result["performance"] is not None:
         lines += ["", "## Timing and GPU utilization", "", performance_markdown(result["performance"]).rstrip()]
     lines += ["", "![Learning curves](learning-curves-detailed.png)", ""]
@@ -124,33 +127,49 @@ def write_snapshot(directory, output=None, *, block_size=10, last=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8), constrained_layout=True)
     blocks = result["training_blocks"]
+    points = result["development_argmax_cp"]
     x = [b["total_decisions"] for b in blocks]
-    if blocks and all(v is not None for v in x):
+    training_has_x = bool(blocks) and all(v is not None for v in x)
+    has_decisions = training_has_x or any(p["decisions"] is not None for p in points)
+    has_epoch_only = any(p["decisions"] is None and p["epoch"] is not None for p in points)
+    mixed = has_decisions and has_epoch_only
+    fig, axes = plt.subplots(3 if mixed else 2, 2, figsize=(12, 11 if mixed else 8), constrained_layout=True)
+    if training_has_x:
         axes[0, 0].plot(x, [b["win_rate"] for b in blocks], marker="o", label="Training: pooled W / episodes")
         for ax, fields in ((axes[0, 1], ("critic_explained_variance_mean", "critic_mse_mean")),
                            (axes[1, 0], ("entropy_mean",)),
                            (axes[1, 1], ("sampled_kl_mean", "full_kl_free_mean"))):
             for field in fields:
                 ax.plot(x, [b[field] for b in blocks], marker="o", label=field.replace("_mean", " (mean/update)"))
-    points = [p for p in result["development_argmax_cp"] if p["decisions"] is not None]
-    x_label = "Cumulative learner decisions"
-    if points:
-        axes[0, 0].plot([p["decisions"] for p in points], [p["win_rate"] for p in points], marker="s", label="Development: fixed cases, argmax vs CP")
-    elif not blocks:
-        epoch_points = sorted(
-            (p for p in result["development_argmax_cp"] if p["epoch"] is not None),
-            key=lambda p: p["epoch"],
-        )
-        if epoch_points:
-            x_label = "Completed training epoch"
-            axes[0, 0].plot([p["epoch"] for p in epoch_points],
-                            [p["win_rate"] for p in epoch_points], marker="s",
-                            label="Development: fixed cases, argmax vs CP")
-    for ax, title, ylabel in zip(axes.flat, ("Win rate", "Critic", "Policy entropy", "KL divergence"), ("Fraction", "Explained variance / MSE", "Entropy (nats)", "KL (nats)")):
+    x_field = "decisions" if has_decisions else "epoch"
+    x_label = "Cumulative learner decisions" if has_decisions else "Completed training epoch"
+
+    def plot_series(axis, series_points, field):
+        for purpose in sorted({p["purpose"] for p in series_points}):
+            series = sorted(
+                (p for p in series_points if p["purpose"] == purpose and p[field] is not None),
+                key=lambda p: p[field],
+            )
+            if series:
+                axis.plot(
+                    [p[field] for p in series], [p["win_rate"] for p in series],
+                    marker="s", label=f"{purpose}: fixed cases, argmax vs CP",
+                )
+
+    plot_series(axes[0, 0], points, x_field)
+    for ax, title, ylabel in zip(axes.flat[:4], ("Win rate", "Critic", "Policy entropy", "KL divergence"), ("Fraction", "Explained variance / MSE", "Entropy (nats)", "KL (nats)")):
         ax.set_title(title); ax.set_xlabel(x_label); ax.set_ylabel(ylabel); ax.grid(True, alpha=.3)
         if ax.get_legend_handles_labels()[0]: ax.legend(fontsize="small")
+    if mixed:
+        epoch_axis = axes[2, 0]
+        plot_series(epoch_axis, [p for p in points if p["decisions"] is None], "epoch")
+        epoch_axis.set(title="Win rate (epoch-only points)", xlabel="Completed training epoch", ylabel="Fraction")
+        epoch_axis.grid(True, alpha=.3)
+        if epoch_axis.get_legend_handles_labels()[0]: epoch_axis.legend(fontsize="small")
+        axes[2, 1].set_visible(False)
+    if no_coordinates:
+        fig.suptitle(f"{no_coordinates} point(s) without decisions or epoch not plotted", fontsize="small")
     fig.savefig(output / "learning-curves-detailed.png", dpi=150)
     plt.close(fig)
     return result

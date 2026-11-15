@@ -86,6 +86,8 @@ def checked_match(task):
 
 
 def evaluate_ensemble(run, checkpoints, out):
+    if len(checkpoints) != 2:
+        raise ValueError('A 50/50 ensemble requires exactly two checkpoints')
     from civ5rl.reporting.evaluation_storage import readable_evaluations, archive_evaluations, restore_evaluations
     from civ5rl.reporting.evaluation_audit import load_eval_rows, clustered_paired_bootstrap, eval_wdl_summary
     from civ5rl.engine.control import RunLock

@@ -22,6 +22,7 @@ from civ5rl.reporting.evaluation_audit import (
     load_eval_rows,
     outcome,
 )
+from civ5rl.reporting.output_paths import derived_output
 from civ5rl.reporting.snapshot import write_snapshot
 
 ARTIFACT_ERRORS = (
@@ -93,23 +94,6 @@ def compare(before, after, expected_n, *, clusters=16, samples=10000, seed=20261
     )
 
 
-def derived_output(directory, output):
-    directory, output = Path(directory).resolve(), Path(output).resolve()
-    if directory == output or directory.is_relative_to(output):
-        raise ValueError("Derived output must be separate from the scientific run root")
-    if output.is_relative_to(directory) and output.relative_to(directory).parts[
-        0
-    ] not in (
-        "derived",
-        "snapshots",
-        "interim-snapshot",
-    ):
-        raise ValueError(
-            "In-run derived output must use derived/, snapshots/ or interim-snapshot/"
-        )
-    return output
-
-
 def _bc_evaluation_due(config, state, evaluations):
     dev_points = [
         v
@@ -137,6 +121,48 @@ def _bc_evaluation_due(config, state, evaluations):
         if not any(v.get("checkpoint") == latest for v in dev_points):
             return True
     return False
+
+
+def _confirmation_check(directory, state, confirmation):
+    if confirmation.get("status") == "not_run_parent_selected":
+        selected = _read(directory / "selected.json", {})
+        points = list(state.get("evaluated", {}).values())
+        baseline = next((p for p in points if p.get("checkpoint") == "checkpoints/initial.pt"), None)
+        if (not state.get("stop_reason") or selected != state.get("best")
+                or selected.get("path") != "checkpoints/initial.pt" or baseline is None):
+            raise ValueError("Skipped Additional does not have a selected parent boundary")
+        wins = baseline["runs"]["argmax"]["cp"]["summary"]["W"]
+        if (selected.get("wins") != wins or selected.get("policy_hash") != baseline.get("policy_hash")
+                or any(p["runs"]["argmax"]["cp"]["summary"]["W"] > wins for p in points)):
+            raise ValueError("Skipped Additional despite a better Development candidate")
+        return {"status": "not_run_parent_selected", "bootstrap_required": False,
+                "best_development_wins": wins, "evaluated_checkpoints": len(points)}
+    if confirmation.get("status") in (
+        "not_run_no_development_improvement",
+        "not_run_development_512_gate_not_met",
+    ):
+        return {"status": confirmation.get("status")}
+    before = confirmation["baseline"]["runs"]["argmax"]["cp"]
+    after = confirmation["candidate"]["runs"]["argmax"]["cp"]
+    settings = confirmation.get("comparison", {})
+    result = compare(
+        directory / before["directory"],
+        directory / after["directory"],
+        before["summary"]["matches"],
+        samples=settings.get("bootstrap_samples", 10000),
+        seed=settings.get("bootstrap_seed", 20261103),
+        clusters=settings.get("bootstrap_clusters", 16),
+    )
+    import numpy as np
+
+    for name in ("delta", "CI95"):
+        if name in settings and not np.allclose(
+            result[name], settings[name], rtol=0, atol=1e-12
+        ):
+            raise ValueError(
+                f"Saved confirmation {name} differs from recomputation"
+            )
+    return result
 
 
 def _audit_stable(directory):
@@ -323,50 +349,9 @@ def _audit_stable(directory):
             reason="A required development evaluation is still pending",
         )
 
-    def confirmation_check():
-        if confirmation.get("status") == "not_run_parent_selected":
-            selected = _read(directory / "selected.json", {})
-            points = list(state.get("evaluated", {}).values())
-            baseline = next((p for p in points if p.get("checkpoint") == "checkpoints/initial.pt"), None)
-            if (not state.get("stop_reason") or selected != state.get("best")
-                    or selected.get("path") != "checkpoints/initial.pt" or baseline is None):
-                raise ValueError("Skipped Additional does not have a selected parent boundary")
-            wins = baseline["runs"]["argmax"]["cp"]["summary"]["W"]
-            if (selected.get("wins") != wins or selected.get("policy_hash") != baseline.get("policy_hash")
-                    or any(p["runs"]["argmax"]["cp"]["summary"]["W"] > wins for p in points)):
-                raise ValueError("Skipped Additional despite a better Development candidate")
-            return {"status": "not_run_parent_selected", "bootstrap_required": False,
-                    "best_development_wins": wins, "evaluated_checkpoints": len(points)}
-        if confirmation.get("status") in (
-            "not_run_no_development_improvement",
-            "not_run_development_512_gate_not_met",
-        ):
-            return {"status": confirmation.get("status")}
-        before = confirmation["baseline"]["runs"]["argmax"]["cp"]
-        after = confirmation["candidate"]["runs"]["argmax"]["cp"]
-        settings = confirmation.get("comparison", {})
-        result = compare(
-            directory / before["directory"],
-            directory / after["directory"],
-            before["summary"]["matches"],
-            samples=settings.get("bootstrap_samples", 10000),
-            seed=settings.get("bootstrap_seed", 20261103),
-            clusters=settings.get("bootstrap_clusters", 16),
-        )
-        import numpy as np
-
-        for name in ("delta", "CI95"):
-            if name in settings and not np.allclose(
-                result[name], settings[name], rtol=0, atol=1e-12
-            ):
-                raise ValueError(
-                    f"Saved confirmation {name} differs from recomputation"
-                )
-        return result
-
     check(
         "confirmation_bootstrap",
-        confirmation_check,
+        lambda: _confirmation_check(directory, state, confirmation),
         None
         if {"baseline", "candidate"} <= confirmation.keys()
         or confirmation.get("status")

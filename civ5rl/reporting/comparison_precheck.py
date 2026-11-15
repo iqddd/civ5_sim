@@ -4,7 +4,6 @@ from copy import deepcopy
 from pathlib import Path
 from time import perf_counter
 import json
-import random
 import torch
 from civ5rl.engine.comparison_training import (
     Histories,
@@ -21,6 +20,44 @@ from civ5rl.provenance.rng import capture_rng, restore_rng
 from civ5rl.experiments.imitation_helpers import assert_equal
 
 
+def check_fit_gate(cfg, out, example, anchors):
+    """Exercise rollback, terminal resume and publication recovery in isolation."""
+    import tempfile, shutil
+    from civ5rl.engine.comparison_training import fit
+
+    with tempfile.TemporaryDirectory(prefix="comparison-smoke-") as temporary:
+        tiny = Path(temporary)
+        source = out / "sources" / str(example["episode"])
+        target_folder = tiny / "sources" / str(example["episode"])
+        target_folder.mkdir(parents=True)
+        for name in ("case.json", "history.json"):
+            shutil.copy2(source / name, target_folder / name)
+        fit(
+            cfg, tiny, dict(pairs=[example], anchors=anchors), {"synthetic_smoke": True}
+        )
+        actual_gate = read_json(tiny / "training.json")
+        if (
+            actual_gate["stop_reason"] != "kl_limit"
+            or actual_gate["changed"]
+            or actual_gate["training_steps"] != 0
+        ):
+            raise AssertionError(f"Full KL rollback failed: {actual_gate}")
+        gate_before = deepcopy(actual_gate)
+        fit(
+            cfg, tiny, dict(pairs=[example], anchors=anchors), {"synthetic_smoke": True}
+        )
+        if read_json(tiny / "training.json") != gate_before:
+            raise AssertionError("Terminal resume changed training")
+        (tiny / "candidate.pt").unlink()
+        (tiny / "training.json").unlink()
+        fit(
+            cfg, tiny, dict(pairs=[example], anchors=anchors), {"synthetic_smoke": True}
+        )
+        if read_json(tiny / "training.json")["training_steps"] != 0:
+            raise AssertionError("Publication recovery reapplied training")
+    return actual_gate
+
+
 def precheck(cfg, out):
     from civ5rl.experiments.rollout_comparison import prepare, collect
 
@@ -35,10 +72,7 @@ def precheck(cfg, out):
     from civ5rl.reporting.comparison_storage import restore_tree
 
     restore_tree(out, "sources")
-    fork = collection["forks"][0]
     histories = Histories(out)
-    history, rows = histories.get(fork["episode"])
-    row = rows[fork["index"]]
     # Time a complete BPTT window, rather than extrapolating six-decision forks.
     candidates = []
     for episode in collection["sources"]:
@@ -135,40 +169,7 @@ def precheck(cfg, out):
     assert_equal(policy.state_dict(), payload["model"])
     assert_equal(optimizer.state_dict(), payload["optimizer"])
     assert_equal(capture_rng(), payload["rng"])
-    # Exercise the actual epoch gate, not merely AdamSnapshot in isolation.
-    import tempfile, shutil
-    from civ5rl.engine.comparison_training import fit
-
-    with tempfile.TemporaryDirectory(prefix="comparison-smoke-") as temporary:
-        tiny = Path(temporary)
-        source = out / "sources" / str(example["episode"])
-        target_folder = tiny / "sources" / str(example["episode"])
-        target_folder.mkdir(parents=True)
-        for name in ("case.json", "history.json"):
-            shutil.copy2(source / name, target_folder / name)
-        fit(
-            cfg, tiny, dict(pairs=[example], anchors=anchors), {"synthetic_smoke": True}
-        )
-        actual_gate = read_json(tiny / "training.json")
-        if (
-            actual_gate["stop_reason"] != "kl_limit"
-            or actual_gate["changed"]
-            or actual_gate["training_steps"] != 0
-        ):
-            raise AssertionError(f"Full KL rollback failed: {actual_gate}")
-        gate_before = deepcopy(actual_gate)
-        fit(
-            cfg, tiny, dict(pairs=[example], anchors=anchors), {"synthetic_smoke": True}
-        )
-        if read_json(tiny / "training.json") != gate_before:
-            raise AssertionError("Terminal resume changed training")
-        (tiny / "candidate.pt").unlink()
-        (tiny / "training.json").unlink()
-        fit(
-            cfg, tiny, dict(pairs=[example], anchors=anchors), {"synthetic_smoke": True}
-        )
-        if read_json(tiny / "training.json")["training_steps"] != 0:
-            raise AssertionError("Publication recovery reapplied training")
+    actual_gate = check_fit_gate(cfg, out, example, anchors)
     # A short real kernel trace, outside the timed logical step. No optimizer change.
     trace = out / "training-trace.json"
     with torch.profiler.profile(

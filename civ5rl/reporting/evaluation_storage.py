@@ -1,12 +1,12 @@
 """Verified PPMd storage of inactive evaluation trees; scientific bytes stay intact."""
 
 import shutil
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-from civ5rl.deploy.archive import _extract, _inventory, _read, pack, unpack
+from civ5rl.deploy.archive import _inventory, _read, unpack
 from civ5rl.engine.control import RunLock
+from civ5rl.reporting.storage import pack_verified
 
 TOKEN = "evaluation-storage-v1"
 
@@ -21,12 +21,10 @@ def archive_evaluations(run):
     with RunLock(run):
         if not source.exists():
             return {"status": "already_archived" if packet.exists() else "absent"}
-        pack(source, packet, token=TOKEN, direction="download", force=True)
-        manifest = _read(packet / "manifest.json")
-        with tempfile.TemporaryDirectory(prefix=".verify-evaluation-", dir=run) as temp:
-            _extract(packet, Path(temp), manifest)
-        if _inventory(source) != (manifest["files"], manifest["directories"]):
-            raise RuntimeError("Evaluation changed during archive verification")
+        manifest = pack_verified(
+            source, packet, token=TOKEN, temporary_prefix=".verify-evaluation-",
+            temporary_dir=run, changed_message="Evaluation changed during archive verification",
+        )
         # Both paths are resolved fixed children of run; never delete an arbitrary target.
         if source.resolve() != run / "evaluation" or source.is_symlink():
             raise ValueError("Unsafe evaluation directory")

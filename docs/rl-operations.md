@@ -49,13 +49,19 @@ resolved config выводит `config_hash_verified: false`; недоступн
 writer или отсутствие lock дают `incomplete`; для текущего среза есть
 `snapshot`. Целостность ledger — свидетельство учёта шагов, а не сходимости.
 `compare` читает полные каталоги opponent/mode, проверяет cases, обе стороны,
-метаданные и W/D/L, затем делает paired bootstrap по parent-world.
+метаданные и W/D/L, затем делает paired bootstrap по parent-world. Для срезов
+требуется placement `contact` или `separated`; парный bootstrap
+дополнительно проверяет баланс расстановок и сторон в каждом parent-world.
 По умолчанию 16 clusters, 10 000 samples, seed 20261103; матчи не запускаются.
 
 `snapshot` создаёт JSON/Markdown и `learning-curves-detailed.png`.
 Training win rate объединяется по эпизодам, PPO-метрики усредняются по updates
-в блоке; development — сохранённые fixed argmax-vs-CP точки с дедупликацией
-одинаковых checkpoints. Он не создаёт новых оценок или учебных шагов.
+в блоке; `development` и `development_512` — отдельные серии сохранённых fixed
+argmax-vs-CP точек; дедупликация и проверка конфликтов выполняются по паре purpose
+и checkpoint. У исторической точки без purpose подразумевается `development`.
+Точки только с epoch выводятся на отдельной оси, если есть точки с decisions;
+точки без обеих координат остаются в таблице с пометкой. Новые оценки и учебные
+шаги не создаются.
 
 Для производных файлов используйте отдельный OUT либо `RUN/derived/`,
 `RUN/snapshots/`, `RUN/interim-snapshot/`. Исходные checkpoints, RNG,
@@ -73,7 +79,9 @@ python tools/ctl_rl.py branch-replay --source MATCH_DIRECTORY --command 30 --act
 `--continue-to-round 90` вместо замены продолжает полный сохранённый префикс
 до увеличенного лимита; `--command` не нужен. Model/CP reset получают исходный
 горизонт, поэтому у C2P после60 раундов elapsed=1 и remaining=0 (clamp),
-а реальные state.turn,таймер контактов и хронология продолжаются.
+а реальные state.turn,таймер контактов и хронология продолжаются. Viewer policy
+берёт горизонт модели из `replay.experiment.model_time_horizon`, а для старых
+реплеев без него — из `result.config.max_rounds`.
 `--forbid-move-to X Y` вместо замены маскирует цели move/swap на заданную
 клетку для всех юнитов модели с `--command` до конца текущего хода. На
 следующих ходах ограничение снимается; промежуточные клетки пути не запрещены.
@@ -309,8 +317,14 @@ python tools/bench_rl.py comparison --run artifacts/preparations/c2p-rollout-com
 двух политик,16продолжений171 и batch32+64 на разных целевых позициях.
 Снимаются NVML Core Load/Memory Controller Load/мощность, CPU process-tree,
 worker CPU и wall scopes симулятора/CP/RPC. Startup и warmup исключаются из
-прогретых средних. Суммы времени параллельных workers не складывать с wall;
-CP search вложен в act. Service wall включает CPU encoding и ожидание GPU.
+прогретых средних. Готовые source/continuation tasks, включая чтение case/branch
+JSON, подготавливаются до таймера прогретого замера. Модель GPU, power limit,
+число матчей и размеры карт в report берутся из identity.json/summary.json.
+Суммы времени параллельных workers не складывать с wall; CP search вложен в act.
+Service wall включает CPU encoding и ожидание GPU. В `summary.json` строки
+телеметрии каждой фазы записаны как `telemetry_samples`, результаты логических
+шагов обучения — как `training.step_samples`; при отсутствии измерений NVML/CPU mean/max равны `null`
+(в Markdown — `n/a`).
 
 Reference-preparation и контрольные KL не входят в стоимость учебного batch.
 Учебные model/Adam восстанавливаются между повторами, веса родителей не меняются.
@@ -328,7 +342,9 @@ python tools/ctl_rl.py evaluate-ensemble --run artifacts/rl/ppo-c2p-h60-end-turn
 
 Команда выполняет Development-512 из manifest end_turn, усредняя вероятности
 двух C2P политик с фиксированными весами 50/50 и T=0,5, затем выбирает argmax.
-Каждая политика ведёт свою GRU/encoder-память по фактически выбранным командам,
+`--checkpoints` требует ровно два файла; confirmation одного родителя остаётся
+внутренней штатной оценкой. Каждая политика ведёт свою GRU/encoder-память
+по фактически выбранным командам,
 включая forced states; новый бой сбрасывает память. CUDA deterministic FP32,
 8 workers, batch32, ожидание1мс. При результате выше361 побед выполняется
 Additional-256 ансамбля и родителя одним evaluator; иначе опыт завершается.
