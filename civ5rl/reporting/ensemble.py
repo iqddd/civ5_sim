@@ -29,7 +29,7 @@ class EnsembleInference(BatchedInference):
         for member, policy in enumerate(self.policies):
             agents = [r[0].members[member] for r in requests]
             encoded = [a.encoder.encode(r[2], legal) for a, r, legal in zip(agents, requests, actions)]
-            batch = batch_inputs(encoded, self.device)
+            batch = batch_inputs(encoded, self.device, compact_units=policy.attention_backend=='compact_fp32')
             hidden = torch.cat([a.hidden if a.hidden is not None else torch.zeros((1,1,policy.hidden_size),device=self.device) for a in agents],dim=1)
             logits, _, hidden = policy(batch, hidden)
             logits_all.append(logits)
@@ -54,7 +54,8 @@ class EnsembleExecutor(EvaluationExecutor):
     def __init__(self, checkpoints, runtime):
         super().__init__(str(checkpoints[0]), runtime)
         policies = [self.inference.policy]
-        policies += [RLAgent.from_checkpoint(p, 'cpu', 'argmax').policy.to(self.runtime.device).eval() for p in checkpoints[1:]]
+        from civ5rl.engine.evaluation import prepare_evaluation_policy
+        policies += [prepare_evaluation_policy(RLAgent.from_checkpoint(p, 'cpu', 'argmax').policy,self.runtime.device) for p in checkpoints[1:]]
         if any(p.variant != policies[0].variant for p in policies):
             raise ValueError('Ensemble variants differ')
         self.inference = EnsembleInference(policies, self.runtime.device)

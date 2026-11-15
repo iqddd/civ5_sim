@@ -103,6 +103,8 @@ class EvaluationRuntime:
     def identity(self):
         from civ5rl.provenance.common import file_sha256
         value = {**asdict(self), "precision": "float32", "service_sha256": file_sha256(Path(__file__)),
+                 "compiled_spatial_heads": self.device == 'cuda', "compile_mode": 'default' if self.device == 'cuda' else None,
+                 "attention_backend": 'compact_fp32' if self.device == 'cuda' else 'dense_fp32',
                  "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
                  "matmul_tf32": torch.backends.cuda.matmul.allow_tf32,
                  "cudnn_tf32": torch.backends.cudnn.allow_tf32}
@@ -185,7 +187,7 @@ class BatchedInference:
         started = perf_counter()
         actions = [ordered_actions(r[3]) for r in requests]
         encoded = [r[0].encoder.encode(r[2], a) for r, a in zip(requests, actions)]
-        batch = batch_inputs(encoded, self.device)
+        batch = batch_inputs(encoded, self.device, compact_units=self.policy.attention_backend=='compact_fp32')
         hidden = None
         if self.policy.is_recurrent:
             hidden = torch.cat([r[0].hidden if r[0].hidden is not None else
@@ -218,13 +220,22 @@ class BatchedInference:
                     encoding_seconds=self.encoding_seconds)
 
 
+def prepare_evaluation_policy(policy, device):
+    """FP32 inference with compiled spatial/heads; no training AMP or graph pools."""
+    policy=policy.to(device).eval()
+    if str(device).startswith('cuda'):
+        policy.configure_execution(attention_backend='compact_fp32')
+        policy.enable_compile(dynamic=True, mode='default', spatial_mode='default')
+    return policy
+
+
 class EvaluationExecutor:
     def __init__(self, checkpoint, runtime):
         self.runtime = runtime.resolve()
         # Load through the CPU path so training AMP and compile options do not
         # leak into this FP32 evaluator. Allocation uses the parent's allocator.
         agent = RLAgent.from_checkpoint(checkpoint, "cpu", "argmax")
-        self.inference = BatchedInference(agent.policy.to(self.runtime.device).eval(), self.runtime.device)
+        self.inference = BatchedInference(prepare_evaluation_policy(agent.policy,self.runtime.device), self.runtime.device)
         self.connections = {}
         self.lock, self.stop = Lock(), Event()
         self.error = None

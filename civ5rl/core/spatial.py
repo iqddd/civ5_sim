@@ -7,7 +7,8 @@ SPATIAL_KEYS = ("cells", "cell_mask", "neighbors", "globals", "previous")
 
 def iter_spatial_blocks(batch, size):
     for start in range(0, len(batch["cells"]), size):
-        part = {key: batch[key][start : start + size] for key in SPATIAL_KEYS}
+        keys = SPATIAL_KEYS + (("unit_indices",) if "unit_indices" in batch else ())
+        part = {key: batch[key][start : start + size] for key in keys}
         count = len(part["cells"])
         if count < size:
             part = {

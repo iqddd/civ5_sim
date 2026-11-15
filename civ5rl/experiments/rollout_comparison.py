@@ -10,7 +10,7 @@ import random
 import torch
 from civ5rl.engine.control import RunLock
 from civ5rl.engine.evaluation import EvaluationRuntime, EvaluationExecutor, evaluation_precision
-from civ5rl.engine.comparison_training import atomic_torch_save, fit
+from civ5rl.engine.comparison_training import atomic_torch_save, fit, training_runtime
 from civ5rl.experiments.comparison_collection import ProposalExecutor, match_task, select_forks, preference
 from civ5rl.provenance.common import ROOT,read_json,write_json,file_sha256,configure,seed_for
 from civ5rl.provenance import checkpoint
@@ -37,7 +37,7 @@ def prepare(cfg,out):
     if cfg['start_episode']<source_state['next_episode']:raise ValueError('Episode IDs overlap')
     plan=read_json(source/'manifest.json')
     identity=checkpoint.passport(out,cfg,plan)
-    write_json(out/'run.json',dict(kind=KIND,config=cfg,identity=identity,source_manifest_sha256=file_sha256(source/'manifest.json'),parent_sha256=cfg['parent_sha256']))
+    write_json(out/'run.json',dict(kind=KIND,config=cfg,identity=identity,training_runtime=training_runtime(),source_manifest_sha256=file_sha256(source/'manifest.json'),parent_sha256=cfg['parent_sha256']))
     write_json(out/'match-config.json',saved['config'])
     write_json(out/'manifest.json',plan)
     write_json(out/'collection.json',dict(seconds=0.,next_episode=cfg['start_episode'],forks=[],sources=[],complete=False,samples=[]))

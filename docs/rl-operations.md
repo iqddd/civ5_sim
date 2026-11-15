@@ -265,11 +265,22 @@ reseeded snapshot, исходный60-раундовый предел сохра
 Обучение: новый Adam1e−5,β0.9/0.999,eps1e−5;32пары+64опоры, отдельно средние
 pairwise logistic и KL(parent||student),T0.5,коэффициентKL1. BPTT128 с пересчётом
 раннего префикса текущими весами без градиента. Value head сохранён, без loss.
+В сравнительном обучении CUDA spatial/heads используют torch.compile mode=default
+без добавления CUDA Graphs; GRU, mixed precision и clipping остаются прежними.
+Время первой компиляции входит в1800с обучения/7200с сбора. Референсы в compiled
+режиме имеют собственную identity; eager и compiled не обещают побитовой
+эквивалентности, полный FP32 KL остаётся обязательным.
 Истории обрабатываются spatial-блоками32, согласованными с mixed padding32;
 логиты/градиенты могут не совпасть побитово с прежними блоками8.
 Mixed BF16 spatial/FP32 GRU,головы,loss,Adam; activation checkpointing ограничивает
-память. Microbatch по одной целевой истории сохраняет логический batch; clipping0.5
+память. Microbatch до8независимых историй одного размера карты сохраняет
+логический batch32+64 и отдельные GRU/BPTT boundaries; повторные цели
+объединяются с сохранением веса каждого вхождения. Clipping0.5
 после накопления. Не обещать высокую GPU-загрузку без измерения реального шага.
+В mixed backward CoalescedSpatial накапливает градиенты spatial-блоков
+через foreach; новых CUDA Graphs и пулов захвата нет. FP32 references/fullKL
+тоже ограничены spatial-блоком32; подготовленная модель переиспользуется
+для references до установки resumed model/Adam.
 Кеш references проверяет веса родителя, SHA историй, anchors, реализацию, GPU
 и численный режим; холодный расчёт и cache hit учитываются отдельно.
 Референсы родителя отдельно mixed/FP32; fullKL и references обрабатывают каждую
@@ -285,6 +296,29 @@ model/Adam/RNG/курсоров и остановка при превышени�
 EMA учебных шагов включает batch и его checkpoint, исключает references/fullKL;
 fits остаётся неизвестным, пока полная стоимость этих работ не оценена.
 Большие деревья JSON перед хранением/передачей упаковывать PPMd штатным транспортом.
+
+### Измерение CPU/GPU сравнительного цикла
+
+```powershell
+python tools/bench_rl.py comparison --run artifacts/preparations/c2p-rollout-comparison --config configs/rl-c2p-rollout-comparison.json --out artifacts/benchmarks/comparison-measurement --warmup 1 --steps 3
+```
+
+Это отбрасываемый замер на сохранённых training-историях. Output должен быть
+новым и вне источника; sources/continuations восстанавливаются только в копию.
+Отдельно измеряются cold/warm генерация восьми cases, прогретые исходные бои
+двух политик,16продолжений171 и batch32+64 на разных целевых позициях.
+Снимаются NVML Core Load/Memory Controller Load/мощность, CPU process-tree,
+worker CPU и wall scopes симулятора/CP/RPC. Startup и warmup исключаются из
+прогретых средних. Суммы времени параллельных workers не складывать с wall;
+CP search вложен в act. Service wall включает CPU encoding и ожидание GPU.
+
+Reference-preparation и контрольные KL не входят в стоимость учебного batch.
+Учебные model/Adam восстанавливаются между повторами, веса родителей не меняются.
+Короткие Kineto-трассы обучения и inference снимаются вне чистого замера.
+NVML Memory Controller Load — доля активности контроллера, не доля занятой
+ёмкости VRAM и не процент пиковой полосы GB/s. Трассы и телеметрия сохраняются
+в output; для долгого хранения больших JSON использовать проверяемый PPMd.
+Фаза по умолчанию измеряет3шага, не наследует450шагов BC benchmark.
 
 ## Фиксированный ансамбль без обучения
 
@@ -325,6 +359,18 @@ CUDA выдаёт ошибку. CP–CP mirror исполняется на CPU. 
 Параметры не добавляются в научный config. По умолчанию workers берётся из него,
 max batch = 32, ожидание объединения готовых запросов = 1 мс. Remote launch
 передаёт те же флаги worker и сохраняет их в deployment.
+
+На CUDA spatial и heads оценочных моделей компилируются через torch.compile
+(dynamic,fullgraph,mode=default); GRU остаётся cuDNN FP32. AMP/TF32 не включаются,
+reduce-overhead/CUDA Graphs не добавляются. Первая компиляция и новые специализации
+могут занимать существенное время; после прогрева они не относятся к steady rate.
+Compiled-режим входит в identity кеша оценок. На Windows нужен MSVC environment
+(vcvars64.bat), как для остальных compiled GPU-команд.
+CUDA evaluation и сравнительное обучение используют compact_fp32 attention:
+все клетки-запросы, K/V только для всех публичных unit/contact клеток, без
+усечения. Индексы и размер padding строятся из публичных входов на CPU,
+без GPU→CPU синхронизации. Backend записан в identity; прежний dense_fp32
+cache не переиспользуется. Другие training runners сохраняют свой режим.
 
 На GPU одна оценочная модель обслуживает запросы CPU-воркеров в основном
 процессе. Воркеры исполняют обычные симулятор/CP и пишут стандартные replay,

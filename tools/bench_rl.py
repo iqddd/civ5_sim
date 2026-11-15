@@ -216,7 +216,7 @@ def main():
     parser.add_argument(
         "phase",
         nargs="?",
-        choices=("full-cycle", "replay", "bc", "evaluation"),
+        choices=("full-cycle", "replay", "bc", "evaluation", "comparison"),
         default="full-cycle",
     )
     parser.add_argument(
@@ -298,6 +298,10 @@ def main():
     parser.add_argument("--max-batch", type=int, default=32, help="Evaluation benchmark only")
     parser.add_argument("--wait-seconds", type=float, default=0.001, help="Evaluation benchmark only")
     args = parser.parse_args()
+    if args.phase == "comparison":
+        if not any(a=="--steps" or a.startswith("--steps=") for a in sys.argv[1:]):args.steps=3
+        from civ5rl.reporting.comparison_performance import run_benchmark
+        return run_benchmark(args,parser)
     if args.phase == "evaluation":
         from tools._evaluation_benchmark import run_evaluation_benchmark
         run_evaluation_benchmark(args, parser)

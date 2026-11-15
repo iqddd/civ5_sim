@@ -29,7 +29,7 @@ from civ5rl.core.variants import PolicyVariant, variant_spec
 GRU_GATES = 3
 
 
-def batch_inputs(items, device, *, non_blocking=False, spatial_only=False, min_cells=0):
+def batch_inputs(items, device, *, non_blocking=False, spatial_only=False, min_cells=0, compact_units=False):
     if not items or any(len(item.cells) == 0 for item in items):
         raise ValueError("Each batch item must contain at least one cell")
     batch_size = len(items)
@@ -49,6 +49,19 @@ def batch_inputs(items, device, *, non_blocking=False, spatial_only=False, min_c
         "globals": np.stack([x.globals for x in items]),
         "previous": np.stack([x.previous for x in items]),
     }
+    if compact_units:
+        # Only public features determine keys. Shape is chosen on the host,
+        # avoiding nonzero()/item() synchronization in the CUDA forward.
+        public = masks & ((cells[..., TILE["own_type"]] > 0).any(-1)
+                          | (cells[..., TILE["enemy_type"]] > 0).any(-1)
+                          | (cells[..., TILE["contact_count"]] > 0).any(-1))
+        count = max(2, int(public.sum(-1).max()))
+        capacity = 1 << (count - 1).bit_length()
+        indices = np.full((batch_size, capacity), -1, np.int64)
+        for i, row in enumerate(public):
+            selected = np.flatnonzero(row)
+            indices[i, :len(selected)] = selected
+        values["unit_indices"] = indices
     if not spatial_only:
         num_actions = max(len(item.sources) for item in items)
         sources = np.full((batch_size, num_actions), -1, np.int64)
@@ -188,6 +201,7 @@ def hex_distance_buckets_from_neighbors(
     neighbors: torch.Tensor,
     cell_mask: torch.Tensor,
     num_buckets: int = C2_DISTANCE_BUCKETS,
+    key_indices=None,
 ) -> torch.Tensor:
     """Exact pairwise hex distance buckets 0..num_buckets-1 from the neighbors graph."""
     _b, n, _ = neighbors.shape
@@ -198,10 +212,13 @@ def hex_distance_buckets_from_neighbors(
     y = idx // w[:, None]
     r = y + row_parity[:, None]
     q = x - ((r - (r & 1)) >> 1)
-    dq = q[:, :, None] - q[:, None, :]
-    dr = r[:, :, None] - r[:, None, :]
+    key_q = q if key_indices is None else q.gather(1, key_indices.clamp_min(0))
+    key_r = r if key_indices is None else r.gather(1, key_indices.clamp_min(0))
+    dq = q[:, :, None] - key_q[:, None, :]
+    dr = r[:, :, None] - key_r[:, None, :]
     dist = (dq.abs() + dr.abs() + (dq + dr).abs()) >> 1
-    valid_pairs = cell_mask[:, :, None] & cell_mask[:, None, :]
+    key_mask = cell_mask if key_indices is None else key_indices >= 0
+    valid_pairs = cell_mask[:, :, None] & key_mask[:, None, :]
     return torch.where(valid_pairs, dist.clamp(0, num_buckets - 1), 0)
 
 
@@ -252,20 +269,23 @@ class CellUnitAttention(nn.Module):
         self.out_proj = nn.Linear(HEX_DIM, HEX_DIM)
         self.distance_bias = nn.Parameter(torch.zeros(C2_ATTN_HEADS, C2_DISTANCE_BUCKETS))
 
-    def forward_with_weights(self, x, cells, neighbors, cell_mask):
+    def forward_with_weights(self, x, cells, neighbors, cell_mask, key_indices=None):
         b, n, _ = x.shape
         unit_mask = unit_cell_mask_from_cells(cells, cell_mask)
-        buckets = hex_distance_buckets_from_neighbors(neighbors, cell_mask)
+        buckets = hex_distance_buckets_from_neighbors(neighbors, cell_mask, key_indices=key_indices)
         u = self.norm(x)
         q = self.q_proj(u).reshape(b, n, self.num_heads, self.head_dim).transpose(1, 2)
-        k, v = self.kv_proj(u).reshape(b, n, 2, self.num_heads, self.head_dim).unbind(2)
+        keys = u if key_indices is None else ActionEmbeddingGather.apply(u, key_indices)
+        key_count = keys.shape[1]
+        key_mask = unit_mask if key_indices is None else key_indices >= 0
+        k, v = self.kv_proj(keys).reshape(b, key_count, 2, self.num_heads, self.head_dim).unbind(2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         with torch.autocast(x.device.type, enabled=False):
             bias = BucketBias.apply(self.distance_bias.float(), buckets).permute(1, 0, 2, 3)
             logits = torch.matmul(q.float(), k.float().transpose(-2, -1)) * self.scale + bias
-            logits = logits.masked_fill(~unit_mask[:, None, None, :], -torch.inf)
-            has_units = unit_mask.any(-1, keepdim=True)[:, None, :, None]
+            logits = logits.masked_fill(~key_mask[:, None, None, :], -torch.inf)
+            has_units = key_mask.any(-1, keepdim=True)[:, None, :, None]
             safe_logits = torch.where(has_units, logits, 0.0)
             weights = torch.where(has_units, safe_logits.softmax(-1), 0.0)
             weights = weights * cell_mask[:, None, :, None]
@@ -274,8 +294,8 @@ class CellUnitAttention(nn.Module):
         out = (x + self.out_proj(merged)) * cell_mask.unsqueeze(-1)
         return out, weights, unit_mask
 
-    def forward(self, x, cells, neighbors, cell_mask):
-        out, _, _ = self.forward_with_weights(x, cells, neighbors, cell_mask)
+    def forward(self, x, cells, neighbors, cell_mask, key_indices=None):
+        out, _, _ = self.forward_with_weights(x, cells, neighbors, cell_mask, key_indices)
         return out
 
 
@@ -319,7 +339,7 @@ class _PolicyExecutor:
 
         self.memory_runner = RecurrentGraphs(memory_module, max_shapes=max_shapes)
 
-    def encode_spatial(self, policy, batch):
+    def encode_spatial(self, policy, batch, *, coalesced=None):
         extra = policy.spatial_cell_padding - batch["cells"].shape[1]
         if extra > 0:
             # Keep BF16 GEMM geometry independent of which map sizes happen
@@ -331,10 +351,13 @@ class _PolicyExecutor:
                 "cell_mask": F.pad(batch["cell_mask"], (0, extra), value=False),
             }
         with policy.autocast(batch["cells"]):
-            return self._encode_spatial(policy, batch)
+            return self._encode_spatial(policy, batch, coalesced=coalesced)
 
-    def _encode_spatial(self, policy, batch):
-        if policy.coalesced_spatial and torch.is_grad_enabled():
+    def _encode_spatial(self, policy, batch, *, coalesced=None):
+        use_coalesced=policy.coalesced_spatial if coalesced is None else coalesced
+        if use_coalesced and torch.is_grad_enabled():
+            if not policy.spatial_batch_size:
+                raise ValueError("Coalesced spatial training requires a fixed spatial block")
             from civ5rl.core.training_graphs import CoalescedSpatial
 
             parameters = tuple(
@@ -432,6 +455,7 @@ class Policy(nn.Module):
         self.amp_enabled = False
         self.spatial_batch_size = 0
         self.spatial_cell_padding = 0
+        self.attention_backend = "dense_fp32"
         self.action_routing = False
         self.maximum_routing = False
         self.spatial_cuda_graphs = False
@@ -495,6 +519,7 @@ class Policy(nn.Module):
         maximum_routing=None,
         coalesced_spatial=None,
         activation_checkpointing=None,
+        attention_backend=None,
     ):
         """Set optional execution paths without changing model parameters."""
         options = (
@@ -508,6 +533,10 @@ class Policy(nn.Module):
             raise ValueError("Execution options must be boolean")
         if coalesced_spatial and not self.spatial_batch_size:
             raise ValueError("Coalesced spatial training requires a fixed spatial block")
+        if attention_backend is not None:
+            if attention_backend not in ("dense_fp32", "compact_fp32"):
+                raise ValueError("Unknown attention backend")
+            self.attention_backend = attention_backend
         if inverse_routing is not None:
             for block in self.blocks:
                 block.inverse_routing = inverse_routing
@@ -548,8 +577,8 @@ class Policy(nn.Module):
             spatial_mode=spatial_mode,
         )
 
-    def encode_spatial(self, batch):
-        return self._executor.encode_spatial(self, batch)
+    def encode_spatial(self, batch, *, coalesced=None):
+        return self._executor.encode_spatial(self, batch, coalesced=coalesced)
 
     def score_heads(self, batch, x, h):
         return self._executor.score_heads(self, batch, x, h)
@@ -615,6 +644,7 @@ class Policy(nn.Module):
             else:
                 x = block(x, batch["neighbors"], mask)
         if self.unit_attention is not None:
+            keys = batch["unit_indices"] if self.attention_backend == "compact_fp32" else None
             if self.activation_checkpointing and torch.is_grad_enabled():
                 from torch.utils.checkpoint import checkpoint
 
@@ -624,10 +654,11 @@ class Policy(nn.Module):
                     batch["cells"],
                     batch["neighbors"],
                     mask,
+                    keys,
                     use_reentrant=False,
                 )
             else:
-                x = self.unit_attention(x, batch["cells"], batch["neighbors"], mask)
+                x = self.unit_attention(x, batch["cells"], batch["neighbors"], mask, keys)
         mean = x.sum(1) / mask.sum(1, keepdim=True)
         masked = x.masked_fill(~mask.unsqueeze(-1), -torch.inf)
         maximum = MapMaximum.apply(masked) if self.maximum_routing else masked.max(1).values

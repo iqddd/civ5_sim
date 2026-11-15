@@ -76,6 +76,43 @@ class C2Tests(unittest.TestCase):
     def setUpClass(cls):
         configure(17, "cpu")
 
+    def test_compact_public_keys_preserve_attention_and_gradients(self):
+        # Silent omission of a remembered key or incorrect gather backward would
+        # alter the policy while ordinary runs would still complete successfully.
+        from copy import deepcopy
+        from dataclasses import replace
+        from civ5rl.core.model import CellUnitAttention
+        from civ5rl.core.schema import TILE
+        s=make_scenario(10)
+        with Battle(s) as battle:
+            item=ObservationEncoder(make_context(s),'C2').encode(battle.observe(0),ordered_actions(battle.available_actions()))
+        items=[]
+        for count,field in ((0,'own_type'),(1,'enemy_type'),(40,'contact_count')):
+            cells=item.cells.copy()
+            for name in ('own_type','enemy_type','contact_count'):cells[:,TILE[name]]=0
+            cells[:count,TILE[field].start]=1
+            items.append(replace(item,cells=cells))
+        # Mix a smaller map into the same padded batch.
+        small=make_scenario(8)
+        with Battle(small) as battle:
+            items.append(ObservationEncoder(make_context(small),'C2').encode(battle.observe(0),ordered_actions(battle.available_actions())))
+        batch=batch_inputs(items,'cpu',compact_units=True)
+        ids=batch['unit_indices'];mask=unit_cell_mask_from_cells(batch['cells'],batch['cell_mask'])
+        self.assertEqual(ids.shape[1],64)
+        for row,valid in zip(ids,mask):
+            self.assertTrue(torch.equal(row[row>=0],valid.nonzero().flatten()))
+        dense=CellUnitAttention();compact=deepcopy(dense)
+        with torch.no_grad():dense.distance_bias.normal_();compact.load_state_dict(dense.state_dict())
+        x=torch.randn(4,100,128,requires_grad=True);other=x.detach().clone().requires_grad_()
+        args=(batch['cells'],batch['neighbors'],batch['cell_mask'])
+        expected=dense(x,*args);actual=compact(other,*args,ids)
+        torch.testing.assert_close(actual,expected,atol=2e-6,rtol=2e-5)
+        upstream=torch.randn_like(expected)
+        expected.backward(upstream);actual.backward(upstream)
+        torch.testing.assert_close(other.grad,x.grad,atol=1e-5,rtol=3e-5)
+        for a,b in zip(dense.parameters(),compact.parameters()):
+            torch.testing.assert_close(b.grad,a.grad,atol=3e-5,rtol=3e-4)
+
     def test_bucket_bias_gradient_reduces_every_head_and_is_repeatable(self):
         # A wrong bucket/head reduction silently changes the learned geometry.
         # No archived corpus is needed for this gradient contract.
@@ -397,7 +434,8 @@ class C2Tests(unittest.TestCase):
             pol_ref.load_state_dict(pol_new.state_dict())
 
             # Patch pol_ref's attention to use direct indexing instead of BucketBias.
-            def ref_forward_with_weights(x, cells, neighbors, cell_mask):
+            def ref_forward_with_weights(x, cells, neighbors, cell_mask, key_indices=None):
+                self.assertIsNone(key_indices)
                 attn = pol_ref.unit_attention
                 b_sz, n_sz, _ = x.shape
                 unit_mask = unit_cell_mask_from_cells(cells, cell_mask)

@@ -52,7 +52,7 @@ class ProposalInference(BatchedInference):
             agents=[r[0].members[member] for r in requests]
             encoded=[a.encoder.encode(r[2],acts) for a,r,acts in zip(agents,requests,legal)]
             hidden=torch.cat([a.hidden if a.hidden is not None else torch.zeros(1,1,policy.hidden_size,device=self.device) for a in agents],1)
-            logits,_,hidden=policy(batch_inputs(encoded,self.device),hidden)
+            logits,_,hidden=policy(batch_inputs(encoded,self.device,compact_units=policy.attention_backend=='compact_fp32'),hidden)
             choices.append(logits.argmax(-1).cpu().tolist())
             for i,a in enumerate(agents): a.hidden=hidden[:,i:i+1].clone()
         outputs=[]
@@ -69,7 +69,8 @@ class ProposalInference(BatchedInference):
 class ProposalExecutor(EvaluationExecutor):
     def __init__(self, checkpoints, runtime):
         super().__init__(str(checkpoints[0]),runtime)
-        second=RLAgent.from_checkpoint(checkpoints[1],'cpu','argmax').policy.to(self.runtime.device).eval()
+        from civ5rl.engine.evaluation import prepare_evaluation_policy
+        second=prepare_evaluation_policy(RLAgent.from_checkpoint(checkpoints[1],'cpu','argmax').policy,self.runtime.device)
         self.inference=ProposalInference([self.inference.policy,second],self.runtime.device)
 
     def _receive(self, connection):

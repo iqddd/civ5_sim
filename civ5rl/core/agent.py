@@ -79,7 +79,7 @@ class RLAgent:
     def _infer(self, observation, actions):
         encoded = self.encoder.encode(observation, actions)
         logits, _, self.hidden = self.policy(
-            batch_inputs([encoded], self.device), self.hidden
+            batch_inputs([encoded], self.device, compact_units=self.policy.attention_backend=='compact_fp32'), self.hidden
         )
         return logits
 

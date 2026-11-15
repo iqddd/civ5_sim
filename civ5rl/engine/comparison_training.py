@@ -16,6 +16,16 @@ from civ5rl.provenance.common import read_json, write_json
 from civ5rl.provenance.rng import capture_rng, restore_rng
 from civ5sim import Action
 
+HISTORY_BATCH = 8
+ATTENTION_BACKEND = 'compact_fp32'
+
+
+def training_runtime():
+    return dict(attention_backend=ATTENTION_BACKEND,history_batch=HISTORY_BATCH,
+                spatial_batch=32,bptt=128,compile_mode='default',cuda_graphs=False,
+                coalesced_spatial_gradients=True,
+                precision='mixed_bf16_spatial_fp32_gru_heads_loss')
+
 
 def pair_loss(logits, better, worse, weight):
     return weight*F.softplus((logits[worse]-logits[better])/.5)
@@ -67,7 +77,7 @@ def target_logits(policy,history,index,*,gradient=False,block=32):
     with torch.no_grad():
         for start in range(0,boundary,block):
             part=history[start:min(boundary,start+block)]
-            batch=batch_inputs(part,device)
+            batch=batch_inputs(part,device,compact_units=policy.attention_backend=='compact_fp32')
             x,context=policy.encode_spatial(batch)
             h,hidden=policy.sequence_memory(context,[len(part)],hidden)
         if not gradient:
@@ -77,7 +87,7 @@ def target_logits(policy,history,index,*,gradient=False,block=32):
     hidden=None if hidden is None else hidden.detach()
     for start in range(boundary,index+1,block):
         part=history[start:min(index+1,start+block)]
-        batch=batch_inputs(part,device)
+        batch=batch_inputs(part,device,compact_units=policy.attention_backend=='compact_fp32')
         x,context=policy.encode_spatial(batch)
         h,hidden=policy.sequence_memory(context,[len(part)],hidden)
     target={k:v[-1:] for k,v in batch.items()}
@@ -91,28 +101,90 @@ def configure_policy(checkpoint,device='cuda',mixed=True):
     policy.enable_inverse_routing()
     policy.enable_action_routing()
     policy.enable_maximum_routing()
-    policy.configure_execution(activation_checkpointing=True)
+    policy.configure_execution(activation_checkpointing=True,attention_backend=ATTENTION_BACKEND)
+    if str(device).startswith('cuda'):
+        # Fuse eager kernels without introducing private CUDA Graph pools.
+        policy.enable_compile(dynamic=True,mode='default',spatial_mode='default')
     for parameter in policy.value.parameters():parameter.requires_grad_(False)
     return policy
+
+
+def _history_groups(histories,keys,size=HISTORY_BATCH):
+    # Maps with different cell counts need not pad one another to the largest map.
+    grouped={}
+    for key in dict.fromkeys(map(tuple,keys)):
+        history,_=histories.get(key[0])
+        cells=len(history[0].cells)
+        entries=grouped.setdefault(cells,[])
+        entries.append((key,history))
+        if len(entries)==size:
+            yield entries
+            grouped[cells]=[]
+    for entries in grouped.values():
+        if entries:yield entries
+
+
+def _encode_histories(policy,sequences):
+    device=next(policy.parameters()).device
+    items=[item for sequence in sequences for item in sequence]
+    inputs=batch_inputs(items,device,spatial_only=True,compact_units=policy.attention_backend=='compact_fp32')
+    if torch.is_grad_enabled() and policy.spatial_batch_size:
+        # Use the executor so cell padding and precision match the ordinary path.
+        return policy.encode_spatial(inputs,coalesced=True)
+    # FP32 full-KL has no mixed-padding setting. Keep its spatial activations
+    # bounded too: an entire group of histories is not one attention matrix.
+    encoded=[policy.encode_spatial({k:v[start:start+32] for k,v in inputs.items()})
+             for start in range(0,len(items),32)]
+    return tuple(torch.cat([row[i] for row in encoded],0) for i in (0,1))
+
+
+def batched_target_logits(policy,entries,*,gradient=True):
+    """Independent current-weight histories; detach each one's own BPTT boundary."""
+    keys,histories=zip(*entries)
+    indices=[key[1] for key in keys]
+    boundaries=[max(0,i+1-128) if gradient else 0 for i in indices]
+    hidden=None
+    present=[i for i,boundary in enumerate(boundaries) if boundary]
+    if present:
+        with torch.no_grad():
+            prefixes=[histories[i][:boundaries[i]] for i in present]
+            _,context=_encode_histories(policy,prefixes)
+            _,last=policy.sequence_memory(context,[len(p) for p in prefixes])
+            lookup={i:last[:,j:j+1] for j,i in enumerate(present)}
+            zero=torch.zeros_like(last[:,:1])
+            hidden=torch.cat([lookup[i] if i in lookup else zero for i in range(len(entries))],1).detach()
+    windows=[h[b:i+1] for h,b,i in zip(histories,boundaries,indices)]
+    with torch.set_grad_enabled(gradient):
+        x,context=_encode_histories(policy,windows)
+        lengths=[len(w) for w in windows]
+        h,_=policy.sequence_memory(context,lengths,hidden)
+        ends=torch.tensor([sum(lengths[:i+1])-1 for i in range(len(lengths))],device=x.device)
+        targets=[history[index] for history,index in zip(histories,indices)]
+        batch=batch_inputs(targets,x.device)
+        logits,_=policy.score_heads(batch,x[ends],h[ends])
+        return [row[:len(target.sources)] for row,target in zip(logits,targets)]
 
 
 def reference_distributions(policy,histories,anchors):
     grouped={}
     for episode,index in anchors:grouped.setdefault(episode,set()).add(index)
     result={}
-    device=next(policy.parameters()).device
     with torch.no_grad():
-        for episode,indices in grouped.items():
-            history,_=histories.get(episode);hidden=None
-            for first in range(0,max(indices)+1,32):
-                part=history[first:min(first+32,max(indices)+1)]
-                batch=batch_inputs(part,device);x,context=policy.encode_spatial(batch)
-                h,hidden=policy.sequence_memory(context,[len(part)],hidden)
-                selected=[i for i in range(len(part)) if first+i in indices]
-                if selected:
-                    logits,_=policy.score_heads({k:v[selected] for k,v in batch.items()},x[selected],h[selected])
-                    for row,offset in enumerate(selected):
-                        result[(episode,first+offset)]=(logits[row,:len(part[offset].sources)]/.5).log_softmax(-1).cpu()
+        for entries in _history_groups(histories,[(e,max(indices)) for e,indices in grouped.items()]):
+            sequences=[history[:key[1]+1] for key,history in entries]
+            x,context=_encode_histories(policy,sequences)
+            lengths=[len(s) for s in sequences]
+            h,_=policy.sequence_memory(context,lengths)
+            targets=[];offset=0
+            for (key,history),length in zip(entries,lengths):
+                targets.extend(((key[0],i),history[i],offset+i) for i in sorted(grouped[key[0]]))
+                offset+=length
+            for start in range(0,len(targets),32):
+                part=targets[start:start+32]
+                selected=torch.tensor([p[2] for p in part],device=x.device)
+                logits,_=policy.score_heads(batch_inputs([p[1] for p in part],x.device),x[selected],h[selected])
+                logp=(logits/.5).log_softmax(-1).cpu()
+                for row,(key,item,_) in zip(logp,part):result[key]=row[:len(item.sources)].clone()
     return result
 
 
@@ -136,9 +208,12 @@ def prepare_references(parent,histories,anchors,path):
         model_hash.update(name.encode());model_hash.update(value.detach().cpu().contiguous().numpy().tobytes())
     sources={str(e):{name:file_sha256(histories.out/'sources'/str(e)/name) for name in ('case.json','history.json')} for e in sorted({k[0] for k in anchors})}
     identity=dict(parent=model_hash.hexdigest(),anchors=[list(k) for k in anchors],histories=sources,
-                  implementation=file_sha256(Path(__file__)),torch=torch.__version__,
+                  implementation={p.relative_to(Path(__file__).parents[2]).as_posix():file_sha256(p)
+                                  for p in (Path(__file__),*(Path(__file__).parents[1]/'core'/name
+                                            for name in ('model.py','spatial.py','training_graphs.py')))},torch=torch.__version__,
                   gpu=torch.cuda.get_device_name() if next(parent.parameters()).is_cuda else None,
-                  modes=['deterministic_fp32_no_tf32','mixed_bf16_spatial_fp32_gru'],temperature=.5,block=32)
+                  modes=['deterministic_fp32_no_tf32','mixed_bf16_spatial_fp32_gru'],temperature=.5,block=32,
+                  attention_backend=parent.attention_backend,history_batch=HISTORY_BATCH)
     if path.exists():
         saved=torch.load(path,map_location='cpu',weights_only=False)
         if saved.get('identity')==identity:
@@ -156,20 +231,25 @@ def prepare_references(parent,histories,anchors,path):
     return result
 
 
-def logical_step(policy,optimizer,histories,pairs,anchor_keys,references,*,block=32):
+def logical_step(policy,optimizer,histories,pairs,anchor_keys,references):
     optimizer.zero_grad(set_to_none=True)
     pair_total=torch.zeros((),device=next(policy.parameters()).device)
     kl_total=torch.zeros_like(pair_total)
-    for row in pairs:
-        history,_=histories.get(row['episode'])
-        logits=target_logits(policy,history,row['index'],gradient=True,block=block)
-        loss=pair_loss(logits,row['better'],row['worse'],row['weight'])/len(pairs)
-        pair_total+=loss.detach()
+    pair_rows={};anchor_counts={}
+    for row in pairs:pair_rows.setdefault((row['episode'],row['index']),[]).append(row)
+    for key in map(tuple,anchor_keys):anchor_counts[key]=anchor_counts.get(key,0)+1
+    keys=list(dict.fromkeys([*pair_rows,*anchor_counts]))
+    for entries in _history_groups(histories,keys):
+        logits=batched_target_logits(policy,entries)
+        loss=pair_total.new_zeros(())
+        for (key,_),z in zip(entries,logits):
+            for row in pair_rows.get(key,()):
+                value=pair_loss(z,row['better'],row['worse'],row['weight'])/len(pairs)
+                pair_total+=value.detach();loss=loss+value
+            if key in anchor_counts:
+                value=categorical_kl(references[key].to(z.device),z)*anchor_counts[key]/len(anchor_keys)
+                kl_total+=value.detach();loss=loss+value
         loss.backward()
-    for key in anchor_keys:
-        history,_=histories.get(key[0]);logits=target_logits(policy,history,key[1],gradient=True,block=block)
-        loss=categorical_kl(references[tuple(key)].to(logits.device),logits)/len(anchor_keys)
-        kl_total+=loss.detach();loss.backward()
     norm=torch.nn.utils.clip_grad_norm_([p for p in policy.parameters() if p.requires_grad],.5,error_if_nonfinite=True)
     optimizer.step();require_finite_state(policy,optimizer)
     measured=torch.stack((pair_total,kl_total,norm)).detach().cpu().tolist()
@@ -226,12 +306,12 @@ def _fit(cfg,out,dataset,identity,budget):
     started=perf_counter();base_seconds=state['seconds']
     policy=configure_policy(cfg['parents'][0]);optimizer=torch.optim.Adam([p for p in policy.parameters() if p.requires_grad],lr=1e-5,betas=(.9,.999),eps=1e-5,weight_decay=0)
     shuffle=random.Random(cfg['seed']+101)
+    histories=Histories(out,source_hashes=dataset.get('source_hashes'))
+    # Policy still has parent weights. Reuse it for frozen references before
+    # installing the student's resumed state; a second CUDA model is unnecessary.
+    references=prepare_references(policy,histories,anchors,out/'references.pt')
     if 'model' in state:
         policy.load_state_dict(state['model']);optimizer.load_state_dict(state['optimizer']);shuffle.setstate(state['shuffle']);restore_rng(state['rng'])
-    histories=Histories(out,source_hashes=dataset.get('source_hashes'))
-    parent=configure_policy(cfg['parents'][0])
-    references=prepare_references(parent,histories,anchors,out/'references.pt')
-    del parent
     if 'rng' in state:restore_rng(state['rng'])
     def save(path):
         state.update(model=policy.state_dict(),optimizer=optimizer.state_dict(),shuffle=shuffle.getstate(),rng=capture_rng(),seconds=budget.elapsed(),identity=identity)
