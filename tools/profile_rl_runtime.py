@@ -35,6 +35,7 @@ def replay(episodes):
     results = []
     for ep in episodes:
         env = DecisionEnv(ep["spec"])
+        env.attack_preview = bool(ep["observations"] and "attack_previews" in ep["observations"][0])
         try:
             for index, chosen in enumerate(ep["chosen"]):
                 state = env.request()
