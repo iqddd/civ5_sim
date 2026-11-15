@@ -25,6 +25,7 @@ from civ5rl.deploy.remote import (
 from civ5rl.engine.control import RunLock
 
 CAPABILITIES = {
+    "rl01.rollout_comparison": {"run", "resume"},
     "rl01.ppo_after_target_bc": {"run", "tune", "resume"},
     "rl01.ppo_target_scale": {"run", "resume"},
     "rl01.ppo_scale_up": {"run"},

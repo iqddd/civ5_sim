@@ -113,20 +113,23 @@ def main(argv=None, *, root=ROOT):
         if args.mode == "run" and has_progress:
             raise ValueError("Run already exists; use resume")
         if args.mode == "resume":
+            if kind == "rl01.rollout_comparison" and not has_progress:
+                raise ValueError("Resume requires existing comparison artifacts")
             if kind in BC_KINDS and not has_progress:
                 raise ValueError("Resume requires existing BC run artifacts")
-            if kind not in BC_KINDS and not (output / "state.json").exists():
+            if kind not in BC_KINDS | {"rl01.rollout_comparison"} and not (output / "state.json").exists():
                 raise ValueError("Resume requires existing state.json")
         output.mkdir(parents=True, exist_ok=True)
         if not (output / "machine.json").exists():
             _write(output / "machine.json", {"hardware": hardware()})
         runner_script = (
+            "tools/run_comparison.py" if kind == "rl01.rollout_comparison" else
             "tools/run_cp_imitation.py" if kind in BC_KINDS else "tools/run_ppo.py"
         )
         command = [
             sys.executable,
             runner_script,
-            args.mode,
+            "resume" if kind == "rl01.rollout_comparison" else args.mode,
             "--config",
             args.config,
         ]
