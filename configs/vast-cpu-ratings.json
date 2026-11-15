@@ -332,6 +332,24 @@
       "single_thread": 2680,
       "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+Threadripper+PRO+3955WX",
       "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD EPYC 7452",
+      "single_thread": 2009,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7452",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD EPYC 7K62",
+      "single_thread": 1979,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7K62",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD Ryzen Threadripper 3970X",
+      "single_thread": 2656,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+Threadripper+3970X",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
     }
   ]
 }
