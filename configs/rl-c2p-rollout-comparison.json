@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "kind": "rl01.rollout_comparison",
+  "seed": 17,
+  "source_run": "artifacts/rl/ppo-c2p-h60-end-turn",
+  "parents": [
+    "artifacts/rl/ppo-c2p-h60-end-turn/checkpoints/initial.pt",
+    "artifacts/rl/ppo-c2p-h60-end-turn/checkpoints/update-0107.pt"
+  ],
+  "parent_sha256": [
+    "ffd541cae737421ddcda21fa3d12b1aad7ebe33dfd8012fbeeaa8c8ce11fe60c",
+    "35ca4a14fd4e9aca1f92079faba1e15c9a085670104d908a74dca910115b1f5d"
+  ],
+  "output": "artifacts/rl/c2p-rollout-comparison-revised",
+  "namespace": "c2p_rollout_comparison_v1",
+  "start_episode": 110860,
+  "max_forks": 1024,
+  "collection_seconds": 7200,
+  "training_seconds": 1800
+}

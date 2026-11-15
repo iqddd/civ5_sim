@@ -231,6 +231,31 @@ class C2BCAdapter(BCAdapter):
         return observation
 
 
+class RolloutComparisonAdapter:
+    def observe(self,source):
+        status=_status(source)
+        collection=source.read('collection.json',{})
+        training=source.read('training.json',{})
+        data=source.read('dataset.json',{})
+        if not collection.get('complete'):
+            samples=[Sample(v['work'],v['seconds']) for v in collection.get('samples',[])]
+            budget=source.read('phase-budgets/collection.json',{})
+            return Observation(status,'collection','forks',sum(f['status']=='completed' for f in collection.get('forks',[])),source.config.get('max_forks',1024),samples=samples,
+                stages=[Stage('comparative_training',1,None),Stage('development_512',1,None,conditional=True)],
+                budgets={'collection':dict(limit_seconds=7200,spent_seconds=budget.get('seconds',collection.get('seconds',0)),work_estimate_complete=False)},work_budget='collection',
+                details=dict(selected_forks=len(collection.get('forks',[])),source_battles=len(collection.get('sources',[]))),
+                warnings=['Collection ETA excludes future source-battle waves; completion is also bounded by the collection deadline.'])
+        target=2*((len(data.get('pairs',[]))+31)//32)
+        rows=source.rows('steps.jsonl')
+        samples=[Sample(1,r['step_seconds']) for r in rows if r.get('step_seconds',0)>0]
+        budget=source.read('phase-budgets/training.json',{})
+        stages=[] if status=='complete' or training.get('status')=='no_accepted_pairs' else [Stage('development_512',1,None,conditional=True),Stage('additional_256_two_policies',1,None,conditional=True)]
+        return Observation(status,'training' if training.get('status')!='complete' else 'evaluation','steps',training.get('training_steps',training.get('steps',0)),target,samples=samples,
+            stages=stages,
+            budgets={'training':dict(limit_seconds=1800,spent_seconds=budget.get('seconds',0),work_estimate_complete=False)},work_budget='training',work_stopped=training.get('status') in ('complete','no_accepted_pairs'),
+            details=dict(accepted_pairs=len(data.get('pairs',[])),selected_forks=data.get('selected_forks'),completed_forks=data.get('completed_forks')))
+
+
 class UnknownAdapter:
     def observe(self, source):
         return Observation(_status(source), "unknown", "work", 0, None,
@@ -241,6 +266,7 @@ class UnknownAdapter:
 # Exact experiment adapters take precedence over family adapters. New run types
 # register an adapter; the estimator, recorder, transport and CLI stay unchanged.
 ADAPTERS = {
+    "rl01.rollout_comparison": RolloutComparisonAdapter,
     "rl01.ppo_after_target_bc": TargetBCPPOAdapter,
     "rl01.cp_imitation_target_scale": TargetScaleBCAdapter,
     "rl01.cp_imitation_target_more_data": TargetScaleBCAdapter,

@@ -229,6 +229,18 @@ class EvaluationExecutor:
         self.lock, self.stop = Lock(), Event()
         self.error = None
         self.wait_seconds = 0.0
+        self._pool = None
+
+    def __enter__(self):
+        if self._pool is not None:
+            raise RuntimeError('Evaluation session already open')
+        self._pool = pool(self.runtime.workers)
+        return self
+
+    def __exit__(self, *args):
+        if self._pool is not None:
+            self._pool.shutdown(wait=True, cancel_futures=True)
+            self._pool = None
 
     def _receive(self, connection):
         try:
@@ -310,7 +322,10 @@ class EvaluationExecutor:
 
     def run(self, function, tasks):
         tasks = iter(tasks)
-        executor = pool(self.runtime.workers)
+        if self.error is not None:
+            raise RuntimeError('Failed evaluation session must be closed')
+        self.stop.clear()
+        executor = self._pool or pool(self.runtime.workers)
         thread = Thread(target=self._serve, name="evaluation-inference", daemon=True)
         thread.start()
         pending = {}
@@ -342,7 +357,8 @@ class EvaluationExecutor:
             self.stop.set()
             thread.join()
             self._fail_all("Evaluation coordinator stopped")
-            executor.shutdown(wait=True, cancel_futures=True)
+            if self._pool is None:
+                executor.shutdown(wait=True, cancel_futures=True)
             for client in pending.values():
                 client.close()
             for connection in list(self.connections):

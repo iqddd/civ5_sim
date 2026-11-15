@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 
-from test_maps import field
+from tests.test_maps import field
 
 from civ5map.maps import adjacent, crop
 from civ5sim import Action, Battle, load_scenario, step_batch

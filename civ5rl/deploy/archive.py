@@ -167,7 +167,27 @@ def pack(source, packet, *, token, direction, force=False):
         # This target was resolved and checked against the source above; only staging is replaced.
         if packet.exists():
             shutil.rmtree(packet)
-        staged.replace(packet)
+        try:
+            staged.replace(packet)
+        except PermissionError:
+            # Windows can reject moving a populated directory despite allowing
+            # ordinary writes (observed on this workspace). The caller owns its
+            # lock; publish a verified copy instead, with manifest written last.
+            if os.name != 'nt' or packet.exists():
+                raise
+            packet.mkdir()
+            for child in staged.iterdir():
+                if child.name == 'manifest.json':
+                    continue
+                if child.is_dir():
+                    shutil.copytree(child, packet/child.name)
+                else:
+                    shutil.copy2(child, packet/child.name)
+            expected_files,expected_dirs=_inventory(staged)
+            expected_files.pop('manifest.json',None)
+            if _inventory(packet)!=(expected_files,expected_dirs):
+                raise RuntimeError('Archive directory-copy verification failed')
+            shutil.copy2(staged/'manifest.json',packet/'manifest.json')
     return manifest
 
 

@@ -216,6 +216,95 @@ update/collection или BC эпохи; GPU kernel и компиляцию не 
 обе ревизии и эффективный лимит. Старому процессу без этих hooks нужна штатная
 пауза и новая версия runner; смена кода оформляется через `source-revisions/`.
 
+## Сравнительное обучение по доигрываниям
+
+```powershell
+python tools/run_comparison.py precheck --config configs/rl-c2p-rollout-comparison.json --out artifacts/preparations/c2p-rollout-comparison
+python tools/run_comparison.py prepare --config configs/rl-c2p-rollout-comparison.json
+python tools/run_comparison.py collect --config configs/rl-c2p-rollout-comparison.json
+python tools/run_comparison.py train --config configs/rl-c2p-rollout-comparison.json
+python tools/run_comparison.py evaluate --config configs/rl-c2p-rollout-comparison.json
+python tools/run_comparison.py resume --config configs/rl-c2p-rollout-comparison.json
+python tools/ctl_rl.py progress --run artifacts/rl/c2p-rollout-comparison-revised --watch --interval 900
+```
+
+`precheck` требует отдельный output: две реальные развилки ×16 продолжений,
+отбрасываемый synthetic_smoke batch32+64, сохранение/resume, rollback и короткий
+Kineto trace. Не запускать полный цикл по одному разрешению на подготовку.
+`resume` продолжает collect/train/evaluate, поэтому разрешает весь научный цикл.
+Паспорт нового опыта проверяется перед фазами; исторические паспорта не меняются.
+Исправленный профиль пишет в `artifacts/rl/c2p-rollout-comparison-revised`; прежний
+пустой подготовленный каталог и его паспорт сохранены как свидетельство предыдущего кода.
+
+Сбор: новые training-эпизоды с110860, namespace `c2p_rollout_comparison_v1`,
+end_turn60. Обе политики следуют фактическим командам argmax171; до четырёх
+расхождений выбираются по разным случайным раундам без учёта результата.
+Предел1024 выбранных развилки либо7200с включает подготовку/исходные бои/
+доигрывания/сохранения. Волны исходных боёв ≤8; одна развилка одновременно.
+Пулы воркеров и замороженные GPU-модели переиспользуются в течение сессии;
+между матчами encoder/GRU/CP и каналы создаются заново. Dataset и архив
+продолжений публикуются до complete; незавершённая финализация восстанавливается.
+Новый deadline проверяется перед волной и перед развилкой; начатую волну либо
+все16 продолжений начатой развилки завершают с учётом превышения.
+`not_started_budget` не является отклонённой меткой. Ошибки блокируют фазу;
+resume повторяет только незавершённые матчи, включая незавершённую развилку.
+Время сохраняется отдельным heartbeat раз в секунду; downtime не расходует
+бюджет, при аварии возможна погрешность учёта до одного интервала.
+
+Префикс восстанавливается с проверкой команд CP и hash каждого состояния;
+организаторский `before_decision` hook меняет только RNG непосредственно перед
+альтернативой. Он не передаётся агентам. Обе альтернативы получают один seed
+повтора, затем штатный поток расходуется независимо; replay начинается с
+reseeded snapshot, исходный60-раундовый предел сохраняется.
+
+Метки: обе четвёрки должны дать одинаковый ненулевой знак разницы побед,
+вес=abs(Δ1+Δ2)/8, reward1/0/0. A:8192 случайные свободные позиции плюс все
+выбранные развилки, дедупликация; не используется Development/Additional.
+Нет принятых пар — `no_accepted_pairs`, без Adam и оценок.
+
+Обучение: новый Adam1e−5,β0.9/0.999,eps1e−5;32пары+64опоры, отдельно средние
+pairwise logistic и KL(parent||student),T0.5,коэффициентKL1. BPTT128 с пересчётом
+раннего префикса текущими весами без градиента. Value head сохранён, без loss.
+Истории обрабатываются spatial-блоками32, согласованными с mixed padding32;
+логиты/градиенты могут не совпасть побитово с прежними блоками8.
+Mixed BF16 spatial/FP32 GRU,головы,loss,Adam; activation checkpointing ограничивает
+память. Microbatch по одной целевой истории сохраняет логический batch; clipping0.5
+после накопления. Не обещать высокую GPU-загрузку без измерения реального шага.
+Кеш references проверяет веса родителя, SHA историй, anchors, реализацию, GPU
+и численный режим; холодный расчёт и cache hit учитываются отдельно.
+Референсы родителя отдельно mixed/FP32; fullKL и references обрабатывают каждую
+историю одним проходом, не повторяя весь prefix для каждой опорной позиции.
+
+Предел2эпохи/1800с, включая reference preparation и fullKL. Проверки полного
+FP32/FP64-reduction K_A≤0.015 после эпохи и на финальной границе; откат
+model/Adam/RNG/курсоров и остановка при превышении. Время не откатывается.
+Последняя частичная эпоха допускается после полногоKL. Один Development512,
+затем Additional256 двух моделей только при >361победе; test закрыт.
+Повторный evaluate читает evaluation.storage; завершённый result повторно не
+оценивается. При нуле пар итоговый report сохраняет счётчики и причины отбраковки.
+EMA учебных шагов включает batch и его checkpoint, исключает references/fullKL;
+fits остаётся неизвестным, пока полная стоимость этих работ не оценена.
+Большие деревья JSON перед хранением/передачей упаковывать PPMd штатным транспортом.
+
+## Фиксированный ансамбль без обучения
+
+```powershell
+python tools/ctl_rl.py evaluate-ensemble --run artifacts/rl/ppo-c2p-h60-end-turn --checkpoints artifacts/rl/ppo-c2p-h60-end-turn/checkpoints/initial.pt artifacts/rl/ppo-c2p-h60-end-turn/checkpoints/update-0107.pt --out artifacts/rl/c2p-u171-u107-ensemble-end-turn
+```
+
+Команда выполняет Development-512 из manifest end_turn, усредняя вероятности
+двух C2P политик с фиксированными весами 50/50 и T=0,5, затем выбирает argmax.
+Каждая политика ведёт свою GRU/encoder-память по фактически выбранным командам,
+включая forced states; новый бой сбрасывает память. CUDA deterministic FP32,
+8 workers, batch32, ожидание1мс. При результате выше361 побед выполняется
+Additional-256 ансамбля и родителя одним evaluator; иначе опыт завершается.
+Output должен быть отдельным; совпадающая identity позволяет продолжить
+незавершённые матчи. Изменение компонентов/runtime блокируется. Отчёт содержит
+парный bootstrap по мирам и переходы W/D/L. Исторический Development родителя
+измерен на RTX5090: сравнение с локальным GPU имеет численное ограничение.
+Replay проверяются, checkpoints не меняются; законченные оценки архивируются
+в PPMd. Команда не обучает модель и не открывает test.
+
 ## CPU/GPU-инференс оценок
 
 ```powershell

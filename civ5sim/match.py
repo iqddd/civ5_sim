@@ -141,7 +141,7 @@ class MatchOutcome:
             self.diagnostic_recorder.save(directory, self.replay)
 
 
-def run_match(config, agents, *, metrics=None, diagnostics="off", scenario=None, agent_seeds=None):
+def run_match(config, agents, *, metrics=None, diagnostics="off", scenario=None, agent_seeds=None, before_decision=None):
     """Run two agent objects/specifications and return privileged match artifacts.
 
     Invalid configuration raises before invoking agents. Agent failures instead
@@ -267,6 +267,9 @@ def run_match(config, agents, *, metrics=None, diagnostics="off", scenario=None,
                     "message": "max_calls_per_turn exceeded",
                 }
                 break
+            if before_decision is not None:
+                # Organizer-only hook; never passed to an Agent or its observation.
+                before_decision(battle, commands)
             with measure(metrics, "prepare_actions", side=side, turn=completed_turns):
                 previews = None
                 if getattr(agents[side], "requires_attack_preview", False):

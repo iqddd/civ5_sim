@@ -1,6 +1,6 @@
 # Журнал экспериментов
 
-Сводка доступных свидетельств на **14 ноября 2026 года**. Это индекс истории,
+Сводка доступных свидетельств на **15 ноября 2026 года**. Это индекс истории,
 не назначение следующих запусков. Конфиги и артефакты указаны относительно
 корня репозитория. W/D/L — победы/ничьи/поражения learner против обычного
 stateful CP, если не оговорено иначе. Ничья не считается победой.
@@ -16,7 +16,7 @@ Development, additional validation, sampling и argmax нельзя объеди
 
 | Этап | Конфиг | Родитель / старт | Статус и главный результат | Артефакт и протокол |
 |---|---|---|---|---|
-| PPO C2P end_turn adaptation | `rl-ppo-c2p-h60-end-turn.json` | C2P update171; Adam41882/29326/12492 и critic сохранены | **Идёт.**2Mi/10800active секунд,Dev0/1/2Mi;episode100008,свежие RNG;без раннего gate,Additional нового кандидата в end_turn,test закрыт. Перенесён после update20/475421решения с EPYC9355 на RTX5090/EPYC7B13,instance60686176,$0.6833/ч,42env/42workers/reply1. Старый60677932 удалён,machine143279 забанен24ч по просьбе пользователя. Baseline361/31/120; сохранение model/Adam/RNG и остатка бюджета подтверждено | [Подготовка](../artifacts/rl/ppo-c2p-end-turn-preparation/report.md), [диагностика](../artifacts/rl/ppo-c2p-end-turn-preparation/speed-diagnosis/report.md), [deployment](../artifacts/deployments/ppo-c2p-h60-end-turn-5090-host2/deployment.json), [перенос](../artifacts/deployments/ppo-c2p-h60-end-turn-5090-host2/host-resume-revision.json) |
+| PPO C2P end_turn adaptation | configs/rl-ppo-c2p-h60-end-turn.json | C2P update171; Adam41882/29326/12492 и critic сохранены | **Завершён.** Resume от update20 на RTX5090: 2100293решения, update107, 7416.7активных секунд; Adam8112принято/19отклонено. Development: parent361/31/120;1Mi339/38/135;2Mi348/41/123. Выбран parent;Additional пропущен. После прогрева EMA достигла351решений/с. Доставка5173файлов и полный аудит проверены;instance60749391 удалён | [Отчёт](../artifacts/rl/ppo-c2p-h60-end-turn/report.md), [аудит](../artifacts/deployments/ppo-c2p-h60-end-turn-5090-warmup/audits/final-complete/audit.json), [удаление](../artifacts/deployments/ppo-c2p-h60-end-turn-5090-warmup/instance-deletion.json) |
 | D0, общая диагностика | `rl-diagnostic.json` | Начальная сеть | Локальный отчёт не найден; проверенного W/D/L здесь нет | `artifacts/rl/diagnostic-results/`; [протокол](rl-diagnostic-protocol.md) |
 | D0, одно решение | `rl-diagnostic-one-decision.json` | `diagnostic-results/seed-17/checkpoints/initial.pt` | Локальный отчёт не найден; наличие протокола не доказывает завершение | `artifacts/rl/diagnostic-one-decision/`; [протокол](rl-d0-one-decision-protocol.md) |
 | D1, перенос | `rl-diagnostic-d1.json` | `diagnostic-one-decision/seed-17/checkpoints/update-000006.pt` | Локальный отчёт не найден; позднее направление сообщает ноль training-побед, это не итоговый evaluation W/D/L | `artifacts/rl/diagnostic-d1/`; [протокол](rl-d1-transfer-protocol.md) |
@@ -71,3 +71,8 @@ Development, additional validation, sampling и argmax нельзя объеди
 находится в [архивном индексе](archive/README.md). Протоколы со стабильными
 путями остаются вне архива там, где их читает конфигурация или код; это не
 делает их действующим общим руководством.
+| C2P legacy/end_turn throughput, 15 ноября | RTX5090, полные checkout d247575/current, update171/update20. На80/24/1 ранние235.27/234.47решений/с; замедление от end_turn не воспроизведено. Последующий matched-контроль18258решений: холодный factory27.37с, прогретый12.27с, команды совпали;13.26с ушло на42visibility cache misses. Прежние числа включали холодный генератор; GPU-прогрева недостаточно. Холодный кэш + больший rollout поддерживают гипотезу340→240. Научные запуски не изменены, instance60749391 впоследствии использован для завершения end_turn и удалён | [Полные циклы](../artifacts/benchmarks/c2p-live-cycle-5090-20261115/report.md), [причина и контроль](../artifacts/benchmarks/c2p-slowdown-cause-20261115/report.md) |
+
+| C2P fixed ensemble u171 + end_turn u107 | 50/50 probabilities, T=0.5; no training; local CUDA FP32 | Frozen u171 / u107, end_turn60, same Development512 | **Completed; idea closed by fixed gate.** 352/34/126 (68.75%) vs parent361/31/120;delta−1.76pp,world CI95[−6.45;+2.73]pp. Gained57wins/lost66;Additional skipped. All replays verified, checkpoints unchanged | [Report](../artifacts/rl/c2p-u171-u107-ensemble-end-turn/report.md), [summary](../artifacts/rl/c2p-u171-u107-ensemble-end-turn/summary.json) |
+
+| C2P rollout comparison | configs/rl-c2p-rollout-comparison.json | u171 student/continuation;u107 alternatives;newAdam | **Подготовлен, не запущен.** end_turn60;1024selected forks/7200s;2×8 futures;strict two-halves labels;32pairs+64anchors;BPTT128;2epochs/1800s;fullKL≤0.015. Исправлены финализация/resume, бюджеты, references и persistent workers. Новый output c2p-rollout-comparison-revised; прежний паспорт сохранён. Полный batch block8→32:93.57→22.54с,gradient L2δ0.415%; полные эпохи по-прежнему ограничены временем. | [Подготовка](../artifacts/preparations/c2p-rollout-comparison/report.md), [исправления и замеры](../artifacts/reviews/rollout-comparison-fixes-20261115/report.md) |

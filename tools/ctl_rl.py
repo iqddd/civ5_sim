@@ -94,8 +94,15 @@ def main(argv=None):
     cmd.add_argument("--alpha", type=float, default=0.1)
     cmd.add_argument("--exclude-compilation", action="store_true")
     cmd.add_argument("--json", action="store_true")
+    cmd = commands.add_parser("evaluate-ensemble")
+    cmd.add_argument("--run", type=Path, required=True)
+    cmd.add_argument("--checkpoints", type=Path, nargs=2, required=True)
+    cmd.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
-    if args.command == "record-host-resume":
+    if args.command == "evaluate-ensemble":
+        from civ5rl.reporting.ensemble import evaluate_ensemble
+        result = evaluate_ensemble(args.run, args.checkpoints, args.out)
+    elif args.command == "record-host-resume":
         from civ5rl.reporting.host_resume import record_host_resume
         result = record_host_resume(args.run, args.host_id, args.reason)
     elif args.command in ("archive-evaluations", "restore-evaluations"):

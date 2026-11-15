@@ -9,6 +9,19 @@ from civ5rl.deploy.archive import pack, seven_zip, unpack, _inventory
 
 
 class ArchiveTests(unittest.TestCase):
+    @unittest.skipUnless(__import__('os').name=='nt', 'Windows directory publication fallback')
+    def test_denied_directory_move_preserves_payload_manifest(self):
+        # This recurring Windows failure must not drop a scientific manifest
+        # while deferring publication of the transport manifest with the same name.
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);source=root/'source';source.mkdir()
+            (source/'manifest.json').write_bytes(b'{"scientific":true}\n')
+            before=_inventory(source)
+            with patch.object(Path,'replace',side_effect=PermissionError('directory move denied')):
+                pack(source,root/'packet',token='retry',direction='upload')
+            unpack(root/'packet',root/'restored',token='retry',direction='upload')
+            self.assertEqual(_inventory(root/'restored'),before)
+
     def test_storage_preserves_scientific_bytes_and_rejects_damaged_archive(self):
         # Deleting unpacked results before verifying a durable copy silently loses evidence.
         from civ5rl.reporting.evaluation_storage import archive_evaluations, restore_evaluations, readable_evaluations
