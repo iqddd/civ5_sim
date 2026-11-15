@@ -120,6 +120,8 @@ def verify_frozen_passport(directory, *, config=None, manifest=None):
 
     All archived hashes are checked, including reporting files in old passports.
     Historical passports/archives are never rewritten to match today's policy.
+    A passport without a resolved-config hash reports config_hash_verified=False;
+    absence of that field must not be silently upgraded to a verified config.
     This establishes artifact integrity, not permission to resume on new code.
     """
     directory = Path(directory)

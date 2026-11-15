@@ -18,6 +18,12 @@ def _read(path, default):
 
 
 def build_snapshot(directory, *, block_size=10, last=None):
+    """Aggregate saved training blocks and distinct Development records.
+
+    Evaluation records are keyed by (purpose, checkpoint); conflicting W/D/L
+    values are errors. Historical records without purpose default to development.
+    Prefer a duplicate with decision coordinates over one without them.
+    """
     if type(block_size) is not int or block_size < 1 or (last is not None and (type(last) is not int or last < 1)):
         raise ValueError("block_size and last must be positive integers")
     directory = Path(directory)
@@ -80,6 +86,12 @@ def build_snapshot(directory, *, block_size=10, last=None):
 
 
 def write_snapshot(directory, output=None, *, block_size=10, last=None):
+    """Write tables and curves without inventing missing evaluation coordinates.
+
+    If decision-based and epoch-only points coexist, plot the latter on a
+    separate epoch axis. Points with neither coordinate remain in the table
+    with a missing-coordinate notice and are excluded from curves.
+    """
     directory = Path(directory).resolve()
     output = derived_output(directory, output if output else directory / "derived" / "snapshot")
     result = build_snapshot(directory, block_size=block_size, last=last)

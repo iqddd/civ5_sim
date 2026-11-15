@@ -38,10 +38,25 @@ def measured_match(task):
 
     # This replacement is process-wide within the worker and is always restored.
     original_run_match = module.run_match
+    original_verify = module._verify
+    original_encode = ObservationEncoder.encode
     _, case, match_output, _, _ = task
     learner_side = case["learner_side"]
     scopes = []
     prefix_hook_seconds = 0.0
+    verify_seconds = encoding_seconds = 0.0
+
+    def measured_verify(*args,**kwargs):
+        nonlocal verify_seconds
+        start=perf_counter()
+        try:return original_verify(*args,**kwargs)
+        finally:verify_seconds+=perf_counter()-start
+
+    def measured_encode(*args,**kwargs):
+        nonlocal encoding_seconds
+        start=perf_counter()
+        try:return original_encode(*args,**kwargs)
+        finally:encoding_seconds+=perf_counter()-start
 
     def run_match_with_measurements(*args, **kwargs):
         nonlocal prefix_hook_seconds
@@ -59,12 +74,16 @@ def measured_match(task):
         return original_run_match(*args, **kwargs, metrics=scopes.append)
 
     module.run_match = run_match_with_measurements
+    module._verify = measured_verify
+    ObservationEncoder.encode = measured_encode
     wall_started = perf_counter()
     cpu_started = process_time()
     try:
         result = match_task(task)
     finally:
         module.run_match = original_run_match
+        module._verify = original_verify
+        ObservationEncoder.encode = original_encode
     grouped = defaultdict(float)
     for row in scopes:
         grouped[f"{row['kind']}/side{row['side']}"] += row["ns"] / 1e9
@@ -76,6 +95,8 @@ def measured_match(task):
             scopes=dict(grouped),
             prefix_hook_seconds=prefix_hook_seconds,
             learner_side=learner_side,
+            replay_verification_seconds=verify_seconds,
+            public_encoding_seconds=encoding_seconds,
         ),
     )
     return result
@@ -84,7 +105,7 @@ def measured_match(task):
 class ServiceMeter:
     def __init__(self, executor):
         self.executor = executor
-        self.call = executor.inference.infer
+        self.call = executor.inference.infer_encoded
         self.encode = ObservationEncoder.encode
         self.encode_seconds = 0.0
         self.wall = 0.0
@@ -105,12 +126,12 @@ class ServiceMeter:
             return result
 
         ObservationEncoder.encode = encode
-        self.executor.inference.infer = infer
+        self.executor.inference.infer_encoded = infer
         return self
 
     def __exit__(self, *args):
         ObservationEncoder.encode = self.encode
-        self.executor.inference.infer = self.call
+        self.executor.inference.infer_encoded = self.call
 
     def result(self):
         return dict(
@@ -155,34 +176,29 @@ def inference_trace(cfg, source, out):
             histories.append(read_json(folder / "history.json"))
         backend = ProposalInference(policies, "cuda")
 
-        def infer(index):
+        def prepare_requests(index):
             requests = []
             for agent, history in zip(agents, histories):
                 if index >= len(history):
                     continue
                 row = history[index]
                 actions = [Action(**a) for a in row["actions"]]
-                requests.append(
-                    (
-                        agent,
-                        "observe",
-                        row["observation"],
-                        actions,
-                        actions[row["chosen"]],
-                    )
-                )
-            backend.infer(requests)
+                encoded=agent.encoder.encode(row['observation'],actions)
+                agent.encoder.remember_action(actions[row['chosen']],row['observation'])
+                requests.append((agent,'observe',encoded))
+            return requests
 
         for index in range(20):
-            infer(index)
+            backend.infer_encoded(prepare_requests(index))
+        ready=[prepare_requests(index) for index in range(20,23)]
         with torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
                 torch.profiler.ProfilerActivity.CUDA,
             ]
         ) as profile:
-            for index in range(20, 23):
-                infer(index)
+            for requests in ready:
+                backend.infer_encoded(requests)
         profile.export_chrome_trace(str(out / "inference-trace.json"))
 
 
@@ -440,11 +456,11 @@ def measure_continuations(cfg, config, collection, runtime, scratch, out, monito
 
 def measure_training(cfg, episodes, scratch, out, monitor, warmup, steps):
     monitor.mark("training_prepare")
-    histories = Histories(scratch, capacity=8)
+    histories = Histories(scratch)
     pairs = []
     anchors = []
     for episode in episodes:
-        _, rows = histories.get(episode)
+        rows = histories.raw(episode)
         eligible = [i for i, r in enumerate(rows) if i >= 127 and len(r["actions"]) > 1]
         if not eligible:
             eligible = [i for i, r in enumerate(rows) if len(r["actions"]) > 1]

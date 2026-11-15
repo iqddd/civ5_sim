@@ -76,7 +76,7 @@ def precheck(cfg, out):
     # Time a complete BPTT window, rather than extrapolating six-decision forks.
     candidates = []
     for episode in collection["sources"]:
-        _, episode_rows = histories.get(episode)
+        episode_rows = histories.raw(episode)
         candidates.extend(
             (episode, i) for i, r in enumerate(episode_rows) if len(r["actions"]) > 1
         )
@@ -85,7 +85,8 @@ def precheck(cfg, out):
     episode, target = next(
         ((e, i) for e, i in candidates if i >= 127), max(candidates, key=lambda k: k[1])
     )
-    history, rows = histories.get(episode)
+    history, _ = histories.get(episode)
+    rows = histories.raw(episode)
     row = rows[target]
     # Explicitly artificial preference, never inserted into dataset.json/labels.
     example = dict(

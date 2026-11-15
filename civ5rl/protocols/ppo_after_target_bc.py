@@ -50,7 +50,15 @@ def validate_profile(config):
 
 
 def compute_time_budget_check(config):
-    """Separate measured expected work from pessimistic, latched-KL replay bounds."""
+    """Separate measured expected work from pessimistic, latched-KL replay bounds.
+
+    Account for partial minibatches in every epoch and completed episodes that
+    overshoot the requested rollout size. Expected KL work needs an observed
+    checks-per-rollout rate. A single-spike allowance is not an upper bound:
+    once the yellow safeguard latches, replay may run after every optimizer step,
+    with another check after rollback. Report that pessimistic scenario separately
+    from measured expected work; a worst-case excess alone does not veto a run.
+    """
     experiment = config["experiment"]
     spec = experiment.get("time_budget_check")
     if not spec:

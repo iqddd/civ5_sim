@@ -7,6 +7,7 @@ from pathlib import Path
 from time import perf_counter
 import json
 import random
+import hashlib
 import torch
 from civ5rl.engine.control import RunLock
 from civ5rl.engine.evaluation import EvaluationRuntime, EvaluationExecutor, evaluation_precision
@@ -156,27 +157,40 @@ def process_forks(cfg,out,state,config,get_executor,expired,save):
 
 
 def build_dataset(cfg,out,state):
+    """Read each case/history once; hash and extract targets from the same bytes.
+
+    Retain only free-position indices and chosen/alternative indices for selected
+    forks. Anchor sampling remains blind to continuation outcomes and keeps its
+    original RNG order; labels are read only after the anchor set is fixed.
+    """
     # Fix A without reading a single continuation outcome; labels are read only below.
     random_stream=random.Random(seed_for(17,0,'anchors',namespace=cfg['namespace']))
-    free=[]
+    free=[];fork_rows={};sides={};hashes={}
+    wanted={(f['episode'],f['index']) for f in state['forks']}
+    def read_hashed(path):
+        data=path.read_bytes()
+        return json.loads(data),hashlib.sha256(data).hexdigest()
     for episode in state['sources']:
-        rows=read_json(out/'sources'/str(episode)/'history.json')
+        folder=out/'sources'/str(episode)
+        case,case_sha=read_hashed(folder/'case.json')
+        rows,history_sha=read_hashed(folder/'history.json')
+        sides[episode]=case['learner_side']
+        hashes[str(episode)]={'case.json':case_sha,'history.json':history_sha}
         free.extend((episode,i) for i,r in enumerate(rows) if len(r['actions'])>1)
+        for i,row in enumerate(rows):
+            if (episode,i) in wanted:fork_rows[(episode,i)]=(row['chosen'],row['alternative'])
     selected=random_stream.sample(free,min(8192,len(free)))
     anchors=sorted(set(selected)|{(f['episode'],f['index']) for f in state['forks']})
     write_json(out/'anchors.json',dict(positions=anchors,selection_blind_to_continuation_outcomes=True))
     pairs=[];reasons=Counter()
     for fork in state['forks']:
         if fork['status']!='completed':continue
-        case=read_json(out/'sources'/str(fork['episode'])/'case.json')
         winners=[[read_json(out/'continuations'/str(fork['id'])/f'{j}-{a}'/'completed.json')['winner'] for j in range(8)] for a in range(2)]
-        label=preference(winners,case['learner_side']);reasons[label['reason']]+=1
+        label=preference(winners,sides[fork['episode']]);reasons[label['reason']]+=1
         write_json(out/'labels'/f"{fork['id']}.json",dict(fork=fork,**label))
         if label['accepted']:
-            row=read_json(out/'sources'/str(fork['episode'])/'history.json')[fork['index']]
-            actions=[row['chosen'],row['alternative']]
+            actions=fork_rows[(fork['episode'],fork['index'])]
             pairs.append(dict(episode=fork['episode'],index=fork['index'],better=actions[label['better']],worse=actions[1-label['better']],weight=label['weight']))
-    hashes={str(episode):{name:file_sha256(out/'sources'/str(episode)/name) for name in ('case.json','history.json')} for episode in state['sources']}
     return dict(pairs=pairs,anchors=anchors,source_hashes=hashes,selected_forks=len(state['forks']),completed_forks=sum(f['status']=='completed' for f in state['forks']),accepted_pairs=len(pairs),rejections=dict(reasons))
 
 

@@ -21,6 +21,11 @@ class EnsembleInference(BatchedInference):
         super().__init__(policies[0], device)
         self.policies = policies
 
+    def combine_encoded_logits(self, logits_all, requests):
+        choices=mean_probabilities(logits_all).argmax(-1).cpu().tolist()
+        return [None if command=='observe' else dict(index=choices[i])
+                for i,(_,command,_) in enumerate(requests)]
+
     @torch.inference_mode()
     def infer(self, requests):
         started = perf_counter()
@@ -59,22 +64,6 @@ class EnsembleExecutor(EvaluationExecutor):
         if any(p.variant != policies[0].variant for p in policies):
             raise ValueError('Ensemble variants differ')
         self.inference = EnsembleInference(policies, self.runtime.device)
-
-    def _receive(self, connection):
-        result = super()._receive(connection)
-        agent = self.connections.get(connection)
-        if agent is not None and not hasattr(agent, 'members'):
-            # reset's context has already initialized the first encoder; duplicate
-            # its public context into an independent encoder for each component.
-            from copy import deepcopy
-            agent.members = [agent]
-            for policy in self.inference.policies[1:]:
-                member = RLAgent(policy, self.runtime.device, 'argmax')
-                member.encoder = deepcopy(agent.encoder)
-                member.hidden = None
-                agent.members.append(member)
-        return result
-
 
 def checked_match(task):
     from civ5rl.experiments.ppo_target_scale import evaluation_task

@@ -16,10 +16,45 @@ from civ5rl.experiments.ppo_target_scale import evaluation_task, evaluate
 from civ5rl.provenance.common import configure, read_json, write_json
 from civ5sim import Action, Battle
 from civ5sim.engine import digest
-from test_rl import context, scenario
+from tests.test_rl import context, scenario
+
+
+def public_sequence(task):
+    checkpoint,initial,mode,metrics=task
+    from civ5rl.engine.evaluation import evaluation_agent
+    agent=evaluation_agent(checkpoint,mode,temperature=.5,collect_selection_metrics=metrics)
+    agent.reset(context(initial))
+    with Battle(initial) as battle:
+        observation=battle.observe(0);actions=ordered_actions(battle.available_actions())
+    selected=[]
+    for i in range(3):
+        selected.append(agent.act(observation,actions))
+        if i==0:agent.observe_step(observation,actions,Action('end_turn'))
+    return (mode,metrics),(selected,agent.selection_metrics,agent.rng.getstate(),agent.encoder.previous.tolist(),agent.encoder.contacts)
 
 
 class BatchedEvaluationTests(unittest.TestCase):
+    def test_worker_encoded_sampling_forced_and_session_isolation(self):
+        # Moving the encoder/RNG to a worker must preserve executed history,
+        # sampling and metrics across concurrent matches and pool reuse.
+        configure(17,'cpu')
+        with tempfile.TemporaryDirectory() as temp:
+            checkpoint=Path(temp)/'policy.pt';policy=Policy('C2')
+            torch.save(dict(variant='C2',model=policy.state_dict(),config={}),checkpoint)
+            tasks=[(str(checkpoint),scenario(),mode,metrics)
+                   for mode,metrics in (('argmax',False),('sample',True),('argmax',True))]
+            expected=dict(public_sequence(t) for t in tasks)
+            with EvaluationExecutor(checkpoint,EvaluationRuntime('cpu',workers=2)) as service:
+                for _ in range(2):
+                    actual=list(service.run(public_sequence,tasks))
+                    # EvaluationExecutor yields completion order.
+                    for key,row in actual:
+                        reference=expected[key]
+                        self.assertEqual(row[0],reference[0]);self.assertEqual(row[2:],reference[2:])
+                        for a,b in zip(row[1],reference[1]):
+                            for name in a:self.assertAlmostEqual(a[name],b[name],places=6)
+                    self.assertEqual(len(actual),len(expected))
+                    self.assertEqual(service.shared,{})
     def test_public_histories_forced_actions_and_separate_hidden_states(self):
         configure(17, "cuda" if torch.cuda.is_available() else "cpu")
         policy = Policy("C2").eval()
@@ -94,7 +129,7 @@ class BatchedEvaluationTests(unittest.TestCase):
             device = "cuda" if torch.cuda.is_available() else "cpu"
             runtime = EvaluationRuntime(device, workers=1)
             failed = EvaluationExecutor(checkpoint, runtime)
-            infer = failed.inference.infer
+            infer = failed.inference.infer_encoded
             first, second = root / "partial-first", root / "partial-second"
 
             def fail_after_first(requests):
@@ -102,7 +137,7 @@ class BatchedEvaluationTests(unittest.TestCase):
                     raise torch.cuda.OutOfMemoryError("injected evaluation OOM")
                 return infer(requests)
 
-            failed.inference.infer = fail_after_first
+            failed.inference.infer_encoded = fail_after_first
             with self.assertRaises(RuntimeError):
                 list(failed.run(evaluation_task, [(cfg, case, str(checkpoint), str(first)),
                                                   (cfg, case, str(checkpoint), str(second))]))

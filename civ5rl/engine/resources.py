@@ -45,7 +45,16 @@ class ResourceMonitor:
         self.last_sample = None
 
     def record_cuda_memory(self, policy, boundary, *, snapshot=False, **state):
-        """Read host counters between updates; failures never mask training errors."""
+        """Read host counters between updates; failures never mask training errors.
+
+        Ordinary samples must not synchronize CUDA or mutate the allocator (see
+        sample_cuda_memory). Boundary hooks surround collection/PPO, rollout
+        cleanup and evaluation, never the optimizer's inner loop. NVML values are
+        the latest asynchronous background sample with their own timestamp, not a
+        synchronous boundary measurement. sampling_seconds excludes serialization
+        and disk writes. Only the explicit OOM path requests an expensive layout
+        snapshot; allocation history and per-allocation stacks stay disabled.
+        """
         started = time.perf_counter()
         try:
             from civ5rl.reporting.cuda_memory import dump_oom_snapshot, sample_cuda_memory

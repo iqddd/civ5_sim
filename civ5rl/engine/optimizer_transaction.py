@@ -61,7 +61,8 @@ class AdamSnapshot:
             raise RuntimeError("Adam rollback failed to restore model exactly")
 
 
-def require_finite_state(model, optimizer):
+def finite_state_flags(model, optimizer):
+    """Device-resident results let callers combine checks with their metric readback."""
     tensors = list(model.state_dict().values()) + [
         v
         for state in optimizer.state.values()
@@ -73,6 +74,11 @@ def require_finite_state(model, optimizer):
     for tensor in tensors:
         if tensor.is_floating_point():
             by_device.setdefault(tensor.device, []).append(tensor)
-    for values in by_device.values():
-        if not torch.stack([torch.isfinite(v).all() for v in values]).all().item():
+    return {device:torch.stack([torch.isfinite(v).all() for v in values]).all()
+            for device,values in by_device.items()}
+
+
+def require_finite_state(model, optimizer):
+    for flag in finite_state_flags(model,optimizer).values():
+        if not flag.item():
             raise FloatingPointError("Non-finite model/Adam state after attempt")

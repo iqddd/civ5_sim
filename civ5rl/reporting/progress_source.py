@@ -25,6 +25,12 @@ class ArtifactSource:
         return self._json[name][1]
 
     def rows(self, name):
+        """Read committed JSONL records, retrying an unfinished trailing fragment.
+
+        A newline commits a record. Invalid JSON inside a committed record raises
+        rather than silently hiding corruption; replacement/truncation resets the
+        incremental cursor. An unfinished fragment is retried on the next read.
+        """
         path = self.directory / name
         if not path.exists():
             return []

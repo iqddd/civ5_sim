@@ -40,6 +40,11 @@ class Observation:
 
 
 class Adapter(Protocol):
+    """Translate run-family facts into algorithm-independent work and stage data.
+
+    Implement observe(source) -> Observation. Experiment-specific phase plans
+    belong in adapter subclasses, not conditionals in the estimator or CLI.
+    """
     def observe(self, source) -> Observation: ...
 
 

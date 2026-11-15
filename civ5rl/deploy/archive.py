@@ -1,4 +1,12 @@
-"""Verified transport packets, separate from scientific run directories."""
+"""Verified transport packets, separate from scientific run directories.
+
+JSON/JSONL groups cross the packing threshold at JSON_MIN_FILES or JSON_MIN_BYTES;
+other files remain uncompressed. PPMD defines the 7z method and solid block size.
+Preserve relative paths and bytes; verify the received manifest/archive hashes,
+then each extracted file in staging before applying the destination tree. Tokens
+and direction distinguish result packets from inputs or stale transfers. Failed
+verification must not mark delivery complete or authorize instance deletion.
+"""
 
 import os
 import shutil

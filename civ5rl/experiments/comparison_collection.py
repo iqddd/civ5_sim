@@ -1,5 +1,4 @@
 """Public histories and paired counterfactual matches with exact CP prefix replay."""
-from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 from time import perf_counter
@@ -43,6 +42,12 @@ class ProposalInference(BatchedInference):
         super().__init__(policies[0],device)
         self.policies=policies
 
+    def combine_encoded_logits(self, logits_all, requests):
+        choices=torch.stack([z.argmax(-1) for z in logits_all]).cpu().tolist()
+        return [None if command=='observe' else
+                dict(index=choices[0][i],events=[dict(kind='proposal',alternative=choices[1][i])])
+                for i,(_,command,_) in enumerate(requests)]
+
     @torch.inference_mode()
     def infer(self, requests):
         start=perf_counter()
@@ -53,8 +58,9 @@ class ProposalInference(BatchedInference):
             encoded=[a.encoder.encode(r[2],acts) for a,r,acts in zip(agents,requests,legal)]
             hidden=torch.cat([a.hidden if a.hidden is not None else torch.zeros(1,1,policy.hidden_size,device=self.device) for a in agents],1)
             logits,_,hidden=policy(batch_inputs(encoded,self.device,compact_units=policy.attention_backend=='compact_fp32'),hidden)
-            choices.append(logits.argmax(-1).cpu().tolist())
+            choices.append(logits.argmax(-1))
             for i,a in enumerate(agents): a.hidden=hidden[:,i:i+1].clone()
+        choices=torch.stack(choices).cpu().tolist()
         outputs=[]
         for i,(agent,command,obs,_,forced) in enumerate(requests):
             action=forced if command=='observe' else legal[i][choices[0][i]]
@@ -73,16 +79,6 @@ class ProposalExecutor(EvaluationExecutor):
         second=prepare_evaluation_policy(RLAgent.from_checkpoint(checkpoints[1],'cpu','argmax').policy,self.runtime.device)
         self.inference=ProposalInference([self.inference.policy,second],self.runtime.device)
 
-    def _receive(self, connection):
-        result=super()._receive(connection)
-        a=self.connections.get(connection)
-        if a is not None and not hasattr(a,'members'):
-            second=RLAgent(self.inference.policies[1],self.runtime.device,'argmax')
-            second.encoder=deepcopy(a.encoder);second.hidden=None
-            a.members=[a,second]
-        return result
-
-
 def _verify(directory):
     # Continuation replays start at the reseeded snapshot, but retain the original horizon.
     from civ5rl.experiments.evaluation import verify_replay
@@ -91,6 +87,14 @@ def _verify(directory):
 
 
 def match_task(task):
+    """Run a source battle or one exact-prefix, reseeded continuation.
+
+    Re-execute CP commands and verify each prefix state hash. The organizer-only
+    before_decision hook reseeds simulator damage immediately before the chosen
+    alternative; agents never receive this hook or hidden snapshot. Each branch
+    then consumes its own stream. The saved continuation replay starts from the
+    reseeded snapshot while keeping the original 60-round horizon.
+    """
     cfg,case,folder,checkpoint,branch=task
     folder=Path(folder)
     command=0
@@ -129,7 +133,9 @@ def match_task(task):
             if not branch:
                 events=self.inner.drain_diagnostics()
                 alternative=next(e['alternative'] for e in events if e['kind']=='proposal')
-                history.append(dict(command=command,observation=deepcopy(obs),actions=[asdict(a) for a in legal],chosen=legal.index(action),alternative=alternative))
+                # Battle.observe returns a new detached tree on each decision;
+                # the public encoder/selection never mutates it afterwards.
+                history.append(dict(command=command,observation=obs,actions=[asdict(a) for a in legal],chosen=legal.index(action),alternative=alternative))
             return action
     class Opponent:
         def __init__(self):self.inner=CPAgent(search_config(cfg))

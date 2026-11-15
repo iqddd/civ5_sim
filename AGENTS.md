@@ -7,6 +7,9 @@
 
 - `docs/` is the durable reference for how the project works and how to operate it: current contracts, architecture, reusable procedures, and a compact experiment ledger. It is not a workspace for generated reports, run logs, debugging diaries, or scratch plans.
 - Update the relevant existing document when behavior changes. Rewrite the affected rule in place; do not accumulate dated updates or version appendices that contradict earlier text.
+- Keep CLI documentation focused on user-controlled options and observable behavior. Put allocator/buffer internals, IPC/shared-memory mechanics, internal signatures, and malformed-input edge cases in nearby Python docstrings/comments. Keep scientific contracts in the architecture reference.
+- Write code comments and docstrings in English. Keep agent-only instructions concise, in English, in `AGENTS.md` rather than user documentation.
+- Describe current behavior in reference/CLI documentation. Keep change history in the experiment ledger or historical archives; omit refactoring narratives and comparisons with superseded implementations.
 - Before creating a document, check whether its content belongs in an existing reference. Add a separate document only for a distinct, durable purpose; avoid duplicate descriptions and one document per run or investigation.
 - Keep experiment results and detailed run reports in `artifacts/`. Add concise status, configuration, parent, result, and report links to `docs/experiment-ledger.md` instead of copying reports into `docs/`.
 - Use `docs/archive/` only for historical protocols or investigations worth retaining for reproducibility or provenance. Archiving is not a reason to preserve every scratch note. Clearly distinguish proposals, completed runs, and unverified historical claims.
@@ -60,6 +63,7 @@ Before adding a test, identify the specific failure it catches and why a normal 
 
 ## Experiment planning and pre-launch checks
 
+- Preparation or diagnostic authorization does not authorize a full experiment. Treat `resume` as execution of the remaining scientific phases, not a read-only check.
 - When proposing a new model component, state its expected computational cost and simpler alternatives.
 - Keep local pre-launch benchmarks short: measure warmup plus a handful of steps and a short Kineto trace (e.g., --warmup 3 --steps 5 --trace-steps 3) rather than hundreds of steps.
 - Before starting a full local or remote run, calculate steps_per_epoch * target_gpu_step_seconds * planned_epochs (or total planned updates) and compare it against 	raining_seconds. If the planned training volume does not fit within the time limit, report the numbers before launching rather than after.

@@ -64,6 +64,31 @@ def allocation_with_reserve(device, reserve_bytes):
 
 
 class SequenceBuffer:
+    """Pack episode offsets, action counts and inputs for BC/PPO caches.
+
+    Resident inputs require successful real allocation plus a temporary 2-GiB
+    allocator reserve probe. Optional whole-replay caches use a 4-GiB probe and
+    can fall back to host/on-demand data without changing KL; mandatory resident
+    allocation failures propagate. Admission snapshots are telemetry, not a
+    promise of enough memory for all subsequent optimizer work. Ragged gathers
+    pad legal actions only to the current batch width.
+    """
+    @classmethod
+    def from_spatial_tensors(cls, data, device):
+        """Reuse gathering for immutable prepacked spatial inputs (no labels/actions)."""
+        value = cls.__new__(cls)
+        rows = len(data['cells'])
+        value.encoded = [range(rows)]
+        value.device = device
+        value.offsets = np.asarray([0, rows])
+        value.action_counts = None
+        value.data = data
+        value.required_bytes = sum(v.numel()*v.element_size() for v in data.values())
+        value.memory_admission = None
+        value.async_transfers = False
+        value._gather_runner = None
+        return value
+
     def __init__(
         self,
         encoded,
@@ -202,8 +227,13 @@ class SequenceBuffer:
                 non_blocking=True,
                 spatial_only=True,
             )
+        keys = SPATIAL_KEYS + (("unit_indices",) if "unit_indices" in self.data else ())
+        if self.action_counts is None and len(spans) == 1:
+            episode, start, stop = spans[0]
+            offset = int(self.offsets[episode])
+            return {key:self.data[key][offset+start:offset+stop] for key in keys}
         indices = self.indices(spans)
-        return {key: self.data[key].index_select(0, indices) for key in SPATIAL_KEYS}
+        return {key: self.data[key].index_select(0, indices) for key in keys}
 
     def enable_compiled_gather(self):
         self._gather_runner = torch.compile(self._gather, dynamic=True, fullgraph=True)

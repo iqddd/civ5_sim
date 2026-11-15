@@ -387,6 +387,13 @@ def _attach(directory, deployment, transport):
 
 
 def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime=None, host_resume_reason=None):
+    """Attach to active jobs or prepare a durable launch with explicit recovery.
+
+    Retry preparation only when the same job is confirmed cancelled_before_launch
+    with execution and pre_sync both not_started. Ambiguous remote state must not
+    trigger another process. Input/output transport packets are separate; reverse
+    post-sync of an input packet alone does not establish result delivery.
+    """
     directory = Path(directory).resolve()
     transport = transport or Transport()
     with RunLock(directory):

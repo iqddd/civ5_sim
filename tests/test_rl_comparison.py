@@ -5,6 +5,137 @@ from civ5rl.experiments.comparison_collection import preference,select_forks
 from civ5rl.engine.comparison_training import pair_loss,categorical_kl
 
 class ComparisonTests(unittest.TestCase):
+    def test_vector_losses_preserve_padding_multiplicity_and_fp64_control(self):
+        # Zero padding probabilities must never multiply an infinite log-delta;
+        # repeats and independent pair/anchor means must retain their weights.
+        from civ5rl.engine.comparison_losses import preference_and_kl,full_kl_rows
+        from civ5rl.engine.comparison_training import DeviceReferences
+        lengths=[1,3,5]
+        teacher={i:(torch.linspace(-.7,.6,n)/.5).log_softmax(-1) for i,n in enumerate(lengths)}
+        raw=torch.tensor([[.2,0,0,0,0],[.3,-.6,.2,0,0],[-.5,.1,.7,-.4,.3]])
+        mask=torch.arange(5)[None]<torch.tensor(lengths)[:,None]
+        pairs=[(1,2,0),(1,1,2),(2,3,4)]
+        weights=[.5/3,.25/3,1./3];counts=[1/4,1/4,2/4]
+        reference=raw.clone().requires_grad_()
+        a=sum(w*torch.nn.functional.softplus((reference[i,worse]-reference[i,better])/.5)
+              for (i,better,worse),w in zip(pairs,weights))
+        b=sum(c*categorical_kl(teacher[i],reference[i,:n]) for i,(n,c) in enumerate(zip(lengths,counts)))
+        (a+b).backward()
+        control=sum(c*categorical_kl(teacher[i],raw[i,:n],double=True) for i,(n,c) in enumerate(zip(lengths,counts)))
+        for device in ('cpu',*(['cuda'] if torch.cuda.is_available() else [])):
+            value=raw.detach().to(device).clone().requires_grad_();logits=value.masked_fill(~mask.to(device),-torch.inf)
+            bank=DeviceReferences(teacher,device);parent,_=bank.gather([0,1,2],5)
+            actual=preference_and_kl(logits,torch.tensor(pairs,device=device),torch.tensor(weights,device=device),parent,torch.tensor(counts,device=device))
+            torch.testing.assert_close(actual[0].cpu(),a.detach());torch.testing.assert_close(actual[1].cpu(),b.detach(),atol=2e-7,rtol=1e-5)
+            sum(actual).backward()
+            torch.testing.assert_close(value.grad.cpu(),reference.grad,atol=2e-7,rtol=1e-5)
+            self.assertTrue(torch.isfinite(value.grad).all());self.assertTrue(torch.equal(value.grad.cpu()[~mask],torch.zeros_like(value.grad.cpu()[~mask])))
+            bank=DeviceReferences(teacher,device,control=True);parent,probability=bank.gather([0,1,2],5)
+            rows=full_kl_rows(logits.detach(),parent,probability)
+            current=(logits.detach()/.5).log_softmax(-1).cpu().double()
+            cpu_control=sum(c*(teacher[i].double().exp()*(teacher[i].double()-current[i,:n])).sum()
+                            for i,(n,c) in enumerate(zip(lengths,counts)))
+            measured=(rows*torch.tensor(counts,device=device,dtype=torch.float64)).sum().cpu()
+            torch.testing.assert_close(measured,cpu_control,rtol=1e-12,atol=1e-12)
+            torch.testing.assert_close(measured,control,rtol=1e-6,atol=1e-7)
+            zero=preference_and_kl(logits,torch.empty((0,3),device=device,dtype=torch.long),torch.empty(0,device=device),parent.float(),torch.zeros(3,device=device))
+            self.assertEqual(float(sum(zero).detach()),0.)
+
+    def test_checkpoint_cpu_image_is_independent_and_restores_adam_rng(self):
+        # Checkpointing a live CUDA tree can silently retain aliases/device tags.
+        # Validate the saved values and resumed optimizer, not serialization calls.
+        import tempfile
+        from pathlib import Path
+        from copy import deepcopy
+        from civ5rl.engine.comparison_training import atomic_torch_save
+        from civ5rl.provenance.rng import capture_rng,restore_rng
+        from civ5rl.experiments.imitation_helpers import assert_equal
+        for device in ('cpu',*(['cuda'] if torch.cuda.is_available() else [])):
+            model=torch.nn.Linear(4,3).to(device)
+            optimizer=torch.optim.Adam(model.parameters(),lr=1e-5)
+            model(torch.ones(2,4,device=device)).square().mean().backward();optimizer.step()
+            state=dict(model=model.state_dict(),optimizer=optimizer.state_dict(),rng=capture_rng(),
+                       transposed=torch.arange(12,device=device,dtype=torch.float64).view(3,4).t())
+            with tempfile.TemporaryDirectory() as temporary:
+                a,b=(Path(temporary)/name for name in ('verified.pt','training.pt'))
+                image=atomic_torch_save(state,a,b)
+                self.assertEqual(a.read_bytes(),b.read_bytes())
+                saved=torch.load(a,weights_only=False)
+                def check_cpu(value):
+                    if torch.is_tensor(value):self.assertEqual(value.device.type,'cpu')
+                    elif isinstance(value,dict):
+                        for child in value.values():check_cpu(child)
+                    elif isinstance(value,(list,tuple)):
+                        for child in value:check_cpu(child)
+                check_cpu(saved);assert_equal(saved,image)
+                with torch.no_grad():
+                    for p in model.parameters():p.add_(3)
+                self.assertFalse(torch.equal(model.weight.cpu(),saved['model']['weight']))
+                restored=deepcopy(model);other=torch.optim.Adam(restored.parameters(),lr=1e-5)
+                restored.load_state_dict(saved['model']);other.load_state_dict(saved['optimizer']);restore_rng(saved['rng'])
+                assert_equal(restored.state_dict(),image['model']);assert_equal(other.state_dict(),image['optimizer'])
+                assert_equal(capture_rng(),image['rng'])
+
+    def test_prepared_histories_preserve_public_prefixes_beyond_eight_episodes(self):
+        # A small LRU silently repeats costly JSON/encoding work. Prepared data
+        # must retain previous-action/forced history and survive a fresh process.
+        import tempfile
+        from pathlib import Path
+        from dataclasses import asdict
+        from copy import deepcopy
+        from civ5rl.core.observation import ObservationEncoder,ordered_actions
+        from civ5rl.core.context import context_from_spec
+        from civ5rl.core.model import batch_inputs
+        from civ5rl.engine.comparison_inputs import Histories
+        from civ5rl.protocols.memory import flat_map
+        from civ5rl.provenance.common import write_json,read_json
+        from civ5sim import Battle,Action
+        from tests.test_combat import scenario,unit
+        s=scenario(unit(x=0,y=0),unit(side=1,x=1,y=1),terrain=flat_map(2))
+        case=dict(scenario=s,armies=[['warrior'],['warrior']],learner_side=0,max_rounds=60,agent_seeds=[17,18])
+        with Battle(s) as battle:
+            actions,previews=battle.actions_with_previews();actions=ordered_actions(actions)
+            obs=battle.observe(0);obs['attack_previews']=previews.tolist()
+        rows=[dict(observation=obs,actions=[asdict(a) for a in actions],chosen=0),
+              dict(observation={**obs,'attack_previews':[[0.]*5]},actions=[asdict(Action('end_turn'))],chosen=0),
+              dict(observation=obs,actions=[],chosen=999)]
+        encoder=ObservationEncoder(context_from_spec(case,seed=17),'C2P');expected=[]
+        for row in rows[:2]:
+            legal=[Action(**a) for a in row['actions']]
+            expected.append(encoder.encode(row['observation'],legal));encoder.remember_action(legal[row['chosen']],row['observation'])
+        with tempfile.TemporaryDirectory() as temporary:
+            out=Path(temporary)
+            for episode in range(10):
+                write_json(out/'sources'/str(episode)/'case.json',case)
+                write_json(out/'sources'/str(episode)/'history.json',rows)
+            store=Histories(out,limits={e:2 for e in range(10)})
+            store.prepare([(e,1) for e in range(10)])
+            for _ in range(2):
+                for episode in range(10):
+                    history,raw=store.get(episode)
+                    self.assertIsNone(raw);self.assertEqual(len(history),2)
+                    for a,b in zip(history,expected):
+                        for name in vars(b):
+                            import numpy as np
+                            np.testing.assert_array_equal(getattr(a,name),getattr(b,name))
+            history,_=store.get(0)
+            for device in ('cpu',*(['cuda'] if torch.cuda.is_available() else [])):
+                for gpu,pinned in ((0,0),(1024**2,0),(0,1024**2)):
+                    packed=Histories(out,limits={0:2},device=device,gpu_bytes=gpu,pinned_bytes=pinned)
+                    packed.prepare([(0,1)])
+                    view,_=packed.get(0)
+                    actual=packed.spatial_inputs([view[:1],view[1:]],device)
+                    reference=batch_inputs(expected,device,spatial_only=True,compact_units=True)
+                    for key in reference:torch.testing.assert_close(actual[key],reference[key],rtol=0,atol=0)
+                    self.assertEqual(packed.statistics().get('encoded_episodes',0),0)
+            self.assertEqual(store.statistics()['encoded_decisions'],20)
+            self.assertEqual(store.statistics()['raw_rows_retained'],0)
+            # A changed public source must select a new cache, never stale inputs.
+            changed=deepcopy(rows)
+            for row in changed[:2]:row['observation']['turn']=42
+            write_json(out/'sources/0/history.json',changed)
+            fresh=Histories(out,limits={0:2});altered,_=fresh.get(0)
+            self.assertFalse(torch.equal(torch.from_numpy(altered[0].globals),torch.from_numpy(history[0].globals)))
     def test_batched_histories_keep_prefix_boundaries_and_preference_weights(self):
         # Wrong GRU grouping, padding, or loss multiplicity can silently train on
         # another episode's memory. Compare the actual accumulated gradients.
@@ -31,8 +162,9 @@ class ComparisonTests(unittest.TestCase):
         histories=Histories()
         a=Policy('C2P');a.configure_execution(inverse_routing=True,action_routing=True,maximum_routing=True,attention_backend='compact_fp32')
         b=deepcopy(a)
-        pairs=[dict(episode=1,index=129,better=1,worse=0,weight=.5),dict(episode=2,index=2,better=0,worse=1,weight=.25)]
-        anchors=[(1,129),(2,0),(2,2),(2,2)]
+        pairs=[dict(episode=1,index=129,better=1,worse=0,weight=.5),dict(episode=2,index=2,better=0,worse=1,weight=.25),
+               dict(episode=1,index=80,better=0,worse=1,weight=.25)]
+        anchors=[(1,129),(1,128),(1,80),(2,0),(2,2),(2,2)]
         refs=reference_distributions(a,histories,anchors)
         with torch.no_grad():
             for key in set(anchors):

@@ -1,4 +1,10 @@
-"""Boundary-only CUDA diagnostics; no kernels, synchronization or allocation history."""
+"""Boundary-only CUDA diagnostics; no kernels, synchronization or allocation history.
+
+Compare driver-free, allocated, reserved and private-pool counters at equivalent
+update boundaries. Reserved bytes alone do not establish a leak; stable allocated
+bytes do not rule out graph-pool growth. These categories overlap and must not be
+added as independent memory volumes. empty_cache cannot release live graph pools.
+"""
 
 import gzip
 import json
@@ -8,6 +14,19 @@ import torch
 
 
 def sample_cuda_memory(policy):
+    """Read host allocator/graph metadata without changing CUDA execution.
+
+    Never add synchronize(), tensor.item(), empty_cache(), CUDA kernels, memory
+    history or graph resets here: boundary telemetry must not drain GPU queues,
+    change allocator state or perturb the memory-retention problem being measured.
+    Inspect existing graph managers only; do not create pools or advance counters.
+
+    Allocator/retry/OOM counters are process-cumulative, not per-update. Private
+    pools are correlated with GRU cache entries and optional version-specific
+    Inductor metadata; the latter covers the device/current thread, not one policy.
+    Unsupported metadata is unavailable rather than an inferred zero. Full layout
+    snapshots belong in dump_oom_snapshot after a failure, outside the hot path.
+    """
     device = next(policy.parameters()).device
     if device.type != "cuda" or not torch.cuda.is_initialized():
         return None
