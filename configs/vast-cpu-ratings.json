@@ -248,6 +248,90 @@
       "single_thread": 2498,
       "source": "https://www.cpubenchmark.net/cpu.php?cpu=Intel+Xeon+w5-3433&id=6078",
       "provenance": "PassMark lookup 2026-11-14"
+    },
+    {
+      "name": "AMD EPYC 7352",
+      "single_thread": 1976,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7352",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD EPYC 7513",
+      "single_thread": 2534,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7513",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD EPYC 7543",
+      "single_thread": 2340,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7543",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD EPYC 7702P",
+      "single_thread": 2050,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7702P",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD EPYC 7742",
+      "single_thread": 2086,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7742",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD EPYC 7R13",
+      "single_thread": 2606,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7R13",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD EPYC 7V13",
+      "single_thread": 2708,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7V13",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD EPYC 9534",
+      "single_thread": 2797,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9534",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD Ryzen 5 5600XT",
+      "single_thread": 3468,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+5+5600XT",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD Ryzen 7 5700X",
+      "single_thread": 3386,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+5700X",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD Ryzen 9 3950X",
+      "single_thread": 2701,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+3950X",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD Ryzen 9 5900X",
+      "single_thread": 3465,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+5900X",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD Ryzen 9 7900",
+      "single_thread": 4121,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+7900",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
+    },
+    {
+      "name": "AMD Ryzen Threadripper PRO 3955WX",
+      "single_thread": 2680,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+Threadripper+PRO+3955WX",
+      "provenance": "PassMark Single Thread rating checked 2026-11-15"
     }
   ]
 }
