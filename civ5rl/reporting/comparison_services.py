@@ -6,7 +6,7 @@ This is a benchmark alternative, not a training runner or passport migration.
 """
 import multiprocessing as mp
 from multiprocessing import Pipe
-from threading import Thread
+from threading import Thread, Lock
 
 
 def _service(checkpoints, runtime, control):
@@ -57,6 +57,8 @@ class ProcessInferenceExecutor:
         self.services = []
         self.pool = None
         self.next_service = 0
+        self.loads = [0] * services
+        self.lock = Lock()
 
     def __enter__(self):
         from dataclasses import replace
@@ -92,11 +94,18 @@ class ProcessInferenceExecutor:
         from civ5rl.engine.evaluation_proxy import _remote_task
         self.check()
         server, client = Pipe()
-        _, control = self.services[self.next_service % self.count]
-        self.next_service += 1
+        with self.lock:
+            selected = min(range(self.count),key=lambda i:(self.loads[i],(i-self.next_service)%self.count))
+            self.loads[selected] += 1
+            self.next_service = (selected+1)%self.count
+        _, control = self.services[selected]
         control.send(('submit', (server, kind)))
         server.close()
         future = self.pool.submit(_remote_task, function, task, client)
+        def finished(_):
+            with self.lock:
+                self.loads[selected] -= 1
+        future.add_done_callback(finished)
         return future, client
 
     def statistics(self):
