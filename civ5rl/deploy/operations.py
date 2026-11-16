@@ -173,7 +173,7 @@ def package(
         source = inputs_dir / group
         if archive_input_groups or needs_archive(source):
             packet = output / "input-packets" / str(index)
-            pack_transfer(source, packet, token=fingerprint, direction="upload")
+            pack_transfer(source, packet, token=fingerprint, direction="upload", force=archive_input_groups)
             remote = f"transport/inputs/{index}"
             input_sync.append({"local": str(packet), "remote": remote})
             input_packets.append(dict(packet=remote, destination=group, token=fingerprint))
