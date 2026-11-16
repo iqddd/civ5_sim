@@ -485,13 +485,16 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
             local_sync_dir = directory / "tuning"
             local_sync_dir.mkdir(parents=True, exist_ok=True)
             remote_sync_dir = deployment["remote_root"] + "/tuning"
+            measurement = (f"measurement-{sequence}"
+                           if deployment["kind"] == "rl01.rollout_comparison_collection" else "")
+            deployment["tuning_measurement"] = measurement
             worker_args = [
                 "--mode",
                 "tune",
                 "--config",
                 deployment["config"],
                 "--tuning-dir",
-                remote_sync_dir,
+                remote_sync_dir + ("/" + measurement if measurement else ""),
             ]
             if deployment.get("tuning_source"):
                 worker_args += ["--tuning-source", deployment["tuning_source"]]
@@ -510,7 +513,9 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
             if deployment["kind"] in {"rl01.ppo_after_target_bc", "rl01.rollout_comparison_collection"}:
                 worker_args += [
                     "--runtime-config",
-                    deployment["remote_root"] + "/tuning/recommended-runtime.json",
+                    deployment["remote_root"] + "/tuning/" +
+                    (deployment["tuning_measurement"] + "/" if deployment.get("tuning_measurement") else "") +
+                    "recommended-runtime.json",
                 ]
             if host_resume_reason:
                 worker_args += ["--host-resume-id", str(deployment["instance"]["instance_id"]),
@@ -675,9 +680,10 @@ def pull(directory, *, delete_instance=False, transport=None):
         mode = deployment["job"]["mode"]
         if mode == "tune":
             destination = directory / "tuning"
+            measurement = destination / deployment.get("tuning_measurement", "")
             summary = (
-                _read(destination / "summary.json")
-                if (destination / "summary.json").exists()
+                _read(measurement / "summary.json")
+                if (measurement / "summary.json").exists()
                 else {}
             )
             confirmed = (
@@ -690,8 +696,8 @@ def pull(directory, *, delete_instance=False, transport=None):
                 "fingerprint": deployment["fingerprint"],
             }
             deployment["runtime"] = (
-                _read(destination / "recommended-runtime.json")
-                if confirmed and (destination / "recommended-runtime.json").exists()
+                _read(measurement / "recommended-runtime.json")
+                if confirmed and (measurement / "recommended-runtime.json").exists()
                 else None
             )
             audit = None
