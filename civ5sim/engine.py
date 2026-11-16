@@ -473,7 +473,9 @@ class Battle:
                 {
                     "action": asdict(action),
                     "result": asdict(result),
-                    "state_sha256": digest(self.snapshot()),
+                    # Hash synchronously without copying immutable map/rules.
+                    # Only the digest escapes; shared terrain stays private.
+                    "state_sha256": digest(self._snapshot(copy_static=False)),
                 }
             )
 
