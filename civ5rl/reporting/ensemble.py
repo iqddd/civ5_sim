@@ -17,8 +17,8 @@ def mean_probabilities(logits):
 
 
 class EnsembleInference(BatchedInference):
-    def __init__(self, policies, device):
-        super().__init__(policies[0], device)
+    def __init__(self, policies, device, *, hidden_capacity=32):
+        super().__init__(policies[0], device, hidden_capacity=hidden_capacity)
         self.policies = policies
 
     def combine_encoded_logits(self, logits_all, requests):
@@ -35,11 +35,10 @@ class EnsembleInference(BatchedInference):
             agents = [r[0].members[member] for r in requests]
             encoded = [a.encoder.encode(r[2], legal) for a, r, legal in zip(agents, requests, actions)]
             batch = batch_inputs(encoded, self.device, compact_units=policy.attention_backend=='compact_fp32')
-            hidden = torch.cat([a.hidden if a.hidden is not None else torch.zeros((1,1,policy.hidden_size),device=self.device) for a in agents],dim=1)
+            hidden = self.gather_hidden(policy, agents, member)
             logits, _, hidden = policy(batch, hidden)
             logits_all.append(logits)
-            for i, a in enumerate(agents):
-                a.hidden = hidden[:,i:i+1].clone()
+            self.store_hidden(agents, hidden, member)
         choices = mean_probabilities(logits_all).argmax(-1).cpu().tolist()
         outputs = []
         for i, (agent, command, observation, _, forced) in enumerate(requests):
@@ -63,7 +62,7 @@ class EnsembleExecutor(EvaluationExecutor):
         policies += [prepare_evaluation_policy(RLAgent.from_checkpoint(p, 'cpu', 'argmax').policy,self.runtime.device) for p in checkpoints[1:]]
         if any(p.variant != policies[0].variant for p in policies):
             raise ValueError('Ensemble variants differ')
-        self.inference = EnsembleInference(policies, self.runtime.device)
+        self.inference = EnsembleInference(policies, self.runtime.device, hidden_capacity=self.runtime.workers)
 
 def checked_match(task):
     from civ5rl.experiments.ppo_target_scale import evaluation_task

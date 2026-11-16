@@ -33,8 +33,8 @@ def preference(winners, side):
 
 
 class ProposalInference(BatchedInference):
-    def __init__(self, policies, device):
-        super().__init__(policies[0],device)
+    def __init__(self, policies, device, *, hidden_capacity=32):
+        super().__init__(policies[0],device,hidden_capacity=hidden_capacity)
         self.policies=policies
 
     def combine_encoded_logits(self, logits_all, requests):
@@ -51,10 +51,10 @@ class ProposalInference(BatchedInference):
         for member,policy in enumerate(self.policies):
             agents=[r[0].members[member] for r in requests]
             encoded=[a.encoder.encode(r[2],acts) for a,r,acts in zip(agents,requests,legal)]
-            hidden=torch.cat([a.hidden if a.hidden is not None else torch.zeros(1,1,policy.hidden_size,device=self.device) for a in agents],1)
+            hidden=self.gather_hidden(policy,agents,member)
             logits,_,hidden=policy(batch_inputs(encoded,self.device,compact_units=policy.attention_backend=='compact_fp32'),hidden)
             choices.append(logits.argmax(-1))
-            for i,a in enumerate(agents): a.hidden=hidden[:,i:i+1].clone()
+            self.store_hidden(agents,hidden,member)
         choices=torch.stack(choices).cpu().tolist()
         outputs=[]
         for i,(agent,command,obs,_,forced) in enumerate(requests):
@@ -72,4 +72,5 @@ class ProposalExecutor(EvaluationExecutor):
         super().__init__(str(checkpoints[0]),runtime)
         from civ5rl.engine.evaluation import prepare_evaluation_policy
         second=prepare_evaluation_policy(RLAgent.from_checkpoint(checkpoints[1],'cpu','argmax').policy,self.runtime.device)
-        self.inference=ProposalInference([self.inference.policy,second],self.runtime.device)
+        self.inference=ProposalInference([self.inference.policy,second],self.runtime.device,
+                                         hidden_capacity=self.runtime.workers)

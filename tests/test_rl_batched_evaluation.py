@@ -34,6 +34,69 @@ def public_sequence(task):
 
 
 class BatchedEvaluationTests(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), 'Resident CUDA hidden states')
+    def test_resident_states_preserve_history_across_reuse_and_prefill(self):
+        # A recycled slot must not import another battle's memory; a removed
+        # agent must return its storage even outside the RPC executor lifecycle.
+        from types import SimpleNamespace
+        from civ5rl.core.observation import ObservationEncoder
+        configure(17, 'cuda')
+        policy = Policy('C2').to('cuda').eval()
+        engine = BatchedInference(policy, 'cuda', hidden_capacity=1)
+        initial = scenario()
+        with Battle(initial) as battle:
+            encoded = ObservationEncoder(context(initial), 'C2').encode(
+                battle.observe(0), ordered_actions(battle.available_actions()))
+
+        def fresh(hidden=None):
+            return SimpleNamespace(members=[SimpleNamespace(hidden=hidden)], mode='argmax',
+                                   collect_selection_metrics=False)
+
+        a, b = fresh(), fresh()
+        expected = {id(a): None, id(b): None}
+
+        @torch.inference_mode()
+        def step(agents, command='act'):
+            h0 = torch.cat([expected[id(agent)] if expected[id(agent)] is not None else
+                            torch.zeros(1, 1, policy.hidden_size, device='cuda') for agent in agents], 1)
+            logits, _, hidden = policy(batch_inputs([encoded] * len(agents), 'cuda'), h0)
+            result = engine.infer_encoded([(agent, command, encoded) for agent in agents])
+            for i, agent in enumerate(agents):
+                expected[id(agent)] = hidden[:, i:i+1].clone()
+                torch.testing.assert_close(agent.members[0].hidden, expected[id(agent)], rtol=0, atol=0)
+                if command == 'act':
+                    self.assertEqual(result[i]['index'], int(logits[i].argmax()))
+                else:
+                    self.assertIsNone(result[i])
+
+        step([a, b]); step([b, a])
+        untouched = b.members[0].hidden.clone()
+        step([a], 'observe')
+        torch.testing.assert_close(b.members[0].hidden, untouched, rtol=0, atol=0)
+        prefill = a.members[0].hidden.clone()
+        engine.release_agent(a)
+        c = fresh(); expected[id(c)] = None
+        step([c, b])
+        engine.release_agent(c)
+        a.members[0].hidden = prefill
+        expected[id(a)] = prefill.clone()
+        step([a, b])
+        # Reset on an existing member also discards the previous recurrent state.
+        a.members[0].hidden = None; expected[id(a)] = None
+        step([a])
+
+        with torch.inference_mode():
+            def transient():
+                agent = fresh()
+                engine.infer_encoded([(agent, 'observe', encoded)])
+            transient()
+            torch.cuda.synchronize()
+            allocated = torch.cuda.memory_allocated()
+            for _ in range(20):
+                transient()
+            torch.cuda.synchronize()
+            self.assertEqual(torch.cuda.memory_allocated(), allocated)
+
     def test_worker_encoded_sampling_forced_and_session_isolation(self):
         # Moving the encoder/RNG to a worker must preserve executed history,
         # sampling and metrics across concurrent matches and pool reuse.

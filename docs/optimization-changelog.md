@@ -144,3 +144,17 @@ W40 выбран как режим в пределах 5% лучшего про�
 `--warmup-measured-work`. Обучение не запускалось.
 [Полностью прогретое сравнение](../artifacts/benchmarks/newhost-worker-grid-warm-24-32-40-64-80/summary.json),
 [runtime](../artifacts/benchmarks/newhost-worker-grid-warm-24-32-40-64-80/recommended-runtime.json).
+
+### Резидентные GRU hidden
+
+RTX 4090 / Ryzen 9 7950X3D, W40, один inference-процесс. Постоянные слоты
+hidden и буфер батча обслуживаются через foreach-копии. На 40 состояниях:
+249 → 42 мкс на итерацию (три прогрева, пять замеров); в Kineto за три
+повтора — 246 → 9 GPU-событий. Значения hidden побитово совпали.
+Полный сбор после отдельного полного прогрева: 53,79 → 53,59 с на тех же
+128 развилках/1224 продолжениях. Разница 0,37% не доказывает общего ускорения.
+Все 1224 исхода совпали с контролем; десять целевых проверок прошли, включая
+reset, prefill, повторное использование слотов и отсутствие роста живой VRAM.
+[Baseline](../artifacts/benchmarks/resident-hidden-baseline40/summary.json),
+[резидентные состояния](../artifacts/benchmarks/resident-hidden-enabled40/summary.json),
+[изолированный замер и трассы](../artifacts/benchmarks/resident-hidden-copy-trace/summary.json).

@@ -91,11 +91,10 @@ class SelectiveProposalInference(ProposalInference):
                 continue
             policy = self.policies[member]
             agents = [requests[i][0].members[member] for i in rows]
-            hidden = torch.cat([a.hidden if a.hidden is not None else
-                                torch.zeros(1, 1, policy.hidden_size, device=self.device) for a in agents], 1)
+            hidden = self.gather_hidden(policy, agents, member)
             logits, _, last = policy(inputs, hidden)
+            self.store_hidden(agents, last, member)
             for j, agent in enumerate(agents):
-                agent.hidden = last[:, j:j + 1].clone()
                 owner=requests[rows[j]][0]
                 if member==0 and hasattr(owner,'prefix_frames'):
                     owner.prefix_frames.append(agent.hidden.clone())
@@ -125,7 +124,8 @@ class CollectionExecutor(EvaluationExecutor):
         super().__init__(str(checkpoints[0]), runtime)
         second = prepare_evaluation_policy(
             RLAgent.from_checkpoint(str(checkpoints[1]), 'cpu', 'argmax').policy, self.runtime.device)
-        self.inference = SelectiveProposalInference([self.inference.policy, second], self.runtime.device)
+        self.inference = SelectiveProposalInference([self.inference.policy, second], self.runtime.device,
+                                                   hidden_capacity=self.runtime.workers)
         self.kinds = {}
         self.tasks = {}
         self.prefixes = None
@@ -199,7 +199,8 @@ class CollectionExecutor(EvaluationExecutor):
         try:
             super().__exit__(*args)
         finally:
-            for connection in list(self.connections):
+            for connection, agent in list(self.connections.items()):
+                self.inference.release_agent(agent)
                 connection.close()
             self.connections.clear()
             self.kinds.clear()

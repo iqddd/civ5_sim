@@ -43,7 +43,8 @@ def _service(checkpoints, runtime, control, prefix_states=False):
             executor.stop.set()
             thread.join()
             executor._fail_all('Inference service stopped')
-            for connection in list(executor.connections):
+            for connection, agent in list(executor.connections.items()):
+                executor.inference.release_agent(agent)
                 connection.close()
             for shared in executor.shared.values():
                 shared.close()
