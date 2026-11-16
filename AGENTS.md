@@ -5,13 +5,13 @@
 
 ## Documentation policy
 
-- `docs/` is the durable reference for how the project works and how to operate it: current contracts, architecture, reusable procedures, and a compact experiment ledger. It is not a workspace for generated reports, run logs, debugging diaries, or scratch plans.
+- `docs/` is the durable reference for how the project works and how to operate it: current contracts, architecture, reusable procedures, a compact experiment ledger, and an optimization changelog. It is not a workspace for generated reports, run logs, debugging diaries, or scratch plans.
 - Update the relevant existing document when behavior changes. Rewrite the affected rule in place; do not accumulate dated updates or version appendices that contradict earlier text.
 - Keep CLI documentation focused on user-controlled options and observable behavior. Put allocator/buffer internals, IPC/shared-memory mechanics, internal signatures, and malformed-input edge cases in nearby Python docstrings/comments. Keep scientific contracts in the architecture reference.
 - Write code comments and docstrings in English. Keep agent-only instructions concise, in English, in `AGENTS.md` rather than user documentation.
-- Describe current behavior in reference/CLI documentation. Keep change history in the experiment ledger or historical archives; omit refactoring narratives and comparisons with superseded implementations.
+- Describe current behavior in reference/CLI documentation; omit refactoring narratives and comparisons with superseded implementations.
 - Before creating a document, check whether its content belongs in an existing reference. Add a separate document only for a distinct, durable purpose; avoid duplicate descriptions and one document per run or investigation.
-- Keep experiment results and detailed run reports in `artifacts/`. Add concise status, configuration, parent, result, and report links to `docs/experiment-ledger.md` instead of copying reports into `docs/`.
+- Keep scientific hypotheses, lineage, dataset stages, and training/evaluation outcomes in `docs/experiment-ledger.md`. Keep implementation optimizations, profiling, runtime tuning, and rejected performance trials in `docs/optimization-changelog.md`. Both are compact indexes; detailed evidence and reports belong in `artifacts/`.
 - Use `docs/archive/` only for historical protocols or investigations worth retaining for reproducibility or provenance. Archiving is not a reason to preserve every scratch note. Clearly distinguish proposals, completed runs, and unverified historical claims.
 - Before moving documentation, check configuration, code, test, and Markdown references to its path and anchors. Preserve required input paths unless their consumers are deliberately updated; do not rewrite frozen passports or source archives to accommodate a move.
 - Keep `docs/README.md` current when adding, moving, or retiring documents. Preserve its list format: filename/link followed by a concise 10–20-word abstract. Keep the index in English.

@@ -1,0 +1,146 @@
+# История оптимизаций
+
+Оптимизации исполнения, замеры производительности и отклонённые варианты.
+Обучение, корпуса и сравнения политик — в [журнале экспериментов](experiment-ledger.md).
+
+## 2 ноября 2026 — поиск и хранение CP
+
+- **Варианты поиска:** на 49 входах distant26 base — 17,355 с,
+  distance-view — 7,461 с, area-strict-bundle — 0,442 с. Часть вариантов меняла
+  ответ; эти замеры не устанавливают силу AI.
+  [Результаты](../artifacts/combat-ai/experiments-v1/report.md),
+  [исторический протокол](archive/combat-ai/combat-ai-experiments.md).
+- **Перенос хранения:** один прогрев и пять замеров, исторический ABI 5,
+  нулевая история урона. Изменения эвристик смешаны с хранением; RSS измерялся
+  как high-water процесса.
+  [Результаты](../artifacts/combat-ai/storage-transfer-20261102/report.md),
+  [карта переноса](combat-ai/combat-ai-cp-transfer.md).
+
+## PPO C2 h60 GAE — память и overhead
+
+Разбор накопления VRAM, предварительной проверки памяти и затрат времени
+с локальной проверкой исправлений. Историческое обучение не повторялось;
+продление бюджета и смены исходников записаны в сохранённом запуске.
+[Разбор](../artifacts/rl/ppo-c2-h60-gae/derived/memory-overhead-review/report.md),
+[ревизии исполнения](../artifacts/rl/ppo-c2-h60-gae/source-revisions/).
+
+## 12 ноября 2026 — C2 attention/backward
+
+На RTX 4060 Ti masked reduction вместо one-hot/GEMM уменьшила PPO backward
+с 323 до 294 мс; полные updates в свежих процессах — с 2,68 до 2,49 с
+(по два замера). SDPA/Flex/BF16 не приняты по скорости; автоматический compact-
+прототип не прошёл replay. Специализированное Triton-ядро ускоряло backward,
+но преимущества полного update не подтвердило. Это короткая диагностика,
+без оценки силы политики или прогноза скорости RTX 4090.
+[Замеры и проверки](../artifacts/benchmarks/c2-attention-20261112/report.md).
+
+## 15 ноября 2026 — сбор и обучение
+
+### Legacy/end_turn и холодный генератор
+
+RTX 5090, checkout `d247575` и текущий на момент замера, update 171/update 20:
+на 80/24/1 получено 235,27/234,47 решений/с. Замедление от `end_turn`
+не воспроизвелось. На одинаковых 18 258 решениях холодный factory занял
+27,37 с, прогретый — 12,27 с; команды совпали. На 42 visibility cache misses
+пришлось 13,26 с. Холодный генератор и больший rollout поддержали гипотезу
+о падении скорости с 340 до 240 решений/с; прогрева одной GPU недостаточно.
+[Полные циклы](../artifacts/benchmarks/c2p-live-cycle-5090-20261115/report.md),
+[контроль причины](../artifacts/benchmarks/c2p-slowdown-cause-20261115/report.md).
+
+### Rollout comparison: профиль CPU/GPU и компиляция
+
+Локально, i5-11600K / RTX 4060 Ti, сохранённые training cases:
+
+| Фаза | Время | GPU Core / Controller |
+|---|---:|---:|
+| 8 исходных боёв | 17,44 с | 30,3% / 10,8% |
+| 16 продолжений | 11,38 с | 29,0% / 23,7% |
+| Учебный шаг, batch 32+64, BPTT 128 | 29,50 с | 74,3% / 69,1% |
+
+Обучение измерялось после одного прогрева, на трёх отбрасываемых шагах;
+full KL/references в время шага не входили. Мощность — около 90 Вт.
+В короткой трассе видны затраты eager-запусков и материализаций;
+stream-sync/HtoD не доминировали.
+[Профиль](../artifacts/benchmarks/rollout-comparison-cpu-gpu-20261115/report.md).
+
+`torch.compile` для spatial/heads в режиме default, без CUDA Graph pools,
+сократил шаг до 7,13–7,69 с. BF16 gradient L2δ — 1,295%, distribution KL —
+4,51×10⁻⁵; FP32 logits δ — 9,54×10⁻⁶, сохранённый replay воспроизведён.
+Короткий замер NVML: Core 61%, Controller 45%. Полный опыт не выполнялся.
+[Проверка компиляции](../artifacts/benchmarks/comparison-compile-20261115/report.md).
+
+## 16 ноября 2026 — масштабирование сравнительного сбора
+
+### RTX 4090 / EPYC 7742
+
+Для v2-сбора W80 выбирался по 10,47 продолжения/с. Исходные 26,7 занятых
+логических ядер при квоте 61,44 потребовали отдельного разбора ожиданий
+воркеров, inference-сервиса, IPC и симулятора/CP.
+[Подбор W64/W80](../artifacts/benchmarks/comparison-collection-4090-w64-w80-20261116/measurement/summary.json).
+
+- **Snapshot hashing (`84d56f0`):** на W80, одинаковых 128 развилках и
+  1224 продолжениях, ABBA дал 129,35/126,79 с до и 107,40/110,41 с после
+  устранения копирования неизменяемых карты/правил. Среднее время −14,96%,
+  пропускная способность +17,60%. В каждом проходе Δ₁ совпала для 128/128
+  развилок, replay и входные hashes проверены.
+  [Парные замеры](../artifacts/benchmarks/collection-paired-results.json),
+  [профили](../artifacts/benchmarks/collection-profile3/diagnostics/),
+  [тайминги воркеров](../artifacts/benchmarks/collection-scaling-optimized/worker-timing/).
+- **Hidden в точке ветвления (`da9b6e1`):** W64, один отдельный inference-
+  процесс, те же 128 развилок/1224 продолжения. Время 127,30 → 89,03 с
+  (−30,1%; throughput +43,0%), рабочая скорость 9,69 → 13,88 cont/s.
+  Устранено 135 312 observe RPC; включены 32 prefill исторических исходных
+  боёв. Δ₁ совпала для 128/128 развилок, replay и входы проверены.
+  Проверка свежего сбора: 4 развилки/48 продолжений, 4352 пропущенных RPC,
+  без prefill. Проверены изоляция hidden и публичный encoder; прошли 19 тестов.
+  [Baseline](../artifacts/benchmarks/branch-prefix-baseline64/summary.json),
+  [hidden на reset](../artifacts/benchmarks/branch-prefix-enabled64/summary.json),
+  [свежий сбор](../artifacts/benchmarks/branch-prefix-live-smoke/collection.json).
+
+Кэш по fingerprint каждого запроса после IPC и альтернативная телеметрия
+отклонены после замедления. Это отдельные варианты, а не отрицательный
+результат восстановления hidden в точке ветвления.
+
+### RTX 4090 / Ryzen 9 7950X3D
+
+Квота 30,72 CPU, W32, один inference-процесс, `prefix_states` включён.
+На тех же 128 развилках/1224 продолжениях два baseline и два итоговых замера:
+71,49/71,35 → 57,91/57,72 с. Среднее время −19,05%, throughput +23,53%;
+рабочая скорость 17,80 → 21,99 cont/s. Изменения: повторное использование
+статической части хеширования, устранение дублирующего hash префикса и
+копирования снимков при replay; постоянный selector и чтение shared views.
+Канонические SHA сохранены, все 1224 исхода совпали в парном повторе;
+Δ₁ 128/128, replay и входы проверены.
+[Baseline A](../artifacts/benchmarks/newhost-service-baseline32-a/summary.json),
+[baseline B](../artifacts/benchmarks/newhost-service-baseline32-b/summary.json),
+[итог A](../artifacts/benchmarks/newhost-service-digest32-a/summary.json),
+[итог B](../artifacts/benchmarks/newhost-service-digest32-b/summary.json),
+[профили](../artifacts/benchmarks/newhost-service-profile/diagnostics/).
+
+Отдельные варианты: selector — 71,33 с, shared views — 70,21 с;
+pinned-буферы — 70,61 с, вариант убран. Два сервиса дали 57,37 с —
+разницу менее 1%; Core Load вырос до 32,2% с 15,2%, RSS — до 33,9 с 20,0 GiB.
+Прошли десять целевых проверок; отдельный CP-oracle тест недоступен из-за
+отсутствия тестового экспорта в перенесённой библиотеке.
+[Два сервиса](../artifacts/benchmarks/newhost-service-digest32-two-services/summary.json).
+
+## 17 ноября 2026 — число воркеров и полный прогрев
+
+RTX 4090 / Ryzen 9 7950X3D, один inference-процесс, `max_batch=W`,
+`prefix_states`. Каждый режим выполнял два одинаковых прохода по 128 развилкам
+и 1224 продолжениям; измерялся второй. До замера все W процессов были запущены.
+
+| W | Рабочая скорость, cont/s | Полное время с хвостом, с |
+|---:|---:|---:|
+| 24 | 20,10 | 60,92 |
+| 32 | 22,75 | 56,10 |
+| 40 | 23,71 | 54,00 |
+| 64 | 24,06 | 51,36 |
+| 80 | 23,53 | 51,53 |
+
+W40 выбран как режим в пределах 5% лучшего прогноза. Все 1224 исхода совпали
+во всех режимах, replay и входы проверены. Первоначальный короткий прогрев
+включал создание части процессов W40/W64/W80 в измерение; в стенд добавлен
+`--warmup-measured-work`. Обучение не запускалось.
+[Полностью прогретое сравнение](../artifacts/benchmarks/newhost-worker-grid-warm-24-32-40-64-80/summary.json),
+[runtime](../artifacts/benchmarks/newhost-worker-grid-warm-24-32-40-64-80/recommended-runtime.json).

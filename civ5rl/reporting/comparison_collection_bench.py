@@ -113,6 +113,7 @@ def phase_resources(rows, phase, start=None, stop=None):
                 peak_ram_tree_rss_gib=(summary("ram_tree_rss_bytes", max) or 0) / 2**30 or None,
                 peak_vram_gib=(summary("vram_used_bytes", max) or 0) / 2**30 or None,
                 mean_gpu_core_percent=summary("gpu_core_load_percent", statistics.mean),
+                mean_gpu_memory_controller_percent=summary("gpu_memory_controller_load_percent", statistics.mean),
                 mean_gpu_power_watts=summary("gpu_power_watts", statistics.mean),
                 mean_cpu_tree_cores=(summary("cpu_tree_percent", statistics.mean) or 0) / 100 or None,
                 mean_cpu_system_percent=summary("cpu_system_percent", statistics.mean))
@@ -125,6 +126,12 @@ def make_records(source, collection, count, offset):
 
 def measure_workers(cfg, source, scratch, out, workers, records, warmup_records, seconds, saved_labels,
                     monitor, source_cases):
+    """Measure saved work with max_batch equal to the worker count.
+
+    Full-work warmup repeats the measured forks before starting the timer. This
+    warms both spawn workers and inference shapes; a four-fork warmup alone can
+    start only 32 CPU workers regardless of the configured pool capacity.
+    """
     from civ5rl.engine.evaluation import EvaluationRuntime, evaluation_precision
     from civ5rl.experiments.comparison_match import match_task
     from civ5rl.experiments.comparison_queue import CollectionExecutor, Scheduler
@@ -148,6 +155,12 @@ def measure_workers(cfg, source, scratch, out, workers, records, warmup_records,
         scheduler.add_selected([dict(r, winners={}) for r in warmup_records])
         monitor.mark(f"W{workers}-warmup")
         scheduler.run()
+        # The spawn pool starts children on demand. Small warmups can leave
+        # process creation in the timed pass even when CUDA is already warm.
+        worker_pool = executor.pool if service_count else executor._pool
+        warmed_workers = len(worker_pool._processes)
+        if cfg.get('warmup_measured_work') and warmed_workers != workers:
+            raise RuntimeError(f'Only {warmed_workers}/{workers} workers started during full-work warmup')
         protocol = SavedForkProtocol(source, scratch, matches / "measured", records, saved_labels)
         protocol.parent = cfg["parents"][0]
         budget = FixedBudget(seconds)
@@ -181,6 +194,7 @@ def measure_workers(cfg, source, scratch, out, workers, records, warmup_records,
     items = after["inference_items"] - before["inference_items"]
     return dict(
         workers=workers,
+        warmed_worker_processes=warmed_workers,
         inference_services=service_count,
         prefix_states=cfg.get('prefix_states',False),
         prefix_observations_skipped=after.get('prefix_observations_skipped',0)-before.get('prefix_observations_skipped',0),
@@ -280,6 +294,7 @@ def run_benchmark(args, parser):
     cfg = dict(cfg, parents=[str(ROOT / p) for p in cfg["parents"]])
     cfg['inference_services'] = args.inference_services
     cfg['prefix_states'] = args.prefix_states
+    cfg['warmup_measured_work'] = args.warmup_measured_work
     source = args.run.resolve()
     from civ5rl.provenance.common import file_sha256
     protected = [Path(p) for p in cfg["parents"]]
@@ -315,6 +330,8 @@ def run_benchmark(args, parser):
     configure(17, "cuda")
     warmup = make_records(source, collection, args.warmup_forks, 0)
     measured = make_records(source, collection, args.forks, args.warmup_forks)
+    if args.warmup_measured_work:
+        warmup = measured
     for record in warmup + measured:
         record["side"] = read_json(scratch / "sources" / str(record["episode"]) / "case.json")["learner_side"]
     source_cases = collection["sources"][-args.source_cases:]
@@ -362,7 +379,8 @@ def run_benchmark(args, parser):
                     gpu=torch.cuda.get_device_name())
     summary = dict(hardware=hardware, saved_reference=saved, workers=rows, barrier=barrier, packing=packing,
                    recommended=recommended, seconds_per_mode=args.seconds, forks=args.forks,
-                   warmup_forks=args.warmup_forks, source_cases=len(source_cases))
+                   warmup_forks=len(warmup), warmup_measured_work=args.warmup_measured_work,
+                   measurement_offset=args.warmup_forks, source_cases=len(source_cases))
     if any(file_sha256(p) != sha for p, sha in original_hashes.items()):
         raise ValueError("Protected comparison benchmark input changed")
     summary.update(preliminary=False, protected_inputs_unchanged=True)

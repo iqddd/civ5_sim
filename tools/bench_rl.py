@@ -306,6 +306,8 @@ def main():
     collection.add_argument("--forks", type=int, default=64, help="Saved forks in the measured work")
     collection.add_argument("--seconds", type=float, default=300, help="Measured window per mode")
     collection.add_argument("--warmup-forks", type=int, default=4)
+    collection.add_argument('--warmup-measured-work', action='store_true',
+                            help='Warm up with one complete pass of the measured forks before timing the same work')
     collection.add_argument("--source-cases", type=int, default=8)
     collection.add_argument("--barrier-workers", type=int, default=8, help="Former per-fork barrier control; 0 skips")
     args = parser.parse_args()
