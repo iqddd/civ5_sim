@@ -664,7 +664,7 @@ def pull(directory, *, delete_instance=False, transport=None):
         if (
             post_sync.get("status") != "ok"
             or post_sync.get("file_errors")
-            or execution.get("status") != "exited"
+            or execution.get("status") not in {"exited", "interrupted"}
         ):
             raise ValueError("Execution/transport not finalized; instance retained")
         if result.get("job_id") != deployment["job"]["id"]:
