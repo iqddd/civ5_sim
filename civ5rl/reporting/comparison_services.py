@@ -9,13 +9,13 @@ from multiprocessing import Pipe
 from threading import Thread, Lock
 
 
-def _service(checkpoints, runtime, control):
+def _service(checkpoints, runtime, control, prefix_states=False):
     from civ5rl.engine.evaluation import evaluation_precision
     from civ5rl.experiments.comparison_queue import CollectionExecutor
     from civ5rl.provenance.common import configure
     configure(17, runtime.device)
     with evaluation_precision():
-        executor = CollectionExecutor(checkpoints, runtime)
+        executor = CollectionExecutor(checkpoints, runtime, prefix_states=prefix_states)
         executor.stop.clear()
         thread = Thread(target=executor._serve, daemon=True)
         thread.start()
@@ -30,10 +30,11 @@ def _service(checkpoints, runtime, control):
                 if command == 'close':
                     break
                 if command == 'submit':
-                    connection, kind = value
+                    connection, kind, task = value
                     with executor.lock:
                         executor.connections[connection] = None
                         executor.kinds[connection] = kind
+                        executor.tasks[connection] = task
                 elif command == 'statistics':
                     control.send(('statistics', executor.statistics()))
                 else:
@@ -50,7 +51,7 @@ def _service(checkpoints, runtime, control):
 
 
 class ProcessInferenceExecutor:
-    def __init__(self, checkpoints, runtime, services):
+    def __init__(self, checkpoints, runtime, services, *, prefix_states=False):
         if services < 1 or services > runtime.workers:
             raise ValueError('Invalid inference process count')
         self.checkpoints, self.runtime, self.count = checkpoints, runtime, services
@@ -59,6 +60,7 @@ class ProcessInferenceExecutor:
         self.next_service = 0
         self.loads = [0] * services
         self.lock = Lock()
+        self.prefix_states = prefix_states
 
     def __enter__(self):
         from dataclasses import replace
@@ -70,7 +72,7 @@ class ProcessInferenceExecutor:
                 capacity = (self.runtime.workers + self.count - 1 - i) // self.count
                 runtime = replace(self.runtime, workers=capacity,
                                   max_batch=min(self.runtime.max_batch, capacity))
-                process = context.Process(target=_service, args=(self.checkpoints, runtime, child))
+                process = context.Process(target=_service, args=(self.checkpoints, runtime, child,self.prefix_states))
                 process.start()
                 child.close()
                 self.services.append((process, parent))
@@ -99,7 +101,7 @@ class ProcessInferenceExecutor:
             self.loads[selected] += 1
             self.next_service = (selected+1)%self.count
         _, control = self.services[selected]
-        control.send(('submit', (server, kind)))
+        control.send(('submit', (server, kind, task)))
         server.close()
         future = self.pool.submit(_remote_task, function, task, client)
         def finished(_):

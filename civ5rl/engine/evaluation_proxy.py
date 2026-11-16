@@ -37,9 +37,14 @@ class ProxyAgent(ActionSelection):
         info = self.call("reset", self.mode, self.temperature, self.collect_selection_metrics)
         self.shared = EncodedSlots(descriptor=info["shared"])
         self.requires_attack_preview = info["attack_preview"]
+        self.prefix_skip = info.get('prefix_skip',0)
+        self.prefix_restored = self.prefix_skip > 0
+        self.capture_prefixes = info.get('capture_prefixes',False)
         self.reset_public_state(context, info["variant"])
 
     def act(self, observation, actions):
+        if self.prefix_skip:
+            raise ValueError('Restored public prefix is incomplete')
         actions = ordered_actions(actions)
         encoded = self.encoder.encode(observation, actions)
         result = self.call("act", self.shared.write(0, encoded))
@@ -59,8 +64,17 @@ class ProxyAgent(ActionSelection):
         if forced_action not in actions:
             raise ValueError("Forced action is not legal")
         encoded = self.encoder.encode(observation, actions)
-        self.call("observe", self.shared.write(0, encoded))
+        if getattr(self,'prefix_restored',False) and not self.prefix_skip:
+            raise ValueError('Restored prefix exhausted before branch boundary')
+        if self.prefix_skip:
+            self.prefix_skip -= 1
+        else:
+            self.call("observe", self.shared.write(0, encoded))
         self.encoder.remember_action(forced_action, observation)
+
+    def finish_source(self):
+        if self.capture_prefixes:
+            self.call('save_prefixes')
 
     def drain_diagnostics(self):
         events, self.events = self.events, []

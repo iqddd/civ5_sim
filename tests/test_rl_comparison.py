@@ -5,6 +5,72 @@ from civ5rl.experiments.comparison_collection import preference,select_forks
 from civ5rl.engine.comparison_training import pair_loss,categorical_kl
 
 class ComparisonTests(unittest.TestCase):
+    def test_branch_prefix_restore_preserves_hidden_and_local_encoder(self):
+        # A wrong boundary/forced-action history can silently change every
+        # continuation label. Compare with stepwise inference and reject stale data.
+        import tempfile
+        from pathlib import Path
+        from dataclasses import asdict
+        import numpy as np
+        from civ5rl.core.model import Policy,batch_inputs
+        from civ5rl.core.context import context_from_spec
+        from civ5rl.core.observation import ObservationEncoder,ordered_actions
+        from civ5rl.engine.evaluation import EvaluationRuntime
+        from civ5rl.engine.evaluation_proxy import ProxyAgent
+        from civ5rl.experiments.comparison_prefix import SourcePrefixes
+        from civ5rl.provenance.common import configure,write_json
+        from civ5rl.protocols.memory import flat_map
+        from civ5sim import Battle,Action
+        from tests.test_combat import scenario,unit
+        configure(17,'cpu')
+        s=scenario(unit(x=0,y=0),unit(side=1,x=1,y=1),terrain=flat_map(2))
+        case=dict(scenario=s,armies=[['warrior'],['warrior']],learner_side=0,
+                  max_rounds=60,agent_seeds=[17,18])
+        context=context_from_spec(case,seed=17)
+        encoder=ObservationEncoder(context,'C2P');policy=Policy('C2P').eval()
+        rows=[];frames=[];hidden=None
+        with Battle(s) as battle,torch.inference_mode():
+            for command in (0,2,4):
+                legal,preview=battle.actions_with_previews();legal=ordered_actions(legal)
+                obs=battle.observe(0);obs['attack_previews']=preview.tolist()
+                encoded=encoder.encode(obs,legal)
+                _,_,hidden=policy(batch_inputs([encoded],'cpu'),hidden)
+                frames.append(hidden.clone())
+                selected=legal.index(Action('end_turn'))
+                rows.append(dict(command=command,observation=obs,actions=[asdict(a) for a in legal],chosen=selected))
+                encoder.remember_action(legal[selected],obs)
+                battle.step(Action('end_turn'));battle.step(Action('end_turn'))
+        with tempfile.TemporaryDirectory() as tmp:
+            source=Path(tmp);write_json(source/'case.json',case);write_json(source/'history.json',rows)
+            checkpoint=source/'weights';checkpoint.write_bytes(b'fixed-parent')
+            runtime=EvaluationRuntime('cpu').resolve()
+            prefixes=SourcePrefixes(policy,checkpoint,runtime)
+            restored,count=prefixes.restore(source,4)
+            self.assertEqual(count,3)
+            torch.testing.assert_close(restored,frames[-1],atol=2e-6,rtol=1e-5)
+            self.assertEqual(prefixes.prefills,1)
+            prefixes.capture(source,frames)
+            fresh=SourcePrefixes(policy,checkpoint,runtime)
+            captured,_=fresh.restore(source,4)
+            self.assertTrue(torch.equal(captured,frames[-1]));self.assertEqual(fresh.prefills,0)
+            with torch.inference_mode():captured.add_(1)
+            again,_=fresh.restore(source,4)
+            self.assertTrue(torch.equal(again,frames[-1]))
+            # No connection exists: processing the prefix must stay local.
+            proxy=ProxyAgent(None,'argmax');proxy.reset_public_state(context,'C2P');proxy.prefix_skip=count
+            reference=ObservationEncoder(context,'C2P')
+            for i,row in enumerate(rows):
+                legal=[Action(**a) for a in row['actions']]
+                action=legal[row['chosen']] if i<2 else next(a for a in legal if a.kind!='end_turn')
+                reference.encode(row['observation'],legal);reference.remember_action(action,row['observation'])
+                proxy.observe_step(row['observation'],legal,action)
+            self.assertEqual(proxy.prefix_skip,0)
+            np.testing.assert_array_equal(proxy.encoder.previous,reference.previous)
+            np.testing.assert_array_equal(proxy.encoder.last_visible,reference.last_visible)
+            self.assertEqual(proxy.encoder.contacts,reference.contacts)
+            write_json(source/'history.json',rows[:-1])
+            with self.assertRaisesRegex(ValueError,'history changed'):fresh.restore(source,4)
+
     def test_vector_losses_preserve_padding_multiplicity_and_fp64_control(self):
         # Zero padding probabilities must never multiply an infinite log-delta;
         # repeats and independent pair/anchor means must retain their weights.

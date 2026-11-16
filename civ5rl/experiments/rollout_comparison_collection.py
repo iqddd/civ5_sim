@@ -60,13 +60,16 @@ class CollectionRuntime:
     max_batch: int = 0  # 0: equal to workers
     wait_seconds: float = 0.001
     pack_mib_per_second: float = 20.0
+    prefix_states: bool = False
 
     def resolved(self):
-        if self.workers < 1 or not 0 <= self.source_share < 1 or self.stock_factor <= 0 or self.pack_mib_per_second <= 0:
+        if (self.workers < 1 or not 0 <= self.source_share < 1 or self.stock_factor <= 0
+                or self.pack_mib_per_second <= 0 or type(self.prefix_states) is not bool):
             raise ValueError('Invalid collection runtime')
         return CollectionRuntime(self.workers, self.source_share, self.stock_factor,
                                  self.max_active_forks or self.workers, max(1, self.buffer_limit),
-                                 self.max_batch or self.workers, self.wait_seconds, self.pack_mib_per_second)
+                                 self.max_batch or self.workers, self.wait_seconds, self.pack_mib_per_second,
+                                 self.prefix_states)
 
 
 def prepare(cfg, out):
@@ -252,7 +255,8 @@ def collect(cfg, out, runtime, *, budget):
                 buffered.append(record)
         record_runtime(out, runtime, executor_runtime.resolve(),
                        dict(started_seconds=budget.elapsed(), resumed_active_forks=len(active)))
-        with evaluation_precision(), CollectionExecutor([ROOT / p for p in cfg['parents']], executor_runtime) as executor:
+        with evaluation_precision(), CollectionExecutor([ROOT / p for p in cfg['parents']], executor_runtime,
+                                                        prefix_states=runtime.prefix_states) as executor:
             scheduler = Scheduler(executor, protocol, budget, workers=runtime.workers,
                                   source_share=runtime.source_share, stock_factor=runtime.stock_factor,
                                   max_active_forks=runtime.max_active_forks, buffer_limit=runtime.buffer_limit,

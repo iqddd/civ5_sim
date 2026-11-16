@@ -266,6 +266,12 @@ class EvaluationExecutor:
             command, args = connection.recv()
         except (EOFError, OSError):
             command, args = "close", ()
+        return self._receive_message(connection, command, args)
+
+    def configure_agent(self, connection, agent, info):
+        """Allow a specialized executor to install task-local reset state."""
+
+    def _receive_message(self, connection, command, args):
         if command == "close":
             with self.lock:
                 self.connections.pop(connection, None)
@@ -285,8 +291,10 @@ class EvaluationExecutor:
             agent=SimpleNamespace(mode=mode,temperature=temperature,collect_selection_metrics=metrics,
                                   members=[SimpleNamespace(hidden=None) for p in policies])
             self.connections[connection] = agent
-            connection.send(("ok",dict(shared=shared.descriptor,variant=policies[0].variant,
-                                       attack_preview=policies[0].variant_spec.attack_preview)))
+            info=dict(shared=shared.descriptor,variant=policies[0].variant,
+                      attack_preview=policies[0].variant_spec.attack_preview)
+            self.configure_agent(connection,agent,info)
+            connection.send(("ok",info))
             return None
         agent = self.connections[connection]
         if agent is None:

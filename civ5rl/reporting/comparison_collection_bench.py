@@ -134,9 +134,10 @@ def measure_workers(cfg, source, scratch, out, workers, records, warmup_records,
     service_count = cfg.get('inference_services', 0)
     if service_count:
         from civ5rl.reporting.comparison_services import ProcessInferenceExecutor
-        executor_context = ProcessInferenceExecutor(cfg['parents'], runtime, service_count)
+        executor_context = ProcessInferenceExecutor(cfg['parents'], runtime, service_count,
+                                                    prefix_states=cfg.get('prefix_states',False))
     else:
-        executor_context = CollectionExecutor(cfg['parents'], runtime)
+        executor_context = CollectionExecutor(cfg['parents'], runtime,prefix_states=cfg.get('prefix_states',False))
     monitor.mark(f"W{workers}-startup")
     with evaluation_precision(), executor_context as executor:
         warmup = SavedForkProtocol(source, scratch, matches / "warmup", warmup_records, {})
@@ -181,6 +182,9 @@ def measure_workers(cfg, source, scratch, out, workers, records, warmup_records,
     return dict(
         workers=workers,
         inference_services=service_count,
+        prefix_states=cfg.get('prefix_states',False),
+        prefix_observations_skipped=after.get('prefix_observations_skipped',0)-before.get('prefix_observations_skipped',0),
+        prefix_source_prefills=after.get('prefix_source_prefills',0)-before.get('prefix_source_prefills',0),
         window_seconds=window,
         measurement_started_elapsed_seconds=measured_start,
         continuations_in_window=len(in_window),
@@ -275,6 +279,7 @@ def run_benchmark(args, parser):
     cfg = load_config(args.config)
     cfg = dict(cfg, parents=[str(ROOT / p) for p in cfg["parents"]])
     cfg['inference_services'] = args.inference_services
+    cfg['prefix_states'] = args.prefix_states
     source = args.run.resolve()
     from civ5rl.provenance.common import file_sha256
     protected = [Path(p) for p in cfg["parents"]]
@@ -346,6 +351,7 @@ def run_benchmark(args, parser):
     best = max(r["forecast"]["forks_in_budget"] for r in feasible)
     chosen = min((r for r in feasible if r["forecast"]["forks_in_budget"] >= 0.95 * best), key=lambda r: r["workers"])
     recommended = dict(runtime=dict(workers=chosen["workers"], source_share=0.25,
+                                    prefix_states=args.prefix_states,
                                     buffer_limit=max(32, chosen["workers"]),
                                     pack_mib_per_second=round(packing["mib_per_second"] * 0.8, 3)),
                        basis="largest forecast forks per 7200 s; smaller W within 5%; peak RSS < 85% RAM; "

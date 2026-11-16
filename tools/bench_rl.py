@@ -301,6 +301,8 @@ def main():
     collection.add_argument("--worker-counts", default="6,8,12,16", help="Comma-separated W candidates")
     collection.add_argument("--inference-services", type=int, default=0,
                             help="Isolated GPU inference processes; 0 uses the in-process thread")
+    collection.add_argument('--prefix-states',action='store_true',
+                            help='Restore branch GRU state at reset and skip prefix observe RPCs')
     collection.add_argument("--forks", type=int, default=64, help="Saved forks in the measured work")
     collection.add_argument("--seconds", type=float, default=300, help="Measured window per mode")
     collection.add_argument("--warmup-forks", type=int, default=4)

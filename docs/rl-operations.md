@@ -189,6 +189,11 @@ python tools/bench_rl.py comparison-collection --run RUN --config CONFIG --out O
 `0` использует поток в основном процессе, `1` и более — отдельные процессы.
 `--worker-counts` задаёт общее число CPU-воркеров, а не число на сервис.
 Каждый сервис загружает модели; следите за суммарным расходом VRAM.
+Флаг `--prefix-states` у `comparison-collection` проверяет восстановление
+памяти ветвей без повторных запросов префикса. Сводка показывает число
+`prefix_observations_skipped` и `prefix_source_prefills`; полученный runtime
+сохраняет выбранный режим. При сборе его можно задать через runtime-файл или
+`run_comparison.py collect --prefix-states` (`--no-prefix-states` отключает).
 
 ## CPU/GPU-инференс оценок
 

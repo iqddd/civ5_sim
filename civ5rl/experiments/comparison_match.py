@@ -70,6 +70,8 @@ def match_task(task):
                 if action not in legal:
                     raise ValueError("Illegal prefix/alternative")
                 self.inner.observe_step(obs, legal, action)
+                if command == boundary and getattr(self.inner,'prefix_skip',0):
+                    raise ValueError('Restored prefix does not match branch boundary')
                 return action
             action = self.inner.act(obs, legal)
             if not branch:
@@ -134,6 +136,8 @@ def match_task(task):
     _verify(folder)
     if not branch:
         write_json(folder / "history.json", history)
+        if hasattr(learner.inner,'finish_source'):
+            learner.inner.finish_source()
     row = dict(
         winner=match.result["winner"],
         side=side,
