@@ -131,8 +131,14 @@ def measure_workers(cfg, source, scratch, out, workers, records, warmup_records,
 
     matches = out / "matches" / f"W{workers}"
     runtime = EvaluationRuntime("cuda", workers, workers, 0.001)
+    service_count = cfg.get('inference_services', 0)
+    if service_count:
+        from civ5rl.reporting.comparison_services import ProcessInferenceExecutor
+        executor_context = ProcessInferenceExecutor(cfg['parents'], runtime, service_count)
+    else:
+        executor_context = CollectionExecutor(cfg['parents'], runtime)
     monitor.mark(f"W{workers}-startup")
-    with evaluation_precision(), CollectionExecutor(cfg["parents"], runtime) as executor:
+    with evaluation_precision(), executor_context as executor:
         warmup = SavedForkProtocol(source, scratch, matches / "warmup", warmup_records, {})
         warmup.parent = cfg["parents"][0]
         scheduler = Scheduler(executor, warmup, FixedBudget(10**9), workers=workers, source_share=0,
@@ -174,6 +180,7 @@ def measure_workers(cfg, source, scratch, out, workers, records, warmup_records,
     items = after["inference_items"] - before["inference_items"]
     return dict(
         workers=workers,
+        inference_services=service_count,
         window_seconds=window,
         measurement_started_elapsed_seconds=measured_start,
         continuations_in_window=len(in_window),
@@ -267,6 +274,7 @@ def run_benchmark(args, parser):
         parser.error("comparison-collection requires --run SAVED_COMPARISON and --config COLLECTION_CONFIG")
     cfg = load_config(args.config)
     cfg = dict(cfg, parents=[str(ROOT / p) for p in cfg["parents"]])
+    cfg['inference_services'] = args.inference_services
     source = args.run.resolve()
     from civ5rl.provenance.common import file_sha256
     protected = [Path(p) for p in cfg["parents"]]
@@ -279,7 +287,8 @@ def run_benchmark(args, parser):
     if out.is_relative_to(source) or source.is_relative_to(out):
         parser.error("Output must be separate from the saved run")
     workers = [int(x) for x in args.worker_counts.split(",")]
-    if any(w < 1 for w in workers) or args.forks < 1 or args.seconds <= 0:
+    if (any(w < max(1,args.inference_services) for w in workers)
+            or args.inference_services < 0 or args.forks < 1 or args.seconds <= 0):
         parser.error("Invalid worker counts, forks or seconds")
     out.mkdir(parents=True)
     scratch = out / "scratch"

@@ -1,0 +1,132 @@
+"""Diagnostic process-isolated inference executor for saved comparison work.
+
+CPU workers remain in one pool. Each inference process owns its models, GRU
+states, shared slots and GIL; requests of a match stay on its assigned service.
+This is a benchmark alternative, not a training runner or passport migration.
+"""
+import multiprocessing as mp
+from multiprocessing import Pipe
+from threading import Thread
+
+
+def _service(checkpoints, runtime, control):
+    from civ5rl.engine.evaluation import evaluation_precision
+    from civ5rl.experiments.comparison_queue import CollectionExecutor
+    from civ5rl.provenance.common import configure
+    configure(17, runtime.device)
+    with evaluation_precision():
+        executor = CollectionExecutor(checkpoints, runtime)
+        executor.stop.clear()
+        thread = Thread(target=executor._serve, daemon=True)
+        thread.start()
+        control.send(('ready', None))
+        try:
+            while True:
+                if executor.error:
+                    raise RuntimeError(executor.error)
+                if not control.poll(.1):
+                    continue
+                command, value = control.recv()
+                if command == 'close':
+                    break
+                if command == 'submit':
+                    connection, kind = value
+                    with executor.lock:
+                        executor.connections[connection] = None
+                        executor.kinds[connection] = kind
+                elif command == 'statistics':
+                    control.send(('statistics', executor.statistics()))
+                else:
+                    raise ValueError(command)
+        finally:
+            executor.stop.set()
+            thread.join()
+            executor._fail_all('Inference service stopped')
+            for connection in list(executor.connections):
+                connection.close()
+            for shared in executor.shared.values():
+                shared.close()
+            control.close()
+
+
+class ProcessInferenceExecutor:
+    def __init__(self, checkpoints, runtime, services):
+        if services < 1 or services > runtime.workers:
+            raise ValueError('Invalid inference process count')
+        self.checkpoints, self.runtime, self.count = checkpoints, runtime, services
+        self.services = []
+        self.pool = None
+        self.next_service = 0
+
+    def __enter__(self):
+        from dataclasses import replace
+        from civ5rl.engine.pool import pool
+        context = mp.get_context('spawn')
+        try:
+            for i in range(self.count):
+                parent, child = Pipe()
+                capacity = (self.runtime.workers + self.count - 1 - i) // self.count
+                runtime = replace(self.runtime, workers=capacity,
+                                  max_batch=min(self.runtime.max_batch, capacity))
+                process = context.Process(target=_service, args=(self.checkpoints, runtime, child))
+                process.start()
+                child.close()
+                self.services.append((process, parent))
+            for process, control in self.services:
+                if not control.poll(300):
+                    raise TimeoutError('Inference service startup timed out')
+                if control.recv()[0] != 'ready':
+                    raise RuntimeError('Inference service did not initialize')
+            self.pool = pool(self.runtime.workers)
+            return self
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def check(self):
+        for process, _ in self.services:
+            if not process.is_alive():
+                raise RuntimeError(f'Inference process exited: {process.exitcode}')
+
+    def submit(self, function, task, kind):
+        from civ5rl.engine.evaluation_proxy import _remote_task
+        self.check()
+        server, client = Pipe()
+        _, control = self.services[self.next_service % self.count]
+        self.next_service += 1
+        control.send(('submit', (server, kind)))
+        server.close()
+        future = self.pool.submit(_remote_task, function, task, client)
+        return future, client
+
+    def statistics(self):
+        self.check()
+        for _, control in self.services:
+            control.send(('statistics', None))
+        rows = []
+        for _, control in self.services:
+            if not control.poll(300):
+                raise TimeoutError('Inference statistics timed out')
+            kind, value = control.recv()
+            if kind != 'statistics':
+                raise RuntimeError('Unexpected service response')
+            rows.append(value)
+        result = {key: sum(row[key] for row in rows) for key in rows[0] if key != 'mean_batch'}
+        result['mean_batch'] = result['inference_items'] / max(1, result['inference_batches'])
+        return result
+
+    def __exit__(self, *args):
+        for process, control in self.services:
+            try:
+                if process.is_alive():
+                    control.send(('close', None))
+            except (OSError, EOFError):
+                pass
+        if self.pool is not None:
+            self.pool.shutdown(wait=True, cancel_futures=True)
+        for process, control in self.services:
+            process.join(15)
+            if process.is_alive():
+                process.terminate()
+                process.join(10)
+            control.close()

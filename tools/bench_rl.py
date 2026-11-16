@@ -299,6 +299,8 @@ def main():
     parser.add_argument("--wait-seconds", type=float, default=0.001, help="Evaluation benchmark only")
     collection = parser.add_argument_group("comparison-collection")
     collection.add_argument("--worker-counts", default="6,8,12,16", help="Comma-separated W candidates")
+    collection.add_argument("--inference-services", type=int, default=0,
+                            help="Isolated GPU inference processes; 0 uses the in-process thread")
     collection.add_argument("--forks", type=int, default=64, help="Saved forks in the measured work")
     collection.add_argument("--seconds", type=float, default=300, help="Measured window per mode")
     collection.add_argument("--warmup-forks", type=int, default=4)
