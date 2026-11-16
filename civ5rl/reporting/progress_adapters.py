@@ -1,5 +1,6 @@
 """Artifact semantics for run families, with explicit experiment overrides."""
 
+from collections import Counter
 from statistics import median
 
 from civ5rl.reporting.progress import Observation, Sample, Stage
@@ -279,6 +280,30 @@ class RolloutComparisonAdapter:
         )
 
 
+class RolloutCollectionAdapter:
+    """Collection-only comparison runs: completed forks over the collection budget."""
+
+    def observe(self, source):
+        collection = source.read("collection.json", {})
+        forks = collection.get("forks", [])
+        budget = source.read("phase-budgets/collection.json", {})
+        scheduler = collection.get("scheduler", {})
+        return Observation(
+            _status(source), "collection", "forks", sum(f["status"] == "completed" for f in forks),
+            source.config.get("max_forks"),
+            samples=[Sample(row["work"], row["seconds"]) for row in collection.get("samples", [])],
+            budgets={"collection": dict(limit_seconds=source.config.get("collection_seconds", 7200),
+                                        spent_seconds=budget.get("seconds", collection.get("seconds", 0)),
+                                        work_estimate_complete=False)},
+            work_budget="collection", work_stopped=bool(collection.get("complete")),
+            details=dict(selected_forks=len(forks), source_battles=len(collection.get("sources", [])),
+                         labels=dict(Counter(f.get("label") for f in forks if f["status"] == "completed")),
+                         **{k: scheduler.get(k) for k in ("active_forks", "buffered_forks", "completed_continuations",
+                                                           "idle_worker_fraction")}),
+            warnings=["Collection is bounded by its deadline; max_forks is an upper limit, not an expected volume."],
+        )
+
+
 class UnknownAdapter:
     def observe(self, source):
         return Observation(_status(source), "unknown", "work", 0, None,
@@ -290,6 +315,7 @@ class UnknownAdapter:
 # register an adapter; the estimator, recorder, transport and CLI stay unchanged.
 ADAPTERS = {
     "rl01.rollout_comparison": RolloutComparisonAdapter,
+    "rl01.rollout_comparison_collection": RolloutCollectionAdapter,
     "rl01.ppo_after_target_bc": TargetBCPPOAdapter,
     "rl01.cp_imitation_target_scale": TargetScaleBCAdapter,
     "rl01.cp_imitation_target_more_data": TargetScaleBCAdapter,

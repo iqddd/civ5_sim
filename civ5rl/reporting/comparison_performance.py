@@ -17,7 +17,8 @@ from civ5rl.engine.evaluation import (
     EvaluationRuntime,
     evaluation_precision,
 )
-from civ5rl.experiments.comparison_collection import ProposalExecutor, match_task
+from civ5rl.experiments.comparison_collection import ProposalExecutor
+from civ5rl.experiments.comparison_match import match_task
 from civ5rl.engine.comparison_training import (
     Histories,
     configure_policy,
@@ -34,7 +35,7 @@ from civ5rl.deploy.archive import unpack
 
 def measured_match(task):
     # Per-worker wall scopes include RPC waiting; process CPU is reported separately.
-    import civ5rl.experiments.comparison_collection as module
+    import civ5rl.experiments.comparison_match as module
 
     # This replacement is process-wide within the worker and is always restored.
     original_run_match = module.run_match

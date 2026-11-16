@@ -42,6 +42,7 @@ def main(argv=None, *, root=ROOT):
     parser.add_argument("--mode", choices=("tune", "run", "resume"), required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--tuning-rollout")
+    parser.add_argument("--tuning-source")
     parser.add_argument("--tuning-dir")
     parser.add_argument("--runtime-config")
     parser.add_argument("--transfer-dir")
@@ -86,9 +87,15 @@ def main(argv=None, *, root=ROOT):
     if args.mode == "tune":
         if has_progress:
             raise ValueError("Cannot retune an existing scientific run")
-        if not args.tuning_rollout or not args.tuning_dir:
+        if not (args.tuning_rollout or args.tuning_source) or not args.tuning_dir:
             raise ValueError("--tuning-rollout and --tuning-dir are required for tune")
         tuning_dir = Path(args.tuning_dir)
+        if kind == "rl01.rollout_comparison_collection":
+            command = [sys.executable, "tools/bench_rl.py", "comparison-collection",
+                       "--config", args.config, "--run", args.tuning_source,
+                       "--out", str(tuning_dir), "--worker-counts", "8,16,32,48",
+                       "--forks", "64", "--seconds", "300", "--barrier-workers", "0"]
+            return subprocess.run(command, cwd=root, check=False).returncode
         parent = cfg.get("parent") or cfg.get("experiment", {}).get("parent")
         command = [
             sys.executable,
@@ -113,23 +120,24 @@ def main(argv=None, *, root=ROOT):
         if args.mode == "run" and has_progress:
             raise ValueError("Run already exists; use resume")
         if args.mode == "resume":
-            if kind == "rl01.rollout_comparison" and not has_progress:
+            if kind in {"rl01.rollout_comparison", "rl01.rollout_comparison_collection"} and not has_progress:
                 raise ValueError("Resume requires existing comparison artifacts")
             if kind in BC_KINDS and not has_progress:
                 raise ValueError("Resume requires existing BC run artifacts")
-            if kind not in BC_KINDS | {"rl01.rollout_comparison"} and not (output / "state.json").exists():
+            if kind not in BC_KINDS | {"rl01.rollout_comparison", "rl01.rollout_comparison_collection"} and not (output / "state.json").exists():
                 raise ValueError("Resume requires existing state.json")
         output.mkdir(parents=True, exist_ok=True)
         if not (output / "machine.json").exists():
             _write(output / "machine.json", {"hardware": hardware()})
         runner_script = (
-            "tools/run_comparison.py" if kind == "rl01.rollout_comparison" else
+            "tools/run_comparison.py" if kind in {"rl01.rollout_comparison", "rl01.rollout_comparison_collection"} else
             "tools/run_cp_imitation.py" if kind in BC_KINDS else "tools/run_ppo.py"
         )
         command = [
             sys.executable,
             runner_script,
-            "resume" if kind == "rl01.rollout_comparison" else args.mode,
+            "resume" if kind == "rl01.rollout_comparison" else
+            "collect" if kind == "rl01.rollout_comparison_collection" and args.mode == "run" else args.mode,
             "--config",
             args.config,
         ]
@@ -137,6 +145,10 @@ def main(argv=None, *, root=ROOT):
             value = getattr(args, "evaluation_" + name)
             if value is not None:
                 command += ["--evaluation-" + name.replace("_", "-"), str(value)]
+        if kind == "rl01.rollout_comparison_collection":
+            if not args.runtime_config:
+                raise ValueError("Collection requires a measured --runtime-config")
+            command += ["--runtime-config", args.runtime_config]
         if kind == "rl01.ppo_after_target_bc":
             if not args.runtime_config:
                 raise ValueError("--runtime-config is required for ppo_after_target_bc")

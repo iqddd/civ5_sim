@@ -25,6 +25,7 @@ def main(argv=None):
     cmd.add_argument("--out", required=True)
     cmd.add_argument("--instance")
     cmd.add_argument("--extra-input", action="append", default=[])
+    cmd.add_argument("--tuning-source", help="Saved comparison collection used for worker-count measurement")
     for name in ("launch", "status", "pull", "extend-budget"):
         cmd = commands.add_parser(name)
         cmd.add_argument("--deployment", required=True)
@@ -47,7 +48,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == "package":
         result = package(
-            args.config, args.out, instance=args.instance, extra_inputs=args.extra_input
+            args.config, args.out, instance=args.instance, extra_inputs=args.extra_input,
+            tuning_source=args.tuning_source,
         )
     elif args.command == "launch":
         result = launch(args.deployment, args.mode, instance=args.instance,

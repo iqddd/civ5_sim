@@ -216,7 +216,7 @@ def main():
     parser.add_argument(
         "phase",
         nargs="?",
-        choices=("full-cycle", "replay", "bc", "evaluation", "comparison"),
+        choices=("full-cycle", "replay", "bc", "evaluation", "comparison", "comparison-collection"),
         default="full-cycle",
     )
     parser.add_argument(
@@ -297,7 +297,17 @@ def main():
     parser.add_argument("--workers", type=int, default=4, help="Evaluation benchmark only")
     parser.add_argument("--max-batch", type=int, default=32, help="Evaluation benchmark only")
     parser.add_argument("--wait-seconds", type=float, default=0.001, help="Evaluation benchmark only")
+    collection = parser.add_argument_group("comparison-collection")
+    collection.add_argument("--worker-counts", default="6,8,12,16", help="Comma-separated W candidates")
+    collection.add_argument("--forks", type=int, default=64, help="Saved forks in the measured work")
+    collection.add_argument("--seconds", type=float, default=300, help="Measured window per mode")
+    collection.add_argument("--warmup-forks", type=int, default=4)
+    collection.add_argument("--source-cases", type=int, default=8)
+    collection.add_argument("--barrier-workers", type=int, default=8, help="Former per-fork barrier control; 0 skips")
     args = parser.parse_args()
+    if args.phase == "comparison-collection":
+        from civ5rl.reporting.comparison_collection_bench import run_benchmark
+        return run_benchmark(args, parser)
     if args.phase == "comparison":
         if not any(a=="--steps" or a.startswith("--steps=") for a in sys.argv[1:]):args.steps=3
         from civ5rl.reporting.comparison_performance import run_benchmark

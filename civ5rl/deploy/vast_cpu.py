@@ -42,12 +42,19 @@ def admit_offers(offers, ratings, minimum):
     return result
 
 
+def offer_cpu_score(offer, ratings):
+    return float(offer.get("cpu_cores_effective") or 0) * 100 * ratings[normalize_cpu(offer["cpu_name"])] / 2067
+
+
 def rent(argv):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--cpu-score-min", type=float)
+    parser.add_argument("--sort-by", choices=("price", "cpu-score"), default="price")
     parser.add_argument("--manager-script", type=Path,
                         default=Path.home() / ".codex/skills/vastai-instance-manager/scripts/vastai_instance.py")
     args, stock_args = parser.parse_known_args(argv)
+    if args.sort_by == "cpu-score" and args.cpu_score_min is None:
+        parser.error("--sort-by cpu-score requires --cpu-score-min")
     if args.cpu_score_min is not None and (not math.isfinite(args.cpu_score_min) or args.cpu_score_min <= 0):
         parser.error("--cpu-score-min must be finite and positive")
     spec = importlib.util.spec_from_file_location("civ5rl_vast_manager", args.manager_script)
@@ -62,7 +69,15 @@ def rent(argv):
         def filtered(offers, banned):
             affordable = [o for o in select(offers, banned) if manager.price_allowed(o.get("dph_total"), config)]
             try:
-                return admit_offers(affordable, cpu_ratings(document), args.cpu_score_min)
+                ratings = cpu_ratings(document)
+                admitted = admit_offers(affordable, ratings, args.cpu_score_min)
+                if args.sort_by == "cpu-score":
+                    admitted.sort(key=lambda o: (-offer_cpu_score(o, ratings), float(o["dph_total"]), int(o["machine_id"])))
+                    for offer in admitted[:2]:
+                        print(f"[cpu-order] machine={offer['machine_id']} cpu={offer['cpu_name']} "
+                              f"effective={offer['cpu_cores_effective']} score={offer_cpu_score(offer, ratings):.1f} "
+                              f"price={offer['dph_total']}", flush=True)
+                return admitted
             except ValueError as error:
                 raise manager.MarketError(str(error)) from error
 

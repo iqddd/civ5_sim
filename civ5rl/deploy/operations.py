@@ -25,6 +25,7 @@ from civ5rl.deploy.remote import (
 from civ5rl.engine.control import RunLock
 
 CAPABILITIES = {
+    "rl01.rollout_comparison_collection": {"run", "tune", "resume"},
     "rl01.rollout_comparison": {"run", "resume"},
     "rl01.ppo_after_target_bc": {"run", "tune", "resume"},
     "rl01.ppo_target_scale": {"run", "resume"},
@@ -116,6 +117,7 @@ def package(
     *,
     instance=None,
     extra_inputs=(),
+    tuning_source=None,
     root=ROOT,
     repo=None,
     verify_origin=True,
@@ -138,13 +140,14 @@ def package(
         )
 
     target = _instance(instance) if instance else None
+    tuning_source = _relative(tuning_source) if tuning_source else None
     extras = [_relative_file(root, path) for path in extra_inputs]
     commit = _verify_git_state(root, verify_origin=verify_origin)
     repo_spec, repo_name = _github_repo(root, repo)
 
     output.mkdir(parents=True, exist_ok=True)
     inputs_dir = output / "inputs"
-    staged = stage_inputs(name, inputs_dir, root=root, extra_inputs=extras)
+    staged = stage_inputs(name, inputs_dir, root=root, extra_inputs=extras, tuning_source=tuning_source)
     inputs_manifest_path = output / "inputs-manifest.json"
     _write(inputs_manifest_path, staged)
 
@@ -221,6 +224,7 @@ def package(
         "remote_scratch": f"{remote_root}/scratch",
         "instance": target,
         "tuning_rollout": carriers[0] if len(carriers) == 1 else None,
+        "tuning_source": tuning_source,
         "job": None,
         "runtime": None,
         "operations": [],
@@ -440,7 +444,7 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
                 )
             elif mode == "run" and deployment.get("run_started"):
                 raise ValueError("Run already exists; use supported resume")
-        if mode == "tune" and not deployment.get("tuning_rollout"):
+        if mode == "tune" and not (deployment.get("tuning_rollout") or deployment.get("tuning_source")):
             raise ValueError(
                 "Tune requires exactly one explicit case-carrier .pt via --extra-input"
             )
@@ -453,7 +457,7 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
             raise ValueError("Resume requires an existing remote or local run")
         if (
             mode in ("run", "resume")
-            and deployment["kind"] == "rl01.ppo_after_target_bc"
+            and deployment["kind"] in {"rl01.ppo_after_target_bc", "rl01.rollout_comparison_collection"}
         ):
             tune = deployment.get("tune", {})
             if (
@@ -485,11 +489,13 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
                 "tune",
                 "--config",
                 deployment["config"],
-                "--tuning-rollout",
-                deployment["tuning_rollout"],
                 "--tuning-dir",
                 remote_sync_dir,
             ]
+            if deployment.get("tuning_source"):
+                worker_args += ["--tuning-source", deployment["tuning_source"]]
+            else:
+                worker_args += ["--tuning-rollout", deployment["tuning_rollout"]]
         else:
             local_sync_dir = Path(deployment["local_output"])
             local_sync_dir.mkdir(parents=True, exist_ok=True)
@@ -500,7 +506,7 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
                 "--config",
                 deployment["config"],
             ]
-            if deployment["kind"] == "rl01.ppo_after_target_bc":
+            if deployment["kind"] in {"rl01.ppo_after_target_bc", "rl01.rollout_comparison_collection"}:
                 worker_args += [
                     "--runtime-config",
                     deployment["remote_root"] + "/tuning/recommended-runtime.json",

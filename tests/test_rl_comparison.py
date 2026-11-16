@@ -257,4 +257,79 @@ class ComparisonTests(unittest.TestCase):
         rounds={rows[i]['observation']['turn'] for episode in range(128) for i in select_forks(rows,episode,'quota',maximum=2)}
         self.assertEqual(rounds,set(range(1,6)))
 
+    def test_two_stage_label_matches_one_stage_preference(self):
+        import random
+        from civ5rl.experiments.comparison_queue import two_stage_label
+        rng = random.Random(17)
+        for _ in range(200):
+            winners = {(r, a): rng.choice([0, 1, None]) for r in range(8) for a in (0, 1)}
+            rows = [[winners[(r, a)] for r in range(8)] for a in (0, 1)]
+            one = preference(rows, 0)
+            two = two_stage_label(winners, 0)
+            self.assertEqual(two['accepted'], one['accepted'])
+            self.assertEqual(two['weight'], one['weight'])
+            if two['accepted']:
+                self.assertEqual(two['better'], one['better'])
+            if one['deltas'][0] == 0:
+                self.assertEqual(two['label'], 'first_group_zero')
+                self.assertEqual(two['executed_repetitions'], 4)
+                self.assertIsNone(two['deltas'][1])
+            else:
+                self.assertEqual(two['executed_repetitions'], 8)
+                self.assertEqual(two['deltas'], one['deltas'])
+
+    def test_selective_proposal_inference_isolates_second_policy(self):
+        from types import SimpleNamespace
+        from dataclasses import replace
+        from civ5rl.core.model import Policy
+        from civ5rl.core.observation import ObservationEncoder, ordered_actions
+        from civ5rl.experiments.comparison_queue import SelectiveProposalInference
+        from civ5rl.protocols.memory import flat_map
+        from civ5sim import Battle
+        from tests.test_combat import scenario, unit
+        from tests.test_rl import context
+
+        configure = __import__('civ5rl.provenance.common', fromlist=['configure']).configure
+        configure(17, 'cpu')
+        s = scenario(unit(x=0, y=0), unit(side=1, x=1, y=1), terrain=flat_map(2))
+        with Battle(s) as battle:
+            legal, previews = battle.actions_with_previews()
+            obs = battle.observe(0)
+            obs['attack_previews'] = previews
+            encoded = ObservationEncoder(context(s), 'C2P').encode(obs, ordered_actions(legal))
+        encoded_b = replace(encoded, previous=encoded.previous + 0.05)
+
+        p1 = Policy('C2P').eval()
+        p2 = Policy('C2P').eval()
+        with torch.no_grad():
+            p2.action[-1].weight.mul_(-1)
+        infer = SelectiveProposalInference([p1, p2], 'cpu')
+
+        def make_agent(proposal):
+            return SimpleNamespace(
+                mode='argmax', temperature=0.5, collect_selection_metrics=False, proposal=proposal,
+                members=[SimpleNamespace(hidden=None), SimpleNamespace(hidden=None)],
+            )
+
+        src = make_agent(True)
+        cont = make_agent(False)
+        out = infer.infer_encoded([(src, 'act', encoded), (cont, 'act', encoded_b)])
+        self.assertIn('events', out[0])
+        self.assertNotIn('events', out[1])
+        self.assertIsNotNone(src.members[0].hidden)
+        self.assertIsNotNone(src.members[1].hidden)
+        self.assertIsNotNone(cont.members[0].hidden)
+        self.assertIsNone(cont.members[1].hidden)
+
+        # Compare u171/u107 hidden states against isolated single-request runs.
+        src_ref = make_agent(True)
+        cont_ref = make_agent(False)
+        out_src = infer.infer_encoded([(src_ref, 'act', encoded)])
+        out_cont = infer.infer_encoded([(cont_ref, 'act', encoded_b)])
+        self.assertEqual(out[0], out_src[0])
+        self.assertEqual(out[1], out_cont[0])
+        torch.testing.assert_close(src.members[0].hidden, src_ref.members[0].hidden)
+        torch.testing.assert_close(src.members[1].hidden, src_ref.members[1].hidden)
+        torch.testing.assert_close(cont.members[0].hidden, cont_ref.members[0].hidden)
+
 if __name__=='__main__':unittest.main()

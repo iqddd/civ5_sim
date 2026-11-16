@@ -9,9 +9,10 @@ def report(out):
     out = Path(out)
     sections = []
     keys = (
-        "status", "phase", "seconds", "overshoot_seconds", "selected_forks",
-        "completed_forks", "accepted_pairs", "rejections", "training_steps",
-        "stop_reason", "changed", "selected", "evaluations_skipped",
+        "status", "phase", "seconds", "overshoot_seconds", "source_matches",
+        "selected_forks", "completed_forks", "fork_statuses", "accepted_pairs",
+        "labels", "rejection_reasons", "rejections", "continuations",
+        "training_steps", "stop_reason", "changed", "selected", "evaluations_skipped",
     )
     for name in ("collection.json", "dataset.json", "training.json", "result.json"):
         if not (out / name).exists():
@@ -24,10 +25,11 @@ def report(out):
                 completed_forks=sum(fork["status"] == "completed" for fork in value["forks"]),
             )
         sections.extend([f"## {name}", "", str(compact), ""])
-    sections.extend([
-        "Historical Development comparison uses the recorded 361 wins of update171; GPU/runtime differences limit attribution. Additional, when admitted, runs both policies through one local evaluator.",
-        "",
-    ])
+    if (out / "result.json").exists():
+        sections.extend([
+            "Historical Development comparison uses the recorded 361 wins of update171; GPU/runtime differences limit attribution. Additional, when admitted, runs both policies through one local evaluator.",
+            "",
+        ])
     (out / "report.md").write_text(
         "# Rollout comparison\n\n" + "\n".join(sections), encoding="utf-8"
     )

@@ -231,6 +231,7 @@ def stage_inputs(
     manifest=None,
     parent=None,
     extra_inputs=(),
+    tuning_source=None,
 ):
     """Stage gitignored read-only inputs into disjoint trees for prepare.json sync."""
     root = Path(root).resolve()
@@ -240,7 +241,7 @@ def stage_inputs(
     cfg = raw.get("config", raw)
     output_posix = PurePosixPath(str(cfg["output"]).replace("\\", "/")).as_posix()
     experiment = cfg.get("experiment", {})
-    comparison = cfg.get("kind") == "rl01.rollout_comparison"
+    comparison = cfg.get("kind") in {"rl01.rollout_comparison", "rl01.rollout_comparison_collection"}
     if comparison:
         parent = cfg["parents"][0]
         manifest = str(PurePosixPath(cfg["source_run"]) / "manifest.json")
@@ -264,13 +265,21 @@ def stage_inputs(
     if comparison:
         source = PurePosixPath(cfg["source_run"])
         names.extend(cfg["parents"])
-        names.extend(str(source / name) for name in
-                     ("run.json", "state.json", "evaluations.json"))
+        names.extend(str(source / name) for name in ("run.json", "state.json"))
+    if cfg.get("kind") == "rl01.rollout_comparison":
+        names.append(str(source / "evaluations.json"))
         storage = root / source / "evaluation.storage"
         if not storage.is_dir():
             raise ValueError("Archive source evaluations before packaging comparison")
         names.extend(path.relative_to(root).as_posix()
                      for path in storage.rglob("*") if path.is_file())
+    if tuning_source:
+        saved = PurePosixPath(tuning_source)
+        names.extend(str(saved / name) for name in
+                     ("collection.json", "match-config.json", "continuations.storage/manifest.json"))
+        for directory in ("sources.storage", "labels"):
+            names.extend(path.relative_to(root).as_posix() for path in
+                         (root / saved / directory).rglob("*") if path.is_file())
     if experiment.get("parent_manifest"):
         names.append(experiment["parent_manifest"])
     if experiment.get("parent_final_state"):

@@ -152,25 +152,31 @@ Status/progress различают записанную и применённу�
 ```powershell
 python tools/run_comparison.py precheck --config CONFIG --out PRECHECK_OUT
 python tools/run_comparison.py prepare --config CONFIG
-python tools/run_comparison.py collect --config CONFIG
+python tools/run_comparison.py collect --config CONFIG [--runtime-config RECOMMENDED] [--workers W]
 python tools/run_comparison.py train --config CONFIG
 python tools/run_comparison.py evaluate --config CONFIG
 python tools/run_comparison.py resume --config CONFIG
 ```
 
 `precheck` использует отдельный PRECHECK_OUT. Остальные фазы пишут в output
-конфига; `resume` продолжает незавершённые фазы. Состояние и итог — в
-`training.json`, `result.json`, `report.md`. Мониторинг — через `ctl_rl.py progress`.
+конфига; `resume` продолжает незавершённые фазы. Для отдельного сбора
+(`rl01.rollout_comparison_collection`) поддерживаются `prepare`, `collect`,
+`resume` и опции исполнения (`--runtime-config`, `--workers`, `--source-share`,
+`--buffer-limit`, `--pack-mib-per-second`). Состояние и итог — в
+`collection.json`, `collection-runtime.json`, `dataset.json`, `training.json`,
+`result.json`, `report.md`. Мониторинг — через `ctl_rl.py progress`.
 
 ### Измерение CPU/GPU сравнительного цикла
 
 ```powershell
 python tools/bench_rl.py comparison --run RUN --config CONFIG --out OUT --warmup 1 --steps 3
+python tools/bench_rl.py comparison-collection --run RUN --config CONFIG --out OUT --worker-counts 6,8,12,16 --forks 64 --seconds 300
 ```
 
-Вход — сохранённые training-истории; OUT должен быть пустым и вне RUN.
-Выход — замеры сбора, доигрываний и отбрасываемых учебных шагов:
-`summary.json`, телеметрия CPU/NVML и Kineto-трассы.
+Вход — сохранённые training-истории (или завершённый сбор для
+`comparison-collection`); OUT должен быть пустым и вне RUN. Выход —
+`summary.json`, телеметрия CPU/NVML и Kineto-трассы (или `recommended-runtime.json`
+и прогноз развилок за бюджет для `comparison-collection`).
 
 ## CPU/GPU-инференс оценок
 
@@ -290,6 +296,9 @@ python tools/remote_rl.py rent --profile 5090 --parallel 2 --cpu-score-min 1250
 [справочнике](../configs/vast-cpu-ratings.json). Неизвестная модель останавливает
 отбор до заполнения справочника.
 
+`--sort-by cpu-score` выбирает кандидатов по убыванию CPU-балла, при равенстве —
+по возрастанию цены. По умолчанию используется `--sort-by price`.
+
 ### Подготовка, tuning и запуск
 
 Нужны чистое рабочее дерево и HEAD в origin. CARRIER — сохранённый rollout
@@ -307,6 +316,11 @@ python tools/ctl_rl.py progress --deployment DEPLOYMENT --watch --interval 900
 `package` собирает входы и описание запуска в DEPLOYMENT. `launch` готовит
 окружение и запускает процесс; при поддержке протокола `tune` подбирает runtime.
 Результаты хранятся на сервере до `pull`.
+
+Для отдельного сравнительного сбора при `package` задайте
+`--tuning-source SAVED_COLLECTION`: каталог завершённого сравнительного опыта.
+`launch --mode tune` измерит число воркеров; после `pull --keep-instance`
+команда `launch --mode run` использует полученный `recommended-runtime.json`.
 
 ### Восстановление и завершение
 

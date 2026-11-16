@@ -439,8 +439,23 @@ hash service включены в cache key/metadata вместе с evaluator id
 Value head сохраняется. Контроль полного KL допускает откат model/Adam/RNG/курсоров;
 потраченное время не откатывается. Сбор, обучение и оценка — отдельные фазы.
 
+`rl01.rollout_comparison_collection` выделяет сбор в отдельный запуск со своим
+паспортом (`dataset.json`, `sources`, `labels`) для последующего обучения.
+Воркеры общей очереди выполняют исходные бои и продолжения через один
+`CollectionExecutor`, вычисляющий предлагающую политику только для исходных боёв.
+Seeds продолжений привязаны к `(episode_id, decision_index, repetition)` и
+не зависят от порядка завершения. Доигрывание двухступенчатое: при нулевой
+разнице побед на повторениях `0–3` развилка закрывается со статусом
+`first_group_zero`, повторения `4–7` не запускаются; в противном случае
+фильтр и вес `|Δ₁+Δ₂|/8` прежние. Параметры очереди и числа воркеров
+хранятся отдельно в `collection-runtime.json`.
+
 Параметры и статус конкретного опыта находятся в
-[конфиге](../configs/rl-c2p-rollout-comparison.json) и [ledger](experiment-ledger.md).
-Фиксированные условия определены в [протоколе](../civ5rl/experiments/rollout_comparison.py)
-и [обучении](../civ5rl/engine/comparison_training.py).
+[конфиге](../configs/rl-c2p-rollout-comparison.json),
+[конфиге нового сбора](../configs/rl-c2p-rollout-comparison-v2-collection.json) и
+[ledger](experiment-ledger.md).
+Фиксированные условия определены в [протоколе](../civ5rl/experiments/rollout_comparison.py),
+[сборщике v2](../civ5rl/experiments/rollout_comparison_collection.py),
+[очереди](../civ5rl/experiments/comparison_queue.py) и
+[обучении](../civ5rl/engine/comparison_training.py).
 Команды — в [операциях](rl-operations.md#сравнительное-обучение-по-доигрываниям).
