@@ -96,6 +96,9 @@ class SelectiveProposalInference(ProposalInference):
             logits, _, last = policy(inputs, hidden)
             for j, agent in enumerate(agents):
                 agent.hidden = last[:, j:j + 1].clone()
+                owner=requests[rows[j]][0]
+                if member==0 and hasattr(owner,'prefix_frames'):
+                    owner.prefix_frames.append(agent.hidden.clone())
             choices.append(logits.argmax(-1))
         acting = any(r[1] != 'observe' for r in requests)
         first = choices[0].cpu().tolist() if acting else None
@@ -118,23 +121,54 @@ class SelectiveProposalInference(ProposalInference):
 class CollectionExecutor(EvaluationExecutor):
     """Persistent pool + inference thread accepting individually submitted matches."""
 
-    def __init__(self, checkpoints, runtime):
+    def __init__(self, checkpoints, runtime, *, prefix_states=False):
         super().__init__(str(checkpoints[0]), runtime)
         second = prepare_evaluation_policy(
             RLAgent.from_checkpoint(str(checkpoints[1]), 'cpu', 'argmax').policy, self.runtime.device)
         self.inference = SelectiveProposalInference([self.inference.policy, second], self.runtime.device)
         self.kinds = {}
+        self.tasks = {}
+        self.prefixes = None
+        if prefix_states:
+            from civ5rl.experiments.comparison_prefix import SourcePrefixes
+            self.prefixes = SourcePrefixes(self.inference.policy,checkpoints[0],self.runtime)
         self.thread = None
 
-    def _receive(self, connection):
+    def configure_agent(self,connection,agent,info):
+        agent.proposal=self.kinds.get(connection)=='source'
+        if self.prefixes is not None:
+            task=self.tasks[connection]
+            if agent.proposal:
+                agent.prefix_frames=[]
+                info['capture_prefixes']=True
+            else:
+                branch=task[-1]
+                hidden,count=self.prefixes.restore(branch['source'],branch['command'])
+                agent.members[0].hidden=hidden
+                info['prefix_skip']=count
+
+    def _receive_message(self, connection, command, args):
+        if command=='save_prefixes':
+            if self.prefixes is None or self.kinds.get(connection)!='source':
+                raise ValueError('Unexpected source prefix capture')
+            self.prefixes.capture(self.tasks[connection][2],self.connections[connection].prefix_frames)
+            connection.send(('ok',None))
+            return None
         kind = self.kinds.get(connection)
-        result = super()._receive(connection)
+        result = super()._receive_message(connection,command,args)
         agent = self.connections.get(connection)
         if agent is not None and not hasattr(agent, 'proposal'):
             agent.proposal = kind == 'source'
         if connection not in self.connections:
             self.kinds.pop(connection, None)
+            self.tasks.pop(connection,None)
         return result
+
+    def statistics(self):
+        return {**super().statistics(),
+                'prefix_source_hits':self.prefixes.hits if self.prefixes else 0,
+                'prefix_source_prefills':self.prefixes.prefills if self.prefixes else 0,
+                'prefix_observations_skipped':self.prefixes.restored_observations if self.prefixes else 0}
 
     def __enter__(self):
         super().__enter__()
@@ -153,6 +187,7 @@ class CollectionExecutor(EvaluationExecutor):
         with self.lock:
             self.connections[server] = None
             self.kinds[server] = kind
+            self.tasks[server] = task
         future = self._pool.submit(_remote_task, function, task, client)
         return future, client
 
@@ -168,6 +203,7 @@ class CollectionExecutor(EvaluationExecutor):
                 connection.close()
             self.connections.clear()
             self.kinds.clear()
+            self.tasks.clear()
             for shared in self.shared.values():
                 shared.close()
             self.shared.clear()

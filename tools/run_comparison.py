@@ -20,6 +20,7 @@ def main():
     group.add_argument('--source-share',type=float)
     group.add_argument('--buffer-limit',type=int)
     group.add_argument('--pack-mib-per-second',type=float)
+    group.add_argument('--prefix-states',action=argparse.BooleanOptionalAction,default=None)
     args=parser.parse_args()
     from time import perf_counter
     preparation_started=perf_counter()
@@ -29,7 +30,7 @@ def main():
         if args.phase not in ('prepare','collect','resume'):
             parser.error('collection-only runs support prepare, collect and resume')
         values=json.loads(args.runtime_config.read_text(encoding='utf-8'))['runtime'] if args.runtime_config else {}
-        for name in ('workers','source_share','buffer_limit','pack_mib_per_second'):
+        for name in ('workers','source_share','buffer_limit','pack_mib_per_second','prefix_states'):
             if getattr(args,name) is not None:values[name]=getattr(args,name)
         runtime=CollectionRuntime(**values).resolved()
         cfg=load_config(args.config)
@@ -38,7 +39,7 @@ def main():
         with ProcessProgress(out,cfg):
             run(args.phase,cfg,out,runtime,preparation_seconds=perf_counter()-preparation_started)
         return
-    if any(getattr(args,n) is not None for n in ('runtime_config','workers','source_share','buffer_limit','pack_mib_per_second')):
+    if any(getattr(args,n) is not None for n in ('runtime_config','workers','source_share','buffer_limit','pack_mib_per_second','prefix_states')):
         parser.error('collection runtime options apply only to rl01.rollout_comparison_collection')
     from civ5rl.experiments.rollout_comparison import load_config,run
     cfg=load_config(args.config)

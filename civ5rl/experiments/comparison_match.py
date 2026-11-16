@@ -44,10 +44,12 @@ def match_task(task):
             return
         if index <= boundary:
             expected = source["initial"] if index == 0 else None
-            # Verification consumes the snapshot synchronously without mutation.
-            actual = battle._snapshot(copy_static=False)
             expected_hash = digest(expected) if index == 0 else source["steps"][index - 1]["state_sha256"]
-            if digest(actual) != expected_hash:
+            # run_match logs every executed command before invoking this hook.
+            # The full independent replay verification still runs after saving.
+            actual_hash = (battle._journal[-1]['state_sha256'] if index and len(battle._journal) == index
+                           else battle.state_digest())
+            if actual_hash != expected_hash:
                 raise ValueError(f"Prefix state differs at {index}")
         if index == boundary:
             saved = battle.snapshot()
@@ -70,6 +72,8 @@ def match_task(task):
                 if action not in legal:
                     raise ValueError("Illegal prefix/alternative")
                 self.inner.observe_step(obs, legal, action)
+                if command == boundary and getattr(self.inner,'prefix_skip',0):
+                    raise ValueError('Restored prefix does not match branch boundary')
                 return action
             action = self.inner.act(obs, legal)
             if not branch:
@@ -134,6 +138,8 @@ def match_task(task):
     _verify(folder)
     if not branch:
         write_json(folder / "history.json", history)
+        if hasattr(learner.inner,'finish_source'):
+            learner.inner.finish_source()
     row = dict(
         winner=match.result["winner"],
         side=side,

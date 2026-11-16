@@ -25,11 +25,13 @@ experiment conditions and results. Historical documents do not authorize new run
 
 ## History
 
+- [optimization-changelog.md](optimization-changelog.md) — Performance measurements, implementation optimizations, rejected variants, hardware context, and links to supporting benchmark evidence.
 - [archive/README.md](archive/README.md) — Index of archived investigations, former references, and historical protocols retained at paths required by configurations.
 
 Update general rules in the existing reference rather than appending conflicting
-historical updates. Keep detailed run reports in `artifacts/` and link them from
-the ledger. Retain archival protocols only when needed for reproducibility or
+historical updates. Keep scientific results in the experiment ledger and execution
+measurements in the optimization changelog; detailed reports belong in `artifacts/`.
+Retain archival protocols only when needed for reproducibility or
 provenance; disposable experiment scripts belong in `.tmp/`, never `artifacts/`.
 
 Before moving documents, check configuration, code, test, and Markdown references.

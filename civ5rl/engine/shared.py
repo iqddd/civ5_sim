@@ -1,8 +1,8 @@
 """Single-producer encoded slots; ownership transfers at each Pipe reply/command.
 
-Only player observations enter these buffers. The parent copies a slot before
-dispatching its next command, so the worker cannot overwrite retained PPO input.
-No torch import or CUDA context is needed in workers.
+Only player observations enter these buffers. PPO copies slots for retained
+inputs. Evaluation may borrow a view until replying: the worker cannot overwrite
+it while blocked on that reply. No torch or CUDA context is needed in workers.
 """
 
 from multiprocessing.shared_memory import SharedMemory
@@ -76,7 +76,12 @@ class EncodedSlots:
             target[...] = value
         return {"encoded_shape": (num_cells, num_actions)}
 
-    def read(self, slot, state):
+    def read(self, slot, state, *, copy=True):
+        """Copy retained inputs, or borrow views until the next producer command.
+
+        A borrowing caller must finish packing every field into independent
+        storage before replying. It must not keep these views in a replay cache.
+        """
         if "encoded_inline" in state:
             return state["encoded_inline"]
         num_cells, num_actions = state["encoded_shape"]
@@ -86,7 +91,7 @@ class EncodedSlots:
             axis = self.axis_kind[key]
             if axis != "fixed":
                 value = value[: num_cells if axis == "cells" else num_actions]
-            values[key] = value.copy()
+            values[key] = value.copy() if copy else value
         return Encoded(**values)
 
     def close(self):

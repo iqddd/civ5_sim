@@ -299,9 +299,15 @@ def main():
     parser.add_argument("--wait-seconds", type=float, default=0.001, help="Evaluation benchmark only")
     collection = parser.add_argument_group("comparison-collection")
     collection.add_argument("--worker-counts", default="6,8,12,16", help="Comma-separated W candidates")
+    collection.add_argument("--inference-services", type=int, default=0,
+                            help="Isolated GPU inference processes; 0 uses the in-process thread")
+    collection.add_argument('--prefix-states',action='store_true',
+                            help='Restore branch GRU state at reset and skip prefix observe RPCs')
     collection.add_argument("--forks", type=int, default=64, help="Saved forks in the measured work")
     collection.add_argument("--seconds", type=float, default=300, help="Measured window per mode")
     collection.add_argument("--warmup-forks", type=int, default=4)
+    collection.add_argument('--warmup-measured-work', action='store_true',
+                            help='Warm up with one complete pass of the measured forks before timing the same work')
     collection.add_argument("--source-cases", type=int, default=8)
     collection.add_argument("--barrier-workers", type=int, default=8, help="Former per-fork barrier control; 0 skips")
     args = parser.parse_args()
