@@ -23,7 +23,7 @@ KIND='rl01.rollout_comparison'
 def load_config(path):
     cfg=read_json(path)
     if cfg['kind']!=KIND or cfg['seed']!=17:raise ValueError('Unknown comparison profile')
-    if cfg['max_forks']!=1024 or cfg['collection_seconds']!=7200 or cfg['training_seconds']!=1800:
+    if (not cfg.get('collection_input') and cfg['max_forks']!=1024) or cfg['collection_seconds']!=7200 or cfg['training_seconds']!=1800:
         raise ValueError('This first-cycle protocol fixes its budgets')
     for p,sha in zip(cfg['parents'],cfg['parent_sha256']):
         if file_sha256(ROOT/p)!=sha:raise ValueError('Parent SHA mismatch')
@@ -32,6 +32,8 @@ def load_config(path):
 
 def prepare(cfg,out):
     if (out/'run.json').exists():return
+    if cfg.get('collection_input'):
+        return prepare_collection_input(cfg,out)
     out.mkdir(parents=True,exist_ok=True)
     source=ROOT/cfg['source_run'];saved=read_json(source/'run.json')
     source_state=read_json(source/'state.json')
@@ -43,6 +45,46 @@ def prepare(cfg,out):
     write_json(out/'manifest.json',plan)
     write_json(out/'collection.json',dict(seconds=0.,next_episode=cfg['start_episode'],forks=[],sources=[],complete=False,samples=[]))
     write_json(out/'status.json',dict(status='prepared',phase='collect'))
+
+
+def prepare_collection_input(cfg,out):
+    """Import immutable collection evidence into a separately passported fit.
+
+    The collector's source snapshot is verified as frozen evidence, never against
+    the current training executable. All consumed files are pinned by the fit
+    config. Only the fit's copy of public histories may be unpacked or cached.
+    Publishing run.json last makes interrupted preparation safely repeatable.
+    """
+    import shutil
+    source=ROOT/cfg['collection_input']['run']
+    expected=cfg['collection_input']['sha256']
+    required={'dataset.json','anchors.json','collection.json','match-config.json',
+              'manifest.json','passport.json','resolved-config.json','corpus-manifest.json',
+              'sources.zip','sources.storage/manifest.json','sources.storage/json.7z'}
+    if set(expected)!=required:raise ValueError('Incomplete frozen collection identity')
+    with RunLock(source):
+        for name,sha in expected.items():
+            if file_sha256(source/name)!=sha:raise ValueError(f'Collection input changed: {name}')
+        checkpoint.verify_frozen_passport(source)
+        collection=read_json(source/'collection.json')
+        original=read_json(source/'resolved-config.json')
+        if not collection.get('finalized'):raise ValueError('Collection is not finalized')
+        if original['parent_sha256']!=cfg['parent_sha256']:raise ValueError('Collection parents differ')
+        dataset=read_json(source/'dataset.json')
+        if dataset['completed_forks']!=sum(f['status']=='completed' for f in collection['forks']):
+            raise ValueError('Collection dataset count differs')
+        out.mkdir(parents=True,exist_ok=True)
+        for name in ('dataset.json','anchors.json','collection.json','match-config.json',
+                     'manifest.json','sources.storage/manifest.json','sources.storage/json.7z'):
+            target=out/name;target.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(source/name,target)
+        write_json(out/'collection-lineage.json',cfg['collection_input'])
+    plan=read_json(out/'manifest.json')
+    identity=checkpoint.passport(out,cfg,plan)
+    write_json(out/'status.json',dict(status='prepared',phase='train'))
+    write_json(out/'run.json',dict(kind=KIND,config=cfg,identity=identity,
+        training_runtime=training_runtime(),collection_input=cfg['collection_input'],
+        source_manifest_sha256=file_sha256(source/'manifest.json'),parent_sha256=cfg['parent_sha256']))
 
 
 def collect(cfg,out,*,limit=None,budget=None):
@@ -232,7 +274,8 @@ def evaluate(cfg,out):
 
 def dataset_counts(out):
     data=read_json(out/'dataset.json')
-    return {k:data[k] for k in ('selected_forks','completed_forks','accepted_pairs','rejections')}
+    return {**{k:data[k] for k in ('selected_forks','completed_forks','accepted_pairs')},
+            'rejections':data.get('rejections',data.get('rejection_reasons',{}))}
 
 
 def run(phase,cfg,out,*,preparation_seconds=0.):
@@ -242,7 +285,9 @@ def run(phase,cfg,out,*,preparation_seconds=0.):
     with RunLock(out),ExitStack() as timing:
         collection=read_json(out/'collection.json') if (out/'collection.json').exists() else {}
         training=read_json(out/'training.json') if (out/'training.json').exists() else {}
-        collect_needed=not collection.get('finalized') or not (out/'dataset.json').exists()
+        collect_needed=not cfg.get('collection_input') and (not collection.get('finalized') or not (out/'dataset.json').exists())
+        if cfg.get('collection_input') and phase=='collect':
+            raise ValueError('Frozen collection inputs cannot collect again')
         train_needed=training.get('status') not in ('complete','no_accepted_pairs')
         budget=None
         if phase in ('prepare','collect','resume') and collect_needed:

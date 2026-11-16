@@ -273,6 +273,9 @@ def stage_inputs(
             raise ValueError("Archive source evaluations before packaging comparison")
         names.extend(path.relative_to(root).as_posix()
                      for path in storage.rglob("*") if path.is_file())
+        if cfg.get("collection_input"):
+            saved = PurePosixPath(cfg["collection_input"]["run"])
+            names.extend(str(saved / name) for name in cfg["collection_input"]["sha256"])
     if tuning_source:
         saved = PurePosixPath(tuning_source)
         names.extend(str(saved / name) for name in

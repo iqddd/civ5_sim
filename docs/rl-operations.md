@@ -166,6 +166,11 @@ python tools/run_comparison.py resume --config CONFIG
 `collection.json`, `collection-runtime.json`, `dataset.json`, `training.json`,
 `result.json`, `report.md`. Мониторинг — через `ctl_rl.py progress`.
 
+Для обучения на отдельном завершённом сборе выберите CONFIG с `collection_input`
+и выполните `train`, затем `evaluate`, либо `resume` для обеих фаз.
+Входной корпус проверяется по сохранённым hashes; результаты пишутся в output
+обучения. Исходный сбор не повторяется.
+
 ### Измерение CPU/GPU сравнительного цикла
 
 ```powershell
