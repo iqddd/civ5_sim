@@ -11,7 +11,7 @@ import os
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, monotonic
 import json
 import math
 import shutil
@@ -96,8 +96,11 @@ class SavedForkProtocol:
         pass
 
 
-def phase_resources(rows, phase):
-    samples = [r for r in rows if r.get("phase") == phase]
+def phase_resources(rows, phase, start=None, stop=None):
+    """Select one measured interval; drain is not part of steady utilization."""
+    samples = [r for r in rows if r.get("phase") == phase
+               and (start is None or r['elapsed_seconds'] >= start)
+               and (stop is None or r['elapsed_seconds'] < stop)]
 
     def values(name):
         return [r[name] for r in samples if r.get(name) is not None]
@@ -145,6 +148,7 @@ def measure_workers(cfg, source, scratch, out, workers, records, warmup_records,
         scheduler.forecast = False
         scheduler.add_selected([dict(r, winners={}) for r in records])
         before = executor.statistics()
+        measured_start = monotonic() - monitor.started
         monitor.mark(f"W{workers}")
         stats = scheduler.run()
         monitor.mark(f"W{workers}-sources")
@@ -171,6 +175,7 @@ def measure_workers(cfg, source, scratch, out, workers, records, warmup_records,
     return dict(
         workers=workers,
         window_seconds=window,
+        measurement_started_elapsed_seconds=measured_start,
         continuations_in_window=len(in_window),
         continuations_per_second=len(in_window) / window,
         busy_workers_in_window=sum(in_window) / window,
@@ -320,6 +325,11 @@ def run_benchmark(args, parser):
     total_ram = psutil.virtual_memory().total
     for row in rows:
         row["resources"] = phase_resources(telemetry, f"W{row['workers']}")
+        start = row['measurement_started_elapsed_seconds']
+        row['steady_resources'] = phase_resources(telemetry, f"W{row['workers']}",
+                                                  start, start+row['window_seconds'])
+        row['drain_resources'] = phase_resources(telemetry, f"W{row['workers']}",
+                                                 start+row['window_seconds'])
         row["forecast"] = forecast(row, saved, packing)
     if barrier is not None:
         barrier["resources"] = phase_resources(telemetry, f"barrier-W{barrier['workers']}")

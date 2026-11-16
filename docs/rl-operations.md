@@ -182,6 +182,9 @@ python tools/bench_rl.py comparison-collection --run RUN --config CONFIG --out O
 `comparison-collection`); OUT должен быть пустым и вне RUN. Выход —
 `summary.json`, телеметрия CPU/NVML и Kineto-трассы (или `recommended-runtime.json`
 и прогноз развилок за бюджет для `comparison-collection`).
+В сводке `steady_resources` показывает загрузку в рабочем окне,
+`drain_resources` — при доигрывании хвоста, `resources` — за обе части.
+Сравнивайте cont/s с загрузкой именно рабочего окна.
 
 ## CPU/GPU-инференс оценок
 

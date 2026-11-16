@@ -44,7 +44,8 @@ def match_task(task):
             return
         if index <= boundary:
             expected = source["initial"] if index == 0 else None
-            actual = battle.snapshot()
+            # Verification consumes the snapshot synchronously without mutation.
+            actual = battle._snapshot(copy_static=False)
             expected_hash = digest(expected) if index == 0 else source["steps"][index - 1]["state_sha256"]
             if digest(actual) != expected_hash:
                 raise ValueError(f"Prefix state differs at {index}")
