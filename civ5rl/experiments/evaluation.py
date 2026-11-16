@@ -150,7 +150,8 @@ def verify_replay(directory, *, demonstration=False):
     )
     with Battle(replay["initial"]) as battle:
         for step in replay["steps"]:
-            if metrics and battle.snapshot()["state"]["side"] == metrics.get("side"):
+            side = battle._info().side if metrics or ep else None
+            if metrics and side == metrics.get("side"):
                 has_attack = any(
                     a.kind in ("melee", "ranged") for a in battle.available_actions()
                 )
@@ -158,7 +159,7 @@ def verify_replay(directory, *, demonstration=False):
                 available += has_attack
                 selected += is_attack
                 omitted += has_attack and not is_attack
-            if ep and battle.snapshot()["state"]["side"] == case["learner_side"]:
+            if ep and side == case["learner_side"]:
                 row = ep["decisions"][decision]
                 if row["observation"] != battle.observe(case["learner_side"]):
                     raise ValueError("Saved learner observation differs from replay")
@@ -173,7 +174,7 @@ def verify_replay(directory, *, demonstration=False):
                 decision += 1
             if (
                 asdict(battle.step(step["action"])) != step["result"]
-                or digest(battle.snapshot()) != step["state_sha256"]
+                or battle.state_digest() != step["state_sha256"]
             ):
                 raise ValueError("Replay result/state hash differs")
         if battle.snapshot() != read_json(directory / "final.json") or (

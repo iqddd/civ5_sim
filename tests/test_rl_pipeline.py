@@ -64,10 +64,16 @@ class PipelineTests(unittest.TestCase):
                             getattr(value, key), getattr(x, key)
                         )
                     original = value.cells.copy()
+                    borrowed = slots.read(0, state, copy=False)
+                    from civ5rl.core.model import batch_inputs
+                    packed = batch_inputs([borrowed], 'cpu')
                     changed = deepcopy(x)
                     changed.cells[:] = 42
                     attached.write(0, changed)
                     np.testing.assert_array_equal(value.cells, original)
+                    # Evaluation must detach its batch before replying, while
+                    # retained PPO inputs still use the default owned copy.
+                    np.testing.assert_array_equal(packed['cells'][0].numpy(), original)
                 finally:
                     attached.close()
                     slots.close()

@@ -126,6 +126,7 @@ class Battle:
 
     def __init__(self, scenario, *, log=False):
         self._handle = None
+        self._state_digest_prefix = None
         self._action_buffer = None
         self._observation_buffers = {}
         if isinstance(scenario, (str, Path)):
@@ -473,15 +474,35 @@ class Battle:
                 {
                     "action": asdict(action),
                     "result": asdict(result),
-                    # Hash synchronously without copying immutable map/rules.
-                    # Only the digest escapes; shared terrain stays private.
-                    "state_sha256": digest(self._snapshot(copy_static=False)),
+                    "state_sha256": self.state_digest(),
                 }
             )
 
     def snapshot(self):
         """Privileged complete state, not an input for a fog-of-war policy."""
         return self._snapshot(copy_static=True)
+
+    def state_digest(self):
+        """Hash current privileged state with the canonical snapshot JSON bytes.
+
+        Sorted snapshot keys are kind/map/rules/schema/state/units. Map and rules
+        are owned immutable data, so cache the SHA state through the comma before
+        state. Copy that SHA context and serialize the changing state and units
+        on every call. This preserves digest(snapshot()) exactly, including RNG
+        and fog history; it does not reuse a previously recorded dynamic hash.
+        Public snapshots stay detached, and reset requires the same map/rules.
+        """
+        snapshot = self._snapshot(copy_static=False)
+        if self._state_digest_prefix is None:
+            static = {key: snapshot[key] for key in ('kind', 'map', 'rules', 'schema')}
+            prefix = json.dumps(static, sort_keys=True, separators=(',', ':'))[:-1] + ',"state":'
+            self._state_digest_prefix = hashlib.sha256(prefix.encode())
+        hasher = self._state_digest_prefix.copy()
+        hasher.update(json.dumps(snapshot['state'], sort_keys=True, separators=(',', ':')).encode())
+        hasher.update(b',"units":')
+        hasher.update(json.dumps(snapshot['units'], sort_keys=True, separators=(',', ':')).encode())
+        hasher.update(b'}')
+        return hasher.hexdigest()
 
     def _snapshot(self, *, copy_static):
         """Internal snapshots share owned immutable terrain; public snapshots detach it."""
@@ -537,6 +558,7 @@ class Battle:
         self._require_open()
         other = object.__new__(Battle)
         other._handle = None
+        other._state_digest_prefix = self._state_digest_prefix
         other._action_buffer = None
         other._observation_buffers = {}
         other._lib, other._map, other._rules = self._lib, self._map, self._rules

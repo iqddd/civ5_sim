@@ -725,6 +725,32 @@ class CombatTests(unittest.TestCase):
                 b.reset(wrong)
             self.assertEqual(initial, b.snapshot())
 
+    def test_state_digest_matches_canonical_snapshot_across_restore(self):
+        # Cached static JSON must never change replay hashes or hide a mutable
+        # RNG/visibility/unit update, including after clone and reset.
+        for mode in ('legacy', 'end_turn'):
+            for fog in (False, True):
+                for random_damage in (False, True):
+                    value = scenario(unit(), unit(side=1, x=3), fog=fog, random_damage=random_damage)
+                    value['turn_reset_mode'] = mode
+                    with Battle(value, log=True) as battle:
+                        initial_hash = battle.state_digest()
+                        for command in (Action('melee', 0, 27), Action('end_turn'), Action('melee', 1, 26)):
+                            battle.step(command)
+                            expected = digest(battle.snapshot())
+                            self.assertEqual(battle.state_digest(), expected)
+                            self.assertEqual(battle.replay()['steps'][-1]['state_sha256'], expected)
+                        with battle.clone() as clone:
+                            self.assertEqual(clone.state_digest(), digest(clone.snapshot()))
+                            clone.step(Action('end_turn'))
+                            self.assertEqual(clone.state_digest(), digest(clone.snapshot()))
+                        detached = battle.snapshot()
+                        detached['state']['rng'] += 1
+                        battle.reset(detached)
+                        self.assertEqual(battle.state_digest(), digest(detached))
+                        battle.reset(value)
+                        self.assertEqual(battle.state_digest(), initial_hash)
+
     def test_loading_relative_map_and_close_lifetime(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp)

@@ -25,6 +25,8 @@ from threading import Event, Lock, Thread
 from time import perf_counter
 from types import SimpleNamespace
 import math
+import os
+import selectors
 import traceback
 
 import torch
@@ -43,6 +45,43 @@ from civ5rl.engine.pool import pool
 
 
 _options = ContextVar("evaluation_options", default={})
+
+
+class _ConnectionWaiter:
+    """Keep POSIX pipe registrations across batches; retain Windows pipe waits.
+
+    Only the serving thread owns the selector. Synchronize removals before
+    additions using saved integer descriptors: a closed Connection cannot expose
+    its old fd, and that number can already belong to a newly submitted match.
+    Pending workers cannot write another request until their batch reply, so
+    gathering can leave them registered and filter them out of readiness.
+    """
+
+    def __init__(self):
+        self.selector = selectors.DefaultSelector() if os.name == 'posix' else None
+        self.registered = {}
+
+    def wait(self, connections, timeout):
+        if self.selector is None:
+            return wait_connections(connections, timeout=timeout)
+        for connection, fd in list(self.registered.items()):
+            if connection.closed:
+                self.selector.unregister(fd)
+                del self.registered[connection]
+        for connection in connections:
+            if connection not in self.registered:
+                fd = connection.fileno()
+                self.selector.register(fd, selectors.EVENT_READ, connection)
+                self.registered[connection] = fd
+        ready = {key.data for key, _ in self.selector.select(timeout)}
+        # A pending peer closing its pipe wakes select too; end this gather
+        # rather than spinning on its EOF until the batching timeout.
+        return [connection for connection in connections if connection in ready]
+
+    def close(self):
+        if self.selector is not None:
+            self.selector.close()
+        self.registered.clear()
 
 
 @contextmanager
@@ -302,7 +341,9 @@ class EvaluationExecutor:
         if command not in {"act", "observe"}:
             raise ValueError(f"Unknown evaluation request {command!r}")
         (state,)=args
-        return connection, (agent, command, self.shared[connection].read(0,state))
+        # The blocked producer owns no write access until the batch reply.
+        # batch_inputs packs independent arrays before any reply is sent.
+        return connection, (agent, command, self.shared[connection].read(0,state,copy=False))
 
     def _fail_all(self, message):
         with self.lock:
@@ -314,14 +355,16 @@ class EvaluationExecutor:
                 pass
 
     def _serve(self):
+        waiter = None
         try:
+            waiter = _ConnectionWaiter()
             while not self.stop.is_set():
                 with self.lock:
                     connections = list(self.connections)
                 if not connections:
                     self.stop.wait(0.001)
                     continue
-                ready = wait_connections(connections, timeout=0.01)
+                ready = waiter.wait(connections, timeout=0.01)
                 pending = []
                 for connection in ready[:self.runtime.max_batch]:
                     request = self._receive(connection)
@@ -332,12 +375,13 @@ class EvaluationExecutor:
                 started = perf_counter()
                 until = started + self.runtime.wait_seconds
                 while True:
+                    waiting = {p[0] for p in pending}
                     with self.lock:
                         target=min(self.runtime.max_batch,self.runtime.workers,len(self.connections))
-                        remaining = [c for c in self.connections if c not in {p[0] for p in pending}]
+                        remaining = [c for c in self.connections if c not in waiting]
                     if len(pending)>=target or not remaining:break
                     timeout = max(0, until - perf_counter())
-                    more = wait_connections(remaining, timeout=timeout) if remaining else []
+                    more = waiter.wait(remaining, timeout=timeout)
                     if not more:
                         self.wait_timeouts+=int(perf_counter()>=until)
                         break
@@ -355,6 +399,9 @@ class EvaluationExecutor:
             # Keep diagnostic text, not a traceback retaining agents/GPU tensors.
             self.error = traceback.format_exc()
             self._fail_all(f"{type(exc).__name__}: {exc}")
+        finally:
+            if waiter is not None:
+                waiter.close()
 
     def run(self, function, tasks):
         tasks = iter(tasks)

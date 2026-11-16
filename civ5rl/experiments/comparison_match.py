@@ -44,10 +44,12 @@ def match_task(task):
             return
         if index <= boundary:
             expected = source["initial"] if index == 0 else None
-            # Verification consumes the snapshot synchronously without mutation.
-            actual = battle._snapshot(copy_static=False)
             expected_hash = digest(expected) if index == 0 else source["steps"][index - 1]["state_sha256"]
-            if digest(actual) != expected_hash:
+            # run_match logs every executed command before invoking this hook.
+            # The full independent replay verification still runs after saving.
+            actual_hash = (battle._journal[-1]['state_sha256'] if index and len(battle._journal) == index
+                           else battle.state_digest())
+            if actual_hash != expected_hash:
                 raise ValueError(f"Prefix state differs at {index}")
         if index == boundary:
             saved = battle.snapshot()
