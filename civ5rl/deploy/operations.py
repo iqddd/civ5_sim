@@ -168,9 +168,10 @@ def package(
 
     input_packets = []
     input_sync = []
+    archive_input_groups = needs_archive(inputs_dir)
     for index, group in enumerate(staged["groups"]):
         source = inputs_dir / group
-        if needs_archive(source):
+        if archive_input_groups or needs_archive(source):
             packet = output / "input-packets" / str(index)
             pack_transfer(source, packet, token=fingerprint, direction="upload")
             remote = f"transport/inputs/{index}"
