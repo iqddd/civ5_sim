@@ -485,6 +485,9 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
             local_sync_dir = directory / "tuning"
             local_sync_dir.mkdir(parents=True, exist_ok=True)
             remote_sync_dir = deployment["remote_root"] + "/tuning"
+            if deployment["kind"] == "rl01.rollout_comparison_collection":
+                remote_sync_dir = deployment["remote_project"] + "/.tmp/collection-tuning"
+            deployment["remote_tuning_dir"] = remote_sync_dir
             measurement = (f"measurement-{sequence}"
                            if deployment["kind"] == "rl01.rollout_comparison_collection" else "")
             deployment["tuning_measurement"] = measurement
@@ -513,7 +516,7 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
             if deployment["kind"] in {"rl01.ppo_after_target_bc", "rl01.rollout_comparison_collection"}:
                 worker_args += [
                     "--runtime-config",
-                    deployment["remote_root"] + "/tuning/" +
+                    deployment.get("remote_tuning_dir", deployment["remote_root"] + "/tuning") + "/" +
                     (deployment["tuning_measurement"] + "/" if deployment.get("tuning_measurement") else "") +
                     "recommended-runtime.json",
                 ]
