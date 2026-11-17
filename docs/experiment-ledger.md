@@ -71,3 +71,5 @@ Development, additional validation, sampling и argmax нельзя объеди
 находится в [архивном индексе](archive/README.md). Протоколы со стабильными
 путями остаются вне архива там, где их читает конфигурация или код; это не
 делает их действующим общим руководством.
+
+| C2P comparison: full-corpus step KL | `rl-c2p-rollout-comparison-v2-full-corpus.json` | Update171, новый Adam; закреплённый v2-корпус330пар/12096опор | **Подготовлен, не запущен.** Все330пар+660неповторяющихся опор на принятый шаг; до10шагов/1800с, полный KL≤0.015 после каждой попытки, до2повторов с половинным LR. Только парный Development последнего принятого состояния и родителя; без Additional. Локальный отбрасываемый GPU-smoke:1принятый шаг/4попытки, принятый KL0.01369; rollback/Adam/critic/terminal resume проверены. Полный предстартовый замер и обучение не выполнялись | [Smoke](../artifacts/preparations/c2p-full-corpus-control-smoke-final/precheck.json) |

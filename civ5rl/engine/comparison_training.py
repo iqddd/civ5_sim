@@ -434,11 +434,17 @@ def publish_candidate(cfg,out,state,identity):
     original=torch.load(cfg['parents'][0],map_location='cpu',weights_only=False)
     changed=any(not torch.equal(value.cpu(),original['model'][name]) for name,value in state['model'].items())
     atomic_torch_save(dict(variant='C2P',model=state['model'],optimizer=state['optimizer'],state={k:v for k,v in state.items() if k not in ('model','optimizer')},config=original['config'],identity=identity),out/'candidate.pt')
-    write_json(out/'training.json',dict(status='complete',training_steps=state['steps'],epoch=state['epoch'],cursor=state['cursor'],seconds=state['seconds'],overshoot_seconds=max(0,state['seconds']-1800),stop_reason=state['stop_reason'],changed=changed,attempted_final_kl=state['attempted_final_kl'],input_cache=state.get('input_cache'),candidate_sha256=file_sha256(out/'candidate.pt')))
+    report=dict(status='complete',training_steps=state['steps'],epoch=state['epoch'],cursor=state['cursor'],seconds=state['seconds'],overshoot_seconds=max(0,state['seconds']-cfg['training_seconds']),stop_reason=state['stop_reason'],changed=changed,attempted_final_kl=state.get('attempted_final_kl',state.get('last_full_kl')),input_cache=state.get('input_cache'),candidate_sha256=file_sha256(out/'candidate.pt'))
+    if state.get('mode')=='full_corpus_step_kl':
+        report.update({k:state[k] for k in ('mode','attempts','rejected_attempts','lr','anchor_cursor','last_full_kl')})
+    write_json(out/'training.json',report)
     return out/'candidate.pt' if changed else None
 
 
 def _fit(cfg,out,dataset,identity,budget):
+    if cfg.get('training',{}).get('mode')=='full_corpus_step_kl':
+        from civ5rl.engine.comparison_control import fit_full_corpus
+        return fit_full_corpus(cfg,out,dataset,identity,budget)
     out=Path(out);state_path=out/'training.pt'
     state=torch.load(state_path,map_location='cpu',weights_only=False) if state_path.exists() else dict(epoch=0,cursor=0,steps=0,seconds=0.,order=[],anchor_order=[],anchor_cursor=0)
     pairs=dataset['pairs'];anchors=dataset['anchors']

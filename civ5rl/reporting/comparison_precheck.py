@@ -59,6 +59,9 @@ def check_fit_gate(cfg, out, example, anchors):
 
 
 def precheck(cfg, out):
+    if cfg.get('training',{}).get('mode')=='full_corpus_step_kl':
+        from civ5rl.reporting.comparison_control_smoke import smoke
+        return smoke(cfg,out)
     from civ5rl.experiments.rollout_comparison import prepare, collect
 
     out = Path(out).resolve()

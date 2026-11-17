@@ -109,6 +109,9 @@ def format_progress(result):
     applied = control.get("applied") or {}
     revision = f" | budget revision {applied.get('revision', '?')}/{control['requested_revision']} applied/requested" if control else ""
     details = result.get("details", {})
+    attempts = (f" | attempts {details['attempts']}, rejected {details.get('rejected_attempts',0)}"
+                + (f", LR {details['lr']:g}" if details.get('lr') is not None else '')
+                if details.get('attempts') is not None else '')
     groups = details.get("adam_counters")
     adam = (f" | Adam shared/actor {groups['shared_actor']}, value {groups['value']}"
             + (f", preview {groups['attack_preview']}" if "attack_preview" in groups else "")
@@ -121,5 +124,5 @@ def format_progress(result):
             f"other {duration(result['eta_other_seconds'])} ({stages or 'none'}) | total {duration(result['eta_total_seconds'])} | "
             f"conditional +{duration(result['eta_conditional_seconds'])} | {budgets}" +
             (f" | finish ~{result['estimated_finish_at']}" if result["estimated_finish_at"] else "") +
-            revision + adam +
+            revision + adam + attempts +
             (" | assumes resume" if result["eta_assumes_resume"] else ""))

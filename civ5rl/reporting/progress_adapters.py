@@ -257,9 +257,11 @@ class RolloutComparisonAdapter:
             )
 
         pairs = dataset.get("pairs", [])
-        target_steps = 2 * ((len(pairs) + 31) // 32)
+        full_corpus = source.config.get('training',{}).get('mode')=='full_corpus_step_kl'
+        target_steps = (source.config['training']['max_accepted_steps'] if full_corpus else
+                        2 * ((len(pairs) + 31) // 32))
         rows = source.rows("steps.jsonl")
-        samples = [Sample(1, row["step_seconds"]) for row in rows if row.get("step_seconds", 0) > 0]
+        samples = [Sample(1, row.get('cycle_seconds',row['step_seconds'])) for row in rows if row.get("step_seconds", 0) > 0]
         budget = source.read("phase-budgets/training.json", {})
         training_status = training.get("status")
         training_finished = training_status in ("complete", "no_accepted_pairs")
@@ -267,8 +269,11 @@ class RolloutComparisonAdapter:
         completed_steps = training.get("training_steps", training.get("steps", 0))
         stages = []
         if status != "complete" and training_status != "no_accepted_pairs":
-            stages = [Stage("development_512", 1, None, conditional=True),
-                      Stage("additional_256_two_policies", 1, None, conditional=True)]
+            stages = ([Stage("paired_development_512", 1, None, conditional=completed_steps==0)] if full_corpus else
+                      [Stage("development_512", 1, None, conditional=True),
+                       Stage("additional_256_two_policies", 1, None, conditional=True)])
+            if full_corpus and training_finished and not training.get('changed'):
+                stages=[]
         return Observation(
             status, phase, "steps", completed_steps, target_steps, samples=samples,
             stages=stages,
@@ -276,7 +281,9 @@ class RolloutComparisonAdapter:
                                       work_estimate_complete=False)},
             work_budget="training", work_stopped=training_finished,
             details=dict(accepted_pairs=len(pairs), selected_forks=dataset.get("selected_forks"),
-                         completed_forks=dataset.get("completed_forks")),
+                         completed_forks=dataset.get("completed_forks"),
+                         **({k:training.get(k) for k in ('attempts','rejected_attempts','lr','last_full_kl','pending')}
+                            if full_corpus else {})),
         )
 
 

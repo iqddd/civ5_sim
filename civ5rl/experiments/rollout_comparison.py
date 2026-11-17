@@ -27,6 +27,14 @@ def load_config(path):
         raise ValueError('This first-cycle protocol fixes its budgets')
     for p,sha in zip(cfg['parents'],cfg['parent_sha256']):
         if file_sha256(ROOT/p)!=sha:raise ValueError('Parent SHA mismatch')
+    if cfg.get('training'):
+        training=cfg['training']
+        expected=dict(mode='full_corpus_step_kl',max_accepted_steps=10,anchors_per_step=660,
+                      initial_lr=1e-5,kl_limit=.015,max_retries=2)
+        if training!=expected or not cfg.get('collection_input'):
+            raise ValueError('Unknown full-corpus comparison protocol')
+        if cfg.get('evaluation_protocol')!='paired_development_only':
+            raise ValueError('Full-corpus fitting requires paired Development only')
     return cfg
 
 
@@ -248,6 +256,8 @@ def evaluate(cfg,out):
     if not training.get('changed'):
         write_json(out/'result.json',dict(status=training.get('status'),training_steps=training.get('training_steps',0),selected='parent',evaluations_skipped=True,**dataset_counts(out)));return
     config=read_json(out/'match-config.json');plan=read_json(out/'manifest.json')
+    if cfg.get('evaluation_protocol')=='paired_development_only':
+        return evaluate_paired_development(cfg,out,config,plan,ordinary_evaluate)
     # Evaluator understands existing checkpoint format; no experiment ledger is forged.
     with readable_evaluations(out),evaluation_options(device='cuda',workers=8,max_batch=32,wait_seconds=.001):
         candidate=ordinary_evaluate(config,plan,out,'candidate.pt','development_512')
@@ -272,6 +282,27 @@ def evaluate(cfg,out):
         write_json(out/'result.json',result)
 
 
+def evaluate_paired_development(cfg,out,config,plan,evaluator):
+    """Compare the last verified candidate and parent through one local runtime."""
+    import shutil
+    from civ5rl.engine.evaluation import evaluation_options
+    from civ5rl.reporting.evaluation_storage import readable_evaluations
+    from civ5rl.reporting.evaluation_audit import load_eval_rows,clustered_paired_bootstrap
+    parent_path=out/'checkpoints/parent.pt';parent_path.parent.mkdir(exist_ok=True)
+    if not parent_path.exists():shutil.copy2(ROOT/cfg['parents'][0],parent_path)
+    if file_sha256(parent_path)!=cfg['parent_sha256'][0]:raise ValueError('Evaluation parent changed')
+    with readable_evaluations(out),evaluation_options(device='cuda',workers=8,max_batch=32,wait_seconds=.001):
+        parent=evaluator(config,plan,out,'checkpoints/parent.pt','development_512')
+        candidate=evaluator(config,plan,out,'candidate.pt','development_512')
+        def rows(record):
+            return load_eval_rows(out/record['runs']['argmax']['cp']['directory'],512,plan=plan['development_512'])
+        comparison=clustered_paired_bootstrap(rows(parent),rows(candidate))
+    write_json(out/'result.json',dict(status='complete',development=candidate,parent_development=parent,
+        comparison=comparison,candidate_selection='last_accepted',
+        candidate_checkpoint='candidate.pt',parent_checkpoint='checkpoints/parent.pt',
+        additional={'status':'disabled_by_protocol'},**dataset_counts(out)))
+
+
 def dataset_counts(out):
     data=read_json(out/'dataset.json')
     return {**{k:data[k] for k in ('selected_forks','completed_forks','accepted_pairs')},
@@ -292,7 +323,8 @@ def run(phase,cfg,out,*,preparation_seconds=0.):
         budget=None
         if phase in ('prepare','collect','resume') and collect_needed:
             budget=timing.enter_context(PhaseBudget(out,'collection',cfg['collection_seconds']))
-        elif phase in ('train','resume') and train_needed:
+        elif (phase in ('train','resume') or
+              phase=='prepare' and cfg.get('training',{}).get('mode')=='full_corpus_step_kl') and train_needed:
             budget=timing.enter_context(PhaseBudget(out,'training',cfg['training_seconds']))
         if budget is not None:budget.base+=preparation_seconds
         configure(cfg['seed'],'cuda')

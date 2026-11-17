@@ -16,6 +16,23 @@ from civ5rl.reporting.progress_source import ArtifactSource
 
 
 class ProgressTests(unittest.TestCase):
+    def test_full_corpus_eta_counts_accepted_steps_and_includes_retry_kl_time(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            self.write(root,'resolved-config.json',dict(kind='rl01.rollout_comparison',
+                training=dict(mode='full_corpus_step_kl',max_accepted_steps=10)))
+            self.write(root,'status.json',dict(status='running',phase='train'))
+            self.write(root,'collection.json',dict(complete=True))
+            self.write(root,'dataset.json',dict(pairs=[{}]))
+            self.write(root,'training.json',dict(steps=1,attempts=3,rejected_attempts=2,lr=2.5e-6))
+            self.log(root,'steps.jsonl',[dict(step=1,step_seconds=5,cycle_seconds=75)])
+            result=collect_progress(ArtifactSource(root))
+            self.assertEqual((result['completed'],result['target']),(1,10))
+            self.assertEqual(result['eta_work_seconds'],675)
+            self.assertEqual(result['details']['attempts'],3)
+            self.assertEqual([s['name'] for s in result['stages']],['paired_development_512'])
+            self.assertIsNone(result['eta_total_seconds'])
+
     def write(self, root, name, data):
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)

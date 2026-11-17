@@ -1,6 +1,7 @@
 """Bounded full-cycle PPO or saved-replay benchmark, optionally against Git."""
 
 import argparse
+import json
 import random
 import sys
 from pathlib import Path
@@ -315,6 +316,10 @@ def main():
         from civ5rl.reporting.comparison_collection_bench import run_benchmark
         return run_benchmark(args, parser)
     if args.phase == "comparison":
+        if args.config and json.loads(args.config.read_text(encoding='utf-8')).get('training',{}).get('mode')=='full_corpus_step_kl':
+            if not any(a=='--steps' or a.startswith('--steps=') for a in sys.argv[1:]):args.steps=1
+            from civ5rl.reporting.comparison_control_smoke import benchmark
+            return benchmark(args,parser)
         if not any(a=="--steps" or a.startswith("--steps=") for a in sys.argv[1:]):args.steps=3
         from civ5rl.reporting.comparison_performance import run_benchmark
         return run_benchmark(args,parser)
