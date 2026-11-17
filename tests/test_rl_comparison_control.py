@@ -19,6 +19,56 @@ class Budget:
 
 
 class ControlTests(unittest.TestCase):
+    def test_cyclic_anchors_preserve_inherited_adam_and_retry_boundary(self):
+        # A wraparound must not skip anchors or reset inherited optimizer/RNG.
+        model,opt,state,anchors,options=self.fixture(max_accepted_steps=12,cycle_anchors=True)
+        for _ in range(10):
+            opt.zero_grad();(-model.weight.sum()).backward();opt.step()
+        state.update(steps=10,attempts=10,anchor_cursor=5)
+        order=state['anchor_order'][:];seen=[];counters=[]
+        def update(selected):
+            seen.append((selected[:],float(torch.rand(()))))
+            opt.zero_grad();(-model.weight.sum()).backward();opt.step()
+            counters.append(int(next(iter(opt.state.values()))['step']))
+            return {}
+        checks=iter([.02,0.,0.])
+        run_updates(model,opt,state,anchors,options,Budget(),lambda:None,update,lambda:next(checks))
+        self.assertEqual(seen[0][0],[anchors[order[5]],anchors[order[0]]])
+        self.assertEqual(seen[0],seen[1])
+        self.assertEqual(seen[2][0],[anchors[order[1]],anchors[order[2]]])
+        self.assertTrue(all(len(set(batch))==2 for batch,_ in seen))
+        self.assertEqual(counters,[11,11,12])
+        self.assertEqual(state['anchor_cursor'],9)
+        self.assertEqual(state['anchor_order'],order)
+        self.assertEqual(state['steps'],12)
+        self.assertEqual(state['attempts'],13)
+        self.assertEqual(state['stop_reason'],'accepted_step_limit')
+        run_updates(model,opt,state,anchors,options,Budget(),lambda:None,
+                    lambda selected:self.fail('Terminal fit restarted'),lambda:0.)
+
+    def test_budget_keeps_inherited_time_after_transient_publication_denial(self):
+        # A Windows reader can briefly deny replacement. Publication retries
+        # must retain the full inherited cost when the phase is resumed.
+        import tempfile
+        from unittest.mock import patch
+        from civ5rl.engine.phase_budget import PhaseBudget
+        from civ5rl.provenance.common import read_json,write_json
+        with tempfile.TemporaryDirectory() as tmp:
+            calls=[]
+            def denied_once(path,value):
+                calls.append(value['seconds'])
+                if len(calls)==1:raise PermissionError('temporary Windows reader')
+                write_json(path,value)
+            with patch('civ5rl.engine.phase_budget.write_json',side_effect=denied_once):
+                with PhaseBudget(tmp,'training',1800,initial_seconds=482.2195) as budget:
+                    self.assertGreaterEqual(budget.elapsed(),482.2195)
+                    self.assertLess(1800-budget.elapsed(),1317.781)
+                    self.assertFalse(budget.expired())
+            saved=read_json(budget.path)
+            restored=PhaseBudget(tmp,'training',1800,initial_seconds=482.2195)
+            self.assertEqual(restored.base,saved['seconds'])
+            self.assertGreaterEqual(saved['seconds'],482.2195)
+
     def test_cached_head_update_matches_full_pair_and_anchor_means(self):
         # The cache path must retain independent loss denominators and all legal
         # logits; a plausible but misnormalized loss can silently spoil a run.

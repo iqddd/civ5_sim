@@ -55,7 +55,10 @@ def run_updates(policy, optimizer, state, anchors, options, budget, save,
             pending['entered'] = True
         count = options['anchors_per_step']
         start = pending['anchor_cursor']
-        selected = [anchors[i] for i in state['anchor_order'][start:start+count]]
+        if options.get('cycle_anchors'):
+            if count>len(anchors):raise ValueError('A step cannot repeat anchors')
+            selected = [anchors[state['anchor_order'][(start+i)%len(anchors)]] for i in range(count)]
+        else:selected = [anchors[i] for i in state['anchor_order'][start:start+count]]
         if len(selected) != count:
             raise ValueError('Not enough distinct anchors for the accepted-step limit')
         # A restored pending attempt already has its ID and RNG in the checkpoint.
@@ -132,12 +135,18 @@ def fit_full_corpus(cfg, out, dataset, identity, budget):
     anchors, pairs = dataset['anchors'], dataset['pairs']
     if len({tuple(key) for key in anchors}) != len(anchors):
         raise ValueError('Full-corpus control requires distinct anchors')
-    if len(anchors) < options['anchors_per_step'] * options['max_accepted_steps']:
+    required=options['anchors_per_step']*(1 if options.get('cycle_anchors') else options['max_accepted_steps'])
+    if len(anchors) < required:
         raise ValueError('Anchor pool does not cover the accepted-step limit')
     identity = dict(passport=identity, dataset_hash=digest(dataset))
     path = out/'training.pt'
-    state = (torch.load(path, map_location='cpu', weights_only=False) if path.exists() else
-             initial_state(anchors, options, seed_for(cfg['seed'], 0, 'anchors', namespace=cfg['namespace'])))
+    if path.exists():state=torch.load(path,map_location='cpu',weights_only=False)
+    elif cfg.get('fit_continuation'):
+        from civ5rl.engine.comparison_continuation import inherited_state
+        state=inherited_state(cfg,identity)
+        atomic_torch_save(state,path)
+        write_json(out/'fit-lineage.json',cfg['fit_continuation'])
+    else:state=initial_state(anchors, options, seed_for(cfg['seed'], 0, 'anchors', namespace=cfg['namespace']))
     if state.get('identity', identity) != identity:
         raise ValueError('Training dataset/identity changed')
     if state.get('stop_reason'):
@@ -161,7 +170,14 @@ def fit_full_corpus(cfg, out, dataset, identity, budget):
     limits = {}
     for episode,index in keys:
         limits[episode] = max(limits.get(episode,0), index+1)
-    histories = Histories(out,source_hashes=dataset.get('source_hashes'),limits=limits)
+    cache_dir=None
+    if cfg.get('fit_continuation'):
+        # Derived caches are optional and verified by their ordinary identities.
+        # Reuse does not modify the predecessor's frozen scientific artifacts.
+        from civ5rl.provenance.common import ROOT
+        previous=Histories(ROOT/cfg['fit_continuation']['run'])
+        if previous.directory.exists():cache_dir=previous.directory
+    histories = Histories(out,source_hashes=dataset.get('source_hashes'),limits=limits,cache_dir=cache_dir)
     histories.prepare(keys,device=next(policy.parameters()).device,budget=budget)
     features = None
     if head_only:
@@ -206,7 +222,8 @@ def fit_full_corpus(cfg, out, dataset, identity, budget):
             jsonl('learning.jsonl',learning_rows)
         write_json(out/'training.json',{k:state[k] for k in (
             'mode','steps','attempts','rejected_attempts','lr','anchor_cursor','pending',
-            'last_full_kl','seconds','stop_reason','input_cache')} | {'learning':state.get('learning')})
+            'last_full_kl','seconds','stop_reason','input_cache')} | {'learning':state.get('learning'),
+                'inherited_steps':state.get('inherited_steps',0),'inherited_seconds':state.get('inherited_seconds',0.)})
 
     def update(selected):
         if features is not None:return features.update(optimizer,pairs,selected)

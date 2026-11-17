@@ -15,6 +15,7 @@ def report(out):
         "training_steps", "stop_reason", "changed", "selected", "evaluations_skipped",
         "attempts", "rejected_attempts", "lr", "last_full_kl", "anchor_cursor",
         "feature_parity",
+        "inherited_steps", "inherited_seconds", "parent_evaluation_reused",
     )
     for name in ("collection.json", "dataset.json", "training.json", "result.json"):
         if not (out / name).exists():

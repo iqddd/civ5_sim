@@ -5,7 +5,7 @@
 
 ## Отложенные задачи
 
-- [ ] Обработать временный Windows `PermissionError` при атомарной публикации
+- [x] Обработать временный Windows `PermissionError` при атомарной публикации
   heartbeat бюджета, чтобы фоновая запись продолжалась после отказа.
   [Наблюдение](../artifacts/rl/c2p-rollout-comparison-v2-heads/console.log):
   основной deadline работал, итоговое время сохранено корректно.

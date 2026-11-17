@@ -32,12 +32,17 @@ def load_config(path):
         training=cfg['training']
         mode=training.get('mode')
         if mode not in ('full_corpus_step_kl','frozen_heads_step_kl'):raise ValueError('Unknown fitting mode')
-        expected=dict(mode=mode,max_accepted_steps=10,anchors_per_step=660,
+        continuation=bool(cfg.get('fit_continuation'))
+        expected=dict(mode=mode,max_accepted_steps=100 if continuation else 10,anchors_per_step=660,
                       initial_lr=1e-5,kl_limit=.015,max_retries=2)
+        if continuation:expected['cycle_anchors']=True
         if training!=expected or not cfg.get('collection_input'):
             raise ValueError('Unknown full-corpus comparison protocol')
         if cfg.get('evaluation_protocol')!='paired_development_only':
             raise ValueError('Full-corpus fitting requires paired Development only')
+        if continuation:
+            from civ5rl.engine.comparison_continuation import validate_continuation
+            validate_continuation(cfg)
     return cfg
 
 
@@ -295,6 +300,9 @@ def evaluate_paired_development(cfg,out,config,plan,evaluator):
     if not parent_path.exists():shutil.copy2(ROOT/cfg['parents'][0],parent_path)
     if file_sha256(parent_path)!=cfg['parent_sha256'][0]:raise ValueError('Evaluation parent changed')
     with readable_evaluations(out),evaluation_options(device='cuda',workers=8,max_batch=32,wait_seconds=.001):
+        if cfg.get('fit_continuation'):
+            from civ5rl.engine.comparison_continuation import reuse_parent_development
+            reuse_parent_development(cfg,out,config,plan)
         parent=evaluator(config,plan,out,'checkpoints/parent.pt','development_512')
         candidate=evaluator(config,plan,out,'candidate.pt','development_512')
         def rows(record):
@@ -303,6 +311,7 @@ def evaluate_paired_development(cfg,out,config,plan,evaluator):
     write_json(out/'result.json',dict(status='complete',development=candidate,parent_development=parent,
         comparison=comparison,candidate_selection='last_accepted',
         candidate_checkpoint='candidate.pt',parent_checkpoint='checkpoints/parent.pt',
+        parent_evaluation_reused=bool(cfg.get('fit_continuation')),
         additional={'status':'disabled_by_protocol'},**dataset_counts(out)))
 
 
@@ -315,6 +324,7 @@ def dataset_counts(out):
 def run(phase,cfg,out,*,preparation_seconds=0.):
     from contextlib import ExitStack
     from civ5rl.engine.phase_budget import PhaseBudget
+    from civ5rl.engine.comparison_continuation import continuation_seconds
     out=Path(out).resolve()
     with RunLock(out),ExitStack() as timing:
         collection=read_json(out/'collection.json') if (out/'collection.json').exists() else {}
@@ -328,7 +338,7 @@ def run(phase,cfg,out,*,preparation_seconds=0.):
             budget=timing.enter_context(PhaseBudget(out,'collection',cfg['collection_seconds']))
         elif (phase in ('train','resume') or
               phase=='prepare' and cfg.get('training',{}).get('mode') in ('full_corpus_step_kl','frozen_heads_step_kl')) and train_needed:
-            budget=timing.enter_context(PhaseBudget(out,'training',cfg['training_seconds']))
+            budget=timing.enter_context(PhaseBudget(out,'training',cfg['training_seconds'],initial_seconds=continuation_seconds(cfg)))
         if budget is not None:budget.base+=preparation_seconds
         configure(cfg['seed'],'cuda')
         prepare(cfg,out)
@@ -341,7 +351,7 @@ def run(phase,cfg,out,*,preparation_seconds=0.):
             if phase in ('train','resume'):
                 if not (out/'dataset.json').exists():raise ValueError('Collection incomplete')
                 if budget is None and train_needed:
-                    budget=timing.enter_context(PhaseBudget(out,'training',cfg['training_seconds']))
+                    budget=timing.enter_context(PhaseBudget(out,'training',cfg['training_seconds'],initial_seconds=continuation_seconds(cfg)))
                 fit(cfg,out,read_json(out/'dataset.json'),read_json(out/'passport.json'),budget=budget)
                 timing.close()
             if phase in ('evaluate','resume'):evaluate(cfg,out)

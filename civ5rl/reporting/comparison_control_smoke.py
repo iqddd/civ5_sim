@@ -19,6 +19,28 @@ from civ5rl.provenance.common import ROOT,configure,read_json,write_json,file_sh
 from civ5rl.provenance.checkpoint import verify_frozen_passport
 
 
+def continuation_smoke(cfg,out):
+    """Verify real inherited state and evaluator compatibility without fitting."""
+    from civ5rl.engine.comparison_continuation import validate_continuation,continuation_seconds
+    from civ5rl.engine.evaluation import EvaluationRuntime,evaluation_precision
+    from civ5rl.experiments.ppo_target_scale import evaluation_key
+    out=Path(out)
+    if out.exists() and any(out.iterdir()):raise ValueError('Use an empty precheck output')
+    state=validate_continuation(cfg);source=ROOT/cfg['fit_continuation']['run']
+    configure(cfg['seed'],'cuda')
+    with evaluation_precision():
+        _,key=evaluation_key(read_json(source/'match-config.json'),read_json(source/'manifest.json'),
+                             source,'checkpoints/parent.pt','development_512',
+                             EvaluationRuntime('cuda',8,32,.001).resolve().identity())
+    if key not in read_json(source/'evaluations.json'):
+        raise ValueError('Parent Development evaluator/runtime/GPU is incompatible')
+    result=dict(status='verified',inherited_steps=state['steps'],next_adam_step=state['steps']+1,
+                inherited_seconds=continuation_seconds(cfg),remaining_seconds=cfg['training_seconds']-continuation_seconds(cfg),
+                anchor_cursor=state['anchor_cursor'],head_adam_exact=True,parent_evaluation_compatible=True)
+    write_json(out/'precheck.json',result);print(json.dumps(result,indent=2),flush=True)
+    return result
+
+
 def smoke(cfg,out):
     out=Path(out).resolve()
     if out.exists() and any(out.iterdir()):raise ValueError('Use an empty smoke output')

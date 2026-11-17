@@ -441,7 +441,7 @@ def publish_candidate(cfg,out,state,identity):
     report=dict(status='complete',training_steps=state['steps'],epoch=state['epoch'],cursor=state['cursor'],seconds=state['seconds'],overshoot_seconds=max(0,state['seconds']-cfg['training_seconds']),stop_reason=state['stop_reason'],changed=changed,attempted_final_kl=state.get('attempted_final_kl',state.get('last_full_kl')),input_cache=state.get('input_cache'),candidate_sha256=file_sha256(out/'candidate.pt'))
     if state.get('mode') in ('full_corpus_step_kl','frozen_heads_step_kl'):
         report.update({k:state[k] for k in ('mode','attempts','rejected_attempts','lr','anchor_cursor','last_full_kl')})
-        for key in ('learning','baseline_learning','feature_parity'):
+        for key in ('learning','baseline_learning','feature_parity','inherited_steps','inherited_seconds'):
             if key in state:report[key]=state[key]
     write_json(out/'training.json',report)
     return out/'candidate.pt' if changed else None

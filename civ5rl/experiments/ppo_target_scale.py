@@ -296,17 +296,10 @@ def evaluation_task(task):
     return result
 
 
-@evaluation_precision()
-def evaluate(config,plan,out,path,purpose):
-    from civ5rl.protocols.turn_reset import validate_case
-    for case in plan[purpose]:
-        validate_case(case, config)
-    from civ5rl.engine.evaluation import EvaluationExecutor, runtime_for
-    runtime = runtime_for(out, config, cp_only=path == 'cp')
-    runtime_identity = runtime.identity()
+def evaluation_key(config,plan,out,path,purpose,runtime_identity):
+    """Return the canonical cache key without running matches."""
     fingerprint=('cp_mirror_'+digest(config['teacher_search'])[:32] if path=='cp'
                  else policy_hash(torch.load(out/path,map_location='cpu',weights_only=False)['model']))
-    cache=read_json(out/'evaluations.json') if (out/'evaluations.json').exists() else {}
     import platform
     import inspect
     import civ5rl.core.agent as agent_module
@@ -320,6 +313,19 @@ def evaluate(config,plan,out,path,purpose):
     key=digest({'purpose':purpose,'policy':fingerprint,'mode':'argmax','temperature':config.get('policy_temperature',1.0),
         'cases':[c['case_hash'] for c in plan[purpose]], 'evaluator':evaluator,
         'runtime':runtime_identity, 'search':config['teacher_search']})
+    return fingerprint,key
+
+
+@evaluation_precision()
+def evaluate(config,plan,out,path,purpose):
+    from civ5rl.protocols.turn_reset import validate_case
+    for case in plan[purpose]:
+        validate_case(case, config)
+    from civ5rl.engine.evaluation import EvaluationExecutor, runtime_for
+    runtime = runtime_for(out, config, cp_only=path == 'cp')
+    runtime_identity = runtime.identity()
+    fingerprint,key=evaluation_key(config,plan,out,path,purpose,runtime_identity)
+    cache=read_json(out/'evaluations.json') if (out/'evaluations.json').exists() else {}
     if key in cache:return cache[key]
     cases=plan[purpose]
     started=perf_counter()

@@ -282,7 +282,7 @@ class RolloutComparisonAdapter:
             work_budget="training", work_stopped=training_finished,
             details=dict(accepted_pairs=len(pairs), selected_forks=dataset.get("selected_forks"),
                          completed_forks=dataset.get("completed_forks"),
-                         **({k:training.get(k) for k in ('attempts','rejected_attempts','lr','last_full_kl','pending','learning')}
+                         **({k:training.get(k) for k in ('attempts','rejected_attempts','lr','last_full_kl','pending','learning','inherited_steps','inherited_seconds')}
                             if full_corpus else {})),
         )
 
