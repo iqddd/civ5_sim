@@ -5,6 +5,63 @@ from civ5rl.experiments.comparison_collection import preference,select_forks
 from civ5rl.engine.comparison_training import pair_loss,categorical_kl
 
 class ComparisonTests(unittest.TestCase):
+    def test_finalized_prefix_collection_imports_and_restores_training_histories(self):
+        # Prefix captures are useful during collection, but retaining them in
+        # the source packet makes its two-file training import partial.
+        import tempfile
+        from pathlib import Path
+        from dataclasses import asdict
+        from types import SimpleNamespace
+        from civ5rl.provenance.common import ROOT,read_json,write_json,file_sha256
+        from civ5rl.provenance.checkpoint import passport
+        from civ5rl.experiments.rollout_comparison_collection import finalize_collection
+        from civ5rl.experiments.rollout_comparison import prepare_collection_input
+        from civ5rl.reporting.comparison_storage import restore_tree
+        from civ5rl.engine.comparison_inputs import Histories
+        from civ5rl.experiments.comparison_prefix import SourcePrefixes
+        from civ5rl.engine.evaluation import EvaluationRuntime
+        from civ5rl.core.model import Policy
+        from tests.test_combat import scenario,unit
+        from civ5sim import Battle
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp',prefix='prefix-import-') as tmp:
+            source=Path(tmp)/'collection';destination=Path(tmp)/'training';episode=1
+            folder=source/'sources'/str(episode)
+            spec=scenario(unit(x=0,y=0),unit(side=1,x=1,y=1))
+            case=dict(scenario=spec,armies=[['warrior'],['warrior']],learner_side=0,
+                      max_rounds=60,agent_seeds=[17,18])
+            with Battle(spec) as battle:
+                actions,previews=battle.actions_with_previews();observation=battle.observe(0)
+                observation['attack_previews']=previews.tolist()
+            row=dict(command=1,chosen=0,alternative=1,actions=[asdict(a) for a in actions],observation=observation)
+            cfg=dict(seed=17,namespace='prefix-import-smoke',collection_seconds=30,parent_sha256=[])
+            write_json(folder/'case.json',case);write_json(folder/'history.json',[row])
+            write_json(source/'manifest.json',{})
+            write_json(source/'match-config.json',{})
+            passport(source,cfg,{})
+            policy=Policy('C2P').eval();weight_file=Path(tmp)/'parent.pt'
+            weight_file.write_bytes(b'smoke checkpoint identity')
+            prefixes=SourcePrefixes(policy,weight_file,EvaluationRuntime('cpu',1,1,.001))
+            prefixes.capture(folder,[torch.zeros(1,1,policy.hidden_size)])
+            (folder/'prefix-states.tmp').write_bytes(b'interrupted cache write')
+            self.assertTrue((folder/'prefix-states.npz').exists())
+            state=dict(sources=[episode],forks=[dict(id=0,episode=episode,index=0,status='completed',
+                       label='accepted',reason=None,accepted=True,better=0,weight=.5,executed_repetitions=8)])
+            finalize_collection(cfg,source,state,SimpleNamespace(elapsed=lambda:1.))
+            names=('dataset.json','anchors.json','collection.json','match-config.json','manifest.json',
+                   'passport.json','resolved-config.json','corpus-manifest.json','sources.zip',
+                   'sources.storage/manifest.json','sources.storage/json.7z')
+            fit_cfg=dict(parents=[],parent_sha256=[],collection_input=dict(
+                run=source.relative_to(ROOT).as_posix(),sha256={n:file_sha256(source/n) for n in names}))
+            prepare_collection_input(fit_cfg,destination)
+            restore_tree(destination,'sources')
+            self.assertEqual({p.name for p in (destination/'sources'/'1').iterdir()}, {'case.json','history.json'})
+            data=read_json(destination/'dataset.json')
+            self.assertEqual(len(data['pairs']),1)
+            histories=Histories(destination,source_hashes=data['source_hashes'])
+            encoded,_=histories.get(episode)
+            self.assertEqual(len(encoded),1)
+            self.assertEqual(len(encoded[0].sources),len(actions))
+
     def test_branch_prefix_restore_preserves_hidden_and_local_encoder(self):
         # A wrong boundary/forced-action history can silently change every
         # continuation label. Compare with stepwise inference and reject stale data.

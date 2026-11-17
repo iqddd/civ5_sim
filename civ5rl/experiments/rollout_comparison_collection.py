@@ -275,10 +275,19 @@ def collect(cfg, out, runtime, *, budget):
 
 
 def finalize_collection(cfg, out, state, budget):
+    """Publish public training histories after all admitted continuations finish.
+
+    Binary prefix captures (and interrupted capture writes) are collection-only
+    caches. They must remain available for collection resume, but must not enter
+    the source packet imported by training as manifest.json plus json.7z.
+    """
     from civ5rl.reporting.comparison_storage import archive_tree
     if not (out / 'dataset.json').exists():
         write_json(out / 'dataset.json', build_dataset(cfg, out, state))
     archive_tree(out, 'continuations')
+    for pattern in ('*/prefix-states.npz', '*/prefix-states.tmp'):
+        for cache in (out / 'sources').glob(pattern):
+            cache.unlink()
     archive_tree(out, 'sources')
     state.update(complete=True, finalized=True, stage='complete', seconds=budget.elapsed(),
                  overshoot_seconds=max(0, budget.elapsed() - cfg['collection_seconds']))
