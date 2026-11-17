@@ -311,6 +311,20 @@ class RolloutCollectionAdapter:
         )
 
 
+class ActionValueAdapter:
+    """Completed training epochs; confirmation is an offline, unmodeled stage."""
+    def observe(self, source):
+        training=source.read('training.json', {})
+        return Observation(_status(source), source.read('status.json', {}).get('phase','preparation'),
+            'epochs', training.get('epoch',0), source.config.get('epochs',100),
+            samples=[Sample(1,row['seconds']) for row in training.get('history',[])],
+            work_stopped=training.get('complete',False),
+            budgets={'training':dict(limit_seconds=source.config.get('training_seconds',1800),
+                spent_seconds=training.get('seconds',0),work_estimate_complete=True)},work_budget='training',
+            stages=[] if source.read('result.json') else [Stage('offline_confirmation',1,None)],
+            details=dict(steps=training.get('steps',0),best=training.get('best')))
+
+
 class UnknownAdapter:
     def observe(self, source):
         return Observation(_status(source), "unknown", "work", 0, None,
@@ -321,6 +335,7 @@ class UnknownAdapter:
 # Exact experiment adapters take precedence over family adapters. New run types
 # register an adapter; the estimator, recorder, transport and CLI stay unchanged.
 ADAPTERS = {
+    "rl01.action_value": ActionValueAdapter,
     "rl01.rollout_comparison": RolloutComparisonAdapter,
     "rl01.rollout_comparison_collection": RolloutCollectionAdapter,
     "rl01.ppo_after_target_bc": TargetBCPPOAdapter,

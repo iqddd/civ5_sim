@@ -3,6 +3,10 @@
 Оптимизации исполнения, замеры производительности и отклонённые варианты.
 Обучение, корпуса и сравнения политик — в [журнале экспериментов](experiment-ledger.md).
 
+## Action-value head smoke
+
+- RTX4060Ti, FP32, batch256forks/512actions: warmed head step **2.08ms** (3warmup/5measured); excludes saving/preparation. Real cached u171 vectors reproduced141action logits exactly. Synthetic controller interrupted/resumed with identical weights/Adam; no full fit or matches. Short smoke phase is below the utilization-policy duration threshold. [Smoke and kernel trace](../artifacts/preparations/c2p-action-value-smoke-verified/precheck.json).
+
 ## Отложенные задачи
 
 - [x] Обработать временный Windows `PermissionError` при атомарной публикации
