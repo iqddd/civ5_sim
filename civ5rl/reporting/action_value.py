@@ -67,13 +67,15 @@ def controller_smoke(cfg,out):
     for directory in (reference,resumed):
         write_json(directory/'split.json',split);write_json(directory/'data.json',dict(preparation_seconds=0))
     configure(17,'cuda');train(options,reference,data)
-    def interrupted(value,path,*copies):
-        result=atomic_torch_save(value,path,*copies)
-        if path.name=='training.pt' and value['steps']==2 and value['epoch']==0:
-            raise InterruptedError('Smoke interruption after a committed step')
+    original_step=torch.optim.AdamW.step
+    calls=0
+    def interrupted(optimizer,*args,**kwargs):
+        nonlocal calls
+        result=original_step(optimizer,*args,**kwargs);calls+=1
+        if calls==7:raise InterruptedError('Smoke interruption in an uncommitted epoch')
         return result
     configure(17,'cuda')
-    with patch('civ5rl.experiments.action_value.atomic_torch_save',side_effect=interrupted):
+    with patch.object(torch.optim.AdamW,'step',interrupted):
         try:train(options,resumed,data)
         except InterruptedError:pass
         else:raise AssertionError('Smoke interruption did not occur')
@@ -83,6 +85,21 @@ def controller_smoke(cfg,out):
     for key in ('epoch','steps','best','cursor','order'):
         assert a[key]==b[key],key
     for name in a['model']:torch.testing.assert_close(a['model'][name],b['model'][name],atol=0,rtol=0)
+    import random
+    configure(17,'cuda');legacy=make_head();legacy_opt=make_optimizer(legacy)
+    shuffle=random.Random('c2p_action_value_shuffle_v1|17')
+    training=np.flatnonzero(np.isin(data['worlds'],split['training'])).tolist()
+    x,w,n=[data[key].cuda() for key in ('inputs','wins','counts')]
+    for _ in range(2):
+        order=training[:];shuffle.shuffle(order)
+        for start in range(0,len(order),16):
+            ids=torch.tensor(order[start:start+16],device='cuda')
+            legacy_opt.zero_grad(set_to_none=True)
+            outcome_loss(legacy(x[ids].flatten(0,1)).reshape(-1,2),w[ids],n[ids]).backward()
+            torch.nn.utils.clip_grad_norm_(legacy.parameters(),1.);legacy_opt.step()
+    for name,value in legacy.state_dict().items():
+        torch.testing.assert_close(value.cpu(),a['model'][name],atol=0,rtol=0)
+
     for key,row in a['optimizer']['state'].items():
         for name,value in row.items():torch.testing.assert_close(value,b['optimizer']['state'][key][name],atol=0,rtol=0)
     train(options,resumed,data)
@@ -90,8 +107,13 @@ def controller_smoke(cfg,out):
     receipt=(resumed/'selected.json').read_bytes()
     assert evaluate(options,resumed,data)==result
     assert (resumed/'selected.json').read_bytes()==receipt
+    predictions=torch.load(resumed/'confirmation-predictions.pt',weights_only=False)
+    probs=torch.as_tensor(predictions['logits'],dtype=torch.float64).sigmoid().numpy()
+    np.testing.assert_array_equal(predictions['probs'],probs)
+    np.testing.assert_array_equal(predictions['delta_prob'],probs[:,1]-probs[:,0])
     assert b['best']['epoch']==1 or b['best']['G']>a['history'][0]['selection']['G']
-    return dict(resume_exact=True,steps=b['steps'],terminal_fit_stable=True,confirmation_idempotent=True)
+    return dict(resume_exact=True,steps=b['steps'],terminal_fit_stable=True,confirmation_idempotent=True,
+        epoch_boundary_resume=True,probabilities_exported=True,original_update_math_exact=True)
 
 
 def cached_vector_smoke(cfg):
@@ -109,6 +131,18 @@ def cached_vector_smoke(cfg):
     assert metadata['identity']['common']['parent']==cfg['parent_sha256']
     record=torch.load(path,weights_only=False,map_location='cpu',mmap=True)
     assert record['identity']==metadata['identity']
+    from civ5rl.engine.action_value_features import FrozenActionFeatures
+    dataset=read_json(ROOT/cfg['collection_input']['run']/'dataset.json')
+    subset={**dataset,'pairs':[p for p in dataset['pairs'] if p['episode']==111068],
+        'anchors':[k for k in dataset['anchors'] if k[0]==111068]}
+    histories=Histories(ROOT/cfg['feature_cache_run'])
+    # The normal preparation verifies these bytes against the source tree;
+    # this bounded smoke has the already recorded hashes and existing packet.
+    histories.sources[111068]=dataset['source_hashes']['111068']
+    fast=FrozenActionFeatures(histories,subset,ROOT/cfg['parent']).prepare()
+    assert fast.statistics['cache_hits']==1 and fast.statistics['policy_loads']==0
+    torch.testing.assert_close(fast.records[111068]['x'],record['x'],atol=0,rtol=0)
+    torch.testing.assert_close(fast.records[111068]['h'],record['h'],atol=0,rtol=0)
     policy=configure_heads(ROOT/cfg['parent']);policy.requires_grad_(False)
     start,stop=record['offsets'][:2]
     batch={name:value[start:stop].unsqueeze(0).cuda() for name,value in record['actions'].items()}
@@ -119,7 +153,8 @@ def cached_vector_smoke(cfg):
         vectors=torch.stack([public_action_vector(record,0,a) for a in range(stop-start)]).cuda()
         manual=policy.action[2](policy.action[1](policy.action[0](vectors[:,:529])+policy.attack_preview(vectors[:,529:]))).flatten()
     torch.testing.assert_close(manual,logits[0],atol=1e-4,rtol=1e-4)
-    return dict(episode=111068,actions=stop-start,max_logit_error=float((manual-logits[0]).abs().max()))
+    return dict(episode=111068,actions=stop-start,max_logit_error=float((manual-logits[0]).abs().max()),
+        cache_policy_loads=fast.statistics['policy_loads'])
 
 
 def report(out):

@@ -325,6 +325,15 @@ class ActionValueAdapter:
             details=dict(steps=training.get('steps',0),best=training.get('best')))
 
 
+class TurnCollectionAdapter:
+    def observe(self,source):
+        state=source.read('collection.json',{});selection=source.read('selection.json',{})
+        return Observation(_status(source),source.read('status.json',{}).get('phase','selection'),
+            'continuations',state.get('completed',0),selection.get('target_continuations'),
+            samples=[Sample(state['completed'],state['seconds'])] if state.get('completed') and state.get('seconds') else [],
+            work_stopped=state.get('complete',False),details=dict(positions=selection.get('selected')))
+
+
 class UnknownAdapter:
     def observe(self, source):
         return Observation(_status(source), "unknown", "work", 0, None,
@@ -335,6 +344,7 @@ class UnknownAdapter:
 # Exact experiment adapters take precedence over family adapters. New run types
 # register an adapter; the estimator, recorder, transport and CLI stay unchanged.
 ADAPTERS = {
+    'rl01.turn_comparison_collection': TurnCollectionAdapter,
     "rl01.action_value": ActionValueAdapter,
     "rl01.rollout_comparison": RolloutComparisonAdapter,
     "rl01.rollout_comparison_collection": RolloutCollectionAdapter,

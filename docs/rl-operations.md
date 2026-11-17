@@ -212,10 +212,23 @@ python tools/run_comparison.py resume --config CONFIG
 `split.json` содержит разбиение миров; `training.json` — эпохи, время и лучший
 selection G; `selected.json` закрепляет кандидата. `result.json` и `report.md`
 показывают confirmation G, CI95 и выполнение критерия перехода к проверке
-политики. Подготовка и confirmation измеряются отдельно от мягкого лимита
+политики. `confirmation-predictions.pt` содержит logits, вероятности `probs`,
+разность `delta_prob = p_alternative - p_parent` и фактический выбор для каждой
+развилки. Подготовка и confirmation измеряются отдельно от мягкого лимита
 учебного цикла; начатая эпоха завершается вместе с selection.
+Состояние сохраняется на границах эпох; после сбоя незавершённая эпоха
+повторяется от последней сохранённой границы.
 
 ### Измерение CPU/GPU сравнительного цикла
+
+Для `rl01.turn_comparison_collection` доступны `prepare`, `precheck`, `collect`
+и `resume`. `prepare` закрепляет список в `positions.json`; `selection.json`
+показывает число подходящих и выбранных позиций. `precheck --out OUT` выполняет
+короткий отбрасываемый smoke. `collect --workers W` запускает продолжения,
+`resume` достраивает незавершённые задачи с теми же seeds. Обучение не запускается.
+Прогресс показывает завершённые продолжения и целевой объём. `result.json`
+содержит W/D/L вариантов, парные разницы с argmax и разнообразие последовательностей;
+истории изменяемого хода находятся в `turn-history.json` каждого продолжения.
 
 ```powershell
 python tools/bench_rl.py comparison --run RUN --config CONFIG --out OUT --warmup 1 --steps 3

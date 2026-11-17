@@ -7,6 +7,12 @@
 
 - RTX4060Ti, FP32, batch256forks/512actions: warmed head step **2.08ms** (3warmup/5measured); excludes saving/preparation. Real cached u171 vectors reproduced141action logits exactly. Synthetic controller interrupted/resumed with identical weights/Adam; no full fit or matches. Short smoke phase is below the utilization-policy duration threshold. [Smoke and kernel trace](../artifacts/preparations/c2p-action-value-smoke-verified/precheck.json).
 
+- Action-value execution: epoch-boundary checkpoints, one permutation upload per epoch, device loss accumulation, resident training/selection splits. Cache-hit preparation loads no policy and runs no head diagnostics; immutable source packets are verified and retained without recompression. Bounded smoke reproduces original update weights bitwise and recovers an interrupted epoch exactly; no full fit was run. [Evidence](../artifacts/preparations/c2p-action-value-optimized-smoke-final/precheck.json).
+
+- Full action-value execution on RTX4060Ti: preparation108.09s with1028/1028feature-cache hits and zero policy loads; 100epochs/1000updates including selection/checkpointing completed in4.37s. First-epoch forecast29.8s was conservative because of startup. The iterative phase is shorter than the utilization-policy threshold. [Timing](../artifacts/rl/c2p-action-value-v1/result.json).
+
+- Whole-turn collection smoke: central CUDA FP32 inference, task-local sampling RNG, switch back to argmax without resetting memory.16discardable2-round continuations plus order/prefix-cache checks completed in21.04s including setup; source prefix prefilled once and reused. NVML and Kineto recorded; this short phase is below the utilization-policy threshold. This is not a forecast for60-round collection. [Smoke](../artifacts/preparations/c2p-turn-comparison-final-smoke/precheck.json).
+
 ## Отложенные задачи
 
 - [x] Обработать временный Windows `PermissionError` при атомарной публикации

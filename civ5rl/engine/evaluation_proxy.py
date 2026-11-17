@@ -45,6 +45,7 @@ class ProxyAgent(ActionSelection):
     def act(self, observation, actions):
         if self.prefix_skip:
             raise ValueError('Restored public prefix is incomplete')
+        self.prefix_restored = False
         actions = ordered_actions(actions)
         encoded = self.encoder.encode(observation, actions)
         result = self.call("act", self.shared.write(0, encoded))
@@ -58,6 +59,11 @@ class ProxyAgent(ActionSelection):
             )
         self.events.extend(result.get("events", ()))
         return action
+
+    def set_selection_mode(self,mode):
+        """Change selection only; preserve encoder, GRU and private RNG."""
+        self.call('selection_mode',mode)
+        self.mode=mode
 
     def observe_step(self, observation, actions, forced_action):
         actions = ordered_actions(actions)

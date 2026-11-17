@@ -25,6 +25,18 @@ def main():
     from time import perf_counter
     preparation_started=perf_counter()
     kind=json.loads(args.config.read_text(encoding='utf-8')).get('kind')
+    if kind=='rl01.turn_comparison_collection':
+        if args.phase not in ('prepare','precheck','collect','resume'):parser.error('whole-turn protocol is collection-only')
+        if any(getattr(args,n) is not None for n in ('runtime_config','source_share','buffer_limit','pack_mib_per_second','prefix_states')):
+            parser.error('whole-turn runtime accepts --workers only')
+        from civ5rl.experiments.turn_comparison import load_config,run
+        cfg=load_config(args.config)
+        if args.phase=='precheck' and (args.out is None or args.out.resolve()==(ROOT/cfg['output']).resolve()):
+            parser.error('precheck requires a separate --out')
+        from civ5rl.reporting.progress_process import ProcessProgress
+        out=args.out or ROOT/cfg['output']
+        with ProcessProgress(out,cfg):run(args.phase,cfg,out,args.workers or 8)
+        return
     if kind=='rl01.action_value':
         if args.phase=='collect':parser.error('action-value fitting uses saved outcomes only')
         if any(getattr(args,n) is not None for n in ('runtime_config','workers','source_share','buffer_limit','pack_mib_per_second','prefix_states')):

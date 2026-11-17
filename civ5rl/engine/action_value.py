@@ -12,7 +12,8 @@ from torch.nn import functional as F
 
 
 def split_worlds(worlds):
-    if len(set(worlds)) != 57:
+    worlds = set(worlds)
+    if len(worlds) != 57:
         raise ValueError('Require 57 distinct training worlds')
     ordered = sorted(worlds, key=lambda w: hashlib.sha256(
         f'c2p_action_value_split_v1|17|{w}'.encode()).hexdigest())
@@ -61,6 +62,8 @@ def world_scores(logits, first_wins, worlds):
     if not np.isfinite(logits).all():
         raise FloatingPointError('Non-finite action-value predictions')
     rates = np.asarray(first_wins, dtype=np.float64)/4
+    # Sigmoid is monotone; compare logits to avoid artificial probability ties
+    # from floating-point saturation. True logit ties retain the parent action.
     choose = (logits[:, 1] > logits[:, 0]).astype(np.int64)
     values = np.column_stack((rates[np.arange(len(rates)), choose], rates))
     return np.stack([values[np.asarray(worlds) == w].mean(0) for w in sorted(set(worlds))])
@@ -71,14 +74,15 @@ def utility(scores):
     return float(means[0]-max(means[1], means[2]))
 
 
-def summarize(logits, first_wins, worlds):
-    scores = world_scores(logits, first_wins, worlds)
+def summarize(logits, first_wins, worlds, *, scores=None):
+    if scores is None:scores = world_scores(logits, first_wins, worlds)
     means = scores.mean(0)
     z = torch.as_tensor(np.asarray(logits), dtype=torch.float64)
     y = torch.as_tensor(np.asarray(first_wins)/4, dtype=torch.float64)
+    p = z.sigmoid()
     return dict(G=utility(scores), head=float(means[0]), parent=float(means[1]),
         alternative=float(means[2]), bce=float(F.binary_cross_entropy_with_logits(z, y)),
-        brier=float((z.sigmoid().square()-2*z.sigmoid()*y+y).mean()),
+        brier=float((p.square()-2*p*y+y).mean()),
         alternative_fraction=float((z[:, 1] > z[:, 0]).double().mean()),
         worlds={str(w): row.tolist() for w, row in zip(sorted(set(worlds)), scores)})
 
@@ -96,4 +100,5 @@ def bootstrap(scores, samples=10000, seed=20261103):
 
 @torch.no_grad()
 def predict(head, inputs):
+    """Return logits for stable ranking; exported probabilities use sigmoid."""
     return head(inputs.flatten(0, 1)).reshape(-1, 2).cpu().numpy()

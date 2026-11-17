@@ -334,6 +334,9 @@ class EvaluationExecutor:
     def configure_agent(self, connection, agent, info):
         """Allow a specialized executor to install task-local reset state."""
 
+    def configure_task(self,connection,task):
+        """Associate task-local metadata before a worker can reset its agent."""
+
     def _receive_message(self, connection, command, args):
         if command == "close":
             with self.lock:
@@ -364,6 +367,12 @@ class EvaluationExecutor:
         agent = self.connections[connection]
         if agent is None:
             raise ValueError("Evaluation agent was not reset")
+        if command == 'selection_mode':
+            (mode,) = args
+            if mode not in ('argmax','sample'):raise ValueError('Unknown selection mode')
+            agent.mode=mode
+            connection.send(('ok',None))
+            return None
         if command not in {"act", "observe"}:
             raise ValueError(f"Unknown evaluation request {command!r}")
         (state,)=args
@@ -447,6 +456,7 @@ class EvaluationExecutor:
             server, client = Pipe()
             with self.lock:
                 self.connections[server] = None
+                self.configure_task(server,task)
             pending[executor.submit(_remote_task, function, task, client)] = client
             return True
 

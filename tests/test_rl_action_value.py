@@ -37,6 +37,7 @@ class ActionValueTests(unittest.TestCase):
     def test_world_split_is_disjoint_and_independent_of_input_order(self):
         worlds=list(range(10000,10057));split=split_worlds(worlds)
         self.assertEqual(split,split_worlds(worlds[::-1]))
+        self.assertEqual(split,split_worlds(worlds+worlds[:5]))
         self.assertEqual([len(x) for x in split.values()],[33,12,12])
         self.assertEqual(len(set(sum(split.values(),[]))),57)
 
