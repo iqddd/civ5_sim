@@ -16,7 +16,7 @@
   "start_episode": 111068,
   "max_forks": 4096,
   "collection_seconds": 7200,
-  "training_seconds": 1800,
+  "training_seconds": 2400,
   "collection_input": {
     "run": "artifacts/rl/c2p-rollout-comparison-v2-collection",
     "sha256": {

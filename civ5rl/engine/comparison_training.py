@@ -34,7 +34,11 @@ HISTORY_BATCH = 8
 ATTENTION_BACKEND = 'compact_fp32'
 
 
-def training_runtime():
+def training_runtime(cfg=None):
+    if cfg and cfg.get('training',{}).get('mode')=='frozen_heads_step_kl':
+        return dict(trainable=['action','attack_preview'],trainable_parameters=68609,
+                    precision='deterministic_fp32_no_amp_no_tf32',feature_cache='frozen_public_histories_fp32',
+                    full_kl_backend='fp32_logsoftmax_fp64_cuda_reduction',compile_mode='default',cuda_graphs=False)
     return dict(attention_backend=ATTENTION_BACKEND,history_batch=HISTORY_BATCH,
                 spatial_batch=32,bptt=128,compile_mode='default',cuda_graphs=False,
                 coalesced_spatial_gradients=True,
@@ -435,14 +439,16 @@ def publish_candidate(cfg,out,state,identity):
     changed=any(not torch.equal(value.cpu(),original['model'][name]) for name,value in state['model'].items())
     atomic_torch_save(dict(variant='C2P',model=state['model'],optimizer=state['optimizer'],state={k:v for k,v in state.items() if k not in ('model','optimizer')},config=original['config'],identity=identity),out/'candidate.pt')
     report=dict(status='complete',training_steps=state['steps'],epoch=state['epoch'],cursor=state['cursor'],seconds=state['seconds'],overshoot_seconds=max(0,state['seconds']-cfg['training_seconds']),stop_reason=state['stop_reason'],changed=changed,attempted_final_kl=state.get('attempted_final_kl',state.get('last_full_kl')),input_cache=state.get('input_cache'),candidate_sha256=file_sha256(out/'candidate.pt'))
-    if state.get('mode')=='full_corpus_step_kl':
+    if state.get('mode') in ('full_corpus_step_kl','frozen_heads_step_kl'):
         report.update({k:state[k] for k in ('mode','attempts','rejected_attempts','lr','anchor_cursor','last_full_kl')})
+        for key in ('learning','baseline_learning','feature_parity'):
+            if key in state:report[key]=state[key]
     write_json(out/'training.json',report)
     return out/'candidate.pt' if changed else None
 
 
 def _fit(cfg,out,dataset,identity,budget):
-    if cfg.get('training',{}).get('mode')=='full_corpus_step_kl':
+    if cfg.get('training',{}).get('mode') in ('full_corpus_step_kl','frozen_heads_step_kl'):
         from civ5rl.engine.comparison_control import fit_full_corpus
         return fit_full_corpus(cfg,out,dataset,identity,budget)
     out=Path(out);state_path=out/'training.pt'

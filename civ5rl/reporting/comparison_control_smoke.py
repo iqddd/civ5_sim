@@ -57,6 +57,17 @@ def smoke(cfg,out):
         parent=torch.load(ROOT/cfg['parents'][0],map_location='cpu',weights_only=False)
         if any(not torch.equal(v,parent['model'][k]) for k,v in candidate['model'].items() if k.startswith('value.')):
             raise AssertionError('Critic changed during comparison smoke')
+        if cfg['training']['mode']=='frozen_heads_step_kl':
+            if any(not torch.equal(v,parent['model'][k]) for k,v in candidate['model'].items()
+                   if not k.startswith(('action.','attack_preview.'))):
+                raise AssertionError('Frozen representation changed')
+            from civ5rl.engine.comparison_heads import configure_heads
+            model=configure_heads(cfg['parents'][0],device='cpu')
+            parameters=[p for p in model.parameters() if p.requires_grad]
+            if sum(p.numel() for p in parameters)!=68609:raise AssertionError('Wrong trainable head set')
+            if len(candidate['optimizer']['param_groups'][0]['params'])!=len(parameters):
+                raise AssertionError('Frozen parameters entered head Adam')
+            result.update(frozen_weights_exact=True,trainable_parameters=68609)
         accepted=result['training_steps']
         if any(int(v['step'])!=accepted for v in candidate['optimizer']['state'].values()):
             raise AssertionError('Smoke Adam counters differ from accepted steps')
@@ -103,7 +114,11 @@ def benchmark(args,parser):
         scratch=Path(tmp)
         shutil.copytree(source/'sources.storage',scratch/'sources.storage')
         restore_tree(scratch,'sources')
-        policy=configure_policy(cfg['parents'][0])
+        head_only=options['mode']=='frozen_heads_step_kl'
+        if head_only:
+            from civ5rl.engine.comparison_heads import configure_heads,HeadFeatures
+            policy=configure_heads(cfg['parents'][0])
+        else:policy=configure_policy(cfg['parents'][0])
         optimizer=torch.optim.Adam([p for p in policy.parameters() if p.requires_grad],lr=options['initial_lr'],
                                    betas=(.9,.999),eps=1e-5,weight_decay=0)
         keys=[(p['episode'],p['index']) for p in data['pairs']]+[tuple(k) for k in data['anchors']]
@@ -111,21 +126,39 @@ def benchmark(args,parser):
         for episode,index in keys:limits[episode]=max(limits.get(episode,0),index+1)
         histories=Histories(scratch,source_hashes=data['source_hashes'],limits=limits)
         histories.prepare(keys,device='cuda')
-        refs=prepare_references(policy,histories,data['anchors'],scratch/'references.pt')
+        if head_only:
+            features=HeadFeatures(policy,histories,data)
+            features.prepare(cfg['parents'][0])
+        else:refs=prepare_references(policy,histories,data['anchors'],scratch/'references.pt')
         state=initial_state(data['anchors'],options,seed_for(cfg['seed'],0,'anchors',namespace=cfg['namespace']))
         anchors=[data['anchors'][i] for i in state['anchor_order'][:options['anchors_per_step']]]
         cold=perf_counter()-started;snapshot=AdamSnapshot(policy,optimizer);rows=[]
         with ResourceMonitor(out/'telemetry') as monitor:
             for index in range(args.warmup+args.steps):
                 snapshot.restore();monitor.mark('warmup' if index<args.warmup else 'full_corpus_attempt')
-                begin=perf_counter();logical_step(policy,optimizer,histories,data['pairs'],anchors,refs['mixed'])
+                begin=perf_counter()
+                if head_only:features.update(optimizer,data['pairs'],anchors)
+                else:logical_step(policy,optimizer,histories,data['pairs'],anchors,refs['mixed'])
                 step=perf_counter()-begin;begin=perf_counter()
-                kl=full_kl(policy,histories,data['anchors'],refs['fp32']);control=perf_counter()-begin
+                if head_only:kl,learning=features.measure()
+                else:kl=full_kl(policy,histories,data['anchors'],refs['fp32'])
+                control=perf_counter()-begin
                 begin=perf_counter()
                 atomic_torch_save(dict(model=policy.state_dict(),optimizer=optimizer.state_dict(),rng=capture_rng()),scratch/'discarded.pt')
                 save=perf_counter()-begin;begin=perf_counter();snapshot.restore();rollback=perf_counter()-begin
                 rows.append(dict(warmup=index<args.warmup,step_seconds=step,kl_seconds=control,
                                  save_seconds=save,rollback_seconds=rollback,full_kl=kl))
+        if head_only:
+            snapshot.restore()
+            from torch.profiler import profile,ProfilerActivity
+            with profile(activities=[ProfilerActivity.CPU,ProfilerActivity.CUDA]) as trace:
+                features.update(optimizer,data['pairs'],anchors)
+            trace.export_chrome_trace(str(out/'heads-trace.json'))
+            kernels=sorted((dict(name=e.key,cuda_us=e.device_time_total,count=e.count)
+                            for e in trace.key_averages() if e.device_time_total),
+                           key=lambda e:e['cuda_us'],reverse=True)[:20]
+            write_json(out/'top-kernels.json',kernels)
+            snapshot.restore()
         measured=[r for r in rows if not r['warmup']]
         cycle=statistics.mean(r['step_seconds']+r['kl_seconds']+2*r['save_seconds'] for r in measured)
         warmup=sum(r['step_seconds']+r['kl_seconds']+r['save_seconds']+r['rollback_seconds']
@@ -137,6 +170,11 @@ def benchmark(args,parser):
                     estimated_thirty_attempts_seconds=cold+warmup+30*(cycle+statistics.mean(r['rollback_seconds'] for r in measured)),
                     training_seconds=cfg['training_seconds'],fits_nominal=estimate<=cfg['training_seconds'],
                     limitation='Measured batch and hardware only; retries and final packing can add time.')
+        if head_only:
+            result.update(feature_cache=features.statistics,feature_parity=features.parity,
+                learning_after_discarded_step=learning,trainable_parameters=sum(p.numel() for p in policy.parameters() if p.requires_grad),
+                speedup_vs_full_training_step=18.2342698/statistics.mean(r['step_seconds'] for r in measured),
+                speedup_vs_full_kl=22.5921917/statistics.mean(r['kl_seconds'] for r in measured))
         del histories
         import gc
         gc.collect()

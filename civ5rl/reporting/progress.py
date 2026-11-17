@@ -112,6 +112,12 @@ def format_progress(result):
     attempts = (f" | attempts {details['attempts']}, rejected {details.get('rejected_attempts',0)}"
                 + (f", LR {details['lr']:g}" if details.get('lr') is not None else '')
                 if details.get('attempts') is not None else '')
+    learning = details.get('learning') or {}
+    alternative = learning.get('pairs',{}).get('alternative')
+    learned = (f" | alternatives preferred {alternative['preferred']}/{alternative['count']}"
+               f", argmax {alternative['better_argmax']}"
+               f", anchor changes {learning['anchors']['all']['changed']}"
+               if alternative else '')
     groups = details.get("adam_counters")
     adam = (f" | Adam shared/actor {groups['shared_actor']}, value {groups['value']}"
             + (f", preview {groups['attack_preview']}" if "attack_preview" in groups else "")
@@ -124,5 +130,5 @@ def format_progress(result):
             f"other {duration(result['eta_other_seconds'])} ({stages or 'none'}) | total {duration(result['eta_total_seconds'])} | "
             f"conditional +{duration(result['eta_conditional_seconds'])} | {budgets}" +
             (f" | finish ~{result['estimated_finish_at']}" if result["estimated_finish_at"] else "") +
-            revision + adam + attempts +
+            revision + adam + attempts + learned +
             (" | assumes resume" if result["eta_assumes_resume"] else ""))

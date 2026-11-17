@@ -69,7 +69,8 @@ def run_updates(policy, optimizer, state, anchors, options, budget, save,
             metrics = update(selected)
             step_seconds = perf_counter() - step_started
             kl_started = perf_counter()
-            kl = measure()
+            measured = measure()
+            kl, learning = measured if isinstance(measured,tuple) else (measured,None)
             kl_seconds = perf_counter() - kl_started
             if not math.isfinite(kl):
                 raise FloatingPointError('Non-finite full KL after Adam attempt')
@@ -92,6 +93,9 @@ def run_updates(policy, optimizer, state, anchors, options, budget, save,
                       full_kl=kl, step_seconds=step_seconds, kl_seconds=kl_seconds,
                       rollback_seconds=0. if accepted else perf_counter()-rollback_started,
                       seconds=perf_counter()-started, **metrics)
+        if accepted and learning is not None:
+            record['learning'] = learning
+            state['learning'] = learning
         state['history'].append(record)
         state['pending'] = None
         if not accepted:
@@ -145,7 +149,12 @@ def fit_full_corpus(cfg, out, dataset, identity, budget):
             return out/'candidate.pt' if report['changed'] else None
         return publish_candidate(cfg,out,state,identity)
     restore_tree(out,'sources')
-    policy = configure_policy(cfg['parents'][0])
+    head_only = options['mode']=='frozen_heads_step_kl'
+    if head_only:
+        from civ5rl.engine.comparison_heads import configure_heads,HeadFeatures
+        policy = configure_heads(cfg['parents'][0])
+    else:
+        policy = configure_policy(cfg['parents'][0])
     optimizer = torch.optim.Adam([p for p in policy.parameters() if p.requires_grad],
         lr=options['initial_lr'],betas=(.9,.999),eps=1e-5,weight_decay=0)
     keys = [(p['episode'],p['index']) for p in pairs]+[tuple(k) for k in anchors]
@@ -154,7 +163,20 @@ def fit_full_corpus(cfg, out, dataset, identity, budget):
         limits[episode] = max(limits.get(episode,0), index+1)
     histories = Histories(out,source_hashes=dataset.get('source_hashes'),limits=limits)
     histories.prepare(keys,device=next(policy.parameters()).device,budget=budget)
-    references = prepare_references(policy,histories,anchors,out/'references.pt',budget=budget)
+    features = None
+    if head_only:
+        features = HeadFeatures(policy,histories,dataset)
+        try:
+            features.prepare(cfg['parents'][0],budget=budget)
+            _,baseline = features.measure()
+            state.setdefault('baseline_learning',baseline)
+            state.setdefault('learning',baseline)
+            state['feature_parity'] = features.parity
+        except TimeoutError:
+            if not budget.expired():raise
+        state['mode'] = options['mode']
+    else:
+        references = prepare_references(policy,histories,anchors,out/'references.pt',budget=budget)
     if 'model' in state:
         policy.load_state_dict(state['model'])
         optimizer.load_state_dict(state['optimizer'])
@@ -169,6 +191,7 @@ def fit_full_corpus(cfg, out, dataset, identity, budget):
     def save():
         state.update(model=policy.state_dict(),optimizer=optimizer.state_dict(),rng=capture_rng(),
                      seconds=budget.elapsed(),identity=identity,input_cache=histories.statistics())
+        if features is not None:state['input_cache']['head_features']=features.statistics
         atomic_torch_save(state,path)
         cycle=0.; accepted=[]
         for row in state['history']:
@@ -177,14 +200,19 @@ def fit_full_corpus(cfg, out, dataset, identity, budget):
                 accepted.append(dict(row,cycle_seconds=cycle));cycle=0.
         jsonl('attempts.jsonl',state['history'])
         jsonl('steps.jsonl',accepted)
+        if features is not None:
+            learning_rows=([dict(step=0,learning=state['baseline_learning'])] if 'baseline_learning' in state else [])
+            learning_rows += [dict(step=row['step'],learning=row['learning']) for row in state['history'] if row['accepted']]
+            jsonl('learning.jsonl',learning_rows)
         write_json(out/'training.json',{k:state[k] for k in (
             'mode','steps','attempts','rejected_attempts','lr','anchor_cursor','pending',
-            'last_full_kl','seconds','stop_reason','input_cache')})
+            'last_full_kl','seconds','stop_reason','input_cache')} | {'learning':state.get('learning')})
 
     def update(selected):
+        if features is not None:return features.update(optimizer,pairs,selected)
         return logical_step(policy,optimizer,histories,pairs,selected,references['mixed'])
 
     run_updates(policy,optimizer,state,anchors,options,budget,save,update,
-                lambda: full_kl(policy,histories,anchors,references['fp32']))
+                features.measure if features is not None else lambda: full_kl(policy,histories,anchors,references['fp32']))
     frozen=torch.load(path,map_location='cpu',weights_only=False)
     return publish_candidate(cfg,out,frozen,identity)

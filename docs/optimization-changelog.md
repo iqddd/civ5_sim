@@ -5,6 +5,11 @@
 
 ## Отложенные задачи
 
+- [ ] Обработать временный Windows `PermissionError` при атомарной публикации
+  heartbeat бюджета, чтобы фоновая запись продолжалась после отказа.
+  [Наблюдение](../artifacts/rl/c2p-rollout-comparison-v2-heads/console.log):
+  основной deadline работал, итоговое время сохранено корректно.
+
 - [ ] Включить `prefix_states` по умолчанию в сравнительном сборе, сохранив явное
   отключение и запись выбранного режима в runtime. Проверить итоговый корпус
   через финализацию, импорт и восстановление учебных историй.
@@ -172,3 +177,19 @@ reset, prefill, повторное использование слотов и о
 [Baseline](../artifacts/benchmarks/resident-hidden-baseline40/summary.json),
 [резидентные состояния](../artifacts/benchmarks/resident-hidden-enabled40/summary.json),
 [изолированный замер и трассы](../artifacts/benchmarks/resident-hidden-copy-trace/summary.json).
+
+## 17 ноября 2026 — FP32-кэш для обучения голов
+
+RTX 4060 Ti, 330 пар + 660 учебных опор, контроль на 12096 позициях: после
+одного прогрева шаг голов занял 0,235 с против 18,23 с полнокорпусного
+обучения; полный KL с диагностикой — 2,30 с против 22,59 с. Замороженные
+признаки вычислены в FP32, сравнение скорости относится к разным режимам
+обучения (в исходном пространственная часть mixed). Холодная подготовка —
+336,1 с, кэш — 1,56 GiB; прогноз 10 шагов — 367,7 с без финальной упаковки.
+Короткая трасса шага: H2D 46,3 мс, GEMM 19,6 мс; рабочее окно короче
+10 минут, средняя NVML Core Load 15,1%, Memory Controller 3,4%, мощность
+24,7 Вт. Кэшированный и обычный FP32-forward на трёх позициях: максимальная
+разница logits 1,06e-5, argmax совпал.
+[Замер](../artifacts/preparations/c2p-heads-local-timing/summary.json),
+[ядра](../artifacts/preparations/c2p-heads-local-timing/top-kernels.json),
+[трасса](../artifacts/preparations/c2p-heads-local-timing/heads-trace.json).

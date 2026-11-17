@@ -19,6 +19,76 @@ class Budget:
 
 
 class ControlTests(unittest.TestCase):
+    def test_cached_head_update_matches_full_pair_and_anchor_means(self):
+        # The cache path must retain independent loss denominators and all legal
+        # logits; a plausible but misnormalized loss can silently spoil a run.
+        from civ5rl.core.model import Policy
+        from civ5rl.engine.comparison_heads import HeadFeatures
+        from civ5rl.engine.comparison_training import categorical_kl,pair_loss
+        torch.manual_seed(11)
+        policy=Policy('C2P')
+        for name,p in policy.named_parameters():p.requires_grad_(name.startswith(('action.','attack_preview.')))
+        manual=deepcopy(policy)
+        cache=object.__new__(HeadFeatures)
+        cache.policy=policy;cache.device=torch.device('cpu')
+        cache.locations={(1,0):(1,0),(1,1):(1,1)}
+        cache.records={1:dict(x=torch.randn(2,4,128),h=torch.randn(2,256),offsets=[0,3,5],
+            actions=dict(sources=torch.tensor([0,1,-1,2,-1]),targets=torch.tensor([1,0,-1,1,-1]),
+                         action_features=torch.randn(5,17),attack_preview=torch.randn(5,5)))}
+        keys=[(1,0),(1,1)]
+        batch,x,h=cache.inputs(keys)
+        with torch.no_grad():
+            initial=policy.heads(batch,x,h)[0]
+            cache.references={k:((initial[i,:cache.count(k)]+torch.arange(cache.count(k))*.1)/.5).log_softmax(-1)
+                              for i,k in enumerate(keys)}
+        pairs=[dict(episode=1,index=0,better=1,worse=0,weight=.5),
+               dict(episode=1,index=1,better=0,worse=1,weight=.25)]
+        optimizer=torch.optim.Adam([p for p in policy.parameters() if p.requires_grad],lr=1e-5,eps=1e-5)
+        expected_optimizer=torch.optim.Adam([p for p in manual.parameters() if p.requires_grad],lr=1e-5,eps=1e-5)
+        logits=manual.heads(batch,x,h)[0]
+        pair=sum(pair_loss(logits[i],p['better'],p['worse'],p['weight']) for i,p in enumerate(pairs))/2
+        kl=sum(categorical_kl(cache.references[k],logits[i,:cache.count(k)]) for i,k in enumerate(keys))/2
+        (pair+kl).backward()
+        torch.nn.utils.clip_grad_norm_([p for p in manual.parameters() if p.requires_grad],.5)
+        expected_optimizer.step()
+        metrics=cache.update(optimizer,pairs,keys)
+        self.assertAlmostEqual(metrics['pair_loss'],float(pair.detach()),places=6)
+        self.assertAlmostEqual(metrics['anchor_kl'],float(kl.detach()),places=6)
+        for name,value in policy.state_dict().items():
+            torch.testing.assert_close(value,manual.state_dict()[name],atol=2e-7,rtol=1e-6)
+
+    def test_rejected_learning_does_not_replace_last_accepted_diagnostics(self):
+        # A rejected model must not appear as learned corrections in reports.
+        model,opt,state,anchors,options=self.fixture(max_accepted_steps=2,max_retries=0)
+        def update(selected):
+            opt.zero_grad();(-model.weight.sum()).backward();opt.step();return {}
+        def measure():
+            return (0. if state['steps']==0 else .02), {'preferred':state['attempts']}
+        run_updates(model,opt,state,anchors,options,Budget(),lambda:None,update,measure)
+        self.assertEqual(state['learning'],{'preferred':1})
+        self.assertEqual(state['history'][0]['learning'],{'preferred':1})
+        self.assertNotIn('learning',state['history'][1])
+
+    def test_learning_distinguishes_pair_preference_argmax_and_parent_confirmation(self):
+        # Better than the paired action need not mean best among all legal ones.
+        from civ5rl.engine.comparison_heads import learning_metrics
+        pairs=[dict(episode=1,index=i,better=1 if i!=1 else 0) for i in range(3)]
+        original={(1,i):0 for i in range(3)}
+        baseline=dict(pairs=[(0,-.5,.7),(0,.2,.3),(0,0.,.4)],
+                      choices={(1,0):0,(2,0):0})
+        current=dict(pairs=[(2,.5,.2),(1,-.2,.5),(0,0.,.4)],
+                     choices={(1,0):2,(2,0):1})
+        result=learning_metrics(pairs,original,baseline,current,[(1,0),(2,0)])
+        alternative=result['pairs']['alternative']
+        self.assertEqual(alternative['count'],2)
+        self.assertEqual(alternative['preferred'],1)
+        self.assertEqual(alternative['ties'],1)
+        self.assertEqual(alternative['better_argmax'],0)
+        self.assertEqual(alternative['preference_gained'],1)
+        self.assertEqual(result['pairs']['parent_confirmation']['preference_lost'],1)
+        self.assertEqual(result['pairs']['parent_confirmation']['argmax_lost'],1)
+        self.assertEqual(result['anchors']['outside_pairs'],dict(count=1,changed=1,fraction=1.))
+
     def fixture(self, **overrides):
         random.seed(4);np.random.seed(4);torch.manual_seed(4)
         options = dict(initial_lr=.1, max_accepted_steps=2, anchors_per_step=2,

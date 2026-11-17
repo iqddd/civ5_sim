@@ -316,7 +316,7 @@ def main():
         from civ5rl.reporting.comparison_collection_bench import run_benchmark
         return run_benchmark(args, parser)
     if args.phase == "comparison":
-        if args.config and json.loads(args.config.read_text(encoding='utf-8')).get('training',{}).get('mode')=='full_corpus_step_kl':
+        if args.config and json.loads(args.config.read_text(encoding='utf-8')).get('training',{}).get('mode') in ('full_corpus_step_kl','frozen_heads_step_kl'):
             if not any(a=='--steps' or a.startswith('--steps=') for a in sys.argv[1:]):args.steps=1
             from civ5rl.reporting.comparison_control_smoke import benchmark
             return benchmark(args,parser)

@@ -23,13 +23,16 @@ KIND='rl01.rollout_comparison'
 def load_config(path):
     cfg=read_json(path)
     if cfg['kind']!=KIND or cfg['seed']!=17:raise ValueError('Unknown comparison profile')
-    if (not cfg.get('collection_input') and cfg['max_forks']!=1024) or cfg['collection_seconds']!=7200 or cfg['training_seconds']!=1800:
+    training_limits=(1800,2400) if cfg.get('training',{}).get('mode')=='full_corpus_step_kl' else (1800,)
+    if (not cfg.get('collection_input') and cfg['max_forks']!=1024) or cfg['collection_seconds']!=7200 or cfg['training_seconds'] not in training_limits:
         raise ValueError('This first-cycle protocol fixes its budgets')
     for p,sha in zip(cfg['parents'],cfg['parent_sha256']):
         if file_sha256(ROOT/p)!=sha:raise ValueError('Parent SHA mismatch')
     if cfg.get('training'):
         training=cfg['training']
-        expected=dict(mode='full_corpus_step_kl',max_accepted_steps=10,anchors_per_step=660,
+        mode=training.get('mode')
+        if mode not in ('full_corpus_step_kl','frozen_heads_step_kl'):raise ValueError('Unknown fitting mode')
+        expected=dict(mode=mode,max_accepted_steps=10,anchors_per_step=660,
                       initial_lr=1e-5,kl_limit=.015,max_retries=2)
         if training!=expected or not cfg.get('collection_input'):
             raise ValueError('Unknown full-corpus comparison protocol')
@@ -48,7 +51,7 @@ def prepare(cfg,out):
     if cfg['start_episode']<source_state['next_episode']:raise ValueError('Episode IDs overlap')
     plan=read_json(source/'manifest.json')
     identity=checkpoint.passport(out,cfg,plan)
-    write_json(out/'run.json',dict(kind=KIND,config=cfg,identity=identity,training_runtime=training_runtime(),source_manifest_sha256=file_sha256(source/'manifest.json'),parent_sha256=cfg['parent_sha256']))
+    write_json(out/'run.json',dict(kind=KIND,config=cfg,identity=identity,training_runtime=training_runtime(cfg),source_manifest_sha256=file_sha256(source/'manifest.json'),parent_sha256=cfg['parent_sha256']))
     write_json(out/'match-config.json',saved['config'])
     write_json(out/'manifest.json',plan)
     write_json(out/'collection.json',dict(seconds=0.,next_episode=cfg['start_episode'],forks=[],sources=[],complete=False,samples=[]))
@@ -91,7 +94,7 @@ def prepare_collection_input(cfg,out):
     identity=checkpoint.passport(out,cfg,plan)
     write_json(out/'status.json',dict(status='prepared',phase='train'))
     write_json(out/'run.json',dict(kind=KIND,config=cfg,identity=identity,
-        training_runtime=training_runtime(),collection_input=cfg['collection_input'],
+        training_runtime=training_runtime(cfg),collection_input=cfg['collection_input'],
         source_manifest_sha256=file_sha256(source/'manifest.json'),parent_sha256=cfg['parent_sha256']))
 
 
@@ -324,7 +327,7 @@ def run(phase,cfg,out,*,preparation_seconds=0.):
         if phase in ('prepare','collect','resume') and collect_needed:
             budget=timing.enter_context(PhaseBudget(out,'collection',cfg['collection_seconds']))
         elif (phase in ('train','resume') or
-              phase=='prepare' and cfg.get('training',{}).get('mode')=='full_corpus_step_kl') and train_needed:
+              phase=='prepare' and cfg.get('training',{}).get('mode') in ('full_corpus_step_kl','frozen_heads_step_kl')) and train_needed:
             budget=timing.enter_context(PhaseBudget(out,'training',cfg['training_seconds']))
         if budget is not None:budget.base+=preparation_seconds
         configure(cfg['seed'],'cuda')

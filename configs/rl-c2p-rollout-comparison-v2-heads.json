@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "kind": "rl01.rollout_comparison",
+  "seed": 17,
+  "source_run": "artifacts/rl/ppo-c2p-h60-end-turn",
+  "parents": [
+    "artifacts/rl/ppo-c2p-h60-end-turn/checkpoints/initial.pt",
+    "artifacts/rl/ppo-c2p-h60-end-turn/checkpoints/update-0107.pt"
+  ],
+  "parent_sha256": [
+    "ffd541cae737421ddcda21fa3d12b1aad7ebe33dfd8012fbeeaa8c8ce11fe60c",
+    "35ca4a14fd4e9aca1f92079faba1e15c9a085670104d908a74dca910115b1f5d"
+  ],
+  "output": "artifacts/rl/c2p-rollout-comparison-v2-heads",
+  "namespace": "c2p_rollout_comparison_v2_heads",
+  "start_episode": 111068,
+  "max_forks": 4096,
+  "collection_seconds": 7200,
+  "training_seconds": 1800,
+  "collection_input": {
+    "run": "artifacts/rl/c2p-rollout-comparison-v2-collection",
+    "sha256": {
+      "dataset.json": "53b4215622fd577c4c74b5457d3cf35e1c7753e10dab1a52b0df490a8f0921be",
+      "anchors.json": "fea8a78fcf16b5600960d8be4d5b699d3c54371d259dab29bab93d8c33d4e820",
+      "collection.json": "715d0fa1f006521036f1d4955f50e87b61018ba38b0e46f95be8238c55f669c8",
+      "match-config.json": "2f1fa9d49ac19669e635b12e724b2eeec627e057a3ca45ab5587feaf0771e07e",
+      "manifest.json": "aaec0e1e444ae63e279276e6e14d87e01437873e0fed8c12620603126fc230b4",
+      "passport.json": "7ac436437e69be02ce7b497ec0041ac75e50020cadd912a435f0dd04688bb918",
+      "resolved-config.json": "4b3992cb2366f7fa0fc9b48c40a17ec40acb06eaccc6567c25ee7547737f27fa",
+      "corpus-manifest.json": "aaec0e1e444ae63e279276e6e14d87e01437873e0fed8c12620603126fc230b4",
+      "sources.zip": "b3d17538f0c7accf966ed8f3fd3b299ae82ec256041429e60af6af12e536c350",
+      "sources.storage/manifest.json": "eae4cf43e000a96bd6a810cce5ad8049a4cbe0ff62445efcef2db0edec7dc761",
+      "sources.storage/json.7z": "4f30e1589c7b968d4467dab3c1708fe15d5a18ebc30739f2cc032a5e06beed44"
+    }
+  },
+  "training": {
+    "mode": "frozen_heads_step_kl",
+    "max_accepted_steps": 10,
+    "anchors_per_step": 660,
+    "initial_lr": 1e-05,
+    "kl_limit": 0.015,
+    "max_retries": 2
+  },
+  "evaluation_protocol": "paired_development_only"
+}

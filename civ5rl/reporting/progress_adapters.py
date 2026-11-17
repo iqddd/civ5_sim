@@ -257,7 +257,7 @@ class RolloutComparisonAdapter:
             )
 
         pairs = dataset.get("pairs", [])
-        full_corpus = source.config.get('training',{}).get('mode')=='full_corpus_step_kl'
+        full_corpus = source.config.get('training',{}).get('mode') in ('full_corpus_step_kl','frozen_heads_step_kl')
         target_steps = (source.config['training']['max_accepted_steps'] if full_corpus else
                         2 * ((len(pairs) + 31) // 32))
         rows = source.rows("steps.jsonl")
@@ -277,12 +277,12 @@ class RolloutComparisonAdapter:
         return Observation(
             status, phase, "steps", completed_steps, target_steps, samples=samples,
             stages=stages,
-            budgets={"training": dict(limit_seconds=1800, spent_seconds=budget.get("seconds", 0),
+            budgets={"training": dict(limit_seconds=source.config.get('training_seconds',1800), spent_seconds=budget.get("seconds", 0),
                                       work_estimate_complete=False)},
             work_budget="training", work_stopped=training_finished,
             details=dict(accepted_pairs=len(pairs), selected_forks=dataset.get("selected_forks"),
                          completed_forks=dataset.get("completed_forks"),
-                         **({k:training.get(k) for k in ('attempts','rejected_attempts','lr','last_full_kl','pending')}
+                         **({k:training.get(k) for k in ('attempts','rejected_attempts','lr','last_full_kl','pending','learning')}
                             if full_corpus else {})),
         )
 
