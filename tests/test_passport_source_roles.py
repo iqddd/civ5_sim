@@ -1,175 +1,92 @@
-"""Silent provenance failures: allowing changed training code or trusting broken archives."""
-
+"""Protect resume state without making parent artifacts depend on source layout."""
 import hashlib
-import json
+import subprocess
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
-
-from civ5rl.provenance import checkpoint
-
+from civ5rl.provenance import checkpoint,execution
+from civ5rl.provenance.common import read_json,write_json
 
 class PassportSourceRoleTests(unittest.TestCase):
-    def test_host_transfer_cannot_silently_change_math_or_dependencies(self):
-        # A blanket environment bypass would silently permit a different training run.
-        from copy import deepcopy
-        from civ5rl.provenance.host_resume import host_delta
-        before = dict(platform="Linux-6.8-generic-x86_64-with-glibc2.39", python="3.13.16",
-                      packages={"torch": "2.15.0"}, cuda="13.2", gpu="RTX 5090",
-                      config_hash="config", corpus_hash="cases",
-                      source_hashes={"civ5rl/core/model.py": "unchanged"})
-        after = deepcopy(before)
-        after["platform"] = "Linux-7.0-generic-x86_64-with-glibc2.39"
-        self.assertEqual(host_delta(before, after), {})
-        changed = deepcopy(after)
-        changed["source_hashes"]["civ5rl/core/model.py"] = "different"
-        with self.assertRaises(ValueError):
-            host_delta(before, changed)
-        changed = deepcopy(after)
-        changed["packages"]["torch"] = "different"
-        with self.assertRaises(ValueError):
-            host_delta(before, changed)
-        self.assertEqual(before["source_hashes"], {"civ5rl/core/model.py": "unchanged"})
+    def git(self,root,*args):
+        return subprocess.check_output(['git',*args],cwd=root,stderr=subprocess.STDOUT,text=True).strip()
+    def commit(self,root):
+        self.git(root,'add','.')
+        self.git(root,'-c','user.name=Test','-c','user.email=test@example.com','commit','-qm','fixture')
+    def test_resume_requires_committed_code_and_ignored_state_survives_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);self.git(root,'init','-q')
+            code=root/'civ5rl/engine/fixture.py';code.parent.mkdir(parents=True)
+            code.write_text('value=1\n');(root/'.gitignore').write_text('artifacts/\nbuild/\n')
+            self.commit(root);old=self.git(root,'rev-parse','HEAD')
+            run=root/'artifacts/run';run.mkdir(parents=True)
+            import random
+            import torch
+            state=run/'checkpoint.pt'
+            model=torch.nn.Linear(2,1);optimizer=torch.optim.Adam(model.parameters(),lr=.01)
+            optimizer.zero_grad();model(torch.ones(1,2)).sum().backward();optimizer.step()
+            model.variant='smoke'
+            shuffle=random.Random(17);config={'lr':.01};identity={'run_id':'fixture'}
+            checkpoint.save(state,model,optimizer,{'steps':1,'cursor':7},shuffle,config,identity)
+            original=state.read_bytes();expected_draw=(torch.rand(1),shuffle.random())
+            expected_model={k:v.detach().clone() for k,v in model.state_dict().items()}
 
-    def fixture(self, root):
-        names = {
-            "civ5rl/core/model.py": "model = 1\n",
-            "civ5rl/engine/ppo.py": "loss = 1\n",
-            "civ5rl/protocols/corpus.py": "cases = 1\n",
-            "native/combat.cpp": "// simulator\n",
-            "civ5rl/experiments/evaluation.py": "match_execution = 1\n",
-            "civ5rl/reporting/snapshot.py": "graph = 1\n",
-            "civ5rl/reporting/evaluation_audit.py": "bootstrap = 1\n",
-            "civ5rl/deploy/remote.py": "inspect = 1\n",
-            "civ5rl/provenance/audit.py": "audit = 1\n",
-            "tools/report_rl.py": "plot = 1\n",
-            "tools/ctl_rl.py": "audit = 1\n",
-            "tools/run_ppo.py": "training = 1\n",
-            "tools/_build_common.py": "compiler = 1\n",
-            "tools/_imitation_benchmark.py": "demonstrations = 1\n",
-            "tests/test_loss.py": "test = 1\n",
-        }
-        for name, text in names.items():
-            path = root / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
-        return names
-
-    def test_discovery_and_legacy_identity_share_source_roles(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            contents = self.fixture(root)
-            with patch.object(checkpoint, "ROOT", root):
-                files = {
-                    p.relative_to(root).as_posix()
-                    for p in checkpoint.artifact_sources(
-                        {"passport_artifacts": ["tools/**/*.py", "tests/**/*.py"]}
-                    )
-                }
-            protected = {
-                "civ5rl/core/model.py",
-                "civ5rl/engine/ppo.py",
-                "civ5rl/protocols/corpus.py",
-                "native/combat.cpp",
-                "civ5rl/experiments/evaluation.py",
-                "tools/run_ppo.py",
-                "tools/_build_common.py",
-                "tools/_imitation_benchmark.py",
-            }
-            self.assertEqual(files, protected)
-            legacy = {
-                "source_hashes": dict.fromkeys(contents, "old"),
-                "corpus_hash": "fixed",
-            }
-            current = {**legacy, "source_hashes": dict.fromkeys(protected, "old")}
-            self.assertTrue(checkpoint.same_execution_identity(legacy, current))
-            for name in protected:
-                changed = {
-                    **current,
-                    "source_hashes": {**current["source_hashes"], name: "changed"},
-                }
-                self.assertFalse(
-                    checkpoint.same_execution_identity(legacy, changed), name
-                )
-
-    def test_analysis_uses_frozen_archive_but_execution_checks_live_core(self):
-        config = {"passport_artifacts": []}
-        manifest = {"cases": [1, 2]}
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            self.fixture(root)
-            out = root / "saved"
-            with (
-                patch.object(checkpoint, "ROOT", root),
-                patch.object(
-                    checkpoint.subprocess,
-                    "check_output",
-                    side_effect=lambda args, **kw: (
-                        "commit\n" if args[1] == "rev-parse" else b""
-                    ),
-                ),
-            ):
-                frozen = checkpoint.passport(out, config, manifest)
-                # Old passports also contain reporting files; verify their saved
-                # bytes even though they are no longer part of resume identity.
-                name = "tools/report_rl.py"
-                old_report = (root / name).read_bytes()
-                with zipfile.ZipFile(out / "sources.zip", "a") as archive:
-                    archive.writestr(name, old_report)
-                frozen["source_hashes"][name] = hashlib.sha256(old_report).hexdigest()
-                (out / "passport.json").write_text(json.dumps(frozen), encoding="utf-8")
-                frozen_bytes = (out / "passport.json").read_bytes()
-                (root / name).write_text("new plotting code\n")
-                (root / "tools/new_report.py").write_text("new = 1\n")
-                checkpoint.verify_execution_passport(out, config, manifest)
-                (root / "civ5rl/core/model.py").write_text("changed model\n")
-                self.assertEqual(
-                    checkpoint.verify_frozen_passport(
-                        out, config=config, manifest=manifest
-                    ),
-                    frozen,
-                )
-                with self.assertRaisesRegex(ValueError, "Training source"):
-                    checkpoint.verify_execution_passport(out, config, manifest)
-                self.assertEqual((out / "passport.json").read_bytes(), frozen_bytes)
-                # Archive-only tooling still counts as immutable evidence.
-                with zipfile.ZipFile(out / "sources.zip") as archive:
-                    saved = {n: archive.read(n) for n in archive.namelist()}
-                saved[name] = b"corrupt historical reporting code"
-                with zipfile.ZipFile(out / "sources.zip", "w") as archive:
-                    for n, data in saved.items():
-                        archive.writestr(n, data)
-                with self.assertRaisesRegex(ValueError, "archive corrupted"):
-                    checkpoint.verify_frozen_passport(
-                        out, config=config, manifest=manifest
-                    )
-
-    def test_frozen_check_rejects_changed_config_and_corpus(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            self.fixture(root)
-            out = root / "saved"
-            with (
-                patch.object(checkpoint, "ROOT", root),
-                patch.object(
-                    checkpoint.subprocess, "check_output", side_effect=["commit\n", b""]
-                ),
-            ):
-                checkpoint.passport(out, {"lr": 1}, {"cases": [1]})
-            with self.assertRaisesRegex(ValueError, "configuration"):
-                checkpoint.verify_frozen_passport(out, config={"lr": 2})
-            (out / "resolved-config.json").write_text('{"lr": 2}', encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "configuration hash"):
-                checkpoint.verify_frozen_passport(out)
-            (out / "resolved-config.json").write_text('{"lr": 1}', encoding="utf-8")
-            corpus = out / "corpus-manifest.json"
-            corpus.rename(out / "manifest.json")
+            binary=root/'build/combat.dll';binary.parent.mkdir();binary.write_bytes(b'original build')
+            with patch.object(execution,'ROOT',root):
+                execution.execution_session(run,'prepare')
+                self.assertFalse((run/'execution.json').exists())
+                code.write_text('value=2\n')
+                with self.assertRaisesRegex(ValueError,'Commit code'):execution.execution_session(run,'train')
+                code.write_text('value=1\n');execution.execution_session(run,'train')
+                receipt=(run/'execution.json').read_bytes()
+                execution.execution_session(run,'resume')
+                code.rename(code.with_name('renamed.py'));self.commit(root)
+                with self.assertRaisesRegex(ValueError,'Resume requires Git commit'):
+                    execution.execution_session(run,'resume')
+                self.git(root,'checkout','--detach',old)
+                execution.execution_session(run,'resume')
+                self.assertEqual(state.read_bytes(),original)
+                restored_model=torch.nn.Linear(2,1)
+                restored_optimizer=torch.optim.Adam(restored_model.parameters(),lr=.01)
+                restored=checkpoint.restore(state,restored_model,restored_optimizer,shuffle,config,identity)
+                self.assertEqual(restored,{'steps':1,'cursor':7})
+                for key,value in restored_model.state_dict().items():
+                    torch.testing.assert_close(value,expected_model[key],atol=0,rtol=0)
+                self.assertTrue(all(int(v['step'])==1 for v in restored_optimizer.state.values()))
+                for key,row in optimizer.state_dict()['state'].items():
+                    for field in ('exp_avg','exp_avg_sq'):
+                        torch.testing.assert_close(row[field],restored_optimizer.state_dict()['state'][key][field],atol=0,rtol=0)
+                torch.testing.assert_close(torch.rand(1),expected_draw[0],atol=0,rtol=0)
+                self.assertEqual(shuffle.random(),expected_draw[1])
+                self.assertEqual((run/'execution.json').read_bytes(),receipt)
+                binary.write_bytes(b'other build')
+                with self.assertRaisesRegex(ValueError,'compiled binaries'):execution.execution_session(run,'resume')
+                binary.write_bytes((run/'execution-binaries/combat.dll').read_bytes())
+                execution.execution_session(run,'resume')
+    def test_parent_inputs_ignore_source_layout_but_reject_changed_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'run'
+            with patch.object(checkpoint.subprocess,'check_output',return_value='old-commit\n'):
+                checkpoint.passport(out,{'lr':1},{'cases':[1]})
+            self.assertFalse((out/'sources.zip').exists())
+            self.assertEqual(read_json(out/'passport.json')['source_hashes'],{})
+            checkpoint.verify_execution_passport(out,{'lr':1},{'cases':[1]})
+            with self.assertRaisesRegex(ValueError,'configuration'):
+                checkpoint.verify_execution_passport(out,{'lr':2},{'cases':[1]})
+            write_json(out/'corpus-manifest.json',{'cases':[2]})
+            with self.assertRaisesRegex(ValueError,'corpus manifest'):checkpoint.verify_frozen_passport(out)
+    def test_explicit_audit_can_still_verify_historical_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)
+            with patch.object(checkpoint.subprocess,'check_output',return_value='commit\n'):
+                meta=checkpoint.passport(out,{}, {})
+            original=b'old producer code'
+            meta['source_hashes']={'old/module.py':hashlib.sha256(original).hexdigest()}
+            write_json(out/'passport.json',meta)
+            with zipfile.ZipFile(out/'sources.zip','w') as archive:archive.writestr('old/module.py',original)
             checkpoint.verify_frozen_passport(out)
-            (out / "manifest.json").rename(corpus)
-            (out / "corpus-manifest.json").write_text(
-                '{"cases": [2]}', encoding="utf-8"
-            )
-            with self.assertRaisesRegex(ValueError, "corpus manifest"):
-                checkpoint.verify_frozen_passport(out)
+            with zipfile.ZipFile(out/'sources.zip','w') as archive:archive.writestr('old/module.py',b'corrupted')
+            checkpoint.verify_execution_passport(out,{}, {})
+            with self.assertRaisesRegex(ValueError,'archive corrupted'):checkpoint.verify_frozen_passport(out)

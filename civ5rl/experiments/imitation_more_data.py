@@ -110,15 +110,8 @@ def initialize(config, out):
         for k, v in planned["inputs"]["training"].items()
     ):
         raise ValueError("Parent demonstrations changed in manifest")
-    allowed = {
-        "tools/run_cp_imitation.py",
-        "civ5rl/engine/imitation.py",
-        "civ5rl/engine/imitation_performance.py",
-        "civ5rl/engine/imitation_more_data.py",
-        "configs/rl-cp-imitation-more-data.json",
-    }
     current, changes = current_parent_lineage(
-        parent, config, manifest, allowed, same_corpus=False
+        parent, config, manifest, same_corpus=False
     )
     if (out / "passport.json").exists():
         identity = verify_existing_run(out, config, current)
@@ -151,7 +144,7 @@ def freeze_dataset(config, out, manifest):
         "environment-lock.txt",
         "manifest.json",
     ):
-        shutil.copy2(out / name, directory / name)
+        if (out/name).exists():shutil.copy2(out / name, directory / name)
     write_json(out / "manifest.json", manifest)
     checkpoint.passport(out, config, manifest)
 

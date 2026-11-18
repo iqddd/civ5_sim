@@ -131,19 +131,8 @@ def initialize(config, out):
         "config_hash": digest(config),
         "old_inputs": parent_manifest["inputs"],
     }
-    allowed = {
-        "civ5rl/core/model.py",
-        "civ5rl/core/training_graphs.py",
-        "civ5rl/engine/imitation.py",
-        "civ5rl/engine/imitation_performance.py",
-        "tools/run_cp_imitation.py",
-        "civ5rl/engine/imitation_own_states.py",
-        "civ5rl/protocols/imitation_own_states.py",
-        "configs/rl-cp-imitation-own-states.json",
-        "tests/test_rl_own_states.py",
-    }
     current, changes = current_parent_lineage(
-        parent, config, plan, allowed, same_corpus=False
+        parent, config, plan, same_corpus=False
     )
     if (out / "passport.json").exists():
         verify_existing_run(out, config, current)

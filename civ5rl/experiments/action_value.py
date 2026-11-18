@@ -50,7 +50,7 @@ def prepare(cfg, out):
     for name, sha in cfg['collection_input']['sha256'].items():
         if file_sha256(source/name) != sha:
             raise ValueError(f'Collection input changed: {name}')
-    checkpoint.verify_frozen_passport(source)
+    checkpoint.verify_frozen_passport(source,sources=False)
     if file_sha256(ROOT/cfg['parent']) != cfg['parent_sha256']:
         raise ValueError('Frozen parent changed')
     plan = read_json(source/'manifest.json')

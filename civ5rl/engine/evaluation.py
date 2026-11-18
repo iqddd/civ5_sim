@@ -162,9 +162,7 @@ class EvaluationRuntime:
         return EvaluationRuntime(device, self.workers, self.max_batch, self.wait_seconds)
 
     def identity(self):
-        from civ5rl.provenance.common import file_sha256
-        value = {**asdict(self), "precision": "float32", "service_sha256": file_sha256(Path(__file__)),
-                 "recurrent_state_sha256": file_sha256(Path(__file__).with_name('inference_state.py')),
+        value = {**asdict(self), "precision": "float32", "evaluator_version": 1,
                  "compiled_spatial_heads": self.device == 'cuda', "compile_mode": 'default' if self.device == 'cuda' else None,
                  "attention_backend": 'compact_fp32' if self.device == 'cuda' else 'dense_fp32',
                  "public_inputs": 'worker_encoder_shared_slots_v1',

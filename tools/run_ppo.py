@@ -55,6 +55,8 @@ def main(argv=None):
         config = protocol.load_config(ROOT / args.config)
     runner = importlib.import_module("civ5rl.experiments." + name).run
     out = args.out or ROOT / config["output"]
+    from civ5rl.provenance.execution import execution_session
+    execution_session(out,args.phase)
     from civ5rl.reporting.progress_process import ProcessProgress
     from civ5rl.engine.evaluation import evaluation_options
 

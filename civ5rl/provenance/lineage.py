@@ -1,61 +1,29 @@
-"""Fail-closed validation of parent source archives and execution identity."""
-
-import hashlib
-import tempfile
-import zipfile
-
+"""Parent artifacts are inputs, not constraints on the child's implementation."""
 from civ5rl.provenance import checkpoint
 from civ5rl.provenance.common import read_json
-from civ5rl.provenance.identity import execution_identity
 
 
-def verify_parent_lineage(parent, previous, current, allowed, *, same_corpus=False):
-    with zipfile.ZipFile(parent / "sources.zip") as archive:
-        for name, expected in previous["source_hashes"].items():
-            if hashlib.sha256(archive.read(name)).hexdigest() != expected:
-                raise ValueError(f"Corrupted parent source archive: {name}")
-    old_identity = execution_identity(
-        previous, include_markdown=False, include_corpus=same_corpus
-    )
-    new_identity = execution_identity(
-        current, include_markdown=False, include_corpus=same_corpus
-    )
-    old, new = old_identity["source_hashes"], new_identity["source_hashes"]
-    changes = sorted(
-        name
-        for name in old.keys() | new.keys()
-        if not name.lower().endswith(".md") and old.get(name) != new.get(name)
-    )
-    if set(changes) - allowed:
-        raise ValueError(f"Unapproved source changes from parent: {changes}")
-    old_fields = {
-        key: value for key, value in old_identity.items() if key != "source_hashes"
-    }
-    new_fields = {
-        key: value for key, value in new_identity.items() if key != "source_hashes"
-    }
-    if old_fields.keys() != new_fields.keys():
-        raise ValueError("Parent execution identity fields differ")
-    for key, value in old_fields.items():
-        if value != new_fields[key]:
-            raise ValueError(f"Parent execution identity differs: {key}")
-    return changes
+def verify_parent_lineage(parent, previous, current, *, same_corpus=False):
+    """Require an unchanged corpus only when the experiment declares it.
+
+    Checkpoint bytes, architecture and optimizer compatibility belong to each
+    loader. Source moves and a different environment never invalidate a parent.
+    """
+    if same_corpus and previous['corpus_hash']!=current['corpus_hash']:
+        raise ValueError('Continuation corpus differs from parent')
+    return []
 
 
-def current_parent_lineage(parent, config, manifest, allowed, *, same_corpus=False):
-    previous = read_json(parent / "passport.json")
+def current_parent_lineage(parent, config, manifest, *, same_corpus=False):
+    import tempfile
+    previous=checkpoint.verify_frozen_passport(parent,sources=False)
     with tempfile.TemporaryDirectory() as directory:
-        current = checkpoint.passport(directory, config, manifest)
-    changes = verify_parent_lineage(
-        parent, previous, current, allowed, same_corpus=same_corpus
-    )
-    return current, changes
+        current=checkpoint.passport(directory,config,manifest)
+    return current,verify_parent_lineage(parent,previous,current,same_corpus=same_corpus)
 
 
 def verify_existing_run(out, config, current):
-    identity = checkpoint.verify_frozen_passport(out, config=config)
-    if read_json(
-        out / "resolved-config.json"
-    ) != config or not checkpoint.same_execution_identity(identity, current):
-        raise ValueError("Execution identity mismatch")
+    identity=checkpoint.verify_frozen_passport(out,config=config,sources=False)
+    if not checkpoint.same_execution_identity(identity,current):
+        raise ValueError('Run/data identity mismatch')
     return identity

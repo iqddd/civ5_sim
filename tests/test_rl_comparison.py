@@ -48,7 +48,7 @@ class ComparisonTests(unittest.TestCase):
                        label='accepted',reason=None,accepted=True,better=0,weight=.5,executed_repetitions=8)])
             finalize_collection(cfg,source,state,SimpleNamespace(elapsed=lambda:1.))
             names=('dataset.json','anchors.json','collection.json','match-config.json','manifest.json',
-                   'passport.json','resolved-config.json','corpus-manifest.json','sources.zip',
+                   'passport.json','resolved-config.json','corpus-manifest.json',
                    'sources.storage/manifest.json','sources.storage/json.7z')
             fit_cfg=dict(parents=[],parent_sha256=[],collection_input=dict(
                 run=source.relative_to(ROOT).as_posix(),sha256={n:file_sha256(source/n) for n in names}))

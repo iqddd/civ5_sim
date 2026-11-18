@@ -43,20 +43,12 @@ class ExperimentRefactorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             paired_world_bootstrap(before, after, samples=29, seed=77)
 
-    def test_lineage_missing_environment_field_fails_closed(self):
-        import zipfile
-
-        with tempfile.TemporaryDirectory() as tmp:
-            parent = Path(tmp)
-            with zipfile.ZipFile(parent / "sources.zip", "w"):
-                pass
-            with self.assertRaises(ValueError):
-                verify_parent_lineage(
-                    parent,
-                    {"source_hashes": {}, "gpu": None},
-                    {"source_hashes": {}},
-                    set(),
-                )
+    def test_parent_code_and_environment_are_not_child_requirements(self):
+        previous={'gpu':'old','source_hashes':{'old.py':'old'},'corpus_hash':'data'}
+        current={'source_hashes':{'new/module.py':'new'},'corpus_hash':'data'}
+        self.assertEqual(verify_parent_lineage(Path('.'),previous,current,same_corpus=True),[])
+        with self.assertRaisesRegex(ValueError,'corpus'):
+            verify_parent_lineage(Path('.'),previous,{**current,'corpus_hash':'other'},same_corpus=True)
 
 
 if __name__ == "__main__":

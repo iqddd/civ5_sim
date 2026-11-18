@@ -21,6 +21,7 @@ from civ5rl.provenance.common import file_sha256, read_json, write_json
 from civ5sim.engine import digest
 
 MODE = 'frozen_heads_step_kl'
+FEATURE_CACHE_VERSION = 1  # Bump when frozen feature values/layout change.
 
 
 def configure_heads(checkpoint, device='cuda'):
@@ -78,7 +79,7 @@ class HeadFeatures:
     def prepare(self, checkpoint, budget=None):
         grouped = defaultdict(list)
         for episode,index in self.keys: grouped[episode].append(index)
-        common = dict(parent=file_sha256(checkpoint), implementation=file_sha256(__file__),
+        common = dict(parent=file_sha256(checkpoint), implementation=FEATURE_CACHE_VERSION,
             encoder=self.histories.encoder_identity, torch=str(torch.__version__),
             gpu=torch.cuda.get_device_name(self.device) if self.device.type=='cuda' else 'cpu',
             attention_backend=self.policy.attention_backend, precision='fp32_no_amp_no_tf32',

@@ -53,7 +53,6 @@ def replay(args, parser, config, inputs):
     from civ5rl.engine.resources import ResourceMonitor
     from civ5rl.experiments.imitation_helpers import load_policy
     from civ5rl.experiments.ppo_artifacts import load_rollout
-    from civ5rl.provenance.checkpoint import artifact_sources
     from civ5rl.provenance.common import (
         configure,
         file_sha256,
@@ -86,7 +85,9 @@ def replay(args, parser, config, inputs):
     # execution sources to make the comparison's dependency scope explicit.
     shared = [
         p
-        for p in artifact_sources(config)
+        for p in {Path(module.__file__).resolve() for name,module in tuple(sys.modules.items())
+                  if name.startswith(("civ5rl.","civ5sim.","civ5map."))
+                  and getattr(module,"__file__",None) and Path(module.__file__).is_file()}
         if p.resolve() != Path(current.__file__).resolve()
     ]
     protected = list(dict.fromkeys([*inputs, Path(current.__file__), *shared]))

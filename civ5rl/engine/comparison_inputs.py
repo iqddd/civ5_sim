@@ -60,11 +60,9 @@ class Histories:
         self.device, self.gpu_limit, self.pinned_limit = str(device), gpu_bytes, pinned_bytes
         self.records, self.sources, self.buffers = {}, {}, {}
         self.counters = Counter()
-        paths = ('civ5rl/core/observation.py','civ5rl/core/schema.py','civ5rl/core/context.py',
-                 'civ5rl/core/variants.py','civ5rl/core/model.py','civ5map/maps.py',
-                 'civ5sim/engine.py','civ5rl/engine/comparison_inputs.py')
-        self.encoder_identity = {p:file_sha256(ROOT/p) for p in paths}
-        self.encoder_identity.update(torch_version=str(torch.__version__),numpy_version=np.__version__)
+        # Bump encoding_version when tensor semantics change, not for file moves.
+        self.encoder_identity = dict(encoding_version=1,torch_version=str(torch.__version__),
+                                     numpy_version=np.__version__)
         self._gpu_closed = self._pinned_closed = False
 
     def source_identity(self, episode):

@@ -13,10 +13,8 @@ from civ5rl.provenance.common import ROOT,read_json,write_json,file_sha256
 from civ5rl.provenance.checkpoint import verify_frozen_passport
 
 
-PINNED = ('training.pt','candidate.pt','training.json','phase-budgets/training.json',
-          'run.json','status.json','passport.json','resolved-config.json','sources.zip',
-          'manifest.json','corpus-manifest.json','match-config.json','dataset.json',
-          'evaluations.json','result.json','evaluation.storage/manifest.json','evaluation.storage/json.7z')
+PINNED = ('training.pt','resolved-config.json','dataset.json','phase-budgets/training.json',
+          'manifest.json','match-config.json')
 
 
 def continuation_seconds(cfg):
@@ -30,10 +28,11 @@ def continuation_seconds(cfg):
 def validate_continuation(cfg):
     spec=cfg['fit_continuation'];source=ROOT/spec['run']
     if source.resolve()==(ROOT/cfg['output']).resolve():raise ValueError('Use a separate continuation directory')
-    if set(spec['sha256'])!=set(PINNED):raise ValueError('Incomplete fit continuation lineage')
-    for name,sha in spec['sha256'].items():
+    if not set(PINNED).issubset(spec['sha256']):raise ValueError('Incomplete fit continuation lineage')
+    for name in PINNED:
+        sha=spec['sha256'][name]
         if file_sha256(source/name)!=sha:raise ValueError(f'Fit continuation source changed: {name}')
-    verify_frozen_passport(source)
+    verify_frozen_passport(source,sources=False)
     old=read_json(source/'resolved-config.json')
     expected={**old,'output':cfg['output'],'fit_continuation':spec,
               'training':{**old['training'],'max_accepted_steps':100,'cycle_anchors':True}}

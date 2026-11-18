@@ -22,10 +22,8 @@ from civ5sim import Action
 class SourcePrefixes:
     def __init__(self, policy, checkpoint, runtime, max_bytes=64*1024**2):
         self.policy, self.device = policy, next(policy.parameters()).device
-        sources=('civ5rl/core/model.py','civ5rl/core/observation.py','civ5rl/core/context.py',
-                 'civ5rl/core/schema.py','civ5rl/core/variants.py','civ5rl/experiments/comparison_prefix.py')
-        self.identity = dict(checkpoint=file_sha256(checkpoint), runtime=runtime.identity(),
-                             torch=str(torch.__version__),sources={p:file_sha256(ROOT/p) for p in sources})
+        self.identity = dict(checkpoint=file_sha256(checkpoint),runtime=runtime.identity(),
+                             torch=str(torch.__version__),prefix_encoding_version=1)
         self.cache = OrderedDict()
         self.max_bytes = max_bytes
         self.hits = self.prefills = self.restored_observations = 0

@@ -301,13 +301,9 @@ def evaluation_key(config,plan,out,path,purpose,runtime_identity):
     fingerprint=('cp_mirror_'+digest(config['teacher_search'])[:32] if path=='cp'
                  else policy_hash(torch.load(out/path,map_location='cpu',weights_only=False)['model']))
     import platform
-    import inspect
-    import civ5rl.core.agent as agent_module
     from civ5sim.combat_ai import LIBRARY_PATH
-    evaluator = digest({'platform':platform.platform(), 'torch':torch.__version__,
-        'play_case':inspect.getsource(play_case), 'agent':file_sha256(Path(agent_module.__file__)),
-        'match':file_sha256(ROOT/'civ5sim/match.py'), 'cp':file_sha256(ROOT/'civ5sim/cp_agent.py'),
-        'model':file_sha256(ROOT/'civ5rl/core/model.py'), 'observation':file_sha256(ROOT/'civ5rl/core/observation.py'),
+    # Version behavior explicitly; source formatting and module names are metadata.
+    evaluator = digest({'version':1,'platform':platform.system(),'torch':str(torch.__version__),
         'planner':file_sha256(LIBRARY_PATH),
         'kernel':file_sha256(ROOT/'build'/('combat.dll' if sys.platform=='win32' else 'libcombat.so'))})
     key=digest({'purpose':purpose,'policy':fingerprint,'mode':'argmax','temperature':config.get('policy_temperature',1.0),

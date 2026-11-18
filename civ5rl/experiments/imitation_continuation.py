@@ -55,14 +55,8 @@ def initialize(config, out):
     manifest = prepare_manifest(config)
     if manifest != read_json(parent / "manifest.json"):
         raise ValueError("Continuation corpus differs from parent")
-    allowed = {
-        "tools/run_cp_imitation.py",
-        "civ5rl/protocols/imitation.py",
-        "civ5rl/engine/imitation_continuation.py",
-        "configs/rl-cp-imitation-continuation.json",
-    }
     current, changes = current_parent_lineage(
-        parent, config, manifest, allowed, same_corpus=True
+        parent, config, manifest, same_corpus=True
     )
     if (out / "passport.json").exists():
         identity = verify_existing_run(out, config, current)

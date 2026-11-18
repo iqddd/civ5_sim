@@ -1,8 +1,7 @@
 """Read frozen head packets without policy-head diagnostics or eager model load.
 
-Use the producer's exact identity, including its implementation hash, so existing
-packets remain usable. Missing packets are rebuilt from verified public histories;
-the producer module is deliberately unchanged to preserve its cache namespace.
+Use the producer's feature-format version and input identity. Missing packets
+are rebuilt from verified public histories; module paths are not cache keys.
 """
 from collections import defaultdict
 import torch
@@ -28,7 +27,7 @@ class FrozenActionFeatures:
         keys=sorted({(p['episode'],p['index']) for p in self.dataset['pairs']} |
                     set(map(tuple,self.dataset['anchors'])))
         for episode,index in keys:grouped[episode].append(index)
-        common=dict(parent=file_sha256(self.checkpoint),implementation=file_sha256(comparison_heads.__file__),
+        common=dict(parent=file_sha256(self.checkpoint),implementation=comparison_heads.FEATURE_CACHE_VERSION,
             encoder=self.histories.encoder_identity,torch=str(torch.__version__),
             gpu=torch.cuda.get_device_name(),attention_backend='compact_fp32',precision='fp32_no_amp_no_tf32',
             temperature=.5,spatial_block=32,history_batch=1)

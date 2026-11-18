@@ -124,16 +124,9 @@ def prepare(config, out):
     ):
         raise ValueError("Parent checkpoint differs")
     parent = ROOT / config["experiment"]["parent_run"]
-    previous = read_json(parent / "passport.json")
-    with zipfile.ZipFile(parent / "sources.zip") as archive:
-        for name, h in previous["source_hashes"].items():
-            if hashlib.sha256(archive.read(name)).hexdigest() != h:
-                raise ValueError(f"Parent archive corrupted: {name}")
-    plan = prepare_cases(config)
-    current = execution_identity(config, plan)
-    for key in ("python", "platform", "packages", "cuda", "gpu"):
-        if current[key] != previous[key]:
-            raise ValueError(f"Parent environment differs: {key}")
+    previous=checkpoint.verify_frozen_passport(parent,sources=False)
+    plan=prepare_cases(config)
+    current=execution_identity(config,plan)
     write_json(out / "manifest.json", plan)
     checkpoint.passport(out, config, plan)
     saved = torch.load(

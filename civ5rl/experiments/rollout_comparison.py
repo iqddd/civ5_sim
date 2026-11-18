@@ -76,12 +76,12 @@ def prepare_collection_input(cfg,out):
     expected=cfg['collection_input']['sha256']
     required={'dataset.json','anchors.json','collection.json','match-config.json',
               'manifest.json','passport.json','resolved-config.json','corpus-manifest.json',
-              'sources.zip','sources.storage/manifest.json','sources.storage/json.7z'}
-    if set(expected)!=required:raise ValueError('Incomplete frozen collection identity')
+              'sources.storage/manifest.json','sources.storage/json.7z'}
+    if not required.issubset(expected):raise ValueError('Incomplete frozen collection identity')
     with RunLock(source):
         for name,sha in expected.items():
             if file_sha256(source/name)!=sha:raise ValueError(f'Collection input changed: {name}')
-        checkpoint.verify_frozen_passport(source)
+        checkpoint.verify_frozen_passport(source,sources=False)
         collection=read_json(source/'collection.json')
         original=read_json(source/'resolved-config.json')
         if not collection.get('finalized'):raise ValueError('Collection is not finalized')

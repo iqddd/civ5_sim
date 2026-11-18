@@ -32,7 +32,7 @@ def initialize(config, out):
         with tempfile.TemporaryDirectory() as tmp:
             current = checkpoint.passport(tmp, config, manifest)
         if not checkpoint.same_execution_identity(identity, current):
-            raise ValueError("Imitation source/corpus/environment mismatch")
+            raise ValueError("Imitation run/data mismatch")
     else:
         identity = checkpoint.passport(out, config, manifest)
     configure(17)

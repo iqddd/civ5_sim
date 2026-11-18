@@ -102,6 +102,8 @@ def main(argv=None):
         "rl01.cp_imitation_target_c2",
     ):
         config = module.load_config(args.config)
+    from civ5rl.provenance.execution import execution_session
+    execution_session(out,args.phase)
     from civ5rl.reporting.progress_process import ProcessProgress
     from civ5rl.engine.evaluation import evaluation_options
 

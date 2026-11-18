@@ -25,6 +25,7 @@ def main():
     from time import perf_counter
     preparation_started=perf_counter()
     kind=json.loads(args.config.read_text(encoding='utf-8')).get('kind')
+    from civ5rl.provenance.execution import execution_session
     if kind=='rl01.turn_comparison_collection':
         if args.phase not in ('prepare','precheck','collect','resume'):parser.error('whole-turn protocol is collection-only')
         if any(getattr(args,n) is not None for n in ('runtime_config','source_share','buffer_limit','pack_mib_per_second','prefix_states')):
@@ -35,6 +36,7 @@ def main():
             parser.error('precheck requires a separate --out')
         from civ5rl.reporting.progress_process import ProcessProgress
         out=args.out or ROOT/cfg['output']
+        execution_session(out,args.phase)
         with ProcessProgress(out,cfg):run(args.phase,cfg,out,args.workers or 8)
         return
     if kind=='rl01.action_value':
@@ -47,6 +49,7 @@ def main():
             parser.error('precheck requires a separate --out')
         from civ5rl.reporting.progress_process import ProcessProgress
         out=args.out or ROOT/cfg['output']
+        execution_session(out,args.phase)
         with ProcessProgress(out,cfg):run(args.phase,cfg,out)
         return
     if kind=='rl01.rollout_comparison_collection':
@@ -60,6 +63,7 @@ def main():
         cfg=load_config(args.config)
         out=args.out or ROOT/cfg['output']
         from civ5rl.reporting.progress_process import ProcessProgress
+        execution_session(out,args.phase)
         with ProcessProgress(out,cfg):
             run(args.phase,cfg,out,runtime,preparation_seconds=perf_counter()-preparation_started)
         return
@@ -74,6 +78,7 @@ def main():
         return precheck(cfg,args.out)
     from civ5rl.reporting.progress_process import ProcessProgress
     out=args.out or ROOT/cfg['output']
+    execution_session(out,args.phase)
     with ProcessProgress(out,cfg):run(args.phase,cfg,out,preparation_seconds=perf_counter()-preparation_started)
 
 if __name__=='__main__':main()

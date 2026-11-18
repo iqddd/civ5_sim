@@ -1,4 +1,4 @@
-"""Atomic completed-update checkpoints and immutable environment passports."""
+"""Atomic training state and compact, descriptive run metadata."""
 
 import hashlib
 import importlib.metadata
@@ -10,119 +10,48 @@ import zipfile
 from pathlib import Path
 
 from civ5rl.provenance.common import ROOT, write_json
-from civ5rl.provenance.identity import execution_identity, is_readonly_source
 from civ5rl.provenance.rng import capture_rng, restore_rng
 
 
 def same_execution_identity(left, right):
-    """Compare execution identity, ignoring documentation and read-only tooling."""
+    """Compare run/data identity, not producer code or installed packages.
 
-    left = {**left, "source_hashes": left.get("source_hashes", {})}
-    right = {**right, "source_hashes": right.get("source_hashes", {})}
-    return execution_identity(left, include_markdown=False) == execution_identity(
-        right, include_markdown=False
-    )
-
-
-DEFAULT_ARTIFACT_GLOBS = (
-    "civ5rl/**/*.py",
-    "civ5sim/**/*.py",
-    "civ5map/**/*.py",
-    "native/**/*.cpp",
-    "native/**/*.c",
-    "native/**/*.h",
-    "native/**/*.hpp",
-    "tools/**/*.py",
-    "build/combat.dll",
-    "build/combat_rules.json",
-    "configs/**/rl*.json",
-    "docs/**/rl*.md",
-    "requirements-rl*.txt",
-)
-
-
-def artifact_sources(config):
-    """Discover execution sources; read-only tooling never pins a training run."""
-    extra = config.get("passport_artifacts", [])
-    if not isinstance(extra, list) or not all(isinstance(p, str) for p in extra):
-        raise ValueError("passport_artifacts must be a list of relative glob patterns")
-    sources = set()
-    for pattern in (*DEFAULT_ARTIFACT_GLOBS, *extra):
-        if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
-            raise ValueError(
-                "Passport artifact patterns must stay within the workspace"
-            )
-        for path in ROOT.glob(pattern):
-            if path.is_file():
-                if not path.resolve().is_relative_to(ROOT.resolve()):
-                    raise ValueError("Passport artifact resolves outside the workspace")
-                if not is_readonly_source(path.relative_to(ROOT).as_posix()):
-                    sources.add(path)
-    return sorted(sources, key=lambda p: p.relative_to(ROOT).as_posix())
+    The name remains a checkpoint API; Git resume enforcement is at the shared
+    CLI execution boundary. Config and tensor compatibility are checked by the
+    caller/load_state_dict. Historical metadata is descriptive, not ancestry law.
+    """
+    descriptive={'source_hashes','git_commit','config_hash','python','platform','packages','cuda','gpu','schema'}
+    return ({k:v for k,v in left.items() if k not in descriptive} ==
+            {k:v for k,v in right.items() if k not in descriptive})
 
 
 def passport(directory, config, manifest):
-    import torch
+    """Record a run's config/data and descriptive environment; code lives in Git.
 
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    sources = artifact_sources(config)
-    hashes = {
-        str(p.relative_to(ROOT)).replace("\\", "/"): hashlib.sha256(
-            p.read_bytes()
-        ).hexdigest()
-        for p in sources
-        if p.exists()
-    }
-    versions = {
-        d.metadata["Name"]: d.version for d in importlib.metadata.distributions()
-    }
-    value = {
-        "schema": 1,
-        "python": platform.python_version(),
-        "platform": platform.platform(),
-        "packages": versions,
-        "cuda": torch.version.cuda,
-        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-        "git_commit": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-        ).strip(),
-        "source_hashes": hashes,
-        "config_hash": hashlib.sha256(
-            json.dumps(config, sort_keys=True).encode()
-        ).hexdigest(),
-        "corpus_hash": hashlib.sha256(
-            json.dumps(manifest, sort_keys=True).encode()
-        ).hexdigest(),
-    }
-    write_json(directory / "passport.json", value)
-    write_json(directory / "resolved-config.json", config)
-    write_json(directory / "corpus-manifest.json", manifest)
-    (directory / "dirty.diff").write_bytes(
-        subprocess.check_output(["git", "diff", "--binary"], cwd=ROOT)
-    )
-    # Include untracked implementation as well as tracked sources in the frozen snapshot.
-    with zipfile.ZipFile(
-        directory / "sources.zip", "w", zipfile.ZIP_DEFLATED
-    ) as archive:
-        for p in sources:
-            if p.exists():
-                archive.write(p, p.relative_to(ROOT).as_posix())
-    (directory / "environment-lock.txt").write_text(
-        "\n".join(f"{k}=={v}" for k, v in sorted(versions.items())) + "\n",
-        encoding="utf-8",
-    )
+    Source archives from completed historical runs remain readable by the audit
+    helper. New runs do not copy or hash the entire repository on preparation.
+    """
+    import torch
+    directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
+    versions={name:importlib.metadata.version(name) for name in ('torch','numpy')}
+    value=dict(schema=2,python=platform.python_version(),platform=platform.platform(),
+        packages=versions,cuda=torch.version.cuda,
+        gpu=torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        git_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
+        source_hashes={},
+        config_hash=hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest(),
+        corpus_hash=hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest())
+    write_json(directory/'passport.json',value)
+    write_json(directory/'resolved-config.json',config)
+    write_json(directory/'corpus-manifest.json',manifest)
     return value
 
 
-def verify_frozen_passport(directory, *, config=None, manifest=None):
-    """Verify saved provenance without importing or hashing the working tree.
+def verify_frozen_passport(directory, *, config=None, manifest=None, sources=True):
+    """Verify config/data metadata and, for explicit audits, historical sources.
 
-    All archived hashes are checked, including reporting files in old passports.
-    Historical passports/archives are never rewritten to match today's policy.
-    A passport without a resolved-config hash reports config_hash_verified=False;
-    absence of that field must not be silently upgraded to a verified config.
-    This establishes artifact integrity, not permission to resume on new code.
+    This never compares the producer with today's workspace or packages.
+    sources=False is sufficient for consuming a completed parent artifact.
     """
     directory = Path(directory)
     saved_config = json.loads(
@@ -150,7 +79,8 @@ def verify_frozen_passport(directory, *, config=None, manifest=None):
     ).hexdigest()
     if identity["corpus_hash"] != corpus_hash:
         raise ValueError("Saved corpus manifest hash differs")
-    expected = identity["source_hashes"]
+    expected = identity.get("source_hashes", {})
+    if not sources or not expected:return identity
     with zipfile.ZipFile(directory / "sources.zip") as archive:
         members = archive.infolist()
         names = [item.filename for item in members]
@@ -167,16 +97,12 @@ def verify_frozen_passport(directory, *, config=None, manifest=None):
 
 
 def verify_execution_passport(directory, config, manifest):
-    """Check frozen evidence first, then require the current execution identity."""
-    import tempfile
+    """Validate the saved run/data contract; CLI execution_session guards Git.
 
-    frozen = verify_frozen_passport(directory, config=config, manifest=manifest)
-    with tempfile.TemporaryDirectory(prefix="civ5-identity-") as temporary:
-        current = passport(temporary, config, manifest)
-    if not same_execution_identity(frozen, current):
-        from civ5rl.provenance.host_resume import require_host_revision
-        require_host_revision(directory, frozen, current)
-    return frozen
+    Source history and environment are not compatibility requirements. Full
+    verification of historical source archives is an explicit audit operation.
+    """
+    return verify_frozen_passport(directory,config=config,manifest=manifest,sources=False)
 
 
 def save(path, policy, optimizer, state, shuffle_rng, config, identity):
@@ -207,7 +133,7 @@ def restore(path, policy, optimizer, shuffle_rng, config, identity):
     if value["config"] != config or not same_execution_identity(
         value["identity"], identity
     ):
-        raise ValueError("Resume config/source/corpus/environment identity mismatch")
+        raise ValueError("Resume config/run/data identity mismatch")
     policy.load_state_dict(value["model"])
     optimizer.load_state_dict(value["optimizer"])
     restore_rng(value, shuffle_rng)
