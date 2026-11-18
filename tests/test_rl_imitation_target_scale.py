@@ -8,10 +8,10 @@ from pathlib import Path
 import torch
 
 from civ5rl.core.model import Policy
-from civ5rl.engine.imitation import DemonstrationCache, backward_minibatch, label_minibatches
-from civ5rl.engine.imitation_stream import FileDemonstrations, PreparedDemonstrations, prepare_episode
-from civ5rl.engine.imitation_performance import backward_minibatch_async
-from civ5rl.engine.ppo_fast import prefixes
+from civ5rl.engine.imitation.core import DemonstrationCache, backward_minibatch, label_minibatches
+from civ5rl.engine.imitation.storage import FileDemonstrations, PreparedDemonstrations, prepare_episode
+from civ5rl.engine.imitation.pipeline import backward_minibatch_async
+from civ5rl.engine.ppo.backend import prefixes
 from civ5rl.experiments.imitation_target_scale import load_config
 from civ5rl.protocols.imitation import RecordingCP, dump_episode, run_imitation_match, search_config
 from civ5rl.protocols.imitation_target_scale import KIND, match_task

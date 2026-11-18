@@ -1,7 +1,7 @@
 import unittest
 
 import torch
-from civ5rl.engine.replay_metrics import StepReplay
+from civ5rl.engine.ppo.metrics import StepReplay
 from civ5rl.ppo import update
 
 

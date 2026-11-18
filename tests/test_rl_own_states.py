@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from civ5rl.core.observation import ObservationEncoder, ordered_actions, public_map
-from civ5rl.engine.imitation import DemonstrationCache, decision_indices
+from civ5rl.engine.imitation.core import DemonstrationCache, decision_indices
 from civ5rl.experiments.imitation_own_states import LabelStream, eta_decision
 from civ5rl.protocols.imitation import make_case, prepare_manifest, search_config
 from civ5rl.protocols.imitation_own_states import AdvisedPolicy, ReplanningCPAdvisor

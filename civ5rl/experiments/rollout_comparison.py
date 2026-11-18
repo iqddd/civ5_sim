@@ -9,9 +9,10 @@ import json
 import random
 import hashlib
 import torch
-from civ5rl.engine.control import RunLock
-from civ5rl.engine.evaluation import EvaluationRuntime, EvaluationExecutor, evaluation_precision
-from civ5rl.engine.comparison_training import atomic_torch_save, fit, training_runtime
+from civ5rl.engine.runtime.control import RunLock
+from civ5rl.engine.evaluation.executor import EvaluationRuntime, EvaluationExecutor, evaluation_precision
+from civ5rl.engine.comparison.training import fit, training_runtime
+from civ5rl.engine.runtime.transactions import atomic_torch_save
 from civ5rl.experiments.comparison_collection import ProposalExecutor, match_task, select_forks, preference
 from civ5rl.provenance.common import ROOT,read_json,write_json,file_sha256,configure,seed_for
 from civ5rl.provenance import checkpoint
@@ -41,7 +42,7 @@ def load_config(path):
         if cfg.get('evaluation_protocol')!='paired_development_only':
             raise ValueError('Full-corpus fitting requires paired Development only')
         if continuation:
-            from civ5rl.engine.comparison_continuation import validate_continuation
+            from civ5rl.engine.comparison.continuation import validate_continuation
             validate_continuation(cfg)
     return cfg
 
@@ -105,7 +106,7 @@ def prepare_collection_input(cfg,out):
 
 def collect(cfg,out,*,limit=None,budget=None):
     if budget is not None:return _collect(cfg,out,limit=limit,budget=budget)
-    from civ5rl.engine.phase_budget import PhaseBudget
+    from civ5rl.engine.runtime.budget import PhaseBudget
     with PhaseBudget(out,"collection",cfg["collection_seconds"]) as budget:
         return _collect(cfg,out,limit=limit,budget=budget)
 
@@ -254,7 +255,7 @@ def build_dataset(cfg,out,state):
 
 def evaluate(cfg,out):
     from civ5rl.experiments.ppo_target_scale import evaluate as ordinary_evaluate
-    from civ5rl.engine.evaluation import evaluation_options
+    from civ5rl.engine.evaluation.executor import evaluation_options
     from civ5rl.reporting.evaluation_audit import load_eval_rows,clustered_paired_bootstrap
     from civ5rl.reporting.evaluation_storage import readable_evaluations,archive_evaluations
     training=read_json(out/'training.json')
@@ -293,7 +294,7 @@ def evaluate(cfg,out):
 def evaluate_paired_development(cfg,out,config,plan,evaluator):
     """Compare the last verified candidate and parent through one local runtime."""
     import shutil
-    from civ5rl.engine.evaluation import evaluation_options
+    from civ5rl.engine.evaluation.executor import evaluation_options
     from civ5rl.reporting.evaluation_storage import readable_evaluations
     from civ5rl.reporting.evaluation_audit import load_eval_rows,clustered_paired_bootstrap
     parent_path=out/'checkpoints/parent.pt';parent_path.parent.mkdir(exist_ok=True)
@@ -301,7 +302,7 @@ def evaluate_paired_development(cfg,out,config,plan,evaluator):
     if file_sha256(parent_path)!=cfg['parent_sha256'][0]:raise ValueError('Evaluation parent changed')
     with readable_evaluations(out),evaluation_options(device='cuda',workers=8,max_batch=32,wait_seconds=.001):
         if cfg.get('fit_continuation'):
-            from civ5rl.engine.comparison_continuation import reuse_parent_development
+            from civ5rl.engine.comparison.continuation import reuse_parent_development
             reuse_parent_development(cfg,out,config,plan)
         parent=evaluator(config,plan,out,'checkpoints/parent.pt','development_512')
         candidate=evaluator(config,plan,out,'candidate.pt','development_512')
@@ -323,8 +324,8 @@ def dataset_counts(out):
 
 def run(phase,cfg,out,*,preparation_seconds=0.):
     from contextlib import ExitStack
-    from civ5rl.engine.phase_budget import PhaseBudget
-    from civ5rl.engine.comparison_continuation import continuation_seconds
+    from civ5rl.engine.runtime.budget import PhaseBudget
+    from civ5rl.engine.comparison.continuation import continuation_seconds
     out=Path(out).resolve()
     with RunLock(out),ExitStack() as timing:
         collection=read_json(out/'collection.json') if (out/'collection.json').exists() else {}

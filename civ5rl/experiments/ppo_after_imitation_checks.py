@@ -10,7 +10,7 @@ import torch
 from civ5rl.core.env import DecisionEnv
 from civ5rl.core.model import batch_inputs
 from civ5rl.core.observation import ObservationEncoder
-from civ5rl.engine.ppo_fast import BatchedBackend
+from civ5rl.engine.ppo.backend import BatchedBackend
 from civ5rl.experiments.ppo_after_imitation import create_policy, optimizer_for
 from civ5rl.protocols.imitation import load_episode, search_config
 from civ5rl.provenance.common import ROOT, configure, write_json
@@ -81,7 +81,7 @@ def warmup(policy, device):
 
 def collector_smoke(config, plan, out, device="cpu"):
     """One CPU wave confirms the real Windows file-entrypoint worker path."""
-    from civ5rl.engine.collector import Collector
+    from civ5rl.engine.collection.collector import Collector
     from civ5rl.protocols.ppo_after_imitation import TrainingFactory
 
     configure(17, device)

@@ -7,12 +7,12 @@ import time
 from pathlib import Path
 from collections import Counter
 from civ5rl.protocols.imitation import search_config
-from civ5rl.engine.evaluation import (
+from civ5rl.engine.evaluation.executor import (
     EvaluationRuntime,
     EvaluationExecutor,
-    evaluation_agent,
     evaluation_precision,
 )
+from civ5rl.engine.evaluation.proxy import evaluation_agent
 from civ5rl.provenance.common import configure, read_json, write_json, file_sha256
 from civ5sim import MatchConfig, run_match
 from civ5sim.cp_agent import CPAgent

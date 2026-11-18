@@ -3,7 +3,7 @@
 import math
 
 from civ5rl.config import load_config as resolve_config
-from civ5rl.engine.counters import TrainingCounters
+from civ5rl.engine.runtime.control import TrainingCounters
 from civ5rl.provenance.common import ROOT
 
 KIND = "rl01.ppo_after_target_bc"

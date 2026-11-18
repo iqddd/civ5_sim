@@ -11,9 +11,9 @@ import numpy as np
 import torch
 
 from civ5rl.core.model import Policy, batch_inputs
-from civ5rl.engine.ppo import episode_returns, raw_gae_advantages, update
-from civ5rl.engine.ppo_adam import check_counters, grouped_optimizer
-from civ5rl.engine.ppo_fast import BatchedBackend
+from civ5rl.engine.ppo.core import episode_returns, raw_gae_advantages, update
+from civ5rl.engine.ppo.adam import check_counters, grouped_optimizer
+from civ5rl.engine.ppo.backend import BatchedBackend
 from civ5rl.experiments import ppo_after_target_bc as runner
 from civ5rl.experiments.imitation_helpers import assert_equal
 from civ5rl.experiments.ppo_after_imitation import optimizer_for

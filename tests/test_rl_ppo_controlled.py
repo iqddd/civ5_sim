@@ -9,10 +9,10 @@ import numpy as np
 import torch
 
 from civ5rl.config import load_config
-from civ5rl.engine.optimizer_transaction import AdamSnapshot, require_finite_state
-from civ5rl.engine.ppo import update
-from civ5rl.engine.ppo_fast import measure_replay
-from civ5rl.engine.replay_metrics import StepReplay
+from civ5rl.engine.runtime.transactions import AdamSnapshot, require_finite_state
+from civ5rl.engine.ppo.core import update
+from civ5rl.engine.ppo.backend import measure_replay
+from civ5rl.engine.ppo.metrics import StepReplay
 from civ5rl.protocols.ppo_after_imitation import advance_controlled_rollout, prepare_cases
 from civ5rl.provenance.common import read_json, configure
 from civ5rl.provenance.validation import validate_config
@@ -243,7 +243,7 @@ class ControlledPPOTests(unittest.TestCase):
         expected = model.weight.detach().clone()
         optimizer = torch.optim.Adam(model.parameters())
         episodes = [{"chosen": [0], "old_value": [0.0], "result": {"reward": 1}}]
-        with patch("civ5rl.engine.ppo.perf_counter", side_effect=lambda: clock[0]):
+        with patch("civ5rl.engine.runtime.budget.perf_counter", side_effect=lambda: clock[0]):
             result = update(
                 model,
                 optimizer,

@@ -9,18 +9,18 @@ from time import perf_counter
 import numpy as np
 import torch
 
-from civ5rl.engine.imitation import (
+from civ5rl.engine.imitation.core import (
     DemonstrationCache,
     backward_minibatch,
     label_minibatches,
     teacher_metrics,
 )
-from civ5rl.engine.imitation_performance import (
+from civ5rl.engine.imitation.pipeline import (
     ResidentDemonstrations,
     backward_minibatch_fast,
 )
-from civ5rl.engine.resources import ResourceMonitor, analyze_telemetry
-from civ5rl.engine.training import FrozenParamsCheck, bc_optimizer_step
+from civ5rl.engine.runtime.telemetry import ResourceMonitor, analyze_telemetry
+from civ5rl.engine.runtime.transactions import FrozenParamsCheck, bc_optimizer_step
 from civ5rl.experiments.evaluation import (
     compare_paired_directories,
     run_validation_cases,

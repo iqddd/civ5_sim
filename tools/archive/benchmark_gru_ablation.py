@@ -15,13 +15,13 @@ from torch import nn
 from torch.nn import functional as F
 
 from civ5rl.core.model import Policy
-from civ5rl.engine.imitation import DemonstrationCache
-from civ5rl.engine.imitation_performance import (
+from civ5rl.engine.imitation.core import DemonstrationCache
+from civ5rl.engine.imitation.pipeline import (
     ResidentDemonstrations,
     backward_minibatch_async,
 )
-from civ5rl.engine.ppo_fast import prefixes
-from civ5rl.engine.resources import ResourceMonitor
+from civ5rl.engine.ppo.backend import prefixes
+from civ5rl.engine.runtime.telemetry import ResourceMonitor
 from civ5rl.experiments.imitation_helpers import adam
 from civ5rl.protocols.imitation import load_episode
 from civ5rl.provenance.common import configure, file_sha256, read_json, write_json
@@ -134,10 +134,10 @@ def run(args):
                     "tools/archive/benchmark_gru_ablation.py",
                     "civ5rl/core/model.py",
                     "civ5rl/core/training_graphs.py",
-                    "civ5rl/engine/imitation.py",
-                    "civ5rl/engine/imitation_performance.py",
-                    "civ5rl/engine/ppo_fast.py",
-                    "civ5rl/engine/resources.py",
+                    "civ5rl/engine/imitation/core.py",
+                    "civ5rl/engine/imitation/pipeline.py",
+                    "civ5rl/engine/ppo/backend.py",
+                    "civ5rl/engine/runtime/telemetry.py",
                 )
             },
         },

@@ -12,10 +12,10 @@ import torch
 from civ5rl.core.model import Policy, batch_inputs
 from civ5rl.core.observation import ObservationEncoder, ordered_actions
 from civ5rl.core.preview import load_parent_model
-from civ5rl.engine.optimizer_transaction import AdamSnapshot
-from civ5rl.engine.ppo import encode_episode
-from civ5rl.engine.ppo_adam import check_counters, grouped_optimizer
-from civ5rl.engine.shared import EncodedSlots
+from civ5rl.engine.runtime.transactions import AdamSnapshot
+from civ5rl.engine.ppo.core import encode_episode
+from civ5rl.engine.ppo.adam import check_counters, grouped_optimizer
+from civ5rl.engine.runtime.shared import EncodedSlots
 from civ5rl.experiments.imitation_helpers import assert_equal
 from civ5rl.experiments.ppo_after_target_bc import load_initial_optimizer
 from civ5rl.experiments.ppo_artifacts import pack_rollout, unpack_rollout

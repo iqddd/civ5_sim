@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from civ5rl.engine.budget import ActiveBudget, deadline_reached
-from civ5rl.engine.control import RunLock
+from civ5rl.engine.runtime.budget import ActiveBudget, deadline_reached
+from civ5rl.engine.runtime.control import RunLock
 from civ5rl.provenance.common import read_json, write_json
 from civ5rl.reporting.operations import extend_budget
 
@@ -42,13 +42,13 @@ class LiveBudgetTests(unittest.TestCase):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
                 self.prepare(root, kind)
-                with patch("civ5rl.engine.budget.monotonic", return_value=0) as tick:
+                with patch("civ5rl.engine.runtime.budget.monotonic", return_value=0) as tick:
                     budget = ActiveBudget(root)
                     self.assertEqual(budget.limit(), 10)
                     request = extend_budget(root, 20, "during update", request_id="one")
                     self.assertEqual(budget.limit(), 10)  # throttle is one second
                     tick.return_value = 2
-                    with patch("civ5rl.engine.budget.perf_counter", return_value=15):
+                    with patch("civ5rl.engine.runtime.budget.perf_counter", return_value=15):
                         self.assertFalse(deadline_reached(budget.limit))
                     self.assertEqual(budget.limit(), 30)
                     receipt = read_json(root / "budget-applied.json")
@@ -69,7 +69,7 @@ class LiveBudgetTests(unittest.TestCase):
 
     def test_extension_inside_ppo_update_preserves_adam_and_rng(self):
         import torch
-        from civ5rl.engine.ppo import update
+        from civ5rl.engine.ppo.core import update
         from tests.test_rl_ppo_refactor import FakeBackend, ReverseRng
 
         with tempfile.TemporaryDirectory() as temp:
@@ -83,8 +83,8 @@ class LiveBudgetTests(unittest.TestCase):
                                    kl_measurement="whole_rollout_after_optimizer_step"), optimizer=dict(lr=0.01))
             episodes = [dict(chosen=[0] * 6, old_value=[0.] * 6, result=dict(reward=1))]
             torch_rng = torch.get_rng_state().clone()
-            with patch("civ5rl.engine.budget.monotonic", return_value=0) as tick, \
-                    patch("civ5rl.engine.budget.perf_counter", return_value=9) as elapsed:
+            with patch("civ5rl.engine.runtime.budget.monotonic", return_value=0) as tick, \
+                    patch("civ5rl.engine.runtime.budget.perf_counter", return_value=9) as elapsed:
                 budget = ActiveBudget(root)
 
                 def on_step(record):

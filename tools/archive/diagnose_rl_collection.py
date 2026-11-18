@@ -89,10 +89,10 @@ class Series:
             for path in (
                 ROOT / "civ5rl/core/env.py",
                 ROOT / "civ5rl/core/contracts.py",
-                ROOT / "civ5rl/engine/collector.py",
-                ROOT / "civ5rl/engine/collection_diagnostics.py",
-                ROOT / "civ5rl/engine/streaming_collector.py",
-                ROOT / "civ5rl/engine/streaming_worker.py",
+                ROOT / "civ5rl/engine/collection/collector.py",
+                ROOT / "civ5rl/engine/collection/diagnostics.py",
+                ROOT / "civ5rl/engine/collection/streaming.py",
+                ROOT / "civ5rl/engine/collection/workers.py",
                 ROOT / "tools/profile_rl_runtime.py",
                 Path(__file__).resolve(),
             )

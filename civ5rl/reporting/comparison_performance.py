@@ -11,15 +11,15 @@ import json
 import statistics
 import torch
 from civ5rl.provenance.common import read_json, write_json, configure, file_sha256
-from civ5rl.engine.resources import ResourceMonitor
-from civ5rl.engine.evaluation import (
+from civ5rl.engine.runtime.telemetry import ResourceMonitor
+from civ5rl.engine.evaluation.executor import (
     EvaluationExecutor,
     EvaluationRuntime,
     evaluation_precision,
 )
 from civ5rl.experiments.comparison_collection import ProposalExecutor
 from civ5rl.experiments.comparison_match import match_task
-from civ5rl.engine.comparison_training import (
+from civ5rl.engine.comparison.training import (
     Histories,
     configure_policy,
     prepare_references,
@@ -28,7 +28,7 @@ from civ5rl.engine.comparison_training import (
     pair_loss,
     training_runtime,
 )
-from civ5rl.engine.optimizer_transaction import AdamSnapshot
+from civ5rl.engine.runtime.transactions import AdamSnapshot
 from civ5rl.core.observation import ObservationEncoder
 from civ5rl.deploy.archive import unpack
 
@@ -151,7 +151,7 @@ def inference_trace(cfg, source, out):
 
     folders = sorted((out / "matches/source").iterdir())[:8]
     with evaluation_precision():
-        from civ5rl.engine.evaluation import prepare_evaluation_policy
+        from civ5rl.engine.evaluation.executor import prepare_evaluation_policy
 
         policies = [
             prepare_evaluation_policy(

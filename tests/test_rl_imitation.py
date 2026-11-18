@@ -10,7 +10,7 @@ import torch
 
 from civ5rl.core.model import Policy
 from civ5rl.core.observation import ObservationEncoder, ordered_actions
-from civ5rl.engine.imitation import (
+from civ5rl.engine.imitation.core import (
     DemonstrationCache,
     backward_minibatch,
     ce_sum,

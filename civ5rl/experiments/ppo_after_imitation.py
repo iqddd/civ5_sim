@@ -15,11 +15,11 @@ from time import perf_counter
 import torch
 
 from civ5rl.core.agent import RLAgent
-from civ5rl.engine.collector import Collector
-from civ5rl.engine.control import RunLock
-from civ5rl.engine.counters import TrainingCounters
-from civ5rl.engine.ppo import update
-from civ5rl.engine.resources import ResourceMonitor, analyze_telemetry
+from civ5rl.engine.collection.collector import Collector
+from civ5rl.engine.runtime.control import RunLock
+from civ5rl.engine.runtime.control import TrainingCounters
+from civ5rl.engine.ppo.core import update
+from civ5rl.engine.runtime.telemetry import ResourceMonitor, analyze_telemetry
 from civ5rl.experiments.evaluation import paired_world_bootstrap, verify_replay
 from civ5rl.experiments.imitation_helpers import (
     CompilationClock,
@@ -218,7 +218,7 @@ def play_case(
     if checkpoint_path == "cp":
         agent = CPAgent(search_config(config))
     else:
-        from civ5rl.engine.evaluation import evaluation_agent
+        from civ5rl.engine.evaluation.proxy import evaluation_agent
         agent = evaluation_agent(
             checkpoint_path, mode, temperature=temperature,
             collect_selection_metrics=collect_selection_metrics,

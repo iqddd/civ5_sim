@@ -14,30 +14,30 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
-from civ5rl.engine.budget import ActiveBudget, deadline_reached, resolve_deadline
+from civ5rl.engine.runtime.budget import ActiveBudget, DeadlineBudget, deadline_reached, resolve_deadline
 from civ5rl.core.model import batch_inputs
-from civ5rl.engine.collector import Collector
-from civ5rl.engine.constants import DEFAULT_PINNED_REPLAY_BYTES
-from civ5rl.engine.control import (
+from civ5rl.engine.collection.collector import Collector
+from civ5rl.engine.runtime.sequence import DEFAULT_PINNED_REPLAY_BYTES
+from civ5rl.engine.runtime.control import (
     RunLock,
     assert_not_closed,
     pause_due,
     target_bc_evaluation_due,
 )
-from civ5rl.engine.counters import TrainingCounters
-from civ5rl.engine.evaluation import runtime_for
-from civ5rl.engine.performance import performance_markdown, summarize_performance
-from civ5rl.engine.ppo import (
+from civ5rl.engine.runtime.control import TrainingCounters
+from civ5rl.engine.evaluation.executor import runtime_for
+from civ5rl.engine.runtime.telemetry import performance_markdown, summarize_performance
+from civ5rl.engine.ppo.core import (
     encode_episode,
     episode_returns,
     raw_gae_advantages,
     targets,
     update,
 )
-from civ5rl.engine.ppo_fast import BatchedBackend
-from civ5rl.engine.ppo_adam import adapts_value, uses_grouped_adam, grouped_optimizer, expected_counters, check_counters
+from civ5rl.engine.ppo.backend import BatchedBackend
+from civ5rl.engine.ppo.adam import adapts_value, uses_grouped_adam, grouped_optimizer, expected_counters, check_counters
 from civ5rl.experiments.ppo_critic_adaptation import adapt_critic
-from civ5rl.engine.resources import ResourceMonitor
+from civ5rl.engine.runtime.telemetry import ResourceMonitor
 from civ5rl.experiments.evaluation import paired_world_bootstrap
 from civ5rl.experiments.imitation_helpers import (
     CompilationClock,
@@ -259,7 +259,9 @@ def prepare_critic(
 ):
     """Fit only value parameters, then refresh old_value without rewriting behavior."""
     started = preparation_started if preparation_started is not None else perf_counter()
-    fit_deadline = lambda: min(started + settings["active_seconds"], resolve_deadline(deadline))
+    fit_deadline = DeadlineBudget(
+        lambda: min(started + settings["active_seconds"], resolve_deadline(deadline))
+    )
     original_policy_hash = policy_hash(policy.state_dict())
     original_behavior = behavior_digest(episodes)
     returns = np.concatenate(episode_returns(episodes, gamma=gamma))
@@ -884,7 +886,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                 if max_updates is not None and state["updates"] >= max_updates:
                     write_json(out / "status.json", {"status": "paused", "reason": "max_updates"})
                     return
-                deadline = lambda: clock.deadline(config)
+                deadline = DeadlineBudget(lambda: clock.deadline(config))
                 if deadline_reached(deadline):
                     state["stop_reason"] = "active_time_limit"
                     break

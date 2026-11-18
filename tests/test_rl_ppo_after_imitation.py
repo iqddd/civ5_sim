@@ -10,9 +10,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from civ5rl.engine.ppo import token_minibatches, update
-from civ5rl.engine.ppo_fast import measure_replay
-from civ5rl.engine.replay_metrics import StepReplay
+from civ5rl.engine.ppo.core import token_minibatches, update
+from civ5rl.engine.ppo.backend import measure_replay
+from civ5rl.engine.ppo.metrics import StepReplay
 from civ5rl.experiments.evaluation import paired_world_bootstrap
 from civ5rl.protocols.ppo_after_imitation import TrainingFactory, prepare_cases
 from civ5rl.provenance.common import configure, read_json
@@ -167,7 +167,7 @@ class PPOAfterTests(unittest.TestCase):
 
         model = torch.nn.Linear(1, 1, bias=False)
         opt = torch.optim.Adam(model.parameters())
-        with patch("civ5rl.engine.ppo.perf_counter", side_effect=lambda: clock[0]):
+        with patch("civ5rl.engine.runtime.budget.perf_counter", side_effect=lambda: clock[0]):
             result = update(
                 model,
                 opt,
@@ -184,7 +184,7 @@ class PPOAfterTests(unittest.TestCase):
         self.assertEqual(result["stop_reason"], "active_time_limit")
         self.assertEqual(result["optimizer_step_records"][0]["valid_tokens"], 1024)
         clock[0] = 101.0
-        with patch("civ5rl.engine.ppo.perf_counter", side_effect=lambda: clock[0]):
+        with patch("civ5rl.engine.runtime.budget.perf_counter", side_effect=lambda: clock[0]):
             result = update(
                 model,
                 opt,

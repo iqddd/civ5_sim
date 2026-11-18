@@ -6,8 +6,8 @@ from time import perf_counter
 
 import torch
 
-from civ5rl.engine.optimizer_transaction import AdamSnapshot, require_finite_state
-from civ5rl.engine.ppo_fast import BatchedBackend
+from civ5rl.engine.runtime.transactions import AdamSnapshot, require_finite_state
+from civ5rl.engine.ppo.backend import BatchedBackend
 from civ5rl.experiments.imitation_helpers import assert_equal
 from civ5rl.provenance.common import ROOT, configure, read_json, write_json
 

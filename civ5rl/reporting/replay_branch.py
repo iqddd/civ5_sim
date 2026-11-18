@@ -9,7 +9,7 @@ from civ5sim.engine import digest
 from civ5sim.cp_agent import CPAgent
 from civ5rl.core.agent import RLAgent
 from civ5rl.core.observation import ordered_actions
-from civ5rl.engine.evaluation import evaluation_precision
+from civ5rl.engine.evaluation.executor import evaluation_precision
 from civ5rl.protocols.imitation import search_config
 from civ5rl.provenance.common import configure, file_sha256, write_json
 

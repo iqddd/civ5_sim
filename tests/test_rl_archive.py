@@ -25,7 +25,7 @@ class ArchiveTests(unittest.TestCase):
     def test_storage_preserves_scientific_bytes_and_rejects_damaged_archive(self):
         # Deleting unpacked results before verifying a durable copy silently loses evidence.
         from civ5rl.reporting.evaluation_storage import archive_evaluations, restore_evaluations, readable_evaluations
-        from civ5rl.engine.control import RunLock
+        from civ5rl.engine.runtime.control import RunLock
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
             source = run / "evaluation"

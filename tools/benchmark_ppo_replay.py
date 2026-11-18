@@ -15,8 +15,8 @@ def main():
 
     from civ5sim.engine import digest
     from civ5rl.config import load_config
-    from civ5rl.engine.ppo_fast import RolloutCache, measure_replay
-    from civ5rl.engine.resources import ResourceMonitor
+    from civ5rl.engine.ppo.backend import RolloutCache, measure_replay
+    from civ5rl.engine.runtime.telemetry import ResourceMonitor
     from civ5rl.experiments.imitation_helpers import load_policy
     from civ5rl.experiments.ppo_artifacts import load_rollout
     from civ5rl.provenance.common import configure, file_sha256, write_json
@@ -78,7 +78,7 @@ def main():
             "resolved_config_sha256": digest(config),
             "checkpoint_sha256": file_sha256(args.checkpoint),
             "rollout_sha256": file_sha256(args.rollout),
-            "source_sha256": file_sha256(ROOT / "civ5rl/engine/ppo_fast.py"),
+            "source_sha256": file_sha256(ROOT / "civ5rl/engine/ppo/backend.py"),
             "warmup_excluded": True,
             "Adam_steps": 0,
             "results": records,

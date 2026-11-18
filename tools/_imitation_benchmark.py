@@ -11,7 +11,7 @@ from civ5rl.protocols.imitation import load_episode, match_task, task_for
 from civ5rl.provenance.common import read_json, write_json
 
 def benchmark(config, manifest, out, workers):
-    from civ5rl.engine.resources import ResourceMonitor
+    from civ5rl.engine.runtime.telemetry import ResourceMonitor
 
     destination = out / "benchmark/collection.json"
     if destination.exists():

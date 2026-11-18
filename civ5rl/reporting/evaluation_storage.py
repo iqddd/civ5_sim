@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from civ5rl.deploy.archive import _inventory, _read, unpack
-from civ5rl.engine.control import RunLock
+from civ5rl.engine.runtime.control import RunLock
 from civ5rl.reporting.storage import pack_verified
 
 TOKEN = "evaluation-storage-v1"

@@ -58,7 +58,7 @@ def main(argv=None):
     from civ5rl.provenance.execution import execution_session
     execution_session(out,args.phase)
     from civ5rl.reporting.progress_process import ProcessProgress
-    from civ5rl.engine.evaluation import evaluation_options
+    from civ5rl.engine.evaluation.executor import evaluation_options
 
     progress = ProcessProgress(out, config) if args.phase in ("train", "run", "resume", "evaluate") else nullcontext()
     with evaluation_options(device=args.evaluation_device, workers=args.evaluation_workers,

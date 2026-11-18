@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 import torch
 
-from civ5rl.engine.sequence import SequenceBuffer, allocation_with_reserve
-from civ5rl.engine.ppo_fast import ReplayPart, RolloutCache
+from civ5rl.engine.runtime.sequence import SequenceBuffer, allocation_with_reserve
+from civ5rl.engine.ppo.backend import ReplayPart, RolloutCache
 
 
 MEMORY = {"driver_free_bytes": 0, "allocated_bytes": 20, "reserved_bytes": 70}
@@ -24,7 +24,7 @@ class ResidentMemoryTests(unittest.TestCase):
             probes.append(weakref.ref(tensor))
             return tensor
         with (
-            patch("civ5rl.engine.sequence.cuda_memory_snapshot", return_value=MEMORY),
+            patch("civ5rl.engine.runtime.sequence.cuda_memory_snapshot", return_value=MEMORY),
             patch("torch.empty", side_effect=allocate),
             patch("torch.cuda.empty_cache", side_effect=AssertionError("cache flushed")),
         ):
@@ -46,12 +46,12 @@ class ResidentMemoryTests(unittest.TestCase):
             allocated.append(weakref.ref(tensor))
             return tensor
         with (
-            patch("civ5rl.engine.sequence.batch_inputs", return_value=template),
-            patch("civ5rl.engine.sequence.cuda_memory_snapshot", return_value=MEMORY),
+            patch("civ5rl.engine.runtime.sequence.batch_inputs", return_value=template),
+            patch("civ5rl.engine.runtime.sequence.cuda_memory_snapshot", return_value=MEMORY),
             patch("torch.empty", side_effect=allocate),
         ):
             try:
-                SequenceBuffer(encoded, "cuda", resident=True, reserve_bytes=32)
+                SequenceBuffer.from_encoded(encoded, "cuda", resident=True, reserve_bytes=32)
             except torch.cuda.OutOfMemoryError as error:
                 self.assertIn("reserve_probe", " ".join(error.__notes__))
             else:
@@ -77,9 +77,9 @@ class ResidentMemoryTests(unittest.TestCase):
             yield ReplayPart({"cells": tensor}, {}, [1], None, 1)
             raise torch.cuda.OutOfMemoryError("next replay part does not fit")
         with (
-            patch("civ5rl.engine.ppo_fast._replay_group_specs", return_value=[(1, [])]),
-            patch("civ5rl.engine.ppo_fast._replay_parts", side_effect=parts),
-            patch("civ5rl.engine.sequence.cuda_memory_snapshot", return_value=MEMORY),
+            patch("civ5rl.engine.ppo.backend._replay_group_specs", return_value=[(1, [])]),
+            patch("civ5rl.engine.ppo.backend._replay_parts", side_effect=parts),
+            patch("civ5rl.engine.runtime.sequence.cuda_memory_snapshot", return_value=MEMORY),
         ):
             plan = cache.prepare_replay_plan(prefer_device=True)
         self.assertEqual(plan.mode, "on_demand")
@@ -89,9 +89,9 @@ class ResidentMemoryTests(unittest.TestCase):
     def test_optional_replay_does_not_hide_non_memory_errors(self):
         cache = self.cache()
         with (
-            patch("civ5rl.engine.ppo_fast._replay_group_specs", return_value=[(1, [])]),
-            patch("civ5rl.engine.ppo_fast._replay_parts", side_effect=RuntimeError("invalid data")),
-            patch("civ5rl.engine.sequence.cuda_memory_snapshot", return_value=MEMORY),
+            patch("civ5rl.engine.ppo.backend._replay_group_specs", return_value=[(1, [])]),
+            patch("civ5rl.engine.ppo.backend._replay_parts", side_effect=RuntimeError("invalid data")),
+            patch("civ5rl.engine.runtime.sequence.cuda_memory_snapshot", return_value=MEMORY),
         ):
             with self.assertRaisesRegex(RuntimeError, "invalid data"):
                 cache.prepare_replay_plan(prefer_device=True)

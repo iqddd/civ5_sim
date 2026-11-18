@@ -11,15 +11,15 @@ from time import perf_counter
 
 import torch
 
-from civ5rl.engine.counters import TrainingCounters
-from civ5rl.engine.imitation import DemonstrationCache, teacher_metrics
-from civ5rl.engine.imitation_performance import (
+from civ5rl.engine.runtime.control import TrainingCounters
+from civ5rl.engine.imitation.core import DemonstrationCache, teacher_metrics
+from civ5rl.engine.imitation.pipeline import (
     ResidentDemonstrations,
     backward_minibatch_async,
 )
-from civ5rl.engine.resources import ResourceMonitor
-from civ5rl.engine.sequence import take_counted_span
-from civ5rl.engine.training import FrozenParamsCheck, bc_optimizer_step
+from civ5rl.engine.runtime.telemetry import ResourceMonitor
+from civ5rl.engine.runtime.sequence import take_counted_span
+from civ5rl.engine.runtime.transactions import FrozenParamsCheck, bc_optimizer_step
 from civ5rl.experiments.evaluation import (
     compare_paired_directories,
     run_validation_cases,

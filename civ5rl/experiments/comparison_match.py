@@ -4,7 +4,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from civ5rl.core.observation import ordered_actions
-from civ5rl.engine.evaluation_proxy import evaluation_agent
+from civ5rl.engine.evaluation.proxy import evaluation_agent
 from civ5rl.protocols.imitation import search_config
 from civ5rl.provenance.common import read_json, write_json
 from civ5sim import Action, MatchConfig, run_match

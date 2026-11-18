@@ -191,7 +191,7 @@ class RLTests(unittest.TestCase):
 
     def test_resident_sequence_padding_preserves_logits_and_gradients(self):
         # Global resident padding must not silently alter training on a smaller map.
-        from civ5rl.engine.sequence import SequenceBuffer
+        from civ5rl.engine.runtime.sequence import SequenceBuffer
 
         large, small = scenario(), scenario()
         small["map"] = flat_map(8)
@@ -206,8 +206,8 @@ class RLTests(unittest.TestCase):
                 )
             item = ObservationEncoder(context(spec)).encode(obs, actions)
             encoded.append([item, item])
-        local = SequenceBuffer(encoded, "cpu")
-        resident = SequenceBuffer(encoded, "cpu", resident=True)
+        local = SequenceBuffer.from_encoded(encoded, "cpu")
+        resident = SequenceBuffer.from_encoded(encoded, "cpu", resident=True)
         original = Policy("C")
         copy = deepcopy(original)
         outputs = []
@@ -224,8 +224,8 @@ class RLTests(unittest.TestCase):
 
     def test_ppo_backend_matches_serial_gradients_and_adam_step(self):
         # A mismatch here would silently change learning despite successful replay.
-        from civ5rl.engine.ppo import encode_episode
-        from civ5rl.engine.ppo_fast import BatchedBackend
+        from civ5rl.engine.ppo.core import encode_episode
+        from civ5rl.engine.ppo.backend import BatchedBackend
 
         original = Policy("C")
         episodes = self._short_rollout(original)
@@ -291,7 +291,7 @@ class RLTests(unittest.TestCase):
 
     def test_cached_replay_uses_current_weights_on_every_pass(self):
         # A silently empty replay plan would invalidate later KL measurements.
-        from civ5rl.engine.ppo_fast import RolloutCache, measure_replay
+        from civ5rl.engine.ppo.backend import RolloutCache, measure_replay
 
         with torch.random.fork_rng(devices=[]):
             for cpu_labels in (False, True):
@@ -313,8 +313,8 @@ class RLTests(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "Pinned replay requires CUDA")
     def test_pinned_cpu_replay_recomputes_after_weight_updates(self):
         # A stale hidden/output cache silently invalidates the KL rollback gate.
-        from civ5rl.engine.ppo import encode_episode
-        from civ5rl.engine.ppo_fast import RolloutCache, measure_replay
+        from civ5rl.engine.ppo.core import encode_episode
+        from civ5rl.engine.ppo.backend import RolloutCache, measure_replay
         from civ5rl.experiments.ppo_artifacts import load_rollout, save_rollout
 
         policy = Policy("C")

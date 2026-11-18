@@ -7,7 +7,7 @@ import torch
 from civ5rl.core.agent import RLAgent
 from civ5rl.core.model import batch_inputs
 from civ5rl.core.observation import ordered_actions
-from civ5rl.engine.evaluation import EvaluationExecutor, EvaluationRuntime, BatchedInference, evaluation_precision
+from civ5rl.engine.evaluation.executor import EvaluationExecutor, EvaluationRuntime, BatchedInference, evaluation_precision
 from civ5rl.provenance.common import read_json, write_json, file_sha256, configure
 from civ5sim.engine import digest
 
@@ -58,7 +58,7 @@ class EnsembleExecutor(EvaluationExecutor):
     def __init__(self, checkpoints, runtime):
         super().__init__(str(checkpoints[0]), runtime)
         policies = [self.inference.policy]
-        from civ5rl.engine.evaluation import prepare_evaluation_policy
+        from civ5rl.engine.evaluation.executor import prepare_evaluation_policy
         policies += [prepare_evaluation_policy(RLAgent.from_checkpoint(p, 'cpu', 'argmax').policy,self.runtime.device) for p in checkpoints[1:]]
         if any(p.variant != policies[0].variant for p in policies):
             raise ValueError('Ensemble variants differ')
@@ -78,7 +78,7 @@ def evaluate_ensemble(run, checkpoints, out):
         raise ValueError('A 50/50 ensemble requires exactly two checkpoints')
     from civ5rl.reporting.evaluation_storage import readable_evaluations, archive_evaluations, restore_evaluations
     from civ5rl.reporting.evaluation_audit import load_eval_rows, clustered_paired_bootstrap, eval_wdl_summary
-    from civ5rl.engine.control import RunLock
+    from civ5rl.engine.runtime.control import RunLock
     from civ5sim.combat_ai import LIBRARY_PATH
     run, out = Path(run).resolve(), Path(out).resolve()
     checkpoints = [Path(p).resolve() for p in checkpoints]

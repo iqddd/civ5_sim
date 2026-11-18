@@ -48,15 +48,14 @@ def resolve_inputs(args, parser):
 
 
 def replay(args, parser, config, inputs):
-    import civ5rl.engine.ppo_fast as current
-    from civ5rl.engine.benchmark import run_replay_benchmark
-    from civ5rl.engine.resources import ResourceMonitor
+    import civ5rl.engine.ppo.backend as current
+    from civ5rl.engine.ppo.benchmark import load_replay_baseline, run_replay_benchmark
+    from civ5rl.engine.runtime.telemetry import ResourceMonitor
     from civ5rl.experiments.imitation_helpers import load_policy
     from civ5rl.experiments.ppo_artifacts import load_rollout
     from civ5rl.provenance.common import (
         configure,
         file_sha256,
-        load_module_from_git,
         write_json,
     )
     from civ5sim.engine import digest
@@ -70,11 +69,7 @@ def replay(args, parser, config, inputs):
         parser.error("output must not overwrite an input")
     modules = {}
     if args.compare_git_rev:
-        modules["git"] = load_module_from_git(
-            "civ5rl.engine._git_replay_baseline",
-            "civ5rl/engine/ppo_fast.py",
-            args.compare_git_rev,
-        )
+        modules["git"] = load_replay_baseline(args.compare_git_rev)
     modules["working"] = current
     configure(args.seed, args.device)
     episodes = load_rollout(inputs[2])
@@ -145,9 +140,9 @@ def replay(args, parser, config, inputs):
 def full_cycle(args, parser, config, inputs):
     import torch
 
-    from civ5rl.engine.benchmark import run_full_cycle_benchmark
-    from civ5rl.engine.collector import Collector
-    from civ5rl.engine.resources import ResourceMonitor
+    from civ5rl.engine.ppo.benchmark import run_full_cycle_benchmark
+    from civ5rl.engine.collection.collector import Collector
+    from civ5rl.engine.runtime.telemetry import ResourceMonitor
     from civ5rl.experiments.imitation_helpers import load_policy
     from civ5rl.experiments.ppo_after_imitation import optimizer_for
     from civ5rl.experiments.ppo_artifacts import load_rollout

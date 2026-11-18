@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from civ5rl.engine.counters import TrainingCounters
+from civ5rl.engine.runtime.control import TrainingCounters
 from civ5rl.provenance.common import read_json, write_json
 
 
@@ -239,9 +239,9 @@ def restore_epoch_cursor_and_batches(
 ) -> RestoredEpochBatches:
     """Restore chunk priority order, check record count matches cursor, and slice remaining minibatches."""
     if Span_cls is None:
-        from civ5rl.engine.spans import Span as Span_cls
+        from civ5rl.engine.runtime.sequence import Span as Span_cls
     if label_minibatches_fn is None:
-        from civ5rl.engine.imitation import (
+        from civ5rl.engine.imitation.core import (
             label_minibatches as label_minibatches_fn,
         )
 

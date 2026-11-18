@@ -13,7 +13,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from civ5rl.engine.benchmark import run_replay_benchmark
+from civ5rl.engine.ppo.benchmark import run_replay_benchmark
 from civ5rl.provenance import common
 from civ5rl.provenance.rng import capture_rng
 

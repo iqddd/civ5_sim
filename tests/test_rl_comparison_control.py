@@ -6,8 +6,8 @@ import unittest
 import numpy as np
 import torch
 
-from civ5rl.engine.comparison_control import initial_state, run_updates
-from civ5rl.engine.tensor_snapshot import cpu_snapshot
+from civ5rl.engine.comparison.control import ComparisonTrainingState, initial_state, run_updates
+from civ5rl.engine.runtime.transactions import cpu_snapshot
 from civ5rl.provenance.rng import capture_rng, restore_rng
 
 
@@ -24,8 +24,8 @@ class ControlTests(unittest.TestCase):
         model,opt,state,anchors,options=self.fixture(max_accepted_steps=12,cycle_anchors=True)
         for _ in range(10):
             opt.zero_grad();(-model.weight.sum()).backward();opt.step()
-        state.update(steps=10,attempts=10,anchor_cursor=5)
-        order=state['anchor_order'][:];seen=[];counters=[]
+        state.steps, state.attempts, state.anchor_cursor = 10, 10, 5
+        order=state.anchor_order[:];seen=[];counters=[]
         def update(selected):
             seen.append((selected[:],float(torch.rand(()))))
             opt.zero_grad();(-model.weight.sum()).backward();opt.step()
@@ -38,11 +38,11 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(seen[2][0],[anchors[order[1]],anchors[order[2]]])
         self.assertTrue(all(len(set(batch))==2 for batch,_ in seen))
         self.assertEqual(counters,[11,11,12])
-        self.assertEqual(state['anchor_cursor'],9)
-        self.assertEqual(state['anchor_order'],order)
-        self.assertEqual(state['steps'],12)
-        self.assertEqual(state['attempts'],13)
-        self.assertEqual(state['stop_reason'],'accepted_step_limit')
+        self.assertEqual(state.anchor_cursor,9)
+        self.assertEqual(state.anchor_order,order)
+        self.assertEqual(state.steps,12)
+        self.assertEqual(state.attempts,13)
+        self.assertEqual(state.stop_reason,'accepted_step_limit')
         run_updates(model,opt,state,anchors,options,Budget(),lambda:None,
                     lambda selected:self.fail('Terminal fit restarted'),lambda:0.)
 
@@ -51,7 +51,7 @@ class ControlTests(unittest.TestCase):
         # must retain the full inherited cost when the phase is resumed.
         import tempfile
         from unittest.mock import patch
-        from civ5rl.engine.phase_budget import PhaseBudget
+        from civ5rl.engine.runtime.budget import PhaseBudget
         from civ5rl.provenance.common import read_json,write_json
         with tempfile.TemporaryDirectory() as tmp:
             calls=[]
@@ -59,7 +59,7 @@ class ControlTests(unittest.TestCase):
                 calls.append(value['seconds'])
                 if len(calls)==1:raise PermissionError('temporary Windows reader')
                 write_json(path,value)
-            with patch('civ5rl.engine.phase_budget.write_json',side_effect=denied_once):
+            with patch('civ5rl.engine.runtime.budget.write_json',side_effect=denied_once):
                 with PhaseBudget(tmp,'training',1800,initial_seconds=482.2195) as budget:
                     self.assertGreaterEqual(budget.elapsed(),482.2195)
                     self.assertLess(1800-budget.elapsed(),1317.781)
@@ -73,8 +73,8 @@ class ControlTests(unittest.TestCase):
         # The cache path must retain independent loss denominators and all legal
         # logits; a plausible but misnormalized loss can silently spoil a run.
         from civ5rl.core.model import Policy
-        from civ5rl.engine.comparison_heads import HeadFeatures
-        from civ5rl.engine.comparison_training import categorical_kl,pair_loss
+        from civ5rl.engine.comparison.heads import HeadFeatures
+        from civ5rl.engine.comparison.training import categorical_kl,pair_loss
         torch.manual_seed(11)
         policy=Policy('C2P')
         for name,p in policy.named_parameters():p.requires_grad_(name.startswith(('action.','attack_preview.')))
@@ -113,15 +113,15 @@ class ControlTests(unittest.TestCase):
         def update(selected):
             opt.zero_grad();(-model.weight.sum()).backward();opt.step();return {}
         def measure():
-            return (0. if state['steps']==0 else .02), {'preferred':state['attempts']}
+            return (0. if state.steps==0 else .02), {'preferred':state.attempts}
         run_updates(model,opt,state,anchors,options,Budget(),lambda:None,update,measure)
-        self.assertEqual(state['learning'],{'preferred':1})
-        self.assertEqual(state['history'][0]['learning'],{'preferred':1})
-        self.assertNotIn('learning',state['history'][1])
+        self.assertEqual(state.metadata['learning'],{'preferred':1})
+        self.assertEqual(state.history[0]['learning'],{'preferred':1})
+        self.assertNotIn('learning',state.history[1])
 
     def test_learning_distinguishes_pair_preference_argmax_and_parent_confirmation(self):
         # Better than the paired action need not mean best among all legal ones.
-        from civ5rl.engine.comparison_heads import learning_metrics
+        from civ5rl.engine.comparison.heads import learning_metrics
         pairs=[dict(episode=1,index=i,better=1 if i!=1 else 0) for i in range(3)]
         original={(1,i):0 for i in range(3)}
         baseline=dict(pairs=[(0,-.5,.7),(0,.2,.3),(0,0.,.4)],
@@ -156,7 +156,7 @@ class ControlTests(unittest.TestCase):
         observations=[];image=None
         def save():
             nonlocal image
-            image=cpu_snapshot(dict(state=state,model=model.state_dict(),optimizer=opt.state_dict(),rng=capture_rng()))
+            image=cpu_snapshot(dict(state=state.to_checkpoint_dict(),model=model.state_dict(),optimizer=opt.state_dict(),rng=capture_rng()))
         def update(selected):
             observations.append((deepcopy(selected),random.random(),float(np.random.random()),float(torch.rand(()))))
             opt.zero_grad();(-model.weight.sum()).backward();opt.step()
@@ -164,11 +164,11 @@ class ControlTests(unittest.TestCase):
         # This is the exact KL of N(0,1) against N(weight,1), not a scripted gate.
         def kl():return float(model.weight.detach().square().sum()/2)
         run_updates(model,opt,state,anchors,options,Budget(),save,update,kl)
-        self.assertEqual(state['steps'],2)
-        self.assertEqual(state['attempts'],5)
-        self.assertEqual(state['rejected_attempts'],3)
-        self.assertEqual(state['anchor_cursor'],4)
-        self.assertEqual(state['lr'],.0125)
+        self.assertEqual(state.steps,2)
+        self.assertEqual(state.attempts,5)
+        self.assertEqual(state.rejected_attempts,3)
+        self.assertEqual(state.anchor_cursor,4)
+        self.assertEqual(state.lr,.0125)
         self.assertEqual(int(next(iter(opt.state.values()))['step']),2)
         self.assertEqual(observations[0],observations[1]);self.assertEqual(observations[1],observations[2])
         self.assertEqual(observations[3],observations[4])
@@ -190,11 +190,11 @@ class ControlTests(unittest.TestCase):
                     return {}
                 run_updates(model,opt,state,anchors,options,budget,lambda:None,update,
                             lambda:.015 if accepted else .015001)
-                self.assertEqual(state['attempts'],1)
-                self.assertEqual(state['steps'],int(accepted))
-                self.assertEqual(state['anchor_cursor'],2*int(accepted))
-                self.assertEqual(state['stop_reason'],'time_limit')
-                self.assertIsNone(state['pending'])
+                self.assertEqual(state.attempts,1)
+                self.assertEqual(state.steps,int(accepted))
+                self.assertEqual(state.anchor_cursor,2*int(accepted))
+                self.assertEqual(state.stop_reason,'time_limit')
+                self.assertIsNone(state.pending)
                 if not accepted:
                     torch.testing.assert_close(model.weight,before,rtol=0,atol=0)
                     self.assertFalse(opt.state)
@@ -204,7 +204,7 @@ class ControlTests(unittest.TestCase):
         saved=None;calls=0;randomness=[]
         def save():
             nonlocal saved
-            saved=cpu_snapshot(dict(state=state,model=model.state_dict(),optimizer=opt.state_dict(),rng=capture_rng()))
+            saved=cpu_snapshot(dict(state=state.to_checkpoint_dict(),model=model.state_dict(),optimizer=opt.state_dict(),rng=capture_rng()))
         def interrupted(selected):
             randomness.append(float(torch.rand(())))
             opt.zero_grad();(-model.weight.sum()).backward();opt.step()
@@ -212,7 +212,7 @@ class ControlTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'lost process'):
             run_updates(model,opt,state,anchors,options,Budget(),save,interrupted,lambda:0.)
         model.load_state_dict(saved['model']);opt.load_state_dict(saved['optimizer']);restore_rng(saved['rng'])
-        state=saved['state']
+        state=ComparisonTrainingState.from_checkpoint_dict(saved['state'])
         def resumed(selected):
             nonlocal calls
             calls+=1;randomness.append(float(torch.rand(())))
@@ -220,7 +220,7 @@ class ControlTests(unittest.TestCase):
             return {}
         run_updates(model,opt,state,anchors,options,Budget(),save,resumed,lambda:0.)
         self.assertEqual(randomness[0],randomness[1])
-        self.assertEqual(state['attempts'],1);self.assertEqual(state['steps'],1)
+        self.assertEqual(state.attempts,1);self.assertEqual(state.steps,1)
         self.assertEqual(int(next(iter(opt.state.values()))['step']),1)
         self.assertEqual(calls,1)
 
@@ -231,11 +231,11 @@ class ControlTests(unittest.TestCase):
             opt.zero_grad();(-model.weight.sum()).backward();opt.step()
             return {}
         run_updates(model,opt,state,anchors,options,Budget(),lambda:None,update,lambda:.02)
-        self.assertEqual(state['attempts'],3);self.assertEqual(state['steps'],0)
-        self.assertEqual(state['rejected_attempts'],3)
-        self.assertEqual(state['stop_reason'],'retry_limit')
-        self.assertEqual(state['anchor_cursor'],0)
-        self.assertEqual(state['attempted_final_kl'],.02)
+        self.assertEqual(state.attempts,3);self.assertEqual(state.steps,0)
+        self.assertEqual(state.rejected_attempts,3)
+        self.assertEqual(state.stop_reason,'retry_limit')
+        self.assertEqual(state.anchor_cursor,0)
+        self.assertEqual(state.attempted_final_kl,.02)
         torch.testing.assert_close(model.weight,before,rtol=0,atol=0)
         self.assertFalse(opt.state)
 

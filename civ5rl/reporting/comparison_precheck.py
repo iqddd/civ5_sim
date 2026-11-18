@@ -5,16 +5,16 @@ from pathlib import Path
 from time import perf_counter
 import json
 import torch
-from civ5rl.engine.comparison_training import (
+from civ5rl.engine.runtime.transactions import atomic_torch_save
+from civ5rl.engine.comparison.training import (
     Histories,
     configure_policy,
     prepare_references,
     logical_step,
     target_logits,
     full_kl,
-    atomic_torch_save,
 )
-from civ5rl.engine.optimizer_transaction import AdamSnapshot
+from civ5rl.engine.runtime.transactions import AdamSnapshot
 from civ5rl.provenance.common import configure, read_json, write_json, file_sha256
 from civ5rl.provenance.rng import capture_rng, restore_rng
 from civ5rl.experiments.imitation_helpers import assert_equal
@@ -23,7 +23,7 @@ from civ5rl.experiments.imitation_helpers import assert_equal
 def check_fit_gate(cfg, out, example, anchors):
     """Exercise rollback, terminal resume and publication recovery in isolation."""
     import tempfile, shutil
-    from civ5rl.engine.comparison_training import fit
+    from civ5rl.engine.comparison.training import fit
 
     with tempfile.TemporaryDirectory(prefix="comparison-smoke-") as temporary:
         tiny = Path(temporary)
@@ -124,7 +124,7 @@ def precheck(cfg, out):
 
     before = difference()
     started = perf_counter()
-    from civ5rl.engine.resources import ResourceMonitor
+    from civ5rl.engine.runtime.telemetry import ResourceMonitor
 
     with ResourceMonitor(out / "training-telemetry") as monitor:
         monitor.mark("comparative_step")
@@ -186,7 +186,7 @@ def precheck(cfg, out):
         ]
     ) as profiler:
         optimizer.zero_grad(set_to_none=True)
-        from civ5rl.engine.comparison_training import pair_loss
+        from civ5rl.engine.comparison.training import pair_loss
 
         logits = target_logits(policy, history, example["index"], gradient=True)
         pair_loss(logits, example["better"], example["worse"], 0.5).backward()

@@ -41,7 +41,7 @@ class EnsembleTests(unittest.TestCase):
         self.assertFalse(torch.equal(server.members[0].hidden,server.members[1].hidden))
 
     def test_batched_greedy_ties_sample_rng_and_selection_metrics(self):
-        from civ5rl.engine.evaluation import BatchedInference
+        from civ5rl.engine.evaluation.executor import BatchedInference
         configure(17,'cpu')
         initial=scenario(unit(),unit(side=1,x=3))
         with Battle(initial) as battle:

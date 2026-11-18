@@ -10,7 +10,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from civ5rl.engine.performance import summarize_performance
+from civ5rl.engine.runtime.telemetry import analyze_telemetry, summarize_performance
 
 
 class PerformanceTests(unittest.TestCase):
@@ -129,6 +129,36 @@ class PerformanceTests(unittest.TestCase):
             self.assertAlmostEqual(windows["min_percent"], (29 * 100 + 31 * 50) / 60)
             self.assertEqual(windows["below_80_count"], 2)
             self.assertEqual(ppo["longest_contiguous_nvml_seconds"], 61)
+
+    def test_both_reports_split_a_phase_between_nvml_samples(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            telemetry = out / "telemetry"
+            self.write(out / "updates.jsonl", [self.update(1)])
+            self.write(
+                telemetry / "phases.jsonl",
+                [
+                    self.row(0, "ppo", 1),
+                    self.row(30.25, "compilation", 1),
+                    self.row(30.75, "ppo", 1),
+                    self.row(61, "stopped", 1),
+                ],
+            )
+            samples = telemetry / "resources.jsonl"
+            self.write(
+                samples,
+                [self.row(t, "ppo", 1, 60 if t < 40 else 80) for t in range(62)],
+            )
+
+            analysis = analyze_telemetry(samples, active_phase="ppo")
+            ppo = summarize_performance(out)["phases"]["ppo"]
+            self.assertEqual(analysis["windows"], [])
+            self.assertEqual(ppo["gpu_60s_windows"]["count"], 0)
+            self.assertAlmostEqual(ppo["nvml_seconds"], 60.5)
+            self.assertAlmostEqual(
+                analysis["metrics"]["gpu_core_load_percent"]["mean"],
+                ppo["gpu_core_load_percent_mean"],
+            )
 
 
 if __name__ == "__main__":

@@ -13,11 +13,11 @@ from time import perf_counter
 
 import torch
 
-from civ5rl.engine.collector import Collector
-from civ5rl.engine.control import RunLock
-from civ5rl.engine.counters import TrainingCounters
-from civ5rl.engine.ppo import update
-from civ5rl.engine.resources import ResourceMonitor, analyze_telemetry
+from civ5rl.engine.collection.collector import Collector
+from civ5rl.engine.runtime.control import RunLock
+from civ5rl.engine.runtime.control import TrainingCounters
+from civ5rl.engine.ppo.core import update
+from civ5rl.engine.runtime.telemetry import ResourceMonitor, analyze_telemetry
 from civ5rl.experiments.evaluation import paired_world_bootstrap, verify_replay
 from civ5rl.experiments.imitation_helpers import (
     CompilationClock,
@@ -228,7 +228,7 @@ def train(config, plan, out, device, *, factory_type=ScaleUpFactory, development
         prep = perf_counter()
         with isolated_rng(shuffle), torch.no_grad():
             from civ5rl.core.model import batch_inputs
-            from civ5rl.engine.ppo import encode_episode
+            from civ5rl.engine.ppo.core import encode_episode
             from civ5rl.experiments.ppo_artifacts import load_rollout
             fixture = load_rollout(ROOT / "artifacts/rl/ppo-controlled-updates/rollouts/first.pt")[0]
             encoded = encode_episode(fixture, "C")[:20]

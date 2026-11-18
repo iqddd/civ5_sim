@@ -8,7 +8,7 @@ from time import perf_counter
 import numpy as np
 import torch
 
-from civ5rl.engine.pool import pool
+from civ5rl.engine.runtime.shared import pool
 from civ5rl.protocols.imitation import load_episode, make_case
 from civ5rl.provenance.common import file_sha256, read_json
 from civ5rl.provenance.rng import capture_rng, restore_rng as _restore_rng

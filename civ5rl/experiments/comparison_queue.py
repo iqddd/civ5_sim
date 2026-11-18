@@ -30,8 +30,8 @@ import torch
 
 from civ5rl.core.agent import RLAgent
 from civ5rl.core.model import batch_inputs
-from civ5rl.engine.evaluation import EvaluationExecutor, prepare_evaluation_policy
-from civ5rl.engine.evaluation_proxy import _remote_task
+from civ5rl.engine.evaluation.executor import EvaluationExecutor, prepare_evaluation_policy
+from civ5rl.engine.evaluation.proxy import _remote_task
 from civ5rl.experiments.comparison_collection import ProposalInference
 
 FIRST_GROUP = (0, 1, 2, 3)

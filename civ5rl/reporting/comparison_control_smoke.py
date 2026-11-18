@@ -13,16 +13,16 @@ import tempfile
 import torch
 
 from civ5rl.deploy.archive import seven_zip
-from civ5rl.engine.comparison_control import fit_full_corpus
-from civ5rl.engine.phase_budget import PhaseBudget
+from civ5rl.engine.comparison.control import fit_full_corpus
+from civ5rl.engine.runtime.budget import PhaseBudget
 from civ5rl.provenance.common import ROOT,configure,read_json,write_json,file_sha256
 from civ5rl.provenance.checkpoint import verify_frozen_passport
 
 
 def continuation_smoke(cfg,out):
     """Verify real inherited state and evaluator compatibility without fitting."""
-    from civ5rl.engine.comparison_continuation import validate_continuation,continuation_seconds
-    from civ5rl.engine.evaluation import EvaluationRuntime,evaluation_precision
+    from civ5rl.engine.comparison.continuation import validate_continuation,continuation_seconds
+    from civ5rl.engine.evaluation.executor import EvaluationRuntime,evaluation_precision
     from civ5rl.experiments.ppo_target_scale import evaluation_key
     out=Path(out)
     if out.exists() and any(out.iterdir()):raise ValueError('Use an empty precheck output')
@@ -83,7 +83,7 @@ def smoke(cfg,out):
             if any(not torch.equal(v,parent['model'][k]) for k,v in candidate['model'].items()
                    if not k.startswith(('action.','attack_preview.'))):
                 raise AssertionError('Frozen representation changed')
-            from civ5rl.engine.comparison_heads import configure_heads
+            from civ5rl.engine.comparison.heads import configure_heads
             model=configure_heads(cfg['parents'][0],device='cpu')
             parameters=[p for p in model.parameters() if p.requires_grad]
             if sum(p.numel() for p in parameters)!=68609:raise AssertionError('Wrong trainable head set')
@@ -112,15 +112,16 @@ def benchmark(args,parser):
     import statistics
     from time import perf_counter
     from civ5rl.experiments.rollout_comparison import load_config
-    from civ5rl.engine.comparison_training import (
-        Histories,configure_policy,prepare_references,logical_step,full_kl,atomic_torch_save,
+    from civ5rl.engine.runtime.transactions import atomic_torch_save
+    from civ5rl.engine.comparison.training import (
+        Histories,configure_policy,prepare_references,logical_step,full_kl,
     )
-    from civ5rl.engine.comparison_control import initial_state
-    from civ5rl.engine.optimizer_transaction import AdamSnapshot
+    from civ5rl.engine.comparison.control import initial_state
+    from civ5rl.engine.runtime.transactions import AdamSnapshot
     from civ5rl.reporting.comparison_storage import restore_tree
     from civ5rl.provenance.common import seed_for
     from civ5rl.provenance.rng import capture_rng
-    from civ5rl.engine.resources import ResourceMonitor
+    from civ5rl.engine.runtime.telemetry import ResourceMonitor
     if args.config is None:parser.error('Full-corpus comparison requires --config')
     cfg=load_config(args.config);out=args.out.resolve()
     if out.exists() and any(out.iterdir()):parser.error('Use an empty benchmark output')
@@ -138,7 +139,7 @@ def benchmark(args,parser):
         restore_tree(scratch,'sources')
         head_only=options['mode']=='frozen_heads_step_kl'
         if head_only:
-            from civ5rl.engine.comparison_heads import configure_heads,HeadFeatures
+            from civ5rl.engine.comparison.heads import configure_heads,HeadFeatures
             policy=configure_heads(cfg['parents'][0])
         else:policy=configure_policy(cfg['parents'][0])
         optimizer=torch.optim.Adam([p for p in policy.parameters() if p.requires_grad],lr=options['initial_lr'],
@@ -153,7 +154,7 @@ def benchmark(args,parser):
             features.prepare(cfg['parents'][0])
         else:refs=prepare_references(policy,histories,data['anchors'],scratch/'references.pt')
         state=initial_state(data['anchors'],options,seed_for(cfg['seed'],0,'anchors',namespace=cfg['namespace']))
-        anchors=[data['anchors'][i] for i in state['anchor_order'][:options['anchors_per_step']]]
+        anchors=[data['anchors'][i] for i in state.anchor_order[:options['anchors_per_step']]]
         cold=perf_counter()-started;snapshot=AdamSnapshot(policy,optimizer);rows=[]
         with ResourceMonitor(out/'telemetry') as monitor:
             for index in range(args.warmup+args.steps):

@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from civ5rl.engine.benchmark import assert_update_parity, run_full_cycle_benchmark
+from civ5rl.engine.ppo.benchmark import assert_update_parity, run_full_cycle_benchmark
 
 
 class BenchmarkTest(unittest.TestCase):
@@ -55,8 +55,8 @@ class BenchmarkTest(unittest.TestCase):
             return {"optimizer_steps": 1}
 
         with (tempfile.TemporaryDirectory() as tmp,
-              patch("civ5rl.engine.benchmark.update", fake_update),
-              patch("civ5rl.engine.benchmark.save_rollout", return_value={"sha256": "fixture"})):
+              patch("civ5rl.engine.ppo.benchmark.update", fake_update),
+              patch("civ5rl.engine.ppo.benchmark.save_rollout", return_value={"sha256": "fixture"})):
             result = run_full_cycle_benchmark(policy=model, optimizer=optimizer,
                 shuffle_rng=shuffle, collector=Collector(), config={}, specs=[1],
                 manifest={}, output=tmp, device="cpu", repeats=2)

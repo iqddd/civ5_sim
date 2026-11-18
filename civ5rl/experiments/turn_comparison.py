@@ -7,7 +7,7 @@ from time import perf_counter
 
 from civ5rl.provenance.common import ROOT,read_json,write_json,file_sha256,seed_for,configure
 from civ5rl.provenance import checkpoint
-from civ5rl.engine.control import RunLock
+from civ5rl.engine.runtime.control import RunLock
 from civ5rl.reporting.comparison_storage import readable_tree,restore_tree,archive_tree
 from civ5sim.engine import digest
 
@@ -115,8 +115,8 @@ def prepare(cfg,out):
 
 
 def collect(cfg,out,workers=8):
-    from civ5rl.engine.evaluation import EvaluationRuntime
-    from civ5rl.engine.turn_collection import TurnExecutor
+    from civ5rl.engine.evaluation.executor import EvaluationRuntime
+    from civ5rl.experiments.comparison_turns import TurnExecutor
     from civ5rl.experiments.comparison_match import match_task
     if (out/'result.json').exists() and read_json(out/'collection.json').get('complete'):return
     manifest=read_json(out/'positions.json')

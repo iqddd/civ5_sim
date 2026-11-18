@@ -25,8 +25,8 @@ import json
 import math
 import random
 
-from civ5rl.engine.control import RunLock
-from civ5rl.engine.evaluation import EvaluationRuntime, evaluation_precision
+from civ5rl.engine.runtime.control import RunLock
+from civ5rl.engine.evaluation.executor import EvaluationRuntime, evaluation_precision
 from civ5rl.experiments.comparison_collection import select_forks
 from civ5rl.experiments.comparison_match import match_task
 from civ5rl.experiments.comparison_queue import CollectionExecutor, Scheduler, two_stage_label
@@ -337,7 +337,7 @@ def build_dataset(cfg, out, state):
 
 
 def run(phase, cfg, out, runtime, *, preparation_seconds=0.):
-    from civ5rl.engine.phase_budget import PhaseBudget
+    from civ5rl.engine.runtime.budget import PhaseBudget
     out = Path(out).resolve()
     with RunLock(out):
         configure(cfg['seed'], 'cuda')

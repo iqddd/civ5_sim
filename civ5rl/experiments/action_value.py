@@ -11,10 +11,10 @@ from time import perf_counter
 import numpy as np
 import torch
 
-from civ5rl.engine.action_value import (split_worlds, make_head, make_optimizer,
+from civ5rl.engine.comparison.action_value import (split_worlds, make_head, make_optimizer,
     predict, summarize, bootstrap, world_scores, fork_targets, public_action_vector)
-from civ5rl.engine.comparison_training import atomic_torch_save
-from civ5rl.engine.control import RunLock
+from civ5rl.engine.runtime.transactions import atomic_torch_save
+from civ5rl.engine.runtime.control import RunLock
 from civ5rl.provenance import checkpoint
 from civ5rl.provenance.common import ROOT, configure, read_json, write_json, file_sha256
 from civ5rl.provenance.rng import capture_rng, restore_rng
@@ -41,8 +41,8 @@ def load_config(path):
 
 def prepare(cfg, out):
     """Copy and verify input evidence, publishing the feature packet last."""
-    from civ5rl.engine.action_value_features import FrozenActionFeatures
-    from civ5rl.engine.comparison_inputs import Histories
+    from civ5rl.engine.comparison.action_value_features import FrozenActionFeatures
+    from civ5rl.engine.comparison.inputs import Histories
     from civ5rl.reporting.comparison_storage import readable_tree
     source = ROOT/cfg['collection_input']['run']
     if source.resolve() == out.resolve():

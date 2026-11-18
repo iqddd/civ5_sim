@@ -10,7 +10,7 @@ from typing import Any
 
 import torch
 
-from civ5rl.engine.resources import analyze_telemetry
+from civ5rl.engine.runtime.telemetry import analyze_telemetry
 from civ5rl.protocols.imitation_target_scale import C2_KIND, MORE_DATA_KIND
 from civ5rl.provenance.common import read_json, write_json
 

@@ -24,7 +24,7 @@ from civ5rl.core.observation import (
 )
 from civ5map.runtime import distance as runtime_hex_distance
 from civ5rl.core.schema import GLOBAL
-from civ5rl.engine.imitation_stream import (
+from civ5rl.engine.imitation.storage import (
     PreparedDemonstrations,
     prepare_inputs,
 )

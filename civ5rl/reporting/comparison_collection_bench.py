@@ -132,7 +132,7 @@ def measure_workers(cfg, source, scratch, out, workers, records, warmup_records,
     warms both spawn workers and inference shapes; a four-fork warmup alone can
     start only 32 CPU workers regardless of the configured pool capacity.
     """
-    from civ5rl.engine.evaluation import EvaluationRuntime, evaluation_precision
+    from civ5rl.engine.evaluation.executor import EvaluationRuntime, evaluation_precision
     from civ5rl.experiments.comparison_match import match_task
     from civ5rl.experiments.comparison_queue import CollectionExecutor, Scheduler
 
@@ -223,7 +223,7 @@ def measure_workers(cfg, source, scratch, out, workers, records, warmup_records,
 
 
 def measure_barrier(cfg, source, scratch, out, workers, records, warmup_record, seconds, monitor):
-    from civ5rl.engine.evaluation import EvaluationExecutor, EvaluationRuntime, evaluation_precision
+    from civ5rl.engine.evaluation.executor import EvaluationExecutor, EvaluationRuntime, evaluation_precision
     protocol = SavedForkProtocol(source, scratch, out / "matches" / f"barrier-W{workers}", records, {})
     protocol.parent = cfg["parents"][0]
 
@@ -284,7 +284,7 @@ def run_benchmark(args, parser):
     import psutil
     import torch
     from civ5rl.deploy.archive import unpack
-    from civ5rl.engine.resources import ResourceMonitor
+    from civ5rl.engine.runtime.telemetry import ResourceMonitor
     from civ5rl.experiments.rollout_comparison_collection import load_config
     from civ5rl.provenance.common import ROOT
 

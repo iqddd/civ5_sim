@@ -22,7 +22,7 @@ from civ5rl.deploy.remote import (
     inspect_remote,
     stage_inputs,
 )
-from civ5rl.engine.control import RunLock
+from civ5rl.engine.runtime.control import RunLock
 
 CAPABILITIES = {
     "rl01.rollout_comparison_collection": {"run", "tune", "resume"},
@@ -326,7 +326,7 @@ sys.path.insert(0,p['root'])
 from civ5rl.deploy.archive import pack
 from civ5rl.deploy.remote import _sha
 from civ5rl.deploy.remote import _read
-from civ5rl.engine.control import RunLock
+from civ5rl.engine.runtime.control import RunLock
 if not Path(p['source']).is_dir() or _read(Path(p['upload'])/'applied.json').get('token') != p['token']:
     raise ValueError('Scientific upload was not applied; refusing to replace local results')
 with RunLock(p['source']):
@@ -539,7 +539,7 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
             transfer_dir = directory / "transfers" / f"job-{sequence}"
             local_sync_dir = transfer_dir / "upload"
             remote_sync_dir = deployment["remote_root"] + f"/transport/job-{sequence}/upload"
-            from civ5rl.engine.control import is_active
+            from civ5rl.engine.runtime.control import is_active
 
             if is_active(scientific_destination):
                 raise ValueError("Cannot transfer an actively written local training run")

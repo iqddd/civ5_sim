@@ -10,7 +10,7 @@ from threading import Thread, Lock
 
 
 def _service(checkpoints, runtime, control, prefix_states=False):
-    from civ5rl.engine.evaluation import evaluation_precision
+    from civ5rl.engine.evaluation.executor import evaluation_precision
     from civ5rl.experiments.comparison_queue import CollectionExecutor
     from civ5rl.provenance.common import configure
     configure(17, runtime.device)
@@ -65,7 +65,7 @@ class ProcessInferenceExecutor:
 
     def __enter__(self):
         from dataclasses import replace
-        from civ5rl.engine.pool import pool
+        from civ5rl.engine.runtime.shared import pool
         context = mp.get_context('spawn')
         try:
             for i in range(self.count):
@@ -94,7 +94,7 @@ class ProcessInferenceExecutor:
                 raise RuntimeError(f'Inference process exited: {process.exitcode}')
 
     def submit(self, function, task, kind):
-        from civ5rl.engine.evaluation_proxy import _remote_task
+        from civ5rl.engine.evaluation.proxy import _remote_task
         self.check()
         server, client = Pipe()
         with self.lock:

@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from civ5rl.deploy.operations import package, verify_package
 from civ5rl.deploy.remote import _sha, input_group, stage_inputs
-from civ5rl.engine.imitation_stream import PreparedDemonstrations, prepare_inputs
+from civ5rl.engine.imitation.storage import PreparedDemonstrations, prepare_inputs
 from civ5rl.experiments.imitation_target_scale import load_config
 from civ5rl.protocols.imitation import dump_episode
 from civ5rl.protocols.ppo_target_scale import TargetFactory

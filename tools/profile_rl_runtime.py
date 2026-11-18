@@ -221,7 +221,7 @@ def main():
     sys.path.insert(0, str(args.source_root.resolve()))
     import torch
 
-    from civ5rl.engine.resources import ResourceMonitor
+    from civ5rl.engine.runtime.telemetry import ResourceMonitor
     from civ5rl.experiments.ppo_artifacts import load_rollout
     from civ5rl.provenance.common import configure, file_sha256, write_json
 
@@ -274,7 +274,7 @@ def main():
                 if args.config is None or args.checkpoint is None:
                     parser.error("Collection requires --config and --checkpoint")
                 from civ5rl.config import load_config
-                from civ5rl.engine.collector import Collector
+                from civ5rl.engine.collection.collector import Collector
                 from civ5rl.experiments.imitation_helpers import CompilationClock
                 from civ5rl.provenance import bound_cases, case_manifest
                 from civ5sim.engine import digest

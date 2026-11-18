@@ -6,12 +6,12 @@ from civ5rl.provenance.common import ROOT,read_json,write_json
 
 def smoke(cfg,out):
     from tests.test_combat import scenario,unit
-    from civ5rl.engine.evaluation import EvaluationRuntime,EvaluationExecutor
+    from civ5rl.engine.evaluation.executor import EvaluationRuntime,EvaluationExecutor
     from civ5rl.experiments.comparison_collection import ProposalExecutor
     from civ5rl.experiments.comparison_match import match_task
     from civ5rl.experiments.turn_comparison import branch_spec,position_candidates
-    from civ5rl.engine.resources import ResourceMonitor
-    from civ5rl.engine.turn_collection import TurnExecutor
+    from civ5rl.engine.runtime.telemetry import ResourceMonitor
+    from civ5rl.experiments.comparison_turns import TurnExecutor
     from torch.profiler import profile,ProfilerActivity
     out=Path(out)
     if any(p.name not in ('run.lock','derived') for p in out.iterdir()):raise ValueError('Use empty smoke output')

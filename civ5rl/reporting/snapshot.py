@@ -4,7 +4,7 @@ import json
 import statistics
 from pathlib import Path
 
-from civ5rl.engine.performance import (
+from civ5rl.engine.runtime.telemetry import (
     _lines,
     performance_markdown,
     summarize_performance,

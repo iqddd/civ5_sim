@@ -7,13 +7,13 @@ import unittest
 from dataclasses import asdict
 from pathlib import Path
 
-from civ5rl.engine.imitation import label_minibatches
-from civ5rl.engine.imitation_stream import (
+from civ5rl.engine.imitation.core import label_minibatches
+from civ5rl.engine.imitation.storage import (
     PreparedDemonstrations,
     prepare_episode,
     prepare_inputs,
 )
-from civ5rl.engine.spans import Span
+from civ5rl.engine.runtime.sequence import Span
 from civ5rl.experiments.imitation_target_scale import (
     _format_corpus_entry,
     load_config,

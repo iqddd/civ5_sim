@@ -8,9 +8,9 @@ import torch
 from civ5rl.core.agent import RLAgent
 from civ5rl.core.model import batch_inputs
 from civ5rl.core.observation import ordered_actions
-from civ5rl.engine.evaluation import BatchedInference, EvaluationExecutor, EvaluationRuntime
-from civ5rl.engine.pool import pool
-from civ5rl.engine.resources import ResourceMonitor
+from civ5rl.engine.evaluation.executor import BatchedInference, EvaluationExecutor, EvaluationRuntime
+from civ5rl.engine.runtime.shared import pool
+from civ5rl.engine.runtime.telemetry import ResourceMonitor
 from civ5rl.experiments.ppo_target_scale import evaluation_task
 from civ5rl.provenance.common import configure, file_sha256, read_json, write_json
 from civ5rl.experiments.evaluation import verify_replay

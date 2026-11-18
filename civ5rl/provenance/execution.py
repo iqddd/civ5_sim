@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 
 from civ5rl.provenance.common import ROOT,read_json,write_json,file_sha256
-from civ5rl.engine.control import RunLock
+from civ5rl.engine.runtime.control import RunLock
 
 CODE_PATHS=('civ5rl','civ5sim','civ5map','native','tools','requirements-rl*.txt')
 

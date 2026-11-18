@@ -20,13 +20,13 @@ import torch
 from civ5rl.core.context import context_from_spec
 from civ5rl.core.model import batch_inputs
 from civ5rl.core.observation import ObservationEncoder
-from civ5rl.engine.collector import Collector
-from civ5rl.engine.evaluation import evaluation_precision
-from civ5rl.engine.control import RunLock, assert_not_closed
-from civ5rl.engine.counters import TrainingCounters
-from civ5rl.engine.ppo import update
-from civ5rl.engine.ppo import encode_episode
-from civ5rl.engine.ppo_fast import BatchedBackend
+from civ5rl.engine.collection.collector import Collector
+from civ5rl.engine.evaluation.executor import evaluation_precision
+from civ5rl.engine.runtime.control import RunLock, assert_not_closed
+from civ5rl.engine.runtime.control import TrainingCounters
+from civ5rl.engine.ppo.core import update
+from civ5rl.engine.ppo.core import encode_episode
+from civ5rl.engine.ppo.backend import BatchedBackend
 from civ5rl.experiments import ppo_scale_up as shared
 from civ5rl.experiments.evaluation import paired_world_bootstrap, verify_replay
 from civ5rl.experiments.imitation_helpers import assert_equal, isolated_rng, pool
@@ -189,7 +189,7 @@ def calibrate(config, plan, out, device):
                     # One real Adam attempt on a disposable copy, including full KL.
                     backend = BatchedBackend(policy,episodes,config,device)
                     backend.precheck()
-                    from civ5rl.engine.ppo import token_minibatches
+                    from civ5rl.engine.ppo.core import token_minibatches
                     spans = [(i,a,min(a+128,len(ep['chosen']))) for i,ep in enumerate(episodes)
                              for a in range(0,len(ep['chosen']),128)]
                     batch = next(iter(token_minibatches(spans,1024)))
@@ -317,7 +317,7 @@ def evaluate(config,plan,out,path,purpose):
     from civ5rl.protocols.turn_reset import validate_case
     for case in plan[purpose]:
         validate_case(case, config)
-    from civ5rl.engine.evaluation import EvaluationExecutor, runtime_for
+    from civ5rl.engine.evaluation.executor import EvaluationExecutor, runtime_for
     runtime = runtime_for(out, config, cp_only=path == 'cp')
     runtime_identity = runtime.identity()
     fingerprint,key=evaluation_key(config,plan,out,path,purpose,runtime_identity)

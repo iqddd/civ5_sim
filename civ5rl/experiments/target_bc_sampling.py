@@ -16,8 +16,8 @@ from civ5rl.config import load_config
 from civ5rl.core.agent import RLAgent, action_probabilities
 from civ5rl.core.context import context_from_spec
 from civ5rl.core.observation import ordered_actions
-from civ5rl.engine.control import RunLock
-from civ5rl.engine.pool import pool
+from civ5rl.engine.runtime.control import RunLock
+from civ5rl.engine.runtime.shared import pool
 from civ5rl.experiments.evaluation import paired_world_bootstrap
 from civ5rl.experiments.ppo_after_imitation import play_case
 from civ5rl.experiments.ppo_artifacts import load_rollout

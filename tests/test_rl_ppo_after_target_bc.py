@@ -8,16 +8,16 @@ import torch
 
 from civ5rl.config import load_config
 from civ5rl.core.model import Policy, batch_inputs
-from civ5rl.engine.counters import TrainingCounters
-from civ5rl.engine.ppo import (
+from civ5rl.engine.runtime.control import TrainingCounters
+from civ5rl.engine.ppo.core import (
     encode_episode,
     episode_returns,
     raw_gae_advantages,
     targets,
     update,
 )
-from civ5rl.engine.ppo_fast import BatchedBackend, RolloutCache
-from civ5rl.engine.replay_metrics import StepReplay
+from civ5rl.engine.ppo.backend import BatchedBackend, RolloutCache
+from civ5rl.engine.ppo.metrics import StepReplay
 from civ5rl.experiments.imitation_helpers import assert_equal
 from civ5rl.experiments.ppo_after_imitation import (
     optimizer_for,

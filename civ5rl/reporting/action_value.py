@@ -3,14 +3,14 @@ from pathlib import Path
 from time import perf_counter
 import torch
 
-from civ5rl.engine.action_value import make_head,make_optimizer,outcome_loss
-from civ5rl.engine.comparison_training import atomic_torch_save
+from civ5rl.engine.comparison.action_value import make_head,make_optimizer,outcome_loss
+from civ5rl.engine.runtime.transactions import atomic_torch_save
 from civ5rl.provenance.common import read_json,write_json
 
 
 def smoke(cfg,out):
     from torch.profiler import profile,ProfilerActivity
-    from civ5rl.engine.resources import ResourceMonitor
+    from civ5rl.engine.runtime.telemetry import ResourceMonitor
     out=Path(out)
     if any(p.name!='run.lock' and p.name!='derived' for p in out.iterdir()):
         raise ValueError('Use an empty smoke directory')
@@ -52,7 +52,7 @@ def controller_smoke(cfg,out):
     """Discardable synthetic fit: interrupted steps must equal an uninterrupted fit."""
     import numpy as np
     from unittest.mock import patch
-    from civ5rl.engine.action_value import split_worlds
+    from civ5rl.engine.comparison.action_value import split_worlds
     from civ5rl.experiments.action_value import train,evaluate
     from civ5rl.provenance.common import configure
     out=Path(out);split=split_worlds(list(range(10000,10057)))
@@ -118,9 +118,9 @@ def controller_smoke(cfg,out):
 
 def cached_vector_smoke(cfg):
     """Compare the vector assembler to the frozen policy on real cached actions."""
-    from civ5rl.engine.comparison_heads import configure_heads
-    from civ5rl.engine.comparison_inputs import Histories
-    from civ5rl.engine.action_value import public_action_vector
+    from civ5rl.engine.comparison.heads import configure_heads
+    from civ5rl.engine.comparison.inputs import Histories
+    from civ5rl.engine.comparison.action_value import public_action_vector
     from civ5rl.provenance.common import ROOT,file_sha256
     directory=Histories(ROOT/cfg['feature_cache_run']).directory.parent/'head-features-fp32'
     receipt=next(directory.glob('111068-*.json'),None)
@@ -131,7 +131,7 @@ def cached_vector_smoke(cfg):
     assert metadata['identity']['common']['parent']==cfg['parent_sha256']
     record=torch.load(path,weights_only=False,map_location='cpu',mmap=True)
     assert record['identity']==metadata['identity']
-    from civ5rl.engine.action_value_features import FrozenActionFeatures
+    from civ5rl.engine.comparison.action_value_features import FrozenActionFeatures
     dataset=read_json(ROOT/cfg['collection_input']['run']/'dataset.json')
     subset={**dataset,'pairs':[p for p in dataset['pairs'] if p['episode']==111068],
         'anchors':[k for k in dataset['anchors'] if k[0]==111068]}

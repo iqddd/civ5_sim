@@ -12,7 +12,12 @@
 | Пакет | Ответственность |
 |---|---|
 | `civ5rl.core` | Контракты входов, schema/encoding, модель, агент, `DecisionEnv` |
-| `civ5rl.engine` | Collector, shared slots, PPO/BC, последовательности, управление запуском, ресурсы |
+| `civ5rl.engine.collection` | Сбор полных траекторий, стратегии планирования и CPU-воркеры |
+| `civ5rl.engine.ppo` | Цели и обновления PPO, batched backend, behavior replay и контроль KL |
+| `civ5rl.engine.imitation` | Behavior Cloning, кэши демонстраций и пакетирование на GPU |
+| `civ5rl.engine.comparison` | Попарное обучение, контроль KL, подготовка историй и продолжение обучения |
+| `civ5rl.engine.evaluation` | Параллельные матчи, batched inference и состояние GRU |
+| `civ5rl.engine.runtime` | Буферы, общая память, транзакции Adam, бюджеты и телеметрия |
 | `civ5rl.protocols` | Корпуса и случаи, диагностики, оценки, ограничения протоколов |
 | `civ5rl.experiments` | Сценарии опытов, общая подготовка и выполнение оценочных матчей |
 | `civ5rl.provenance` | Паспорта, checkpoint/lineage, миграции, валидация конфигураций |
@@ -20,11 +25,11 @@
 | `civ5rl.deploy` | Упаковка и управление удалённым исполнением |
 
 `core` не зависит от `engine` или `protocols`; `engine` не импортирует CLI
-из `tools/` и сценарии экспериментов. Collector workers загружаются без Torch.
+из `tools/`. Collector workers загружаются без Torch.
 Код использует канонические пути, например `civ5rl.core.observation`,
-`civ5rl.core.model`, `civ5rl.engine.collector`, `civ5rl.engine.ppo` и
-`civ5rl.provenance.checkpoint`. Существующие алиасы плоских импортов — свойство
-совместимости реализации, а не рекомендуемая структура новых модулей.
+`civ5rl.core.model`, `civ5rl.engine.collection.collector`, `civ5rl.engine.ppo.core`
+и `civ5rl.provenance.checkpoint`. Сценарии отдельных опытов находятся в
+`civ5rl.experiments`.
 
 ## Информация и память
 
@@ -180,7 +185,7 @@ CPU workers, переключается между ними после кома�
 равен терминальному исходу её эпизода $R \in \{0, 1\}$, а сырое преимущество
 равно $A_t = R - V_{\text{old}}(s_t)$. При `gamma < 1` или `gae_lambda < 1`
 (`discounted_monte_carlo_with_gae`, функции `episode_returns` и
-`raw_gae_advantages` в `engine/ppo.py`) целью регрессии критика — как при
+`raw_gae_advantages` в `engine/ppo/core.py`) целью регрессии критика — как при
 коротком прогреве `prepare_critic` на первом сборе, так и в основных PPO-шагах —
 служит точный дисконтированный терминальный возврат $G_t = \gamma^{T-1-t} R$,
 а преимущество актора вычисляется обратным проходом $\text{GAE}(\gamma, \lambda)$
@@ -206,8 +211,8 @@ loss = policy_loss + value_coef*value_loss - entropy_coef*mean(H_norm)
 Необязательный кеш может остаться на CPU; нехватка памяти обязательных
 резидентных входов завершает фазу ошибкой.
 
-PPO выполняется единым циклом `engine/ppo.py` через `BatchedBackend` из
-`engine/ppo_fast.py`. Без batched-режима используются нерезидентные входы
+PPO выполняется единым циклом `engine/ppo/core.py` через `BatchedBackend` из
+`engine/ppo/backend.py`. Без batched-режима используются нерезидентные входы
 и одна последовательность на microbatch; это не отдельный ReferenceBackend.
 Перед chunk полный префикс данного эпизода пересчитывается текущими весами
 без градиента от `h=0`, затем detach и BPTT на chunk (обычно до 128 шагов).
@@ -397,7 +402,7 @@ parent checkpoint и начинаться после родительского 
 
 ## Исполнение оценок
 
-`engine/evaluation.py` задаёт отдельный `EvaluationRuntime`, выбор backend и
+`engine/evaluation/executor.py` задаёт отдельный `EvaluationRuntime`, выбор backend и
 центральный `BatchedInference`/`EvaluationExecutor`. Target-scale BC/PPO
 запуск без сохранённого runtime выбирает CUDA автоматически, при её отсутствии CPU. `evaluation-runtime.json` хранит
 первый выбор, явные runtime options могут задать другой. Научный config не меняется.
@@ -560,5 +565,5 @@ Seeds продолжений привязаны к `(episode_id, decision_index,
 Фиксированные условия определены в [протоколе](../civ5rl/experiments/rollout_comparison.py),
 [сборщике v2](../civ5rl/experiments/rollout_comparison_collection.py),
 [очереди](../civ5rl/experiments/comparison_queue.py) и
-[обучении](../civ5rl/engine/comparison_training.py).
+[обучении](../civ5rl/engine/comparison/training.py).
 Команды — в [операциях](rl-operations.md#сравнительное-обучение-по-доигрываниям).

@@ -13,11 +13,11 @@ from time import perf_counter
 import torch
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from civ5rl.engine.imitation import label_minibatches
-from civ5rl.engine.imitation_performance import backward_minibatch_async
-from civ5rl.engine.imitation_stream import PreparedDemonstrations, prepare_inputs
-from civ5rl.engine.resources import ResourceMonitor, analyze_telemetry, integrate_gpu_interval
-from civ5rl.engine.training import FrozenParamsCheck, bc_optimizer_step
+from civ5rl.engine.imitation.core import label_minibatches
+from civ5rl.engine.imitation.pipeline import backward_minibatch_async
+from civ5rl.engine.imitation.storage import PreparedDemonstrations, prepare_inputs
+from civ5rl.engine.runtime.telemetry import ResourceMonitor, analyze_telemetry, integrate_gpu_interval
+from civ5rl.engine.runtime.transactions import FrozenParamsCheck, bc_optimizer_step
 from civ5rl.experiments.imitation_helpers import CompilationClock, adam, load_policy
 from civ5rl.experiments.imitation_target_scale import (
     _chunk_priority_order,
@@ -157,7 +157,7 @@ def _execute_bc_steps(
     on_step_completed=None,
 ):
     """Execute a list of (spans, label_count) minibatches using the active BC runner."""
-    from civ5rl.engine import imitation_performance as ip
+    from civ5rl.engine.imitation import pipeline as ip
 
     if use_pipeline and hasattr(ip, "run_bc_minibatch_stream"):
         return ip.run_bc_minibatch_stream(
@@ -272,11 +272,11 @@ def _execute_bc_steps(
 @contextmanager
 def _instrument_for_trace(policy, cache, optimizer):
     """Attach temporary record_function scopes for Kineto attribution only."""
-    import civ5rl.engine.imitation_performance as ip
+    import civ5rl.engine.imitation.pipeline as ip
 
     orig_get = cache.get
     orig_get_arrays = getattr(cache, "get_arrays", None)
-    orig_pack = getattr(cache, "_pack_cpu_spans", None)
+    orig_pack = getattr(cache, "pack_cpu_spans", None)
     orig_batch = cache.batch
     orig_gather = getattr(cache, "gather_spatial_inputs", None)
     orig_encode = policy.encode_spatial
@@ -337,7 +337,7 @@ def _instrument_for_trace(policy, cache, optimizer):
     if orig_get_arrays is not None:
         cache.get_arrays = wrapped_get_arrays
     if orig_pack is not None:
-        cache._pack_cpu_spans = wrapped_pack
+        cache.pack_cpu_spans = wrapped_pack
     cache.batch = wrapped_batch
     if orig_gather is not None:
         cache.gather_spatial_inputs = wrapped_gather
@@ -354,7 +354,7 @@ def _instrument_for_trace(policy, cache, optimizer):
         if orig_get_arrays is not None:
             cache.get_arrays = orig_get_arrays
         if orig_pack is not None:
-            cache._pack_cpu_spans = orig_pack
+            cache.pack_cpu_spans = orig_pack
         cache.batch = orig_batch
         if orig_gather is not None:
             cache.gather_spatial_inputs = orig_gather

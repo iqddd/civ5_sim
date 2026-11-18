@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 from civ5rl.deploy import operations as remote
 from civ5rl.deploy import worker
-from civ5rl.engine.control import RunLock
+from civ5rl.engine.runtime.control import RunLock
 from civ5rl.reporting.operations import audit_run
 from tools.ctl_rl import main as ctl
 from tools.remote_rl import main as remote_cli

@@ -10,9 +10,9 @@ from unittest.mock import patch
 import torch
 
 from civ5rl.core.model import Policy
-from civ5rl.engine.evaluation import evaluation_options, runtime_for
-from civ5rl.engine.ppo import update
-from civ5rl.engine.ppo_fast import BatchedBackend
+from civ5rl.engine.evaluation.executor import evaluation_options, runtime_for
+from civ5rl.engine.ppo.core import update
+from civ5rl.engine.ppo.backend import BatchedBackend
 from civ5rl.experiments import ppo_after_target_bc as runner
 from civ5rl.experiments.imitation_helpers import assert_equal, isolated_rng
 from civ5rl.experiments.ppo_after_imitation import optimizer_for
@@ -27,8 +27,8 @@ class PPOContinuationTests(unittest.TestCase):
     def test_lambda099_full_episode_signal(self):
         # Fragment-local GAE could silently erase distant reward at BPTT=128.
         import numpy as np
-        from civ5rl.engine.ppo import raw_gae_advantages, episode_returns, targets
-        from civ5rl.engine.ppo_fast import RolloutCache
+        from civ5rl.engine.ppo.core import raw_gae_advantages, episode_returns, targets
+        from civ5rl.engine.ppo.backend import RolloutCache
 
         values = np.linspace(0.1, 0.7, 263)
         episodes = [dict(chosen=[0] * len(values), old_value=values.tolist(),
@@ -83,7 +83,7 @@ class PPOContinuationTests(unittest.TestCase):
 
     def test_two_inherited_adam_origins_survive_update_rollback_and_resume(self):
         # A single origin silently corrupts the adapted critic's Adam clock.
-        from civ5rl.engine.ppo_adam import grouped_optimizer, check_counters, expected_counters
+        from civ5rl.engine.ppo.adam import grouped_optimizer, check_counters, expected_counters
 
         configure(17)
         cfg = load_config("configs/rl-ppo-c2-h60-gae-gamma1-continuation.json")

@@ -10,8 +10,8 @@ from test_rl import context, scenario
 from civ5rl.config import load_config
 from civ5rl.core.distributions import policy_logits, require_rollout_temperature
 from civ5rl.core.model import Policy, batch_inputs
-from civ5rl.engine.ppo import encode_episode, objective, targets
-from civ5rl.engine.ppo_fast import BatchedBackend, categorical_distance
+from civ5rl.engine.ppo.core import encode_episode, objective, targets
+from civ5rl.engine.ppo.backend import BatchedBackend, categorical_distance
 from civ5rl.provenance.common import configure
 from civ5sim import Action, Battle
 

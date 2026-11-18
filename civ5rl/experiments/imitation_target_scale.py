@@ -20,20 +20,20 @@ import psutil
 import torch
 from torch.nn import functional as F
 
-from civ5rl.engine.budget import ActiveBudget
+from civ5rl.engine.runtime.budget import ActiveBudget
 from civ5rl.config import load_config as resolve_config
 from civ5rl.core.model import Policy
-from civ5rl.engine.control import RunLock, assert_not_closed, pause_due
-from civ5rl.engine.counters import TrainingCounters
-from civ5rl.engine.imitation import decision_indices, label_minibatches
-from civ5rl.engine.imitation_performance import (
+from civ5rl.engine.runtime.control import RunLock, assert_not_closed, pause_due
+from civ5rl.engine.runtime.control import TrainingCounters
+from civ5rl.engine.imitation.core import decision_indices, label_minibatches
+from civ5rl.engine.imitation.pipeline import (
     backward_minibatch_async,
     run_bc_minibatch_stream,
 )
-from civ5rl.engine.imitation_stream import PreparedDemonstrations, prepare_inputs
-from civ5rl.engine.ppo_fast import prefixes
-from civ5rl.engine.resources import ResourceMonitor, analyze_telemetry
-from civ5rl.engine.training import FrozenParamsCheck, bc_optimizer_step
+from civ5rl.engine.imitation.storage import PreparedDemonstrations, prepare_inputs
+from civ5rl.engine.ppo.backend import prefixes
+from civ5rl.engine.runtime.telemetry import ResourceMonitor, analyze_telemetry
+from civ5rl.engine.runtime.transactions import FrozenParamsCheck, bc_optimizer_step
 from civ5rl.experiments.evaluation import paired_world_bootstrap, verify_replay
 from civ5rl.experiments.imitation_helpers import (
     CompilationClock,
@@ -568,7 +568,7 @@ def _try_reuse_saved_evaluation(
         if (source_run_dir / "run.json").is_file()
         else {}
     )
-    from civ5rl.engine.evaluation import runtime_for
+    from civ5rl.engine.evaluation.executor import runtime_for
     runtime = runtime_for(out, config).identity()
     candidate_keys = [_evaluation_key(config, plan, purpose, fingerprint, runtime)]
     if runtime["device"] == "cpu":
@@ -695,7 +695,7 @@ def baseline(config, plan, out):
     # A cheap check of saved data and exact evaluator sources. No reconstruction.
     reused = False
     archive = ROOT / config["baseline_archive"]
-    from civ5rl.engine.evaluation import runtime_for
+    from civ5rl.engine.evaluation.executor import runtime_for
     if archive.exists() and runtime_for(out, config).device == "cpu":
         with zipfile.ZipFile(archive) as previous:
             prefix = "artifacts/rl/ppo-target-scale/"
@@ -1165,7 +1165,7 @@ def train(config, plan, out, *, resume=False):
             )
             fixed.clear()
         clock = ActiveClock(clock_offset)
-        budget = ActiveBudget(out)
+        budget = ActiveBudget(out, elapsed=clock.seconds)
         reason = "epoch_limit"
         last_path = source
         utilization = (
@@ -1216,7 +1216,7 @@ def train(config, plan, out, *, resume=False):
             )
 
         for epoch in range(start_epoch, config["epochs"] + 1):
-            if clock.seconds() >= budget.limit():
+            if budget.expired():
                 reason = "active_time_limit"
                 break
             if max_steps is not None and steps >= max_steps:
@@ -1242,7 +1242,7 @@ def train(config, plan, out, *, resume=False):
 
             def _check_stop():
                 nonlocal stop_hit
-                if clock.seconds() >= budget.limit():
+                if budget.expired():
                     stop_hit = "active_time_limit"
                     return stop_hit
                 return None
@@ -1347,7 +1347,7 @@ def train(config, plan, out, *, resume=False):
                 )
                 terminal_step = (
                     (not completed and reason != "paused")
-                    or clock.seconds() >= budget.limit()
+                    or budget.expired()
                     or (max_steps is not None and steps >= max_steps)
                     or (completed and epoch == config["epochs"])
                 )
@@ -1355,7 +1355,7 @@ def train(config, plan, out, *, resume=False):
                     final_reason = None
                 elif max_steps is not None and steps >= max_steps:
                     final_reason = "max_adam_steps"
-                elif not completed or clock.seconds() >= budget.limit():
+                elif not completed or budget.expired():
                     final_reason = "active_time_limit"
                 else:
                     final_reason = "epoch_limit"
@@ -1407,7 +1407,7 @@ def train(config, plan, out, *, resume=False):
                 return
             terminal = (
                 not completed
-                or clock.seconds() >= budget.limit()
+                or budget.expired()
                 or (max_steps is not None and steps >= max_steps)
             )
             if terminal and reason == "epoch_limit":

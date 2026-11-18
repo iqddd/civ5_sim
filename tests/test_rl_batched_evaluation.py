@@ -11,7 +11,7 @@ from civ5rl.core.agent import RLAgent
 from civ5rl.config import load_config
 from civ5rl.core.model import Policy, batch_inputs
 from civ5rl.core.observation import ordered_actions
-from civ5rl.engine.evaluation import BatchedInference, EvaluationExecutor, EvaluationRuntime, evaluation_options, runtime_for
+from civ5rl.engine.evaluation.executor import BatchedInference, EvaluationExecutor, EvaluationRuntime, evaluation_options, runtime_for
 from civ5rl.experiments.ppo_target_scale import evaluation_task, evaluate
 from civ5rl.provenance.common import configure, read_json, write_json
 from civ5sim import Action, Battle
@@ -21,7 +21,7 @@ from tests.test_rl import context, scenario
 
 def public_sequence(task):
     checkpoint,initial,mode,metrics=task
-    from civ5rl.engine.evaluation import evaluation_agent
+    from civ5rl.engine.evaluation.proxy import evaluation_agent
     agent=evaluation_agent(checkpoint,mode,temperature=.5,collect_selection_metrics=metrics)
     agent.reset(context(initial))
     with Battle(initial) as battle:

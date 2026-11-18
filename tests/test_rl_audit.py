@@ -227,7 +227,7 @@ class AuditTests(unittest.TestCase):
             verify_checkpoint_chain(tmp_path)
 
     def test_hashing_skips_live_lock_and_derived_transients(self):
-        from civ5rl.engine.control import RunLock
+        from civ5rl.engine.runtime.control import RunLock
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

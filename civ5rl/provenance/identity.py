@@ -13,6 +13,7 @@ def is_readonly_source(path):
     if name.startswith(("civ5rl/reporting/", "civ5rl/deploy/", "tests/")):
         return True
     if name in (
+        "civ5rl/engine/ppo/benchmark.py",
         "civ5rl/provenance/audit.py",
         "civ5rl/evaluation/audit.py",
         "civ5rl/experiments/report_cp_imitation.py",

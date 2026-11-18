@@ -2,7 +2,7 @@
 import unittest
 import torch
 from civ5rl.experiments.comparison_collection import preference,select_forks
-from civ5rl.engine.comparison_training import pair_loss,categorical_kl
+from civ5rl.engine.comparison.training import pair_loss,categorical_kl
 
 class ComparisonTests(unittest.TestCase):
     def test_finalized_prefix_collection_imports_and_restores_training_histories(self):
@@ -17,9 +17,9 @@ class ComparisonTests(unittest.TestCase):
         from civ5rl.experiments.rollout_comparison_collection import finalize_collection
         from civ5rl.experiments.rollout_comparison import prepare_collection_input
         from civ5rl.reporting.comparison_storage import restore_tree
-        from civ5rl.engine.comparison_inputs import Histories
+        from civ5rl.engine.comparison.inputs import Histories
         from civ5rl.experiments.comparison_prefix import SourcePrefixes
-        from civ5rl.engine.evaluation import EvaluationRuntime
+        from civ5rl.engine.evaluation.executor import EvaluationRuntime
         from civ5rl.core.model import Policy
         from tests.test_combat import scenario,unit
         from civ5sim import Battle
@@ -72,8 +72,8 @@ class ComparisonTests(unittest.TestCase):
         from civ5rl.core.model import Policy,batch_inputs
         from civ5rl.core.context import context_from_spec
         from civ5rl.core.observation import ObservationEncoder,ordered_actions
-        from civ5rl.engine.evaluation import EvaluationRuntime
-        from civ5rl.engine.evaluation_proxy import ProxyAgent
+        from civ5rl.engine.evaluation.executor import EvaluationRuntime
+        from civ5rl.engine.evaluation.proxy import ProxyAgent
         from civ5rl.experiments.comparison_prefix import SourcePrefixes
         from civ5rl.provenance.common import configure,write_json
         from civ5rl.protocols.memory import flat_map
@@ -131,8 +131,8 @@ class ComparisonTests(unittest.TestCase):
     def test_vector_losses_preserve_padding_multiplicity_and_fp64_control(self):
         # Zero padding probabilities must never multiply an infinite log-delta;
         # repeats and independent pair/anchor means must retain their weights.
-        from civ5rl.engine.comparison_losses import preference_and_kl,full_kl_rows
-        from civ5rl.engine.comparison_training import DeviceReferences
+        from civ5rl.engine.comparison.training import preference_and_kl,full_kl_rows
+        from civ5rl.engine.comparison.training import DeviceReferences
         lengths=[1,3,5]
         teacher={i:(torch.linspace(-.7,.6,n)/.5).log_softmax(-1) for i,n in enumerate(lengths)}
         raw=torch.tensor([[.2,0,0,0,0],[.3,-.6,.2,0,0],[-.5,.1,.7,-.4,.3]])
@@ -170,7 +170,7 @@ class ComparisonTests(unittest.TestCase):
         import tempfile
         from pathlib import Path
         from copy import deepcopy
-        from civ5rl.engine.comparison_training import atomic_torch_save
+        from civ5rl.engine.runtime.transactions import atomic_torch_save
         from civ5rl.provenance.rng import capture_rng,restore_rng
         from civ5rl.experiments.imitation_helpers import assert_equal
         for device in ('cpu',*(['cuda'] if torch.cuda.is_available() else [])):
@@ -209,7 +209,7 @@ class ComparisonTests(unittest.TestCase):
         from civ5rl.core.observation import ObservationEncoder,ordered_actions
         from civ5rl.core.context import context_from_spec
         from civ5rl.core.model import batch_inputs
-        from civ5rl.engine.comparison_inputs import Histories
+        from civ5rl.engine.comparison.inputs import Histories
         from civ5rl.protocols.memory import flat_map
         from civ5rl.provenance.common import write_json,read_json
         from civ5sim import Battle,Action
@@ -266,7 +266,7 @@ class ComparisonTests(unittest.TestCase):
         from dataclasses import replace
         from civ5rl.core.model import Policy
         from civ5rl.core.observation import ObservationEncoder,ordered_actions
-        from civ5rl.engine.comparison_training import target_logits,logical_step,reference_distributions
+        from civ5rl.engine.comparison.training import target_logits,logical_step,reference_distributions
         from civ5rl.provenance.common import configure
         from civ5rl.protocols.memory import flat_map
         from civ5sim import Battle
@@ -310,7 +310,7 @@ class ComparisonTests(unittest.TestCase):
         if torch.cuda.is_available():
             # Calling CoalescedSpatial directly must retain the executor's BF16
             # autocast boundary. A missing boundary silently changes precision.
-            from civ5rl.engine.comparison_training import _encode_histories
+            from civ5rl.engine.comparison.training import _encode_histories
             from civ5rl.core.model import batch_inputs
             p=deepcopy(b).cuda();q=deepcopy(b).cuda()
             for model in (p,q):

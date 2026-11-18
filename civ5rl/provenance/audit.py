@@ -146,9 +146,9 @@ def verify_ppo_ledger(directory, *, offsets=None):
         "stop_kl": threshold,
         "pending_decisions": state.get("decisions", 0) - totals["decisions"],
     }
-    from civ5rl.engine.ppo_adam import uses_grouped_adam
+    from civ5rl.engine.ppo.adam import uses_grouped_adam
     if uses_grouped_adam(config):
-        from civ5rl.engine.ppo_adam import expected_counters
+        from civ5rl.engine.ppo.adam import expected_counters
         expected = expected_counters(state)
         if state.get("Adam_counters") != expected:
             raise ValueError("Grouped Adam counters differ from preparation + PPO")
@@ -302,11 +302,11 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
         ]
         groups = value["optimizer"]["param_groups"]
         ids = [index for group in groups for index in group["params"]]
-        from civ5rl.engine.ppo_adam import uses_grouped_adam
+        from civ5rl.engine.ppo.adam import uses_grouped_adam
         adapting = uses_grouped_adam(value.get("config", {}))
         if adapting:
             named = dict(policy.named_parameters())
-            from civ5rl.engine.ppo_adam import parameter_group
+            from civ5rl.engine.ppo.adam import parameter_group
             names = ["shared_actor", "value"] + (["attack_preview"] if policy.variant_spec.attack_preview else [])
             if [g.get("name") for g in groups] != names:
                 raise ValueError(f"Adam groups differ: {path}")
@@ -390,7 +390,7 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
             else None
         )
         if adapting:
-            from civ5rl.engine.ppo_adam import check_counters, expected_counters
+            from civ5rl.engine.ppo.adam import check_counters, expected_counters
             check_counters(optimizer, state)
             if state.get("Adam_counters") != expected_counters(state):
                 raise ValueError(f"Grouped Adam state counters differ: {path}")

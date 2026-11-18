@@ -1,6 +1,6 @@
 import unittest
 
-from civ5rl.engine.resources import integrate_gpu_interval
+from civ5rl.engine.runtime.telemetry import integrate_gpu_interval
 
 
 class GpuIntervalTest(unittest.TestCase):

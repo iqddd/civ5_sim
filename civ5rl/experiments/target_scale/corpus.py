@@ -8,7 +8,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from civ5rl.engine.resources import ResourceMonitor
+from civ5rl.engine.runtime.telemetry import ResourceMonitor
 from civ5rl.experiments.imitation_helpers import pool
 from civ5rl.protocols.imitation_target_scale import (
     C2_KIND,

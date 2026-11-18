@@ -2,7 +2,7 @@
 import unittest
 import numpy as np
 import torch
-from civ5rl.engine.action_value import outcome_loss,split_worlds,world_scores,utility,bootstrap,fork_targets,public_action_vector
+from civ5rl.engine.comparison.action_value import outcome_loss,split_worlds,world_scores,utility,bootstrap,fork_targets,public_action_vector
 
 
 class ActionValueTests(unittest.TestCase):

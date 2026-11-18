@@ -5,7 +5,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from civ5rl.engine.control import RunLock
+from civ5rl.engine.runtime.control import RunLock
 from civ5rl.provenance import checkpoint
 from civ5rl.provenance.common import ROOT, file_sha256, read_json, write_json
 from civ5rl.provenance.host_resume import host_delta, identity_digest, verify_revision

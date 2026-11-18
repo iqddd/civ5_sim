@@ -8,9 +8,9 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
-from civ5rl.engine.budget import deadline_reached
-from civ5rl.engine.ppo_adam import expected_counters
-from civ5rl.engine.ppo import raw_gae_advantages
+from civ5rl.engine.runtime.budget import deadline_reached
+from civ5rl.engine.ppo.adam import expected_counters
+from civ5rl.engine.ppo.core import raw_gae_advantages
 from civ5rl.provenance import checkpoint
 
 

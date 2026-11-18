@@ -5,7 +5,7 @@ import torch
 from civ5rl.core.agent import RLAgent
 from civ5rl.core.model import batch_inputs
 from civ5rl.core.observation import ordered_actions
-from civ5rl.engine.evaluation import EvaluationExecutor, BatchedInference
+from civ5rl.engine.evaluation.executor import EvaluationExecutor, BatchedInference
 from civ5rl.experiments.comparison_match import _verify, match_task
 from civ5rl.provenance.common import seed_for
 
@@ -70,7 +70,7 @@ class ProposalInference(BatchedInference):
 class ProposalExecutor(EvaluationExecutor):
     def __init__(self, checkpoints, runtime):
         super().__init__(str(checkpoints[0]),runtime)
-        from civ5rl.engine.evaluation import prepare_evaluation_policy
+        from civ5rl.engine.evaluation.executor import prepare_evaluation_policy
         second=prepare_evaluation_policy(RLAgent.from_checkpoint(checkpoints[1],'cpu','argmax').policy,self.runtime.device)
         self.inference=ProposalInference([self.inference.policy,second],self.runtime.device,
                                          hidden_capacity=self.runtime.workers)

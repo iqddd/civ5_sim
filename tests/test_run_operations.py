@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from civ5rl.engine.control import (
+from civ5rl.engine.runtime.control import (
     RunLock,
     close_run,
     pause_due,

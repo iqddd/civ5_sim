@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from civ5rl.config import load_config
 from civ5rl.common import configure, read_json
-from civ5rl.engine.replay_metrics import StepReplay
+from civ5rl.engine.ppo.metrics import StepReplay
 from civ5rl.ppo import token_minibatches, update
 from civ5rl.validation import validate_config
 from test_rl_ppo_refactor import FakeBackend, ReverseRng

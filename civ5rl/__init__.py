@@ -10,7 +10,7 @@ import sys
 
 _ALIASES = {
     **{
-        name: "core"
+        name: f"core.{name}"
         for name in (
             "agent",
             "context",
@@ -21,16 +21,18 @@ _ALIASES = {
             "schema",
         )
     },
+    "collector": "engine.collection.collector",
+    "control": "engine.runtime.control",
+    "ppo": "engine.ppo.core",
+    "ppo_fast": "engine.ppo.backend",
+    "resources": "engine.runtime.telemetry",
+    "shared": "engine.runtime.shared",
     **{
-        name: "engine"
-        for name in ("collector", "control", "ppo", "ppo_fast", "resources", "shared")
-    },
-    **{
-        name: "provenance"
+        name: f"provenance.{name}"
         for name in ("checkpoint", "common", "migration", "validation")
     },
     **{
-        name: "protocols"
+        name: f"protocols.{name}"
         for name in (
             "corpus",
             "diagnostic",
@@ -70,7 +72,7 @@ class _AliasFinder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         prefix, dot, name = fullname.rpartition(".")
         if prefix == "civ5rl" and dot and name in _ALIASES:
-            canonical = f"civ5rl.{_ALIASES[name]}.{name}"
+            canonical = f"civ5rl.{_ALIASES[name]}"
             return importlib.util.spec_from_loader(fullname, _AliasLoader(canonical))
         return None
 

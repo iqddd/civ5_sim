@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 from uuid import uuid4
 
-from civ5rl.engine.control import RunLock, target_bc_evaluation_due
+from civ5rl.engine.runtime.control import RunLock, target_bc_evaluation_due
 from civ5rl.provenance.audit import (
     verify_bc_ledger,
     verify_checkpoint_chain,
@@ -46,7 +46,7 @@ def extend_budget(directory, additional_seconds, reason, *, request_id=None):
     if type(additional_seconds) is not int or additional_seconds <= 0 or not reason.strip():
         raise ValueError("A positive integer extension and reason are required")
     directory = Path(directory)
-    from civ5rl.engine.budget import budget_base, read_extension
+    from civ5rl.engine.runtime.budget import budget_base, read_extension
     request_id = request_id or uuid4().hex
     if not isinstance(request_id, str) or not request_id.strip():
         raise ValueError("Request ID must be a nonempty string")
