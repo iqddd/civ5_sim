@@ -160,6 +160,19 @@ def match_task(task):
     if turn_branch:
         write_json(folder/'turn-history.json',history)
         write_json(folder/'branch.json',branch)
+        # reset() starts the continuation journal at the branch boundary.
+        # Keep the physical boundary hash distinct from agent/GRU memory.
+        last = history[-1]
+        boundary_index = last['command'] - boundary
+        step = match.replay['steps'][boundary_index]
+        if step['action'] != last['actions'][last['chosen']]:
+            raise ValueError('Changed-turn boundary does not match continuation replay')
+        turn_summary = dict(
+            turn_sequence_sha256=digest([r['actions'][r['chosen']] for r in history]),
+            turn_free_decisions=sum(not r['forced'] for r in history),
+            boundary_state_sha256=step['state_sha256'],
+            boundary_command=last['command'],boundary_replay_index=boundary_index,
+            boundary_reason='end_turn' if step['action']['kind']=='end_turn' else 'battle_end')
     if not branch:
         write_json(folder / "history.json", history)
         if hasattr(learner.inner,'finish_source'):
@@ -172,7 +185,8 @@ def match_task(task):
         prefix_verified=prefix_verified if branch else None,
         **(dict(turn_variant=branch['turn_variant'],repetition=branch['repetition'],
                 position_key=branch['position_key'],
-                turn_commands=len(history),damage_seed=branch['seed'],sampling_seed=branch['sampling_seed']) if turn_branch else {}),
+                turn_commands=len(history),damage_seed=branch['seed'],sampling_seed=branch['sampling_seed'],
+                **turn_summary) if turn_branch else {}),
     )
     write_json(folder / "completed.json", row)
     return str(folder)

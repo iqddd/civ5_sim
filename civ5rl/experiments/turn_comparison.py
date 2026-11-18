@@ -62,11 +62,17 @@ def branch_spec(position,variant,repetition,source):
 
 def load_config(path):
     cfg=read_json(path)
-    if cfg['kind']!=KIND or cfg['seed']!=17 or cfg['positions']!=512:raise ValueError('Unknown whole-turn protocol')
+    expected=71 if 'confirmation' in cfg else 512
+    if cfg['kind']!=KIND or cfg['seed']!=17 or cfg['positions']!=expected:raise ValueError('Unknown whole-turn protocol')
+    if 'confirmation' in cfg and cfg['confirmation']['repetitions']!=list(range(4,12)):
+        raise ValueError('Confirmation requires eight new repetitions 4-11')
     return cfg
 
 
 def prepare(cfg,out):
+    if 'confirmation' in cfg:
+        from civ5rl.experiments.turn_confirmation import prepare_confirmation
+        return prepare_confirmation(cfg,out)
     source=ROOT/cfg['collection_input']['run']
     for name,sha in cfg['collection_input']['sha256'].items():
         if file_sha256(source/name)!=sha:raise ValueError(f'Source changed: {name}')
@@ -118,7 +124,10 @@ def collect(cfg,out,workers=8):
     from civ5rl.engine.evaluation.executor import EvaluationRuntime
     from civ5rl.experiments.comparison_turns import TurnExecutor
     from civ5rl.experiments.comparison_match import match_task
-    if (out/'result.json').exists() and read_json(out/'collection.json').get('complete'):return
+    if (out/'result.json').exists() and read_json(out/'collection.json').get('complete'):
+        archive_tree(out,'continuations')
+        write_json(out/'status.json',dict(status='complete',phase='complete'))
+        return
     manifest=read_json(out/'positions.json')
     runtime=EvaluationRuntime('cuda',workers,32,.001).resolve()
     runtime_path=out/'collection-runtime.json'
@@ -127,13 +136,18 @@ def collect(cfg,out,workers=8):
     write_json(runtime_path,runtime.identity())
     restore_tree(out,'continuations')
     state=read_json(out/'collection.json') if (out/'collection.json').exists() else dict(completed=0,seconds=0.)
+    confirmation='confirmation' in cfg
+    repetitions=manifest['repetitions'] if confirmation else range(4)
     state['target']=len(manifest['positions'])*16
     rows=[];tasks=[];started=perf_counter();base=state['seconds']
-    with readable_tree(out,'sources') as sources:
+    from civ5rl.engine.runtime.telemetry import ResourceMonitor
+    with ResourceMonitor(out/'telemetry') as monitor, readable_tree(out,'sources') as sources:
+        monitor.mark('collection')
         for position in manifest['positions']:
             episode=position['episode'];case=read_json(sources/str(episode)/'case.json')
-            for variant in range(4):
-                for repetition in range(4):
+            variants=(0,position['selected_variant']) if confirmation else range(4)
+            for variant in variants:
+                for repetition in repetitions:
                     folder=out/'continuations'/f'{episode}-{position["key"][1]}'/f'{variant}-{repetition}'
                     branch=branch_spec(position,variant,repetition,sources/str(episode))
                     if (folder/'completed.json').exists():
@@ -148,8 +162,17 @@ def collect(cfg,out,workers=8):
                 rows.append(read_json(Path(folder)/'completed.json'))
                 state.update(completed=len(rows),seconds=base+perf_counter()-started)
                 if len(rows)%16==0:write_json(out/'collection.json',state)
-    state.update(completed=len(rows),seconds=base+perf_counter()-started,complete=len(rows)==state['target'])
+    state.update(completed=len(rows),seconds=base+perf_counter()-started,complete=False)
     write_json(out/'collection.json',state)
+    if len(rows)!=state['target']:raise ValueError('Collection incomplete')
+    if confirmation:
+        from civ5rl.experiments.turn_confirmation import summarize_confirmation
+        summarize_confirmation(cfg,out,manifest,rows,state['seconds'])
+        archive_tree(out,'continuations')
+        state['complete']=True
+        write_json(out/'collection.json',state)
+        write_json(out/'status.json',dict(status='complete',phase='complete'))
+        return
     summary={}
     for variant in range(4):
         items=[r for r in rows if r['turn_variant']==variant]
@@ -174,6 +197,8 @@ def collect(cfg,out,workers=8):
         continuations=len(rows),seconds=state['seconds'],paired_vs_argmax=paired,
         unique_turn_sequences=dict(Counter(diversity)),note='Descriptive paired futures; no best-sample policy claim'))
     archive_tree(out,'continuations')
+    state['complete']=True
+    write_json(out/'collection.json',state)
     write_json(out/'status.json',dict(status='complete',phase='complete'))
 
 

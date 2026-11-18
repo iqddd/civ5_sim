@@ -257,6 +257,14 @@ selection G; `selected.json` закрепляет кандидата. `result.js
 содержит W/D/L вариантов, парные разницы с argmax и разнообразие последовательностей;
 истории изменяемого хода находятся в `turn-history.json` каждого продолжения.
 
+Конфиг с `confirmation` проверяет закреплённые sampling-варианты против argmax
+на дополнительных парных seeds. Команды те же; `prepare` сохраняет список задач
+и трактовку результата в `analysis-plan.json`. `continuations-summary.json`
+содержит исходы, seeds, хеши команд и состояния при передаче хода либо завершении
+боя; `position-results.json` — парные результаты позиций. `result.json` показывает
+среднюю разницу побед, CI95 по мирам и описательные количества положительных,
+нулевых и отрицательных эффектов. Обучение по результатам не запускается.
+
 ```powershell
 python tools/bench_rl.py comparison --run RUN --config CONFIG --out OUT --warmup 1 --steps 3
 python tools/bench_rl.py comparison-collection --run RUN --config CONFIG --out OUT --worker-counts 6,8,12,16 --forks 64 --seconds 300

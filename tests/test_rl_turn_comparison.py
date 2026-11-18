@@ -28,5 +28,29 @@ class TurnComparisonTests(unittest.TestCase):
         self.assertEqual(len({row[0]['seed'] for row in branches}),1)
         self.assertEqual(len({b['seed'] for b in branches[0]}),4)
 
+    def test_confirmation_keeps_sampling_but_uses_unseen_paired_damage(self):
+        # A changed namespace would silently test a different selected policy.
+        p=dict(key=[111068,2,0],command=19)
+        original=[branch_spec(p,2,r,'source') for r in range(4)]
+        fresh=[branch_spec(p,2,r,'source') for r in range(4,12)]
+        self.assertEqual({b['sampling_seed'] for b in fresh},{original[0]['sampling_seed']})
+        self.assertFalse({b['seed'] for b in original}&{b['seed'] for b in fresh})
+        self.assertEqual(len({b['seed'] for b in fresh}),8)
+        self.assertEqual([b['seed'] for b in fresh],
+                         [branch_spec(p,0,r,'source')['seed'] for r in range(4,12)])
+
+    def test_cluster_bootstrap_retains_position_weighting(self):
+        # Equal-world averaging would silently turn this mean from .5 into 0.
+        from civ5rl.experiments.turn_confirmation import paired_statistics
+        from itertools import product
+        import numpy as np
+        result=paired_statistics([1,1,1,2],[1,1,1,-1],samples=10000,seed=20261103)
+        draws=np.random.default_rng(20261103).integers(2,size=(10000,2))
+        possible={d:(sum(3 if i==0 else -1 for i in d)/sum(3 if i==0 else 1 for i in d))
+                  for d in product(range(2),repeat=2)}
+        expected=np.quantile([possible[tuple(d)] for d in draws],[.025,.975]).tolist()
+        self.assertEqual(result['mean_win_delta'],.5)
+        self.assertEqual(result['ci95'],expected)
+
 
 if __name__=='__main__':unittest.main()

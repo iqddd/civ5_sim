@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "kind": "rl01.turn_comparison_collection",
+  "seed": 17,
+  "positions": 71,
+  "output": "artifacts/rl/c2p-turn-comparison-confirmation-v1",
+  "collection_input": {
+    "run": "artifacts/rl/c2p-rollout-comparison-v2-collection",
+    "sha256": {
+      "match-config.json": "2f1fa9d49ac19669e635b12e724b2eeec627e057a3ca45ab5587feaf0771e07e"
+    }
+  },
+  "parent": "artifacts/rl/ppo-c2p-h60-end-turn/checkpoints/initial.pt",
+  "parent_sha256": "ffd541cae737421ddcda21fa3d12b1aad7ebe33dfd8012fbeeaa8c8ce11fe60c",
+  "split": "artifacts/rl/c2p-action-value-v1/split.json",
+  "split_sha256": "f5d6c211105d4b14baafd1eb91c6b22531c9bb97a191512c1dd8990e1d630d86",
+  "confirmation": {
+    "run": "artifacts/rl/c2p-turn-comparison-v1",
+    "candidates": "derived/turn-review/candidates.json",
+    "repetitions": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "bootstrap": {
+      "samples": 10000,
+      "seed": 20261103
+    },
+    "sha256": {
+      "positions.json": "b8d879918e34889f94283c650f0f59157daac7018bce7a5fb51a0579e5d235a7",
+      "derived/turn-review/candidates.json": "f05f595f0ebfe03bd10062619dc9c187625e49fce08540e8e093579d5b8b22f8",
+      "sources.storage/manifest.json": "eae4cf43e000a96bd6a810cce5ad8049a4cbe0ff62445efcef2db0edec7dc761",
+      "sources.storage/json.7z": "4f30e1589c7b968d4467dab3c1708fe15d5a18ebc30739f2cc032a5e06beed44"
+    }
+  }
+}

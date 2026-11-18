@@ -29,8 +29,10 @@ def smoke(cfg,out):
     if not positions:raise AssertionError('Smoke needs a nonempty reconstructed prefix')
     position=positions[0]
     tasks=[]
-    for variant in range(4):
-        for repetition in range(4):
+    variants=(0,2) if 'confirmation' in cfg else range(4)
+    repetitions=range(4,12) if 'confirmation' in cfg else range(4)
+    for variant in variants:
+        for repetition in repetitions:
             branch=branch_spec(position,variant,repetition,source)
             tasks.append((config,case,str(out/'branches'/f'{variant}-{repetition}'),parent,branch))
     with ResourceMonitor(out/'telemetry') as monitor,EvaluationExecutor(parent,runtime) as executor:
@@ -50,6 +52,21 @@ def smoke(cfg,out):
         assert a==read_json(out/'prefixed'/Path(task[2]).name/'turn-history.json')
     rows=[read_json(Path(folder)/'completed.json') for folder in folders]
     assert len(rows)==16 and all(r['prefix_verified'] for r in rows)
+    for folder in folders:
+        folder=Path(folder)
+        row=read_json(folder/'completed.json')
+        replay=read_json(folder/'replay.json')
+        history=read_json(folder/'turn-history.json')
+        from civ5sim.engine import digest
+        step=replay['steps'][row['boundary_replay_index']]
+        assert step['state_sha256']==row['boundary_state_sha256']
+        assert step['action']==history[-1]['actions'][history[-1]['chosen']]
+        assert row['turn_sequence_sha256']==digest([r['actions'][r['chosen']] for r in history])
+    if 'confirmation' in cfg:
+        from civ5rl.experiments.turn_confirmation import summarize_confirmation
+        manifest=dict(positions=[{**position,'selected_variant':2}],tasks=[{}]*16,repetitions=list(repetitions))
+        confirmation=summarize_confirmation(cfg,out,manifest,rows,perf_counter()-started)
+        assert confirmation['continuations']==16 and confirmation['primary']['worlds']==1
     result=dict(status='passed',discarded=True,smoke_rounds=2,continuations=16,
         task_order_reproducible=True,replay_verified=True,seconds=perf_counter()-started,
         top_kernels=sorted([dict(name=e.key,cuda_us=e.device_time_total,count=e.count)
