@@ -70,26 +70,28 @@ def evaluate(cfg,out):
     if file_sha256(parent)!=cfg['parent_sha256'][0]:raise ValueError('Parent changed')
     source=ROOT/cfg['source_run'];config=read_json(source/'run.json')['config']
     plan={'development_512':read_json(source/'manifest.json')['development_512']}
-    write_json(out/'status.json',dict(status='evaluating',phase='development_512'))
-    with readable_evaluations(out),evaluation_options(device='cuda',workers=8,max_batch=32,wait_seconds=.001):
-        before=evaluator(config,plan,out,'checkpoints/parent.pt','development_512')
-        after=evaluator(config,plan,out,'candidate.pt','development_512')
-        def rows(record):
-            return load_eval_rows(out/record['runs']['argmax']['cp']['directory'],512,plan=plan['development_512'])
-        comparison=clustered_paired_bootstrap(rows(before),rows(after))
-    write_json(out/'result.json',dict(status='complete',development=after,parent_development=before,
-        comparison=comparison,candidate_selection='last_accepted',additional={'status':'disabled_by_protocol'}))
+    with RunLock(out):
+        write_json(out/'status.json',dict(status='evaluating',phase='development_512'))
+        with readable_evaluations(out),evaluation_options(device='cuda',workers=8,max_batch=32,wait_seconds=.001):
+            before=evaluator(config,plan,out,'checkpoints/parent.pt','development_512')
+            after=evaluator(config,plan,out,'candidate.pt','development_512')
+            def rows(record):
+                return load_eval_rows(out/record['runs']['argmax']['cp']['directory'],512,plan=plan['development_512'])
+            comparison=clustered_paired_bootstrap(rows(before),rows(after))
+        write_json(out/'result.json',dict(status='complete',development=after,parent_development=before,
+            comparison=comparison,candidate_selection='last_accepted',additional={'status':'disabled_by_protocol'}))
     archive_evaluations(out)
-    write_json(out/'status.json',dict(status='complete',phase='complete'))
+    with RunLock(out):
+        write_json(out/'status.json',dict(status='complete',phase='complete'))
 
 
 def run(phase,cfg,out,*,microbatch=2,compile_model=True,preparation_seconds=0.):
     out=Path(out).resolve();configure(cfg['seed'],'cuda')
+    if phase=='evaluate':return evaluate(cfg,out)
     with RunLock(out):
         if phase=='precheck':
             from civ5rl.reporting.turn_fit import smoke
             return smoke(cfg,out,microbatch=microbatch,compile_model=compile_model)
-        if phase=='evaluate':return evaluate(cfg,out)
         # Preparation is charged even when explicitly requested before train.
         with PhaseBudget(out,'training',cfg['training_seconds'],initial_seconds=preparation_seconds) as budget:
             dataset=prepare(cfg,out)

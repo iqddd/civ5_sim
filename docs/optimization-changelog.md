@@ -25,6 +25,16 @@
   [Замер](../artifacts/preparations/c2p-turn-fit-prefix-tree-bench/benchmark.json),
   [NVML](../artifacts/preparations/c2p-turn-fit-prefix-tree-bench/resources-summary.json),
   [smoke](../artifacts/preparations/c2p-turn-fit-prefix-tree-bench/precheck.json).
+- RTX 4090 / i9-14900KF (Vast.ai, instance 61390071), полный fit
+  `c2p-turn-comparison-fit-v1` (FP32, `--history-microbatch 2`, 16 принятых
+  шагов / 0 отклонений): **404,3 с** суммарно с подготовкой и сохранениями.
+  Шаг 1 (с компиляцией): 37,71 с шаг + 5,01 с полный KL; прогретые шаги 2–16:
+  6,34–7,03 с шаг + 4,55–4,97 с полный KL (~11,1 с цикл). В фазе `training`
+  (202 выборки NVML): средняя GPU Core Load **80,9%**, мощность **364,3 Вт
+  (81,0% TDP)**, пик VRAM **6,56 GiB**.
+  [Training](../artifacts/rl/c2p-turn-comparison-fit-v1/training.json),
+  [Steps](../artifacts/rl/c2p-turn-comparison-fit-v1/steps.jsonl),
+  [NVML](../artifacts/rl/c2p-turn-comparison-fit-v1/telemetry/resources.jsonl).
 
 ## Action-value head smoke
 
