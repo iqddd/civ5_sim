@@ -241,7 +241,11 @@ def stage_inputs(
     cfg = raw.get("config", raw)
     output_posix = PurePosixPath(str(cfg["output"]).replace("\\", "/")).as_posix()
     experiment = cfg.get("experiment", {})
-    comparison = cfg.get("kind") in {"rl01.rollout_comparison", "rl01.rollout_comparison_collection"}
+    comparison = cfg.get("kind") in {
+        "rl01.rollout_comparison",
+        "rl01.rollout_comparison_collection",
+        "rl01.turn_comparison_fit",
+    }
     if comparison:
         parent = cfg["parents"][0]
         manifest = str(PurePosixPath(cfg["source_run"]) / "manifest.json")
@@ -276,6 +280,8 @@ def stage_inputs(
         if cfg.get("collection_input"):
             saved = PurePosixPath(cfg["collection_input"]["run"])
             names.extend(str(saved / name) for name in cfg["collection_input"]["sha256"])
+    if cfg.get("kind") == "rl01.turn_comparison_fit":
+        names.extend(cfg["input_sha256"])
     if tuning_source:
         saved = PurePosixPath(tuning_source)
         names.extend(str(saved / name) for name in

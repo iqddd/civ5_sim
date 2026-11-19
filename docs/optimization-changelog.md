@@ -3,6 +3,29 @@
 Оптимизации исполнения, замеры производительности и отклонённые варианты.
 Обучение, корпуса и сравнения политик — в [журнале экспериментов](experiment-ledger.md).
 
+## Whole-turn fit
+
+- CPU-замер на 7000 контрольных опорах и 64 позициях шага, медиана трёх
+  повторов. Построение маски вне учебных продолжений занимало 10,25 с на
+  проверку и перечитывало 595 историй. Подготовка маски выполняется один раз
+  за сессию (11,04 с), повторный поиск готовых масок занимает 0,14 мс.
+  После подготовки предпочтений упаковка батча занимает 8,3 мс на шаг вместо
+  0,89 с на попытку. Повторы используют готовый батч. Байты батча и число опор
+  вне учебных продолжений совпали. Замер исключает вычисления модели и перенос
+  данных на GPU. [Замер](../artifacts/preparations/c2p-turn-fit-cached-inputs-timing/comparison.json).
+- RTX 4060 Ti, FP32, штатный шаг 64 позиций / 660 опор / 7000 контрольных опор
+  (`--history-microbatch 2`): один граф на позицию через матрицу выбора без
+  отдельного прохода коэффициентов, сжатое префиксное дерево для `no_grad`,
+  батчи `no_grad` GRU по 64 без склейки лишних `x` и перенос скрытых состояний
+  следующих опор из `control_kl`. Прогретый цикл: 23,65 с шаг + 14,79 с
+  полный KL + 0,11 с сохранения = **38,55 с** (прогрев 57,57 с) против 67,06 с
+  (прогрев 122,66 с) до переделки; средняя NVML Core Load 73,1%, мощность
+  72,2% TDP. В `precheck` метрики и веса `value` совпали, `indexing_backward`
+  отсутствует; 4 целевых теста пройдены.
+  [Замер](../artifacts/preparations/c2p-turn-fit-prefix-tree-bench/benchmark.json),
+  [NVML](../artifacts/preparations/c2p-turn-fit-prefix-tree-bench/resources-summary.json),
+  [smoke](../artifacts/preparations/c2p-turn-fit-prefix-tree-bench/precheck.json).
+
 ## Action-value head smoke
 
 - RTX4060Ti, FP32, batch256forks/512actions: warmed head step **2.08ms** (3warmup/5measured); excludes saving/preparation. Real cached u171 vectors reproduced141action logits exactly. Synthetic controller interrupted/resumed with identical weights/Adam; no full fit or matches. Short smoke phase is below the utilization-policy duration threshold. [Smoke and kernel trace](../artifacts/preparations/c2p-action-value-smoke-verified/precheck.json).

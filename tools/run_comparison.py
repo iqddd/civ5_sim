@@ -14,6 +14,8 @@ def main():
     parser.add_argument('phase',choices=['prepare','collect','train','evaluate','resume','precheck'])
     parser.add_argument('--config',type=Path,default=Path('configs/rl-c2p-rollout-comparison.json'))
     parser.add_argument('--out',type=Path)
+    parser.add_argument('--history-microbatch',type=int,help='Whole-turn fit: scored histories per GPU microbatch')
+    parser.add_argument('--compile',action=argparse.BooleanOptionalAction,default=None,help='Whole-turn fit: compile CUDA operators')
     group=parser.add_argument_group('collection-only runtime (rl01.rollout_comparison_collection)')
     group.add_argument('--runtime-config',type=Path,help='recommended-runtime.json from bench_rl.py comparison-collection')
     group.add_argument('--workers',type=int)
@@ -26,6 +28,24 @@ def main():
     preparation_started=perf_counter()
     kind=json.loads(args.config.read_text(encoding='utf-8')).get('kind')
     from civ5rl.provenance.execution import execution_session
+    if kind=='rl01.turn_comparison_fit':
+        if args.phase=='collect':parser.error('whole-turn fitting uses existing continuations only')
+        if any(getattr(args,n) is not None for n in ('runtime_config','workers','source_share','buffer_limit','pack_mib_per_second','prefix_states')):
+            parser.error('collection options do not apply to whole-turn fitting')
+        if args.history_microbatch is not None and args.history_microbatch<1:parser.error('history microbatch must be positive')
+        from civ5rl.experiments.turn_fit import load_config,run
+        cfg=load_config(args.config)
+        if args.phase=='precheck' and (args.out is None or args.out.resolve()==(ROOT/cfg['output']).resolve()):
+            parser.error('precheck requires a separate --out')
+        from civ5rl.reporting.progress_process import ProcessProgress
+        out=args.out or ROOT/cfg['output']
+        execution_session(out,args.phase)
+        with ProcessProgress(out,cfg):
+            run(args.phase,cfg,out,microbatch=args.history_microbatch or 2,
+                compile_model=args.compile is not False,preparation_seconds=perf_counter()-preparation_started)
+        return
+    if args.history_microbatch is not None or args.compile is not None:
+        parser.error('history microbatch and compile options apply only to whole-turn fitting')
     if kind=='rl01.turn_comparison_collection':
         if args.phase not in ('prepare','precheck','collect','resume'):parser.error('whole-turn protocol is collection-only')
         if any(getattr(args,n) is not None for n in ('runtime_config','source_share','buffer_limit','pack_mib_per_second','prefix_states')):

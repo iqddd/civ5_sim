@@ -395,6 +395,7 @@ def full_kl(policy, histories, anchors, references):
     multiplicity = {}
     for key in map(tuple, anchors):
         multiplicity[key] = multiplicity.get(key, 0) + 1
+    previous_amp, previous_batch = policy.amp_enabled, policy.spatial_batch_size
     policy.enable_amp(False)
     try:
         total = torch.zeros((), device=device, dtype=torch.float64)
@@ -411,7 +412,7 @@ def full_kl(policy, histories, anchors, references):
                 total += (values * counts).sum()
         return float(total / len(anchors))
     finally:
-        policy.enable_amp(True, spatial_batch_size=32)
+        policy.enable_amp(previous_amp, spatial_batch_size=previous_batch)
 
 
 def prepare_references(parent, histories, anchors, path, *, budget=None):

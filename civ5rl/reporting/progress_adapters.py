@@ -341,9 +341,25 @@ class UnknownAdapter:
                            warnings=[f"No progress adapter for {source.config.get('kind')!r}; ETA is unknown."])
 
 
+class TurnFitAdapter:
+    def observe(self,source):
+        training=source.read('training.json',{})
+        rows=source.rows('attempts.jsonl')
+        budget=source.read('phase-budgets/training.json',{})
+        return Observation(_status(source),source.read('status.json',{}).get('phase','preparation'),
+            'steps',training.get('training_steps',0),source.config['training']['max_accepted_steps'],
+            samples=[Sample(1,r['seconds']) for r in rows if r.get('accepted') and r.get('seconds',0)>0],
+            budgets={'training':dict(limit_seconds=source.config['training_seconds'],spent_seconds=budget.get('seconds',0),
+                                    work_estimate_complete=False)},work_budget='training',
+            work_stopped=training.get('status')=='complete',
+            details={k:training.get(k) for k in ('attempts','rejected_attempts','epoch','cursor','lr','last_full_kl','learning')},
+            warnings=['Preparation and retries are included in the budget; Development requires an explicit evaluate command.'])
+
+
 # Exact experiment adapters take precedence over family adapters. New run types
 # register an adapter; the estimator, recorder, transport and CLI stay unchanged.
 ADAPTERS = {
+    'rl01.turn_comparison_fit': TurnFitAdapter,
     'rl01.turn_comparison_collection': TurnCollectionAdapter,
     "rl01.action_value": ActionValueAdapter,
     "rl01.rollout_comparison": RolloutComparisonAdapter,

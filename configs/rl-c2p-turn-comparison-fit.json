@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "kind": "rl01.turn_comparison_fit",
+  "seed": 17,
+  "namespace": "c2p_turn_comparison_fit_v1",
+  "parents": [
+    "artifacts/rl/ppo-c2p-h60-end-turn/checkpoints/initial.pt"
+  ],
+  "parent_sha256": [
+    "ffd541cae737421ddcda21fa3d12b1aad7ebe33dfd8012fbeeaa8c8ce11fe60c"
+  ],
+  "source_run": "artifacts/rl/ppo-c2p-h60-end-turn",
+  "output": "artifacts/rl/c2p-turn-comparison-fit-v1",
+  "screening_run": "artifacts/rl/c2p-turn-comparison-v1",
+  "confirmation_run": "artifacts/rl/c2p-turn-comparison-confirmation-v1",
+  "review": "artifacts/rl/c2p-turn-comparison-v1/derived/turn-review/positions.jsonl",
+  "anchor_input": "artifacts/rl/c2p-rollout-comparison-v2-collection/anchors.json",
+  "split": "artifacts/rl/c2p-action-value-v1/split.json",
+  "training_seconds": 3600,
+  "training": {
+    "positions_per_step": 64,
+    "anchors_per_step": 660,
+    "max_epochs": 2,
+    "max_accepted_steps": 16,
+    "initial_lr": 1e-05,
+    "kl_limit": 0.015,
+    "max_retries": 2
+  },
+  "automatic_development": false,
+  "evaluation_protocol": "paired_development_only",
+  "input_sha256": {
+    "artifacts/rl/c2p-turn-comparison-v1/positions.json": "b8d879918e34889f94283c650f0f59157daac7018bce7a5fb51a0579e5d235a7",
+    "artifacts/rl/c2p-turn-comparison-v1/derived/turn-review/positions.jsonl": "dfb0fa74843331d5b0d4d5c9d055742faca845ece822f1c6b6f7d080ccc4379d",
+    "artifacts/rl/c2p-turn-comparison-v1/derived/turn-review/candidates.json": "f05f595f0ebfe03bd10062619dc9c187625e49fce08540e8e093579d5b8b22f8",
+    "artifacts/rl/c2p-turn-comparison-v1/sources.storage/manifest.json": "eae4cf43e000a96bd6a810cce5ad8049a4cbe0ff62445efcef2db0edec7dc761",
+    "artifacts/rl/c2p-turn-comparison-v1/sources.storage/json.7z": "4f30e1589c7b968d4467dab3c1708fe15d5a18ebc30739f2cc032a5e06beed44",
+    "artifacts/rl/c2p-turn-comparison-v1/continuations.storage/manifest.json": "7f3ecfc6f2800ed3f58e745bc83f493db1fb47448c8105ecf04a919f25fa6ea3",
+    "artifacts/rl/c2p-turn-comparison-v1/continuations.storage/json.7z": "31bfc1e692f5e3746ca18ab3fc10034e02adbe9d21810be462fa685d9415ea81",
+    "artifacts/rl/c2p-turn-comparison-confirmation-v1/positions.json": "833d56131ed495d30fd62da33c2063635800bd36c294e01a47f8d4023469d6fb",
+    "artifacts/rl/c2p-turn-comparison-confirmation-v1/continuations-summary.json": "09cb5aeeab5d9943fe63410e036953da760cd048a63e21601041c23f61945885",
+    "artifacts/rl/c2p-turn-comparison-confirmation-v1/continuations.storage/manifest.json": "bf2fe8169b1d5606ec9d420d34df25862600aac3a174c0c13739f06fd030dd0d",
+    "artifacts/rl/c2p-turn-comparison-confirmation-v1/continuations.storage/json.7z": "b211e0b4990cb98f19dc1ec0fe082b2b9dd9ea949266f5517a914f7c3cddfe99",
+    "artifacts/rl/c2p-rollout-comparison-v2-collection/anchors.json": "fea8a78fcf16b5600960d8be4d5b699d3c54371d259dab29bab93d8c33d4e820",
+    "artifacts/rl/c2p-action-value-v1/split.json": "f5d6c211105d4b14baafd1eb91c6b22531c9bb97a191512c1dd8990e1d630d86"
+  }
+}

@@ -104,9 +104,12 @@ class Histories:
         )
         self._gpu_closed = self._pinned_closed = False
 
+    def source_folder(self, episode):
+        return self.out / 'sources' / str(episode)
+
     def source_identity(self, episode):
         if episode not in self.sources:
-            folder = self.out / "sources" / str(episode)
+            folder = self.source_folder(episode)
             hashes = {
                 name: file_sha256(folder / name)
                 for name in ("case.json", "history.json")
@@ -123,11 +126,11 @@ class Histories:
     def raw(self, episode):
         """Explicit, uncached diagnostic access; never retained by the training store."""
         self.source_identity(episode)
-        return read_json(self.out / "sources" / str(episode) / "history.json")
+        return read_json(self.source_folder(episode) / "history.json")
 
-    def _build(self, episode, identity, path):
-        started = perf_counter()
-        folder = self.out / "sources" / str(episode)
+    def encoded_rows(self, episode):
+        """Encode immutable source decisions; subclasses may provide branch tails."""
+        folder = self.source_folder(episode)
         case = read_json(folder / "case.json")
         rows = read_json(folder / "history.json")
         limit = self.limits.get(episode, len(rows))
@@ -142,6 +145,11 @@ class Histories:
             legal = [Action(**a) for a in row["actions"]]
             encoded.append(encoder.encode(row["observation"], legal))
             encoder.remember_action(legal[row["chosen"]], row["observation"])
+        return encoded
+
+    def _build(self, episode, identity, path):
+        started = perf_counter()
+        encoded = self.encoded_rows(episode)
         spatial = batch_inputs(encoded, "cpu", spatial_only=True, compact_units=True)
         counts = torch.tensor([len(x.sources) for x in encoded])
         actions = {
@@ -166,7 +174,7 @@ class Histories:
             path.with_suffix(".json"), dict(identity=identity, sha256=file_sha256(path))
         )
         self.counters["encoded_episodes"] += 1
-        self.counters["encoded_decisions"] += limit
+        self.counters["encoded_decisions"] += len(encoded)
         self.counters["preparation_seconds"] += perf_counter() - started
 
     def get(self, episode):

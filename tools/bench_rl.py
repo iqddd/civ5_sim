@@ -222,6 +222,8 @@ def main():
         help="Resolve saved config, latest checkpoint and rollout from RUN",
     )
     parser.add_argument("--config", type=Path)
+    parser.add_argument("--history-microbatch", type=int, default=2, help="Whole-turn fit histories per GPU microbatch")
+    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True, help="Whole-turn fit CUDA compilation")
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--rollout", type=Path)
     parser.add_argument("--out", type=Path, required=True)
@@ -312,6 +314,10 @@ def main():
         from civ5rl.reporting.comparison_collection_bench import run_benchmark
         return run_benchmark(args, parser)
     if args.phase == "comparison":
+        if args.config and json.loads(args.config.read_text(encoding='utf-8')).get('kind')=='rl01.turn_comparison_fit':
+            if not any(a=='--steps' or a.startswith('--steps=') for a in sys.argv[1:]):args.steps=1
+            from civ5rl.reporting.turn_fit import benchmark
+            return benchmark(args,parser)
         if args.config and json.loads(args.config.read_text(encoding='utf-8')).get('training',{}).get('mode') in ('full_corpus_step_kl','frozen_heads_step_kl'):
             if not any(a=='--steps' or a.startswith('--steps=') for a in sys.argv[1:]):args.steps=1
             from civ5rl.reporting.comparison_control_smoke import benchmark

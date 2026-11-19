@@ -57,3 +57,44 @@ def readable_tree(out,name):
                 raise RuntimeError('Comparison reader changed files; retaining extracted data')
             if source.resolve()!=out/name or source.is_symlink():raise ValueError('Unsafe comparison tree')
             shutil.rmtree(source)
+
+
+@contextmanager
+def readable_members(packet, names):
+    """Extract only requested packet members and verify their original bytes.
+
+    Solid archives still require decoding preceding data, but selecting members
+    avoids materializing unrelated multi-gigabyte replay trees. This is a
+    disposable read cache, never a resume dependency or a rewritten input packet.
+    """
+    import subprocess
+    import tempfile
+    from civ5rl.deploy.archive import seven_zip, _name
+    from civ5rl.provenance.common import read_json, file_sha256
+
+    packet = Path(packet).resolve()
+    manifest = read_json(packet / 'manifest.json')
+    names = sorted(set(_name(n) for n in names))
+    if not set(names).issubset(manifest['files']):
+        raise ValueError('Requested comparison input is absent from packet')
+    archived = set(manifest['archived'])
+    with tempfile.TemporaryDirectory(prefix='comparison-members-') as temporary:
+        root = Path(temporary)
+        selected = [n for n in names if n in archived]
+        if selected:
+            archive = packet / 'json.7z'
+            if file_sha256(archive) != manifest['archive_sha256']:
+                raise ValueError('Comparison archive SHA-256 mismatch')
+            listing = root / 'members.txt'
+            listing.write_text('\n'.join(selected) + '\n', encoding='utf-8')
+            subprocess.run([seven_zip(), 'x', '-y', '-bso0', '-bsp0', '-scsUTF-8',
+                            '-spd', '-o' + str(root), str(archive), '@' + str(listing)], check=True)
+            listing.unlink()
+        for name in names:
+            path = root / name
+            if name not in archived:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(packet / 'files' / name, path)
+            if path.stat().st_size != manifest['files'][name]['size'] or file_sha256(path) != manifest['files'][name]['sha256']:
+                raise ValueError(f'Comparison member changed: {name}')
+        yield root

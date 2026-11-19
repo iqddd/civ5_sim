@@ -119,25 +119,31 @@ def main(argv=None, *, root=ROOT):
     else:
         if args.mode == "run" and has_progress:
             raise ValueError("Run already exists; use resume")
+        comparison_kinds = {
+            "rl01.rollout_comparison",
+            "rl01.rollout_comparison_collection",
+            "rl01.turn_comparison_fit",
+        }
         if args.mode == "resume":
-            if kind in {"rl01.rollout_comparison", "rl01.rollout_comparison_collection"} and not has_progress:
+            if kind in comparison_kinds and not has_progress:
                 raise ValueError("Resume requires existing comparison artifacts")
             if kind in BC_KINDS and not has_progress:
                 raise ValueError("Resume requires existing BC run artifacts")
-            if kind not in BC_KINDS | {"rl01.rollout_comparison", "rl01.rollout_comparison_collection"} and not (output / "state.json").exists():
+            if kind not in BC_KINDS | comparison_kinds and not (output / "state.json").exists():
                 raise ValueError("Resume requires existing state.json")
         output.mkdir(parents=True, exist_ok=True)
         if not (output / "machine.json").exists():
             _write(output / "machine.json", {"hardware": hardware()})
         runner_script = (
-            "tools/run_comparison.py" if kind in {"rl01.rollout_comparison", "rl01.rollout_comparison_collection"} else
+            "tools/run_comparison.py" if kind in comparison_kinds else
             "tools/run_cp_imitation.py" if kind in BC_KINDS else "tools/run_ppo.py"
         )
         command = [
             sys.executable,
             runner_script,
             "resume" if kind == "rl01.rollout_comparison" else
-            "collect" if kind == "rl01.rollout_comparison_collection" and args.mode == "run" else args.mode,
+            "collect" if kind == "rl01.rollout_comparison_collection" and args.mode == "run" else
+            "train" if kind == "rl01.turn_comparison_fit" and args.mode == "run" else args.mode,
             "--config",
             args.config,
         ]

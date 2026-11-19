@@ -27,6 +27,7 @@ from civ5rl.engine.runtime.control import RunLock
 CAPABILITIES = {
     "rl01.rollout_comparison_collection": {"run", "tune", "resume"},
     "rl01.rollout_comparison": {"run", "resume"},
+    "rl01.turn_comparison_fit": {"run", "resume"},
     "rl01.ppo_after_target_bc": {"run", "tune", "resume"},
     "rl01.ppo_target_scale": {"run", "resume"},
     "rl01.ppo_scale_up": {"run"},
