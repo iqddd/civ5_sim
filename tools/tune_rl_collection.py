@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import statistics
 import subprocess
 import sys
 from dataclasses import replace
@@ -92,19 +93,25 @@ def main():
     max_envs = count
     if not args.candidates and count < 2:
         parser.error("Automatic search requires at least two saved episodes")
+    compare_worker_counts = self_play and not args.candidates
     try:
         if args.candidates:
             candidates = [
                 Candidate(*map(int, part.split("/")), scheduler=args.scheduler)
                 for part in args.candidates.split(",")
             ]
-        elif self_play:
-            if count <= base:
-                raise ValueError("Self-play tuning needs more saved episodes than allocated CPUs")
+        elif compare_worker_counts:
+            if count < 2 * base:
+                raise ValueError("Self-play tuning needs at least twice as many cases as allocated CPUs")
             capacity = min(count, max(DEFAULT_ENV_CAPACITY, 2 * base))
+            smaller = max(capacity // 2, 2 * base)
             candidates = [
-                Candidate(envs, base, scheduler="streaming")
-                for envs in sorted({capacity, (base + capacity) // 2, base}, reverse=True)
+                Candidate(envs, workers, reply, scheduler="streaming")
+                for envs, reply in dict.fromkeys((
+                    (capacity, 1),
+                    (smaller, 2 if smaller > 2 * base else 1),
+                ))
+                for workers in (base, 2 * base)
             ]
         else:
             candidates = streaming_candidates(cpu_budget, count)
@@ -162,11 +169,24 @@ def main():
     exhausted = False
     deadline = started + args.budget_seconds
 
+    def decision_rate(row):
+        return statistics.median(t["positions"] / t["seconds"] for t in row.trials)
+
     def save():
         confirmed = len(finalists) == 2 and all(
             r.status == "ok" and len(r.confirmations) == 1 for r in finalists
         )
         best = preferred(finalists if confirmed else rows.values())
+        if compare_worker_counts:
+            report["minimum_double_worker_speedup"] = 1.10
+            baseline = next((r for r in finalists if r.candidate.workers == base), None)
+            doubled = next((r for r in finalists if r.candidate.workers == 2 * base), None)
+            if confirmed:
+                speedup = decision_rate(doubled) / decision_rate(baseline)
+                report["double_worker_speedup"] = speedup
+                best = doubled if speedup >= 1.10 else baseline
+            else:
+                best = preferred(r for r in rows.values() if r.candidate.workers == base)
         report["elapsed_seconds"] = perf_counter() - started
         report["budget_exhausted"] = exhausted
         report["recommended"] = str(best.candidate) if best else None
@@ -180,7 +200,7 @@ def main():
                 "min_seconds": min((t["seconds"] for t in r.trials), default=None),
                 "max_seconds": max((t["seconds"] for t in r.trials), default=None),
                 "decisions_per_second": (
-                    r.trials[-1]["positions"] / r.median
+                    decision_rate(r)
                     if r.median is not None
                     else None
                 ),
@@ -373,7 +393,7 @@ def main():
     try:
         for candidate in candidates:
             measure(candidate)
-        if not args.candidates and not exhausted:
+        if not args.candidates and not compare_worker_counts and not exhausted:
             best = preferred(rows.values())
             if best:
                 candidate = best.candidate
@@ -388,7 +408,18 @@ def main():
             best = preferred(rows.values())
             if best and best.candidate.envs >= 2 * best.candidate.workers:
                 measure(replace(best.candidate, reply=2))
-        while not exhausted:
+        if compare_worker_counts:
+            for workers in (base, 2 * base):
+                valid = [
+                    r for r in rows.values()
+                    if r.status == "ok" and r.candidate.workers == workers
+                ]
+                if valid:
+                    finalists.append(max(valid, key=decision_rate))
+            if len(finalists) == 2:
+                for row in finalists:
+                    measure(row.candidate, confirmation=True)
+        while not compare_worker_counts and not exhausted:
             valid = sorted(
                 (r for r in rows.values() if r.status == "ok"), key=lambda r: r.median
             )
