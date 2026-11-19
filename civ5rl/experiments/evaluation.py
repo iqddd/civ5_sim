@@ -1,6 +1,9 @@
 """Validation execution and replay verification; saved-result analysis is re-exported."""
 
+import traceback
 from dataclasses import asdict, dataclass
+from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 
@@ -65,8 +68,9 @@ class MatchTask:
         raise TypeError(f"Cannot coerce {type(task)} to MatchTask")
 
 
-from civ5rl.protocols.imitation import load_episode
-from civ5rl.provenance.common import ROOT, read_json
+from civ5rl.engine.evaluation.proxy import evaluation_agent
+from civ5rl.protocols.imitation import load_episode, search_config
+from civ5rl.provenance.common import ROOT, read_json, write_json
 from civ5rl.reporting.evaluation_audit import (
     clustered_paired_bootstrap,
     compare_paired_directories,
@@ -74,8 +78,10 @@ from civ5rl.reporting.evaluation_audit import (
     outcome,
     paired_world_bootstrap,
 )
-from civ5sim import Battle
+from civ5sim import Battle, MatchConfig
+from civ5sim.cp_agent import CPAgent
 from civ5sim.engine import digest
+from civ5sim.match import run_match
 
 __all__ = [
     "MatchTask",
@@ -86,7 +92,106 @@ __all__ = [
     "paired_world_bootstrap",
     "run_validation_cases",
     "verify_replay",
+    "play_case",
 ]
+
+
+def play_case(
+    config, case, checkpoint_path, mode, enemy, directory, *,
+    temperature=1.0, collect_selection_metrics=False,
+):
+    """Shared ordinary-match execution; protocol callers supply validated cases."""
+    directory = Path(directory)
+    if checkpoint_path == "cp":
+        agent = CPAgent(search_config(config))
+    else:
+        agent = evaluation_agent(
+            checkpoint_path,
+            mode,
+            temperature=temperature,
+            collect_selection_metrics=collect_selection_metrics,
+            cpu_seed=17,
+        )
+    opponent = CPAgent(search_config(config)) if enemy == "cp" else "greedy"
+    side = case["learner_side"]
+    agents = [None, None]
+    agents[side], agents[1 - side] = agent, opponent
+    write_json(directory / "case.json", case)
+    started = perf_counter()
+    try:
+        outcome = run_match(
+            MatchConfig(
+                case["scenario"]["map"],
+                case["armies"],
+                int(case["max_rounds"]),
+                max_calls_per_turn=config["environment"]["max_calls_per_turn"],
+                turn_reset_mode=case["scenario"].get("turn_reset_mode", "legacy"),
+            ),
+            agents,
+            scenario=case["scenario"],
+            agent_seeds=case["agent_seeds"],
+        )
+        outcome.save(directory)
+        if outcome.result["status"] != "completed":
+            raise RuntimeError(str(outcome.result["error"]))
+    except BaseException:
+        (directory / "traceback.txt").write_text(
+            traceback.format_exc(), encoding="utf-8"
+        )
+        raise
+    finally:
+        if isinstance(agent, CPAgent):
+            agent.close()
+        if isinstance(opponent, CPAgent):
+            opponent.close()
+    result = {
+        "status": "completed",
+        "case_id": case["case_id"],
+        "side": side,
+        "parent_world": case["parent_world"],
+        "winner": outcome.result["winner"],
+        "reason": outcome.result["reason"],
+        "rounds": outcome.result["completed_rounds"],
+        "seconds": perf_counter() - started,
+        "remaining_hp": outcome.result["remaining_hp"],
+        "case_hash": case["case_hash"],
+    }
+    if collect_selection_metrics:
+        write_json(directory / "selection-metrics.json", agent.selection_metrics)
+    write_json(directory / "metrics.json", result)
+    return result
+
+
+def target_scale_evaluation_task(task):
+    config, case, path, directory = task
+    if case["split"] != "validation" or digest(
+        {k: v for k, v in case.items() if k != "case_hash"}
+    ) != case["case_hash"]:
+        raise ValueError("Invalid validation case")
+    result = play_case(config, case, path, "argmax", "cp", directory)
+    replay = read_json(Path(directory) / "replay.json")
+    final = read_json(Path(directory) / "final.json")
+    side = case["learner_side"]
+    damage = [0, 0]
+    owners = {u["id"]: u["side"] for u in replay["initial"]["units"]}
+    for step in replay["steps"]:
+        detail = step["result"]
+        if step["action"]["kind"] in ("ranged", "melee"):
+            attacker = owners[step["action"]["unit"]]
+            damage[attacker] += detail["damage"]
+            damage[1 - attacker] += detail["retaliation"]
+    result.update(
+        map_size=case.get("map_size", 10),
+        army_size=len(case["armies"][side]),
+        army_bin=case.get("army_bin", -1),
+        placement=case["placement"],
+        damage_dealt=damage,
+        units_lost=[
+            sum(u["side"] == s and u["hp"] <= 0 for u in final["units"]) for s in (0, 1)
+        ],
+    )
+    write_json(Path(directory) / "metrics.json", result)
+    return result
 
 
 def run_validation_cases(

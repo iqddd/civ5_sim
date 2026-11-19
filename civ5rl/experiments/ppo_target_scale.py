@@ -28,10 +28,14 @@ from civ5rl.engine.ppo.core import update
 from civ5rl.engine.ppo.core import encode_episode
 from civ5rl.engine.ppo.backend import BatchedBackend
 from civ5rl.experiments import ppo_scale_up as shared
-from civ5rl.experiments.evaluation import paired_world_bootstrap, verify_replay
-from civ5rl.experiments.imitation_helpers import assert_equal, isolated_rng, pool
+from civ5rl.experiments.evaluation import (
+    paired_world_bootstrap,
+    target_scale_evaluation_task as evaluation_task,
+    verify_replay,
+)
+from civ5rl.experiments.imitation_helpers import assert_equal, isolated_rng
 from civ5rl.experiments.ppo_artifacts import load_rollout, save_rollout
-from civ5rl.experiments.ppo_after_imitation import optimizer_for, play_case, policy_hash, match_summary
+from civ5rl.experiments.ppo_after_imitation import optimizer_for, policy_hash, match_summary
 from civ5rl.protocols.corpus import validate_corpus
 from civ5rl.protocols.ppo_target_scale import KIND, TargetFactory, InvalidDataset, evaluation_cases, validate_profile
 from civ5rl.provenance import checkpoint
@@ -272,30 +276,6 @@ def initialize(config, plan, out):
     write_json(out/'status.json',{'status':'prepared'})
 
 
-def evaluation_task(task):
-    config,case,path,directory=task
-    if case['split']!='validation' or digest({k:v for k,v in case.items() if k!='case_hash'})!=case['case_hash']:
-        raise ValueError('Invalid validation case')
-    result=play_case(config,case,path,'argmax','cp',directory)
-    replay=read_json(Path(directory)/'replay.json')
-    final=read_json(Path(directory)/'final.json')
-    side=case['learner_side']
-    damage=[0,0]
-    owners={u['id']:u['side'] for u in replay['initial']['units']}
-    for step in replay['steps']:
-        detail=step['result']
-        if step['action']['kind'] in ('ranged','melee'):
-            attacker=owners[step['action']['unit']]
-            damage[attacker]+=detail['damage']
-            damage[1-attacker]+=detail['retaliation']
-    result.update(map_size=case.get('map_size',10),army_size=len(case['armies'][side]),
-                  army_bin=case.get('army_bin',-1),placement=case['placement'],
-                  damage_dealt=damage,
-                  units_lost=[sum(u['side']==s and u['hp']<=0 for u in final['units']) for s in (0,1)])
-    write_json(Path(directory)/'metrics.json',result)
-    return result
-
-
 def evaluation_key(config,plan,out,path,purpose,runtime_identity):
     """Return the canonical cache key without running matches."""
     fingerprint=('cp_mirror_'+digest(config['teacher_search'])[:32] if path=='cp'
@@ -317,7 +297,11 @@ def evaluate(config,plan,out,path,purpose):
     from civ5rl.protocols.turn_reset import validate_case
     for case in plan[purpose]:
         validate_case(case, config)
-    from civ5rl.engine.evaluation.executor import EvaluationExecutor, runtime_for
+    from civ5rl.engine.evaluation.executor import (
+        EvaluationExecutor,
+        evaluation_worker_pool,
+        runtime_for,
+    )
     runtime = runtime_for(out, config, cp_only=path == 'cp')
     runtime_identity = runtime.identity()
     fingerprint,key=evaluation_key(config,plan,out,path,purpose,runtime_identity)
@@ -338,8 +322,8 @@ def evaluate(config,plan,out,path,purpose):
             if count % workers == 0 or count == len(tasks):
                 print(f'Evaluation {purpose}: {count}/{len(tasks)} new matches',flush=True)
         inference_statistics = executor.statistics()
-    else:
-        with pool(workers) as executor:
+    elif tasks:
+        with evaluation_worker_pool(workers) as executor:
             for first in range(0,len(tasks),workers):
                 list(executor.map(evaluation_task,tasks[first:first+workers]))
                 print(f'Evaluation {purpose}: {min(first+workers,len(tasks))}/{len(tasks)} new matches',flush=True)

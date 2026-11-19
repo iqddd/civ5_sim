@@ -25,7 +25,7 @@ from civ5rl.engine.runtime.control import (
     target_bc_evaluation_due,
 )
 from civ5rl.engine.runtime.control import TrainingCounters
-from civ5rl.engine.evaluation.executor import runtime_for
+from civ5rl.engine.evaluation.executor import evaluation_session, runtime_for
 from civ5rl.engine.runtime.telemetry import performance_markdown, summarize_performance
 from civ5rl.engine.ppo.core import (
     encode_episode,
@@ -1418,7 +1418,7 @@ def run(phase, config, out, device, runtime_path=None, max_updates=None):
     if phase == "pause":
         (out / "pause.request").write_text("pause requested\n", encoding="utf-8")
         return
-    with RunLock(out):
+    with RunLock(out), evaluation_session():
         if phase in ("train", "run", "resume"):
             assert_not_closed(out)
         try:

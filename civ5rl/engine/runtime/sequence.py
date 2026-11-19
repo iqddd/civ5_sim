@@ -92,6 +92,33 @@ def allocation_with_reserve(device, reserve_bytes):
         raise
 
 
+_ACTION_TRIM_KEYS = (
+    "sources",
+    "targets",
+    "action_features",
+    "action_mask",
+    "attack_preview",
+)
+_COMPILED_GATHER = None
+
+
+def _gather_resident(data, indices, width):
+    gathered = {key: value.index_select(0, indices) for key, value in data.items()}
+    for key in _ACTION_TRIM_KEYS:
+        if key in gathered:
+            gathered[key] = gathered[key][:, :width].contiguous()
+    return gathered
+
+
+def _compiled_gather():
+    global _COMPILED_GATHER
+    if _COMPILED_GATHER is None:
+        _COMPILED_GATHER = torch.compile(
+            _gather_resident, dynamic=True, fullgraph=True
+        )
+    return _COMPILED_GATHER
+
+
 class SequenceBuffer:
     """Pack episode offsets, action counts and inputs for BC/PPO caches.
 
@@ -234,16 +261,7 @@ class SequenceBuffer:
         return indices
 
     def _gather(self, indices, width):
-        data = {key: value.index_select(0, indices) for key, value in self.data.items()}
-        for key in (
-            "sources",
-            "targets",
-            "action_features",
-            "action_mask",
-            "attack_preview",
-        ):
-            data[key] = data[key][:, :width].contiguous()
-        return data
+        return _gather_resident(self.data, indices, width)
 
     def gather_inputs(self, spans, indices=None, *, device=None, min_cells=0):
         if self.data is None:
@@ -270,7 +288,9 @@ class SequenceBuffer:
             )
             for episode_index, start, stop in spans
         )
-        return (self._gather_runner or self._gather)(indices, width)
+        if self._gather_runner is not None:
+            return self._gather_runner(self.data, indices, width)
+        return _gather_resident(self.data, indices, width)
 
     def gather_spatial_inputs(self, spans):
         """Recurrent prefixes need neither action tensors nor PPO labels."""
@@ -294,7 +314,7 @@ class SequenceBuffer:
         return {key: self.data[key].index_select(0, indices) for key in keys}
 
     def enable_compiled_gather(self):
-        self._gather_runner = torch.compile(self._gather, dynamic=True, fullgraph=True)
+        self._gather_runner = _compiled_gather()
 
     def enable_async_transfers(self):
         self.async_transfers = True

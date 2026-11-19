@@ -80,7 +80,7 @@ def main():
         if args.cpu_budget is not None
         else machine["effective_cpu_budget"]
     )
-    base = max(1, math.ceil(cpu_budget))
+    base = max(1, math.floor(cpu_budget) if self_play else math.ceil(cpu_budget))
     episodes = load_rollout(args.rollout)
     count = (
         args.episodes
@@ -93,14 +93,21 @@ def main():
     if not args.candidates and count < 2:
         parser.error("Automatic search requires at least two saved episodes")
     try:
-        candidates = (
-            [
+        if args.candidates:
+            candidates = [
                 Candidate(*map(int, part.split("/")), scheduler=args.scheduler)
                 for part in args.candidates.split(",")
             ]
-            if args.candidates
-            else streaming_candidates(cpu_budget, count)
-        )
+        elif self_play:
+            if count <= base:
+                raise ValueError("Self-play tuning needs more saved episodes than allocated CPUs")
+            capacity = min(count, max(DEFAULT_ENV_CAPACITY, 2 * base))
+            candidates = [
+                Candidate(envs, base, scheduler="streaming")
+                for envs in sorted({capacity, (base + capacity) // 2, base}, reverse=True)
+            ]
+        else:
+            candidates = streaming_candidates(cpu_budget, count)
     except (ValueError, TypeError) as exc:
         parser.error(str(exc))
     candidates = list(dict.fromkeys(candidates))

@@ -100,13 +100,17 @@ class ProxyAgent(ActionSelection):
 
 
 def evaluation_agent(
-    checkpoint, mode, *, temperature=1.0, collect_selection_metrics=False
+    checkpoint, mode, *, temperature=1.0, collect_selection_metrics=False, cpu_seed=None
 ):
     connection = _client.get()
     if connection is not None:
         return ProxyAgent(connection, mode, temperature, collect_selection_metrics)
     from civ5rl.core.agent import RLAgent
 
+    if cpu_seed is not None:
+        from civ5rl.provenance.common import configure
+
+        configure(cpu_seed, "cpu")
     return RLAgent.from_checkpoint(
         checkpoint,
         "cpu",

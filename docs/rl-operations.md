@@ -321,7 +321,7 @@ python tools/bench_rl.py comparison-collection --run RUN --config CONFIG --out O
 ## CPU/GPU-инференс оценок
 
 ```powershell
-python tools/run_ppo.py run --config CONFIG --evaluation-device cuda --evaluation-workers 8 --evaluation-max-batch 32 --evaluation-wait-seconds 0.001
+python tools/run_ppo.py run --config CONFIG --evaluation-device cuda
 python tools/run_cp_imitation.py evaluate --config CONFIG --evaluation-device cpu
 ```
 
@@ -336,6 +336,10 @@ python tools/run_cp_imitation.py evaluate --config CONFIG --evaluation-device cp
 Эти флаги доступны для target-scale BC/PPO и after-target-BC PPO, а также
 передаются через `remote_rl.py launch`. Если CONFIG закрепляет runtime,
 используйте указанные в нём значения. Выбор сохраняется в `evaluation-runtime.json`.
+В новом смешанном PPO число воркеров по умолчанию определяется доступными CPU
+с учётом affinity и квоты Linux. Один логический CPU оставляется координатору,
+число воркеров ограничено диапазоном 1–24. Явный `--evaluation-workers`
+позволяет выбрать другое число.
 Одновременно batch ограничен числом workers. Оценки используют FP32 без AMP/TF32.
 На Windows CUDA-командам нужен активированный MSVC environment (`vcvars64.bat`).
 После ошибки повторите оценку с тем же runtime: завершённые матчи сохраняются.
@@ -416,6 +420,12 @@ python tools/tune_rl_collection.py --scheduler streaming --config CONFIG --check
 
 Вход — CONFIG, CHECKPOINT и сохранённые случаи ROLLOUT. Выход подбора —
 `recommended-runtime.json`; передайте его runner через `--runtime-config`.
+В профилировании смешанного сбора с ненулевой долей архива используются два
+архивных идентификатора с весами CHECKPOINT, чтобы измерять смешанные волны.
+При автоматическом подборе для self-play число воркеров равно целой части
+доступного CPU-бюджета с учётом affinity и квоты, минимум один. Подбор меняет
+число окружений и размер ответа. Для ручного выбора числа воркеров используйте
+`--candidates`; для автоматического подбора нужно больше случаев, чем воркеров.
 `--budget-seconds` включает подготовку и прогрев. `preliminary` означает,
 что подтверждение рекомендации не завершено.
 
@@ -453,7 +463,7 @@ git push origin HEAD
 python tools/remote_rl.py package --config CONFIG --out DEPLOYMENT --instance INSTANCE_JSON --extra-input CARRIER
 python tools/remote_rl.py launch --deployment DEPLOYMENT --mode tune
 python tools/remote_rl.py pull --deployment DEPLOYMENT --keep-instance
-python tools/remote_rl.py launch --deployment DEPLOYMENT --mode run --evaluation-device cuda --evaluation-workers 8 --evaluation-max-batch 32 --evaluation-wait-seconds 0.001
+python tools/remote_rl.py launch --deployment DEPLOYMENT --mode run --evaluation-device cuda
 python tools/ctl_rl.py progress --deployment DEPLOYMENT --watch --interval 900
 ```
 

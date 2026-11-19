@@ -287,15 +287,24 @@ def main():
                 # Build fresh rollouts in the requested physics without changing source evidence.
                 episodes = deepcopy(episodes)
                 self_play = bool(config.get("self_play", {}).get("enabled"))
+                synthetic_archive = []
                 if self_play:
                     from civ5rl.engine.collection.opponents import OpponentPool, select_opponent
+
+                    if float(config["self_play"].get("archive_share", 0.0)) > 0:
+                        synthetic_archive = [
+                            {"id": "archive:10", "path": str(args.checkpoint.resolve())},
+                            {"id": "archive:20", "path": str(args.checkpoint.resolve())},
+                        ]
                 for episode in episodes:
                     scenario = episode["spec"]["scenario"]
                     if selected_mode != "legacy" or "turn_reset_mode" in scenario:
                         scenario["turn_reset_mode"] = selected_mode
                     episode["spec"]["scenario_hash"] = digest(scenario)
                     if self_play:
-                        opp, opp_id = select_opponent(episode["spec"]["episode_id"], config, [])
+                        opp, opp_id = select_opponent(
+                            episode["spec"]["episode_id"], config, synthetic_archive
+                        )
                         if opp == "policy":
                             episode["spec"]["opponent"] = "policy"
                             episode["spec"]["opponent_id"] = opp_id
@@ -308,6 +317,8 @@ def main():
                     if self_play
                     else None
                 )
+                if opponent_pool is not None and synthetic_archive:
+                    opponent_pool.sync_archive(synthetic_archive)
                 manifest = case_manifest(
                     [ep["spec"] for ep in episodes],
                     source="runtime_profile",

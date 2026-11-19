@@ -20,7 +20,7 @@ from civ5rl.engine.runtime.control import RunLock
 from civ5rl.engine.runtime.control import TrainingCounters
 from civ5rl.engine.ppo.core import update
 from civ5rl.engine.runtime.telemetry import ResourceMonitor, analyze_telemetry
-from civ5rl.experiments.evaluation import paired_world_bootstrap, verify_replay
+from civ5rl.experiments.evaluation import paired_world_bootstrap, play_case, verify_replay
 from civ5rl.experiments.imitation_helpers import (
     CompilationClock,
     isolated_rng,
@@ -28,7 +28,6 @@ from civ5rl.experiments.imitation_helpers import (
     pool,
 )
 from civ5rl.experiments.ppo_artifacts import prune_checkpoints, save_rollout
-from civ5rl.protocols.imitation import search_config
 from civ5rl.protocols.ppo_after_imitation import (
     CONTROLLED_KIND,
     KIND,
@@ -41,10 +40,7 @@ from civ5rl.provenance import checkpoint
 from civ5rl.provenance.common import ROOT, configure, read_json, write_json
 from civ5rl.provenance.common import file_sha256 as file_hash
 from civ5rl.provenance.validation import validate_config
-from civ5sim import MatchConfig
-from civ5sim.cp_agent import CPAgent
 from civ5sim.engine import digest
-from civ5sim.match import run_match
 
 
 def policy_hash(model):
@@ -206,71 +202,6 @@ def evaluation_task(task):
     if digest({k: v for k, v in case.items() if k != "case_hash"}) != case["case_hash"]:
         raise ValueError("Evaluation case changed")
     return play_case(config, case, checkpoint_path, mode, enemy, directory)
-
-
-def play_case(
-    config, case, checkpoint_path, mode, enemy, directory, *,
-    temperature=1.0, collect_selection_metrics=False,
-):
-    """Shared ordinary-match execution; protocol callers supply validated cases."""
-    directory = Path(directory)
-    configure(17, "cpu")
-    if checkpoint_path == "cp":
-        agent = CPAgent(search_config(config))
-    else:
-        from civ5rl.engine.evaluation.proxy import evaluation_agent
-        agent = evaluation_agent(
-            checkpoint_path, mode, temperature=temperature,
-            collect_selection_metrics=collect_selection_metrics,
-        )
-    opponent = CPAgent(search_config(config)) if enemy == "cp" else "greedy"
-    side = case["learner_side"]
-    agents = [None, None]
-    agents[side], agents[1 - side] = agent, opponent
-    write_json(directory / "case.json", case)
-    started = perf_counter()
-    try:
-        outcome = run_match(
-            MatchConfig(
-                case["scenario"]["map"],
-                case["armies"],
-                int(case["max_rounds"]),
-                max_calls_per_turn=config["environment"]["max_calls_per_turn"],
-                turn_reset_mode=case["scenario"].get("turn_reset_mode", "legacy"),
-            ),
-            agents,
-            scenario=case["scenario"],
-            agent_seeds=case["agent_seeds"],
-        )
-        outcome.save(directory)
-        if outcome.result["status"] != "completed":
-            raise RuntimeError(str(outcome.result["error"]))
-    except BaseException:
-        (directory / "traceback.txt").write_text(
-            traceback.format_exc(), encoding="utf-8"
-        )
-        raise
-    finally:
-        if isinstance(agent, CPAgent):
-            agent.close()
-        if isinstance(opponent, CPAgent):
-            opponent.close()
-    result = {
-        "status": "completed",
-        "case_id": case["case_id"],
-        "side": side,
-        "parent_world": case["parent_world"],
-        "winner": outcome.result["winner"],
-        "reason": outcome.result["reason"],
-        "rounds": outcome.result["completed_rounds"],
-        "seconds": perf_counter() - started,
-        "remaining_hp": outcome.result["remaining_hp"],
-        "case_hash": case["case_hash"],
-    }
-    if collect_selection_metrics:
-        write_json(directory / "selection-metrics.json", agent.selection_metrics)
-    write_json(directory / "metrics.json", result)
-    return result
 
 
 def match_summary(directory, expected):

@@ -17,9 +17,11 @@ Graphs; deterministic FP32 evaluation never inherits training AMP/TF32.
 import math
 import os
 import selectors
+import sys
 import traceback
+from collections import OrderedDict
 from concurrent.futures import FIRST_COMPLETED, wait
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from multiprocessing import Pipe
@@ -41,6 +43,50 @@ from civ5rl.engine.runtime import is_int_at_least
 from civ5rl.engine.runtime.shared import pool
 
 _options = ContextVar("evaluation_options", default={})
+_session = ContextVar("evaluation_session", default=None)
+
+
+class _EvaluationSession:
+    def __init__(self):
+        self.policies = OrderedDict()
+        self.workers = None
+        self.executor = None
+
+    def close_pool(self):
+        if self.executor is not None:
+            executor, self.executor = self.executor, None
+            executor.shutdown(wait=True, cancel_futures=True)
+
+
+@contextmanager
+def evaluation_session():
+    """Keep compiled checkpoints and simulator processes for one sequential run."""
+    session = _EvaluationSession()
+    token = _session.set(session)
+    try:
+        yield
+    finally:
+        _session.reset(token)
+        session.close_pool()
+
+
+@contextmanager
+def evaluation_worker_pool(workers):
+    session = _session.get()
+    if session is None:
+        with pool(workers) as executor:
+            yield executor
+        return
+    if session.workers != workers:
+        session.close_pool()
+        session.workers = workers
+    if session.executor is None:
+        session.executor = pool(workers)
+    try:
+        yield session.executor
+    except BaseException:
+        session.close_pool()
+        raise
 
 
 class _ConnectionWaiter:
@@ -130,9 +176,17 @@ def runtime_for(directory, config, *, cp_only=False):
         ) or (record is None and (Path(directory) / "evaluations.json").exists())
         # The run marker distinguishes a genuinely new experiment from an old
         # partially unpacked run whose evaluations.json is still archived.
+        default_workers = int(config.get("workers", 4) or 4)
+        if (
+            not required
+            and not historical
+            and "workers" not in _options.get()
+            and config.get("self_play", {}).get("enabled")
+        ):
+            default_workers = _self_play_evaluation_workers()
         defaults = required or dict(
             device="cpu" if historical else "auto",
-            workers=int(config.get("workers", 4) or 4),
+            workers=default_workers,
         )
     values = {**defaults, **_options.get()}
     if required is not None and values != required:
@@ -149,6 +203,26 @@ def runtime_for(directory, config, *, cp_only=False):
         if cp_only
         else runtime
     )
+
+
+def _self_play_evaluation_workers():
+    import psutil
+
+    process = psutil.Process()
+    affinity = (
+        process.cpu_affinity()
+        if hasattr(process, "cpu_affinity")
+        else range(os.cpu_count() or 1)
+    )
+    available = len(affinity)
+    if sys.platform == "linux":
+        from tools.rl_collection_hardware import cgroup_limits, effective_cpu_budget
+
+        limits = cgroup_limits()
+        available = math.floor(
+            effective_cpu_budget(affinity, limits["cpu_quota"], limits["cpuset"])
+        )
+    return max(1, min(24, available - 1))
 
 
 @dataclass(frozen=True)
@@ -281,9 +355,7 @@ class BatchedInference:
             for i, (agent, command, encoded) in enumerate(requests)
         ]
 
-    @torch.inference_mode()
-    def infer_encoded(self, requests):
-        """One public encoding shared by policies; each policy keeps its own GRU."""
+    def _forward_encoded(self, requests):
         start = perf_counter()
         policies = self.policies
         if any(p.variant != policies[0].variant for p in policies):
@@ -294,6 +366,7 @@ class BatchedInference:
         batch = batch_inputs(
             encoded,
             self.device,
+            non_blocking=True,
             compact_units=self.policy.attention_backend == "compact_fp32",
         )
         self.encoding_seconds += perf_counter() - start
@@ -305,15 +378,29 @@ class BatchedInference:
             logits, _, last = policy(batch, hidden)
             logits_all.append(logits)
             self.store_hidden(agents, last, member)
+        self.batches += 1
+        self.items += len(requests)
+        return logits_all, start
+
+    @torch.inference_mode()
+    def infer_encoded(self, requests):
+        """One public encoding shared by policies; each policy keeps its own GRU."""
+        logits_all, start = self._forward_encoded(requests)
         results = (
             self.combine_encoded_logits(logits_all, requests)
             if any(r[1] != "observe" for r in requests)
             else [None] * len(requests)
         )
         self.forward_seconds += perf_counter() - start
-        self.batches += 1
-        self.items += len(requests)
         return results
+
+    @torch.inference_mode()
+    def forward_encoded_argmax(self, requests) -> torch.Tensor:
+        """Enqueue public-encoded forward + argmax on device without host synchronization."""
+        logits, start = self._forward_encoded(requests)
+        choices = logits[0].argmax(-1)
+        self.forward_seconds += perf_counter() - start
+        return choices
 
     @torch.inference_mode()
     def infer(self, requests):
@@ -385,14 +472,41 @@ def prepare_evaluation_policy(policy, device):
     return policy
 
 
+def load_evaluation_policy(checkpoint, device) -> Policy:
+    """Reuse the two most recent CUDA checkpoints without changing their weights."""
+    session = _session.get()
+    key = None
+    if session is not None and str(device).startswith("cuda"):
+        path = Path(checkpoint).resolve()
+        stat = path.stat()
+        key = (
+            str(device),
+            path,
+            stat.st_ino,
+            stat.st_size,
+            stat.st_mtime_ns,
+            stat.st_ctime_ns,
+        )
+        cached = session.policies.get(key)
+        if cached is not None:
+            session.policies.move_to_end(key)
+            return cached
+    agent = RLAgent.from_checkpoint(checkpoint, "cpu", "argmax")
+    policy = prepare_evaluation_policy(agent.policy, device)
+    if key is not None:
+        session.policies[key] = policy
+        if len(session.policies) > 2:
+            session.policies.popitem(last=False)
+    return policy
+
+
 class EvaluationExecutor:
     def __init__(self, checkpoint, runtime):
         self.runtime = runtime.resolve()
         # Load through the CPU path so training AMP and compile options do not
         # leak into this FP32 evaluator. Allocation uses the parent's allocator.
-        agent = RLAgent.from_checkpoint(checkpoint, "cpu", "argmax")
         self.inference = BatchedInference(
-            prepare_evaluation_policy(agent.policy, self.runtime.device),
+            load_evaluation_policy(checkpoint, self.runtime.device),
             self.runtime.device,
             hidden_capacity=self.runtime.workers,
         )
@@ -548,11 +662,19 @@ class EvaluationExecutor:
                 waiter.close()
 
     def run(self, function, tasks):
+        workers = (
+            nullcontext(self._pool)
+            if self._pool is not None
+            else evaluation_worker_pool(self.runtime.workers)
+        )
+        with workers as executor:
+            yield from self._run(executor, function, tasks)
+
+    def _run(self, executor, function, tasks):
         tasks = iter(tasks)
         if self.error is not None:
             raise RuntimeError("Failed evaluation session must be closed")
         self.stop.clear()
-        executor = self._pool or pool(self.runtime.workers)
         thread = Thread(target=self._serve, name="evaluation-inference", daemon=True)
         thread.start()
         pending = {}
@@ -587,8 +709,6 @@ class EvaluationExecutor:
             self.stop.set()
             thread.join()
             self._fail_all("Evaluation coordinator stopped")
-            if self._pool is None:
-                executor.shutdown(wait=True, cancel_futures=True)
             for client in pending.values():
                 client.close()
             for connection, agent in list(self.connections.items()):

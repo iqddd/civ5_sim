@@ -1,8 +1,13 @@
 {
   "base_config": "configs/rl-ppo-c2p-h60-end-turn.json",
   "output": "artifacts/rl/ppo-c2p-h60-selfplay",
+  "evaluation_runtime": null,
   "collection": {
     "min_learner_decisions_per_update": 32768
+  },
+  "performance": {
+    "spatial_compile_mode": "default",
+    "ppo_cached_replay": false
   },
   "ppo": {
     "epochs": 3,
@@ -60,6 +65,19 @@
     "training_namespace": "ppo_c2p_selfplay_v1_training",
     "shuffle_namespace": "ppo_c2p_selfplay_v1_shuffle",
     "torch_namespace": "ppo_c2p_selfplay_v1_torch",
-    "critic_namespace": "ppo_c2p_selfplay_v1_critic"
+    "critic_namespace": "ppo_c2p_selfplay_v1_critic",
+    "time_budget_check": {
+      "local_precheck_gpu": "NVIDIA GeForce RTX 4060 Ti",
+      "local_measured_step_seconds_mean": 0.9662,
+      "local_measured_step_seconds_median": 0.9862,
+      "local_measured_replay_32k_seconds": 4.046,
+      "target_gpu": "NVIDIA GeForce RTX 5090",
+      "target_gpu_step_seconds": 0.35,
+      "target_gpu_kl_check_seconds": 1.6,
+      "target_collection_decisions_per_second": 800.0,
+      "terminal_episode_overshoot_decisions": 4096,
+      "expected_kl_checks_per_rollout": 4.2,
+      "runtime_compilation_allowance_seconds": 120.0
+    }
   }
 }

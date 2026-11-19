@@ -120,18 +120,91 @@ def maybe_archive_snapshot(
     return entry
 
 
+class _StaticSpatialGraph:
+    """Replay one padded spatial shape and read the archive runner's live weights.
+
+    The archive runner updates parameter storage in place. Capture the compiled
+    forward after warming its kernels, and copy outputs before another block can
+    overwrite them. Larger maps use the regular compiled forward.
+    """
+
+    def __init__(self, runner, cell_padding: int):
+        self._runner = runner
+        self._cell_padding = cell_padding
+        self._capture = None
+
+    def __call__(self, part: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        cells = part["cells"]
+        if torch.is_grad_enabled() or cells.shape[1] != self._cell_padding:
+            return self._runner(part)
+        if self._capture is None:
+            inputs = {key: value.clone() for key, value in part.items()}
+            current = torch.cuda.current_stream(cells.device)
+            stream = torch.cuda.Stream(device=cells.device)
+            stream.wait_stream(current)
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    self._runner(inputs)
+            current.wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                outputs = self._runner(inputs)
+            self._capture = graph, inputs, outputs
+        graph, inputs, (x, ctx) = self._capture
+        torch._foreach_copy_(list(inputs.values()), [part[key] for key in inputs])
+        graph.replay()
+        return x.clone(), ctx.clone()
+
+
 def _build_collection_policy(
     checkpoint_path: Path,
     config: dict[str, Any],
     device: str | torch.device,
 ) -> Policy:
-    """Load a frozen opponent policy matching the collector's exact precision/compile mode."""
-    from civ5rl.experiments.imitation_helpers import load_policy
+    """Load a frozen inference-only opponent policy with one bounded 4-row spatial graph."""
+    from civ5rl.core.preview import extends_parent, load_parent_model
 
-    policy = load_policy(config, checkpoint_path, str(device))
+    device_str = str(device)
+    saved = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
+    variant = (
+        config["model"]["variant"]
+        if extends_parent(config)
+        else saved.get("variant") or config.get("model", {}).get("variant", "C")
+    )
+    policy = Policy(variant)
+    load_parent_model(policy, saved, config)
+    policy = policy.to(device_str)
+    perf = config.get("performance", {})
+    policy.spatial_cell_padding = perf.get("spatial_cell_padding", 0)
+    # Opponent moves never enter behavior_replay/precheck: block size 4 eliminates
+    # 32-row padding waste while giving _StaticSpatialGraph one fixed [4, 256] shape.
+    use_static_graph = (
+        device_str.startswith("cuda")
+        and perf.get("compile", False)
+        and policy.spatial_cell_padding > 0
+    )
+    policy.enable_amp(
+        device_str.startswith("cuda"),
+        spatial_batch_size=4 if use_static_graph else 0,
+    )
+    if perf.get("inverse_routing", False):
+        policy.enable_inverse_routing()
+    if perf.get("optimized_routing", False):
+        policy.enable_inverse_routing()
+        policy.enable_action_routing()
+        policy.enable_maximum_routing()
     policy.eval()
     for p in policy.parameters():
         p.requires_grad_(False)
+    if device_str.startswith("cuda") and perf.get("compile", False):
+        policy.enable_compile(
+            dynamic=perf.get("compile_dynamic", True),
+            recompile_limit=perf.get("compile_recompile_limit", 32),
+        )
+        if use_static_graph:
+            policy._spatial_runner = _StaticSpatialGraph(
+                policy.spatial_runner, policy.spatial_cell_padding
+            )
     return policy
 
 

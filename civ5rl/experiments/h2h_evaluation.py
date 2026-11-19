@@ -13,21 +13,9 @@ from threading import Event, Lock, Thread
 from time import perf_counter
 
 import numpy as np
-import torch
 
-from civ5rl.core.agent import RLAgent
-from civ5rl.engine.evaluation.executor import (
-    AgentMember,
-    AgentSession,
-    BatchedInference,
-    _ConnectionWaiter,
-    evaluation_precision,
-    prepare_evaluation_policy,
-    runtime_for,
-)
 from civ5rl.engine.evaluation.proxy import ProxyAgent
-from civ5rl.engine.runtime.shared import EncodedSlots, pool
-from civ5rl.experiments.ppo_after_imitation import policy_hash
+from civ5rl.engine.runtime.shared import EncodedSlots
 from civ5rl.provenance.common import ROOT, configure, file_sha256, read_json, write_json
 from civ5rl.reporting.evaluation_audit import (
     dual_promotion_decision,
@@ -42,22 +30,28 @@ def _h2h_worker_task(task, cand_conn, ref_conn):
     """Run one policy-vs-policy match in a worker with two isolated ProxyAgents."""
     config, case, cand_path, ref_path, directory = task
     directory = Path(directory)
-    configure(17, "cpu")
     if case["split"] != "validation" or digest(
         {k: v for k, v in case.items() if k != "case_hash"}
     ) != case["case_hash"]:
         raise ValueError("Invalid validation case")
     side = case["learner_side"]
-    cand_agent = (
-        ProxyAgent(cand_conn, "argmax")
-        if cand_conn is not None
-        else RLAgent.from_checkpoint(cand_path, "cpu", "argmax")
-    )
-    ref_agent = (
-        ProxyAgent(ref_conn, "argmax")
-        if ref_conn is not None
-        else RLAgent.from_checkpoint(ref_path, "cpu", "argmax")
-    )
+    if cand_conn is not None and ref_conn is not None:
+        cand_agent = ProxyAgent(cand_conn, "argmax")
+        ref_agent = ProxyAgent(ref_conn, "argmax")
+    else:
+        from civ5rl.core.agent import RLAgent
+
+        configure(17, "cpu")
+        cand_agent = (
+            ProxyAgent(cand_conn, "argmax")
+            if cand_conn is not None
+            else RLAgent.from_checkpoint(cand_path, "cpu", "argmax")
+        )
+        ref_agent = (
+            ProxyAgent(ref_conn, "argmax")
+            if ref_conn is not None
+            else RLAgent.from_checkpoint(ref_path, "cpu", "argmax")
+        )
     agents = [None, None]
     agents[side], agents[1 - side] = cand_agent, ref_agent
     write_json(directory / "case.json", case)
@@ -134,21 +128,21 @@ class DualPolicyExecutor:
     """Serve two frozen FP32 policies concurrently with strictly isolated GRU states."""
 
     def __init__(self, candidate_checkpoint, reference_checkpoint, runtime, *, identical=False):
+        from civ5rl.engine.evaluation.executor import BatchedInference, load_evaluation_policy
+
         self.runtime = runtime.resolve()
-        cand = RLAgent.from_checkpoint(candidate_checkpoint, "cpu", "argmax")
         self.identical = identical
         capacity = max(2, self.runtime.workers * (2 if identical else 1))
         self.cand_inference = BatchedInference(
-            prepare_evaluation_policy(cand.policy, self.runtime.device),
+            load_evaluation_policy(candidate_checkpoint, self.runtime.device),
             self.runtime.device,
             hidden_capacity=capacity,
         )
         if identical:
             self.ref_inference = self.cand_inference
         else:
-            ref = RLAgent.from_checkpoint(reference_checkpoint, "cpu", "argmax")
             self.ref_inference = BatchedInference(
-                prepare_evaluation_policy(ref.policy, self.runtime.device),
+                load_evaluation_policy(reference_checkpoint, self.runtime.device),
                 self.runtime.device,
                 hidden_capacity=capacity,
             )
@@ -158,6 +152,7 @@ class DualPolicyExecutor:
         self.error = None
         self.wait_seconds = 0.0
         self.wait_timeouts = 0
+        self.result_transfer_seconds = 0.0
 
     def _inference_for(self, role):
         return self.cand_inference if role == "candidate" else self.ref_inference
@@ -183,7 +178,11 @@ class DualPolicyExecutor:
             connection.close()
             return None
         if command == "reset":
+            from civ5rl.engine.evaluation.executor import AgentMember, AgentSession
+
             mode, temperature, metrics = args
+            if mode != "argmax" or metrics:
+                raise ValueError("H2H evaluation requires argmax without selection metrics")
             inference.release_agent(agent)
             previous = self.shared.pop(connection, None)
             if previous is not None:
@@ -223,6 +222,9 @@ class DualPolicyExecutor:
                 pass
 
     def _serve(self):
+        import torch
+        from civ5rl.engine.evaluation.executor import _ConnectionWaiter
+
         waiter = None
         try:
             waiter = _ConnectionWaiter()
@@ -263,18 +265,29 @@ class DualPolicyExecutor:
                     if perf_counter() >= until:
                         break
                 self.wait_seconds += perf_counter() - started
-                if self.identical:
-                    results = self.cand_inference.infer_encoded([r[2] for r in pending])
-                    for (connection, _, _), result in zip(pending, results):
-                        connection.send(("ok", result))
+                if self.identical or len({r[1] for r in pending}) == 1:
+                    groups = [pending]
                 else:
-                    for role in ("candidate", "reference"):
-                        group = [r for r in pending if r[1] == role]
-                        if not group:
-                            continue
-                        results = self._inference_for(role).infer_encoded([r[2] for r in group])
-                        for (connection, _, _), result in zip(group, results):
-                            connection.send(("ok", result))
+                    groups = [
+                        [r for r in pending if r[1] == role]
+                        for role in ("candidate", "reference")
+                    ]
+                choices = [
+                    self._inference_for(group[0][1]).forward_encoded_argmax(
+                        [request for _, _, request in group]
+                    )
+                    for group in groups
+                ]
+                started = perf_counter()
+                packed = choices[0] if len(choices) == 1 else torch.cat(choices)
+                host_choices = iter(packed.cpu().tolist())
+                self.result_transfer_seconds += perf_counter() - started
+                for group in groups:
+                    for connection, _, (_, command, _) in group:
+                        choice = next(host_choices)
+                        connection.send(
+                            ("ok", None if command == "observe" else {"index": choice})
+                        )
         except BaseException as exc:
             self.error = traceback.format_exc()
             self._fail_all(f"{type(exc).__name__}: {exc}")
@@ -283,9 +296,14 @@ class DualPolicyExecutor:
                 waiter.close()
 
     def run(self, tasks):
+        from civ5rl.engine.evaluation.executor import evaluation_worker_pool
+
+        with evaluation_worker_pool(self.runtime.workers) as executor:
+            yield from self._run(executor, tasks)
+
+    def _run(self, executor, tasks):
         tasks = iter(tasks)
         self.stop.clear()
-        executor = pool(self.runtime.workers)
         thread = Thread(target=self._serve, name="h2h-evaluation-inference", daemon=True)
         thread.start()
         pending = {}
@@ -322,7 +340,6 @@ class DualPolicyExecutor:
             self.stop.set()
             thread.join()
             self._fail_all("H2H evaluation coordinator stopped")
-            executor.shutdown(wait=True, cancel_futures=True)
             for c_cli, r_cli in pending.values():
                 c_cli.close()
                 r_cli.close()
@@ -336,27 +353,30 @@ class DualPolicyExecutor:
 
     def statistics(self):
         cand_stats = self.cand_inference.statistics()
-        if self.identical:
-            return {
-                **cand_stats,
-                "batch_wait_seconds": self.wait_seconds,
-                "batch_wait_timeouts": self.wait_timeouts,
-            }
-        ref_stats = self.ref_inference.statistics()
-        batches = cand_stats["inference_batches"] + ref_stats["inference_batches"]
-        items = cand_stats["inference_items"] + ref_stats["inference_items"]
+        ref_stats = {} if self.identical else self.ref_inference.statistics()
+        batches = cand_stats["inference_batches"] + ref_stats.get("inference_batches", 0)
+        items = cand_stats["inference_items"] + ref_stats.get("inference_items", 0)
         return {
             "inference_batches": batches,
             "inference_items": items,
             "mean_batch": items / max(1, batches),
-            "forward_seconds": cand_stats["forward_seconds"] + ref_stats["forward_seconds"],
-            "encoding_seconds": cand_stats["encoding_seconds"] + ref_stats["encoding_seconds"],
+            "forward_seconds": (
+                cand_stats["forward_seconds"]
+                + ref_stats.get("forward_seconds", 0.0)
+                + self.result_transfer_seconds
+            ),
+            "encoding_seconds": (
+                cand_stats["encoding_seconds"] + ref_stats.get("encoding_seconds", 0.0)
+            ),
             "batch_wait_seconds": self.wait_seconds,
             "batch_wait_timeouts": self.wait_timeouts,
         }
 
 
 def h2h_evaluation_key(config, plan, out, candidate_path, reference_path, purpose, runtime_identity):
+    import torch
+    from civ5rl.experiments.ppo_after_imitation import policy_hash
+
     cand_hash = policy_hash(torch.load(out / candidate_path, map_location="cpu", weights_only=False)["model"])
     ref_hash = policy_hash(torch.load(out / reference_path, map_location="cpu", weights_only=False)["model"])
     evaluator = digest(
@@ -382,9 +402,16 @@ def h2h_evaluation_key(config, plan, out, candidate_path, reference_path, purpos
     return cand_hash, ref_hash, key
 
 
-@evaluation_precision()
 def evaluate_h2h(config, plan, out, candidate_path, reference_path, purpose):
     """Run mirrored deterministic FP32 argmax head-to-head series vs reference_path."""
+    from civ5rl.engine.evaluation.executor import evaluation_precision
+
+    with evaluation_precision():
+        return _evaluate_h2h_impl(config, plan, out, candidate_path, reference_path, purpose)
+
+
+def _evaluate_h2h_impl(config, plan, out, candidate_path, reference_path, purpose):
+    from civ5rl.engine.evaluation.executor import evaluation_worker_pool, runtime_for
     from civ5rl.protocols.turn_reset import validate_case
 
     out = Path(out)
@@ -427,7 +454,7 @@ def evaluate_h2h(config, plan, out, candidate_path, reference_path, purpose):
                 print(f"H2H {purpose}: {count}/{len(tasks)} new matches", flush=True)
         inference_stats = executor.statistics()
     elif tasks:
-        with pool(runtime.workers) as executor:
+        with evaluation_worker_pool(runtime.workers) as executor:
             for first in range(0, len(tasks), runtime.workers):
                 list(executor.map(_h2h_cpu_task, tasks[first : first + runtime.workers]))
                 print(

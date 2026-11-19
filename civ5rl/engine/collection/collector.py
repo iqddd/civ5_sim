@@ -759,6 +759,8 @@ class Collector:
                     torch.cuda.Event(enable_timing=True),
                 )
                 cuda_events[0].record()
+            main_action_width = 0
+            outputs: list[tuple[list[int], torch.Tensor]] = []
             if main_pos:
                 if policy.spatial_cuda_graphs:
                     torch.compiler.cudagraph_mark_step_begin()
@@ -811,14 +813,8 @@ class Collector:
                 pieces = [scaled.log_softmax(-1), critic_values[:, None]]
                 if h is not None:
                     pieces.append(h[0])
-                host = torch.cat(pieces, -1).cpu().numpy()
-                action_width = logits.shape[1]
-                for k, j in enumerate(main_pos):
-                    log_probs_out[j] = host[k, :action_width]
-                    if not wave.slot_state(live[j]).get("is_opponent"):
-                        cpu_critic_values[j] = host[k, action_width]
-                        if old_hidden is not None:
-                            old_hidden[j] = host[k, action_width + 1 :]
+                outputs.append((main_pos, torch.cat(pieces, -1)))
+                main_action_width = logits.shape[1]
             for opp_id, pos_list in opp_groups.items():
                 if self.opponent_pool is None:
                     raise RuntimeError(
@@ -832,22 +828,46 @@ class Collector:
                 logits, _, next_hidden = opp_model(opp_batches[opp_id], h_opp)
                 if next_hidden is not None and opp_hidden is not None:
                     opp_hidden.index_copy_(1, o_slots, next_hidden)
-                host_lp = policy_logits(logits, self.opponent_temperature).log_softmax(-1).cpu().numpy()
-                for k, j in enumerate(pos_list):
-                    log_probs_out[j] = host_lp[k]
+                opp_lp = policy_logits(logits, self.opponent_temperature).log_softmax(-1)
+                outputs.append((pos_list, opp_lp))
+            # Enqueue all policy forward passes before one host-synchronizing D2H copy.
+            flat = (
+                outputs[0][1].reshape(-1)
+                if len(outputs) == 1
+                else torch.cat([output.reshape(-1) for _, output in outputs])
+            )
             if diag:
                 if cuda_events:
                     cuda_events[1].record()
-                at = diag.end("forward_submit_and_output", clock)
+                diag.end("forward_submit_and_output", clock)
                 for slot in live:
                     diag.requests[slot]["forward_submit_ns"] = clock[0]
+                clock = diag.begin()
+            flat_host = flat.cpu().numpy()
+            if diag:
+                at = diag.end("blocking_result_to_cpu", clock)
+                for slot in live:
                     diag.requests[slot]["host_result_ns"] = at
                 if cuda_events:
-                    torch.cuda.synchronize()
                     diag.add(
                         "cuda_forward_and_output.stream",
                         round(cuda_events[0].elapsed_time(cuda_events[1]) * 1e6),
                     )
+            offset = 0
+            for positions, output in outputs:
+                end = offset + output.numel()
+                rows = flat_host[offset:end].reshape(output.shape)
+                offset = end
+                if positions is main_pos:
+                    for row, j in zip(rows, positions):
+                        log_probs_out[j] = row[:main_action_width]
+                        if not wave.slot_state(live[j]).get("is_opponent"):
+                            cpu_critic_values[j] = row[main_action_width]
+                            if old_hidden is not None:
+                                old_hidden[j] = row[main_action_width + 1 :]
+                else:
+                    for row, j in zip(rows, positions):
+                        log_probs_out[j] = row
         times["inference_seconds"] += perf_counter() - start
         times["inference_batches"] += int(bool(main_pos)) + len(opp_groups)
         times["inference_batch_items"] += len(live)

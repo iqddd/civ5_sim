@@ -250,14 +250,15 @@ class RolloutCache(SequenceBuffer):
             return self._replay_plan.cached_bytes
         return 0
 
+    def enable_compiled_replay_sums(self):
+        if str(self.device).startswith("cuda") and self._replay_sums_runner is None:
+            self._replay_sums_runner = _compiled_replay_sums()
+
     def enable_cached_replay(self):
         """Cache inputs only; GRU state and logits always use current weights."""
         if self.data is None:
             return
-        if str(self.device).startswith("cuda"):
-            self._replay_sums_runner = torch.compile(
-                _replay_sums, dynamic=True, fullgraph=True
-            )
+        self.enable_compiled_replay_sums()
         self.replay_inputs = True
         self._replay_plan = None
 
@@ -565,6 +566,18 @@ def _replay_sums(logits, value, indices, old_logp, returns, action_mask):
     return torch.stack(sums), delta.abs().max()
 
 
+_COMPILED_REPLAY_SUMS = None
+
+
+def _compiled_replay_sums():
+    global _COMPILED_REPLAY_SUMS
+    if _COMPILED_REPLAY_SUMS is None:
+        _COMPILED_REPLAY_SUMS = torch.compile(
+            _replay_sums, dynamic=True, fullgraph=True
+        )
+    return _COMPILED_REPLAY_SUMS
+
+
 def _part_free_count(cache, spans):
     return sum(
         int(
@@ -856,11 +869,14 @@ class BatchedBackend:
         ):
             self.cache.enable_compiled_gather()
             self.cache.enable_async_transfers()
+            self.cache.enable_compiled_replay_sums()
         if options.get("ppo_cached_replay", False):
             self.cache.enable_cached_replay()
         if pinned_replay or options.get("ppo_pinned_replay", False):
             self.cache.enable_pinned_replay()
-            if str(device).startswith("cuda"):
+            if str(device).startswith("cuda") and (
+                self.cache.data is None or options.get("ppo_cached_replay", False)
+            ):
                 self.cache.stage_gpu_replay(self.kl_batch)
         if str(device).startswith("cuda"):
             torch.cuda.synchronize()

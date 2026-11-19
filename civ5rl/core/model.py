@@ -17,6 +17,8 @@ from civ5rl.core.schema import (
     HEX_DIRECTIONS,
     HEX_MLP_DIM,
     HIDDEN_SIZE,
+    MAX_MAP_AXIS,
+    MAX_MAP_CELLS,
     MEMORY_MLP_DIM,
     OPPOSITE_HEX_OFFSET,
     SELF_AND_HEX_DIRECTIONS,
@@ -201,21 +203,53 @@ class HexBlock(nn.Module):
         return (u + self.mlp(self.norm2(u))) * mask.unsqueeze(-1)
 
 
+_HEX_QR_CPU: tuple[torch.Tensor, torch.Tensor] | None = None
+
+
+def _hex_qr_cpu_tables() -> tuple[torch.Tensor, torch.Tensor]:
+    """Precomputed axial (q, r) coordinates for row_parity in {0, 1}, w in 2..MAX_MAP_AXIS."""
+    global _HEX_QR_CPU
+    if _HEX_QR_CPU is None:
+        widths = MAX_MAP_AXIS - 1
+        qs = torch.zeros((2 * widths, MAX_MAP_CELLS), dtype=torch.int16)
+        rs = torch.zeros((2 * widths, MAX_MAP_CELLS), dtype=torch.int16)
+        idx = torch.arange(MAX_MAP_CELLS, dtype=torch.long)
+        for parity in (0, 1):
+            for w in range(2, MAX_MAP_AXIS + 1):
+                gid = parity * widths + (w - 2)
+                x = idx % w
+                y = idx // w
+                r = y + parity
+                q = x - ((r - (r & 1)) >> 1)
+                qs[gid] = q.to(torch.int16)
+                rs[gid] = r.to(torch.int16)
+        _HEX_QR_CPU = (qs, rs)
+    return _HEX_QR_CPU
+
+
 def hex_distance_buckets_from_neighbors(
     neighbors: torch.Tensor,
     cell_mask: torch.Tensor,
     num_buckets: int = C2_DISTANCE_BUCKETS,
     key_indices=None,
+    *,
+    qr_tables: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Exact pairwise hex distance buckets 0..num_buckets-1 from the neighbors graph."""
     _b, n, _ = neighbors.shape
     row_parity = (neighbors[:, 0, 5] >= 0).long()
     w = torch.where(neighbors[:, 0, 5] >= 0, neighbors[:, 0, 5], neighbors[:, 0, 0]).clamp_min(2)
-    idx = torch.arange(n, device=neighbors.device, dtype=torch.long)[None, :]
-    x = idx % w[:, None]
-    y = idx // w[:, None]
-    r = y + row_parity[:, None]
-    q = x - ((r - (r & 1)) >> 1)
+    if qr_tables is not None and n <= MAX_MAP_CELLS:
+        qs, rs = qr_tables
+        gid = row_parity * (MAX_MAP_AXIS - 1) + (w.clamp_max(MAX_MAP_AXIS) - 2)
+        q = qs[gid, :n].to(torch.int32)
+        r = rs[gid, :n].to(torch.int32)
+    else:
+        idx = torch.arange(n, device=neighbors.device, dtype=torch.long)[None, :]
+        x = idx % w[:, None]
+        y = idx // w[:, None]
+        r = y + row_parity[:, None]
+        q = x - ((r - (r & 1)) >> 1)
     key_q = q if key_indices is None else q.gather(1, key_indices.clamp_min(0))
     key_r = r if key_indices is None else r.gather(1, key_indices.clamp_min(0))
     dq = q[:, :, None] - key_q[:, None, :]
@@ -223,7 +257,7 @@ def hex_distance_buckets_from_neighbors(
     dist = (dq.abs() + dr.abs() + (dq + dr).abs()) >> 1
     key_mask = cell_mask if key_indices is None else key_indices >= 0
     valid_pairs = cell_mask[:, :, None] & key_mask[:, None, :]
-    return torch.where(valid_pairs, dist.clamp(0, num_buckets - 1), 0)
+    return torch.where(valid_pairs, dist.clamp(0, num_buckets - 1), 0).to(torch.long)
 
 
 def unit_cell_mask_from_cells(cells: torch.Tensor, cell_mask: torch.Tensor) -> torch.Tensor:
@@ -272,11 +306,19 @@ class CellUnitAttention(nn.Module):
         self.kv_proj = nn.Linear(HEX_DIM, 2 * HEX_DIM)
         self.out_proj = nn.Linear(HEX_DIM, HEX_DIM)
         self.distance_bias = nn.Parameter(torch.zeros(C2_ATTN_HEADS, C2_DISTANCE_BUCKETS))
+        qr_q, qr_r = _hex_qr_cpu_tables()
+        self.register_buffer("_qr_q", qr_q.clone(), persistent=False)
+        self.register_buffer("_qr_r", qr_r.clone(), persistent=False)
 
     def forward_with_weights(self, x, cells, neighbors, cell_mask, key_indices=None):
         b, n, _ = x.shape
         unit_mask = unit_cell_mask_from_cells(cells, cell_mask)
-        buckets = hex_distance_buckets_from_neighbors(neighbors, cell_mask, key_indices=key_indices)
+        buckets = hex_distance_buckets_from_neighbors(
+            neighbors,
+            cell_mask,
+            key_indices=key_indices,
+            qr_tables=(self._qr_q, self._qr_r),
+        )
         u = self.norm(x)
         q = self.q_proj(u).reshape(b, n, self.num_heads, self.head_dim).transpose(1, 2)
         keys = u if key_indices is None else ActionEmbeddingGather.apply(u, key_indices)
