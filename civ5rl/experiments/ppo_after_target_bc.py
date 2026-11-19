@@ -519,23 +519,30 @@ def load_initial_optimizer(policy, saved, config):
             tensor = item[name]
             if tensor.shape != parameter.shape or tensor.dtype != parameter.dtype or not torch.isfinite(tensor).all():
                 raise ValueError(f"Invalid parent Adam {name}")
+    parent_lr = experiment.get("parent_optimizer_lr", config["optimizer"]["lr"])
     for group in optimizer.param_groups:
-        for name in ("lr", "eps", "weight_decay"):
+        if group["lr"] != parent_lr:
+            raise ValueError("Parent Adam lr differs from experiment")
+        for name in ("eps", "weight_decay"):
             if group[name] != config["optimizer"][name]:
                 raise ValueError(f"Parent Adam {name} differs from experiment")
         if tuple(group["betas"]) != tuple(config["optimizer"]["betas"]):
             raise ValueError("Parent Adam betas differ from experiment")
+        group["lr"] = config["optimizer"]["lr"]
     if adapts_value(config):
         inherited = optimizer
-        optimizer = grouped_optimizer(policy, config, "cpu")
-        if len(inherited.param_groups) != 1:
-            raise ValueError("Expected one parent Adam group before selective reset")
-        options = {k: v for k, v in inherited.param_groups[0].items() if k != "params"}
-        for group in optimizer.param_groups:
-            group.update(options)
-        for name, parameter in policy.named_parameters():
-            if not name.startswith("value."):
-                optimizer.state[parameter] = inherited.state[parameter]
+        if len(inherited.param_groups) == 1:
+            optimizer = grouped_optimizer(policy, config, "cpu")
+            options = {k: v for k, v in inherited.param_groups[0].items() if k != "params"}
+            for group in optimizer.param_groups:
+                group.update(options)
+            for name, parameter in policy.named_parameters():
+                if not name.startswith("value."):
+                    optimizer.state[parameter] = inherited.state[parameter]
+        else:
+            for name, parameter in policy.named_parameters():
+                if name.startswith("value."):
+                    optimizer.state.pop(parameter, None)
     return optimizer
 
 
@@ -632,7 +639,8 @@ def initialize(config, out):
         **({"parent_Adam_counters": experiment["parent_optimizer_counters"]}
            if experiment.get("parent_optimizer_counters") else {"parent_Adam_counter": int(experiment["parent_optimizer_steps"])}),
         "critic_preserved": inherited,
-        **({"value_optimizer": "reset_then_preserve", "Adam_counter_groups": ["shared_actor", "value"]}
+        **({"value_optimizer": "reset_then_preserve",
+            "Adam_counter_groups": [g["name"] for g in optimizer.param_groups]}
            if adapts_value(config) else {}),
         "behavior_hash": policy_hash(policy.state_dict()),
         "manifest_hash": plan["hash"],
@@ -687,6 +695,12 @@ def initialize(config, out):
     }
     if extension:
         state["origin_Adam_counters"]["attack_preview"] = 0
+    if adapts_value(config) and "origin_Adam_counters" in state:
+        state["value_optimizer"] = "reset_then_preserve"
+        state["origin_Adam_counters"]["value"] = 0
+    if config.get("self_play", {}).get("enabled"):
+        state["self_play_archive"] = []
+        state["self_play_last_archived_optimizer_steps"] = 0
     write_json(out / "run.json", record)
     save_boundary(
         out,
@@ -706,20 +720,53 @@ def development(config, plan, out, state, shuffle, clock=None):
         clock.pause()
     started = perf_counter()
     purpose = config.get("ppo", {}).get("evaluation_purpose", "development")
+    dual = bool(config.get("self_play", {}).get("enabled"))
     try:
         with isolated_rng(shuffle):
             result = evaluate(config, plan, out, state["latest"], purpose)
+            h2h = None
+            if dual:
+                from civ5rl.experiments.h2h_evaluation import evaluate_h2h
+
+                h2h = evaluate_h2h(
+                    config, plan, out, state["latest"], "checkpoints/initial.pt", purpose
+                )
         state["evaluation_seconds"] += perf_counter() - started
-        state["evaluated"][result["policy_hash"]] = {
+        entry = {
             **result,
             "decisions": state["decisions"],
+            "update": state["updates"],
         }
+        if h2h is not None:
+            entry["h2h"] = h2h
+        state["evaluated"][result["policy_hash"]] = entry
         wins = result["runs"]["argmax"]["cp"]["summary"]["W"]
         if state["baseline_wins"] is None:
             state["baseline_wins"] = wins
             if config["experiment"].get("early_gain_min_wins") is not None:
                 state["early_gain_required_wins"] = wins + config["experiment"]["early_gain_min_wins"]
-        if wins > state["best"]["wins"]:
+        if dual:
+            from civ5rl.experiments.h2h_evaluation import select_dual_milestone
+
+            candidates = []
+            for p_hash, item in state["evaluated"].items():
+                cp_sum = item["runs"]["argmax"]["cp"]["summary"]
+                h2h_sum = item["h2h"]["summary"]
+                candidates.append(
+                    {
+                        "path": item["checkpoint"],
+                        "update": int(item.get("update", 0)),
+                        "decisions": int(item.get("decisions", 0)),
+                        "policy_hash": p_hash,
+                        "cp_wins": int(cp_sum["W"]),
+                        "h2h_wins": int(h2h_sum["W"]),
+                        "h2h_losses": int(h2h_sum["L"]),
+                        "cp_summary": cp_sum,
+                        "h2h_summary": h2h_sum,
+                    }
+                )
+            state["best"] = select_dual_milestone(candidates, state["baseline_wins"])
+        elif wins > state["best"]["wins"]:
             state["best"] = {
                 "path": result["checkpoint"],
                 "wins": wins,
@@ -782,6 +829,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
             "optimizer_steps", "attempted_steps", "rejected_steps",
             "rollouts_collected", "rollouts_with_accepted_steps",
             "adam_steps_attempted", "adam_steps_accepted",
+            "self_play_archive", "self_play_last_archived_optimizer_steps",
         ):
             if key in restored and key in state and restored[key] != state[key]:
                 raise ValueError(f"Saved checkpoint and state disagree on {key}")
@@ -813,7 +861,21 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
             return
         if state["stop_reason"]:
             return
-        factory = TargetFactory(config, plan["base"])
+        factory = TargetFactory(
+            config,
+            plan["base"],
+            archive_provider=(
+                (lambda: state.get("self_play_archive", []))
+                if config.get("self_play", {}).get("enabled")
+                else None
+            ),
+        )
+        opponent_pool = None
+        if config.get("self_play", {}).get("enabled"):
+            from civ5rl.engine.collection.opponents import OpponentPool
+
+            opponent_pool = OpponentPool(config, device, out)
+            opponent_pool.sync_archive(state.get("self_play_archive", []))
         # Runtime capacity can change rollout boundaries; record it separately.
         runtime_path = Path(
             runtime_path or ROOT / "configs/rl-ppo-after-target-bc-runtime.json"
@@ -878,6 +940,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                 collection_scheduler=scheduler,
                 inference_min_batch=runtime.get("inference_min_batch", 0),
                 inference_wait_seconds=runtime.get("inference_wait_seconds", 0),
+                opponent_pool=opponent_pool,
             ) as collector,
             monitor.capture_cuda_oom(policy),
         ):
@@ -1076,10 +1139,22 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                 state["pending_update"] = row
                 state["phase"] = Phase.COLLECT.value
                 state["latest"] = f"checkpoints/update-{state['rollouts']:04}.pt"
+                archived = None
+                if opponent_pool is not None:
+                    from civ5rl.engine.collection.opponents import maybe_archive_snapshot
+
+                    archived = maybe_archive_snapshot(
+                        state,
+                        config,
+                        checkpoint_relpath=state["latest"],
+                        policy_hash_value=policy_hash(policy.state_dict()),
+                    )
                 monitor.mark("checkpoint")
                 save_boundary(
                     out, policy, optimizer, state, shuffle, config, identity, clock
                 )
+                if opponent_pool is not None and archived is not None:
+                    opponent_pool.sync_archive(state["self_play_archive"])
                 with (out / "updates.jsonl").open("a", encoding="utf-8") as stream:
                     stream.write(json.dumps(row, allow_nan=False) + "\n")
                 state.pop("pending_update", None)
@@ -1189,6 +1264,17 @@ def finish(config, plan, out):
         "candidate": candidate,
         "comparison": comparison,
     }
+    if config.get("self_play", {}).get("enabled"):
+        from civ5rl.experiments.h2h_evaluation import (
+            dual_promotion_decision,
+            evaluate_h2h,
+        )
+
+        h2h_confirmation = evaluate_h2h(
+            config, plan, out, state["best"]["path"], "checkpoints/initial.pt", "confirmation"
+        )
+        payload["h2h_confirmation"] = h2h_confirmation
+        payload["promotion"] = dual_promotion_decision(comparison, h2h_confirmation["bootstrap"])
     if dev_comparison is not None:
         payload[f"{dev_purpose}_comparison"] = dev_comparison
     write_json(out / "confirmation.json", payload)
@@ -1201,6 +1287,15 @@ def report(config, out):
     max_rounds = config.get("environment", {}).get("max_rounds", 30)
     gamma = config["ppo"].get("gamma", 1)
     gae_lambda = config["ppo"].get("gae_lambda", 1)
+    sp = config.get("self_play", {})
+    dual = bool(sp.get("enabled"))
+    opponent_desc = (
+        f"смешанный пул (CP {sp['cp_share']:.0%} / current {sp['current_share']:.0%} / "
+        f"u0 {sp['parent_share']:.0%} / archive {sp['archive_share']:.0%}, "
+        f"T_opp={sp.get('opponent_temperature', 0.5)}, архив={len(state.get('self_play_archive', []))})"
+        if dual
+        else "обычный CP"
+    )
     lines = [
         f"# PPO после {parent_label}",
         "",
@@ -1209,16 +1304,49 @@ def report(config, out):
         f"Sampling rollouts {state['rollouts']}; PPO updates {state['updates']}; accepted/rejected Adam {state['optimizer_steps']}/{state['rejected_steps']}.",
         (f"Adam groups: {state.get('Adam_counters', expected_counters(state))}; critic preparation {state.get('critic_progress', {}).get('steps', 0)}; new PPO accepted {state['optimizer_steps']}."
          if uses_grouped_adam(config) else f"Adam: inherited {state.get('origin_Adam_counter', 0)}; new accepted {state['optimizer_steps']}; total {state.get('origin_Adam_counter', 0) + state['optimizer_steps']}."),
-        f"GPU {read_json(out / 'run.json')['GPU']}; T={config.get('policy_temperature', 1)}; max_rounds={max_rounds}; gamma={gamma}; gae_lambda={gae_lambda}; microbatch {config['ppo']['sequences_per_microbatch']}; обычный CP; reward 1/0/0.",
+        f"GPU {read_json(out / 'run.json')['GPU']}; T={config.get('policy_temperature', 1)}; max_rounds={max_rounds}; gamma={gamma}; gae_lambda={gae_lambda}; microbatch {config['ppo']['sequences_per_microbatch']}; {opponent_desc}; reward 1/0/0.",
         "",
-        f"| Решения | Checkpoint | W/D/L {eval_purpose} |",
-        "|---:|---|---|",
     ]
-    for point in state["evaluated"].values():
-        summary = point["runs"]["argmax"]["cp"]["summary"]
-        lines.append(
-            f"| {point['decisions']} | {point['checkpoint']} | {summary['W']}/{summary['D']}/{summary['L']} |"
-        )
+    if dual:
+        base_wins = state.get("baseline_wins")
+        lines += [
+            f"| Решения | Checkpoint | W/D/L {eval_purpose} (CP) | ΔW_cp | W/D/L H2H vs u0 | ΔW_h2h | J |",
+            "|---:|---|---|---:|---|---:|---:|",
+        ]
+        for point in state["evaluated"].values():
+            summary = point["runs"]["argmax"]["cp"]["summary"]
+            h2h_sum = point.get("h2h", {}).get("summary")
+            d_cp = (
+                int(summary["W"]) - int(base_wins)
+                if base_wins is not None
+                else None
+            )
+            if h2h_sum is not None:
+                d_h2h = int(h2h_sum["W"]) - int(h2h_sum["L"])
+                h2h_str = f"{h2h_sum['W']}/{h2h_sum['D']}/{h2h_sum['L']}"
+                j_val = (d_cp + d_h2h) if d_cp is not None else None
+            else:
+                d_h2h = None
+                h2h_str = "—"
+                j_val = None
+            lines.append(
+                f"| {point['decisions']} | {point['checkpoint']} | "
+                f"{summary['W']}/{summary['D']}/{summary['L']} | "
+                f"{f'{d_cp:+d}' if d_cp is not None else '—'} | "
+                f"{h2h_str} | "
+                f"{f'{d_h2h:+d}' if d_h2h is not None else '—'} | "
+                f"{f'{j_val:+d}' if j_val is not None else '—'} |"
+            )
+    else:
+        lines += [
+            f"| Решения | Checkpoint | W/D/L {eval_purpose} |",
+            "|---:|---|---|",
+        ]
+        for point in state["evaluated"].values():
+            summary = point["runs"]["argmax"]["cp"]["summary"]
+            lines.append(
+                f"| {point['decisions']} | {point['checkpoint']} | {summary['W']}/{summary['D']}/{summary['L']} |"
+            )
     lines += ["", f"Выбор: {state['best']}."]
     if (out / "runtime.json").exists():
         lines += ["", "Runtime: " + json.dumps(read_json(out / "runtime.json"), ensure_ascii=False)]
@@ -1256,7 +1384,7 @@ def report(config, out):
             "",
             f"Срезы development {point['checkpoint']}",
             "",
-            json.dumps(point["slices"], ensure_ascii=False),
+            json.dumps(point.get("slices", {}), ensure_ascii=False),
         ]
     if state["stop_reason"] == "no_development_gain":
         lines += ["", "Прироста в установленном раннем бюджете не получено."]
@@ -1264,7 +1392,11 @@ def report(config, out):
         "",
         (f"Ранний порог: {state.get('early_gain_required_wins', 'по конфигу')} побед после {config['experiment']['early_gain_decisions']} новых решений; полезность оценивается по парному additional-приросту и CI."
          if config['experiment'].get('early_gain_enabled', True)
-         else "Ранний порог продолжения отключён; выбор по Development, проверка нового кандидата на парном Additional."),
+         else (
+             "Ранний порог продолжения отключён; двухлинейный выбор по Development-512 (CP) и H2H-512 (ΔW_cp ≥ 0, ΔW_h2h ≥ 0, max J), проверка нового кандидата на Additional-256 (CP + H2H)."
+             if dual
+             else "Ранний порог продолжения отключён; выбор по Development, проверка нового кандидата на парном Additional."
+         )),
     ]
     for name in ("critic-preparation.json", "confirmation.json"):
         if (out / name).exists():

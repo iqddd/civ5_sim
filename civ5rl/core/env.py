@@ -77,7 +77,9 @@ class DecisionEnv:
         if self.reward_profile not in ("symmetric", "win_probability"):
             self.battle.close()
             raise ValueError("Unknown terminal reward profile")
-        if spec["opponent"] == "cp" and "opponent_search" in spec:
+        if spec["opponent"] == "policy":
+            self.opponent = None
+        elif spec["opponent"] == "cp" and "opponent_search" in spec:
             from civ5sim.combat_ai import Aggression, SearchConfig
             from civ5sim.cp_agent import CPAgent
 
@@ -86,19 +88,20 @@ class DecisionEnv:
             self.opponent = CPAgent(SearchConfig(**options))
         else:
             self.opponent = load_agent(spec["opponent"])
-        try:
-            self.opponent.reset(
-                context_for(
-                    spec["scenario"],
-                    spec["armies"],
-                    1 - self.side,
-                    spec["max_rounds"],
-                    spec["agent_seeds"][1 - self.side],
+        if self.opponent is not None:
+            try:
+                self.opponent.reset(
+                    context_for(
+                        spec["scenario"],
+                        spec["armies"],
+                        1 - self.side,
+                        spec["max_rounds"],
+                        spec["agent_seeds"][1 - self.side],
+                    )
                 )
-            )
-        except BaseException:
-            self.close()
-            raise
+            except BaseException:
+                self.close()
+                raise
         self.first_contact_turn = None
         self.damage = [0, 0]
         self._prepared_step: PreparedStep | None = None
@@ -195,6 +198,21 @@ class DecisionEnv:
         if not self.check() and self.turns % NUM_SIDES != self.side:
             if self.calls >= self.spec["max_calls_per_turn"]:
                 raise RuntimeError("Opponent action limit")
+            if self.opponent is None:
+                opp_side = 1 - self.side
+                observation = self.battle.observe(opp_side)
+                if self.attack_preview:
+                    actions, previews = self.battle.actions_with_previews()
+                    observation["attack_previews"] = previews
+                else:
+                    actions = ordered_actions(self.battle.available_actions())
+                return {
+                    "done": False,
+                    "acting_side": opp_side,
+                    "is_opponent": True,
+                    "observation": observation,
+                    "actions": actions,
+                }
             obs = self.battle.observe(1 - self.side)
             actions = tuple(self.battle.available_actions())
             start = perf_counter()
@@ -278,6 +296,8 @@ class DecisionEnv:
             actions = ordered_actions(self.battle.available_actions())
         return {
             "done": False,
+            "acting_side": self.side,
+            "is_opponent": False,
             "observation": observation,
             "actions": actions,
         }

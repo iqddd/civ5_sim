@@ -26,10 +26,23 @@ def _evaluations(source, purpose):
     return [r for key, r in rows.items() if key not in baseline and r.get("purpose") == purpose]
 
 
+def _h2h_evaluations(source, purpose):
+    baseline = set(source.session.get("h2h_evaluation_keys", []))
+    rows = source.read("evaluations-h2h.json", {})
+    return [r for key, r in rows.items() if key not in baseline and r.get("purpose") == purpose]
+
+
 def _evaluation_seconds(source, purpose):
     # Short records are cache hits, not measurements of this workload. Use only
     # this process's measurements when a recorder session is available.
     rows = [r for r in _evaluations(source, purpose) if r.get("seconds", 0) > 10]
+    latest_runtime = rows[-1].get("runtime") if rows else None
+    values = [r["seconds"] for r in rows if r.get("runtime") == latest_runtime]
+    return median(values[-3:]) if values else None
+
+
+def _h2h_evaluation_seconds(source, purpose):
+    rows = [r for r in _h2h_evaluations(source, purpose) if r.get("seconds", 0) > 10]
     latest_runtime = rows[-1].get("runtime") if rows else None
     values = [r["seconds"] for r in rows if r.get("runtime") == latest_runtime]
     return median(values[-3:]) if values else None
@@ -98,7 +111,9 @@ class TargetBCPPOAdapter(PPOAdapter):
         cfg, state = source.config, source.read("state.json", {})
         experiment = cfg["experiment"]
         purpose = cfg.get("ppo", {}).get("evaluation_purpose", "development")
+        dual = bool(cfg.get("self_play", {}).get("enabled"))
         seconds = _evaluation_seconds(source, purpose)
+        h2h_seconds = _h2h_evaluation_seconds(source, purpose) if dual else None
         points = state.get("development_points", {})
         stopped = bool(state.get("stop_reason"))
         # After an early training stop, future decision milestones are abandoned;
@@ -114,6 +129,8 @@ class TargetBCPPOAdapter(PPOAdapter):
         if observation.status == "complete":
             pending = []
         observation.stages.append(Stage(purpose, len(pending), seconds))
+        if dual:
+            observation.stages.append(Stage(f"h2h_{purpose}", len(pending), h2h_seconds))
         confirmation = source.read("confirmation.json")
         if confirmation is None and observation.status != "complete":
             # Two policies on Additional-256. Scale by the actual dev workload.
@@ -123,6 +140,12 @@ class TargetBCPPOAdapter(PPOAdapter):
             matches = next((n for n in counts if n), None)
             additional = seconds * 512 / matches if seconds is not None and matches else None
             observation.stages.append(Stage("additional_256_two_policies", 1, additional, conditional=True))
+            if dual:
+                h2h_evals = source.read("evaluations-h2h.json", {}).values()
+                h2h_counts = [r.get("summary", {}).get("matches") for r in h2h_evals if r.get("purpose") == purpose]
+                h2h_matches = next((n for n in h2h_counts if n), None)
+                h2h_additional = h2h_seconds * 256 / h2h_matches if h2h_seconds is not None and h2h_matches else None
+                observation.stages.append(Stage("additional_256_h2h", 1, h2h_additional, conditional=True))
         observation.details["pending_development_points"] = pending
         observation.details["early_gain_required_wins"] = state.get("early_gain_required_wins") if experiment.get("early_gain_enabled", True) else None
         observation.details["turn_reset_mode"] = cfg.get("environment", {}).get("turn_reset_mode", "legacy")

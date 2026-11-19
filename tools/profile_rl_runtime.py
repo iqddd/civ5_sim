@@ -286,13 +286,28 @@ def main():
                 # Saved episodes carry layouts only in collection benchmarks, never replay labels.
                 # Build fresh rollouts in the requested physics without changing source evidence.
                 episodes = deepcopy(episodes)
+                self_play = bool(config.get("self_play", {}).get("enabled"))
+                if self_play:
+                    from civ5rl.engine.collection.opponents import OpponentPool, select_opponent
                 for episode in episodes:
                     scenario = episode["spec"]["scenario"]
                     if selected_mode != "legacy" or "turn_reset_mode" in scenario:
                         scenario["turn_reset_mode"] = selected_mode
                     episode["spec"]["scenario_hash"] = digest(scenario)
+                    if self_play:
+                        opp, opp_id = select_opponent(episode["spec"]["episode_id"], config, [])
+                        if opp == "policy":
+                            episode["spec"]["opponent"] = "policy"
+                            episode["spec"]["opponent_id"] = opp_id
+                            episode["spec"].pop("opponent_search", None)
                 result["turn_reset_mode"] = selected_mode
+                result["self_play"] = self_play
                 policy = load_collection_policy(config, args.checkpoint)
+                opponent_pool = (
+                    OpponentPool(config, "cuda", args.out, parent_checkpoint=args.checkpoint)
+                    if self_play
+                    else None
+                )
                 manifest = case_manifest(
                     [ep["spec"] for ep in episodes],
                     source="runtime_profile",
@@ -332,6 +347,7 @@ def main():
                     args.out / "errors",
                     collection_diagnostics=args.collection_diagnostics,
                     worker_priority=worker_priority,
+                    opponent_pool=opponent_pool,
                     **runtime,
                 )
                 result.update(
@@ -356,8 +372,11 @@ def main():
                 if args.warmup_workers:
                     monitor.mark("warmup")
                     tick = perf_counter()
+                    cp_warmup_spec = deepcopy(warmup_specs[0])
+                    cp_warmup_spec["opponent"] = "cp"
+                    cp_warmup_spec.setdefault("opponent_search", deepcopy(config["teacher_search"]))
                     for connection, _ in collector.workers:
-                        connection.send(("warmup", warmup_specs[0]))
+                        connection.send(("warmup", cp_warmup_spec))
                     acknowledgements = []
                     for connection, process in collector.workers:
                         if not connection.poll(300):

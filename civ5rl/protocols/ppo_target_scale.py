@@ -133,8 +133,9 @@ def validate_profile(config):
 
 
 class TargetFactory:
-    def __init__(self, config, base):
+    def __init__(self, config, base, *, archive_provider=None):
         self.config, self.base = config, base
+        self.archive_provider = archive_provider
         self.maps = {}
         self.visibility_conflicts = {}
         self.issued = set()
@@ -318,6 +319,15 @@ class TargetFactory:
             namespace,
             crop=relative // len(worlds),
         )
+        if self.config.get("self_play", {}).get("enabled"):
+            from civ5rl.engine.collection.opponents import select_opponent
+
+            archive = self.archive_provider() if self.archive_provider is not None else []
+            opponent, opponent_id = select_opponent(index, self.config, archive)
+            if opponent == "policy":
+                spec["opponent"] = "policy"
+                spec["opponent_id"] = opponent_id
+                spec.pop("opponent_search", None)
         self.issued.add(digest(spec))
         h = own_state_physical_hash(spec["scenario"])
         self._coverage_tracker.record(

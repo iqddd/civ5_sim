@@ -434,6 +434,8 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
                 "attempted_steps",
                 "rejected_steps",
                 "phase",
+                "self_play_archive",
+                "self_play_last_archived_optimizer_steps",
             ):
                 if (
                     key in run_state

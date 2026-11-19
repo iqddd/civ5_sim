@@ -90,7 +90,8 @@ class ProcessProgress:
                             ppo_rollout=max(state.get("rollouts", 0),
                                             max((r.get("rollout", r.get("update", 0)) for r in updates), default=0)),
                             bc_step=min(logged_steps, state.get("Adam_steps", logged_steps)),
-                            evaluation_keys=list(self.source.read("evaluations.json", {})))
+                            evaluation_keys=list(self.source.read("evaluations.json", {})),
+                            h2h_evaluation_keys=list(self.source.read("evaluations-h2h.json", {})))
         self.thread = threading.Thread(target=self._loop, name="run-progress", daemon=True)
         self.thread.start()
 

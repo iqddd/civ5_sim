@@ -1,6 +1,7 @@
 """Recoverable value-only adaptation without rebuilding the parent's PPO Adam."""
 
 import os
+import random
 from pathlib import Path
 from time import perf_counter
 
@@ -10,8 +11,9 @@ from torch.nn import functional as F
 
 from civ5rl.engine.runtime.budget import deadline_reached
 from civ5rl.engine.ppo.adam import expected_counters
-from civ5rl.engine.ppo.core import raw_gae_advantages
+from civ5rl.engine.ppo.core import episode_returns, raw_gae_advantages
 from civ5rl.provenance import checkpoint
+from civ5rl.provenance.common import seed_for
 
 
 def atomic_save(value, path):
@@ -69,8 +71,8 @@ def adapt_critic(policy, optimizer, episodes, config, device, out, state, shuffl
 
     fit_finished = False
     try:
-        returns = np.concatenate([np.full(len(ep["chosen"]), ep["result"]["reward"], np.float32)
-                                  for ep in episodes])
+        gamma = float(config.get("ppo", {}).get("gamma", 1.0))
+        returns = np.concatenate(episode_returns(episodes, gamma=gamma))
         before = statistics(np.concatenate([ep["old_value"] for ep in episodes]), returns)
         cache_path = out / "critic-features.pt"
         if cache_path.exists():
@@ -105,16 +107,35 @@ def adapt_critic(policy, optimizer, episodes, config, device, out, state, shuffl
         old_lr = value_group["lr"]
         value_group["lr"] = settings["lr"]
         batches = (len(returns) + settings["batch_size"] - 1) // settings["batch_size"]
+        shuffle_epochs = bool(
+            settings.get("shuffle", bool(config.get("self_play", {}).get("enabled")))
+        )
+        critic_namespace = config.get("experiment", {}).get("critic_namespace", "critic")
+        base_seed = int(config.get("seed", 17))
+        cached_epoch = None
+        epoch_order = None
         try:
             while progress["cursor"] < batches * settings["epochs"]:
                 tick()
                 if progress["fit_seconds"] >= settings["active_seconds"] or deadline_reached(deadline):
                     break
-                first = (progress["cursor"] % batches) * settings["batch_size"]
+                epoch_idx, batch_idx = divmod(progress["cursor"], batches)
+                first = batch_idx * settings["batch_size"]
                 stop = min(first + settings["batch_size"], len(returns))
                 optimizer.zero_grad(set_to_none=True)
                 with torch.autocast(torch.device(device).type, enabled=False):
-                    loss = F.mse_loss(policy.value(features[first:stop]).squeeze(-1), labels[first:stop])
+                    if shuffle_epochs:
+                        if cached_epoch != epoch_idx:
+                            perm = list(range(len(returns)))
+                            random.Random(
+                                seed_for(base_seed, epoch_idx, "critic_shuffle", namespace=critic_namespace)
+                            ).shuffle(perm)
+                            epoch_order = torch.tensor(perm, device=device, dtype=torch.long)
+                            cached_epoch = epoch_idx
+                        sel = epoch_order[first:stop]
+                        loss = F.mse_loss(policy.value(features[sel]).squeeze(-1), labels[sel])
+                    else:
+                        loss = F.mse_loss(policy.value(features[first:stop]).squeeze(-1), labels[first:stop])
                 if not torch.isfinite(loss):
                     raise FloatingPointError("Non-finite critic adaptation loss")
                 loss.backward()
@@ -146,7 +167,7 @@ def adapt_critic(policy, optimizer, episodes, config, device, out, state, shuffl
         clock.progress()
         if policy_hash(policy.state_dict()) != original_policy or behavior_hash(episodes) != behavior:
             raise RuntimeError("Critic adaptation changed policy or recorded behavior")
-        advantages = np.concatenate(raw_gae_advantages(episodes, gamma=1.0,
+        advantages = np.concatenate(raw_gae_advantages(episodes, gamma=gamma,
                                                       gae_lambda=config["ppo"]["gae_lambda"]))
         remaining = np.concatenate([np.arange(len(ep["chosen"]) - 1, -1, -1) for ep in episodes])
         horizon_statistics = {}

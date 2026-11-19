@@ -19,8 +19,11 @@ from civ5rl.provenance.checkpoint import verify_frozen_passport
 from civ5rl.provenance.common import write_json
 from civ5rl.reporting.evaluation_audit import (
     clustered_paired_bootstrap,
+    dual_promotion_decision,
+    h2h_world_bootstrap,
     load_eval_rows,
     outcome,
+    select_dual_milestone,
 )
 from civ5rl.reporting.output_paths import derived_output
 from civ5rl.reporting.snapshot import write_snapshot
@@ -123,7 +126,34 @@ def _bc_evaluation_due(config, state, evaluations):
     return False
 
 
-def _confirmation_check(directory, state, confirmation):
+def _dual_candidates(state):
+    candidates = []
+    for p_hash, item in state.get("evaluated", {}).items():
+        h2h = item.get("h2h")
+        if not isinstance(h2h, dict) or not isinstance(h2h.get("summary"), dict):
+            raise ValueError("Missing H2H evaluation on Development milestone")
+        cp_sum = item["runs"]["argmax"]["cp"]["summary"]
+        h2h_sum = h2h["summary"]
+        candidates.append(
+            {
+                "path": item["checkpoint"],
+                "update": int(item.get("update", 0)),
+                "decisions": int(item.get("decisions", 0)),
+                "policy_hash": p_hash,
+                "cp_wins": int(cp_sum["W"]),
+                "h2h_wins": int(h2h_sum["W"]),
+                "h2h_losses": int(h2h_sum["L"]),
+                "cp_summary": cp_sum,
+                "h2h_summary": h2h_sum,
+            }
+        )
+    return candidates
+
+
+def _confirmation_check(directory, state, confirmation, config=None):
+    if config is None:
+        config = _read(directory / "run.json", {}).get("config", {})
+    dual = bool((config or {}).get("self_play", {}).get("enabled"))
     if confirmation.get("status") == "not_run_parent_selected":
         selected = _read(directory / "selected.json", {})
         points = list(state.get("evaluated", {}).values())
@@ -132,8 +162,25 @@ def _confirmation_check(directory, state, confirmation):
                 or selected.get("path") != "checkpoints/initial.pt" or baseline is None):
             raise ValueError("Skipped Additional does not have a selected parent boundary")
         wins = baseline["runs"]["argmax"]["cp"]["summary"]["W"]
-        if (selected.get("wins") != wins or selected.get("policy_hash") != baseline.get("policy_hash")
-                or any(p["runs"]["argmax"]["cp"]["summary"]["W"] > wins for p in points)):
+        if selected.get("wins") != wins or selected.get("policy_hash") != baseline.get("policy_hash"):
+            raise ValueError("Skipped Additional despite a better Development candidate")
+        if dual:
+            expected = select_dual_milestone(_dual_candidates(state), wins)
+            h2h_base = baseline["h2h"]["summary"]
+            if h2h_base["W"] != h2h_base["L"]:
+                raise ValueError("Baseline H2H zero-point is asymmetric")
+            if expected["path"] != "checkpoints/initial.pt":
+                raise ValueError("Skipped Additional despite an admissible dual Development candidate")
+            if selected != expected:
+                raise ValueError("Saved dual selection differs from recomputation")
+            return {
+                "status": "not_run_parent_selected",
+                "bootstrap_required": False,
+                "selection_rule": "dual_nonregression_max_J",
+                "best_development_wins": wins,
+                "evaluated_checkpoints": len(points),
+            }
+        if any(p["runs"]["argmax"]["cp"]["summary"]["W"] > wins for p in points):
             raise ValueError("Skipped Additional despite a better Development candidate")
         return {"status": "not_run_parent_selected", "bootstrap_required": False,
                 "best_development_wins": wins, "evaluated_checkpoints": len(points)}
@@ -162,6 +209,63 @@ def _confirmation_check(directory, state, confirmation):
             raise ValueError(
                 f"Saved confirmation {name} differs from recomputation"
             )
+    if dual or "h2h_confirmation" in confirmation:
+        h2h_conf = confirmation.get("h2h_confirmation")
+        saved_promotion = confirmation.get("promotion")
+        if not isinstance(h2h_conf, dict) or not isinstance(saved_promotion, dict):
+            raise ValueError("Missing H2H confirmation or dual promotion decision")
+        if dual and state.get("evaluated"):
+            points = list(state["evaluated"].values())
+            baseline_dev = next(
+                (p for p in points if p.get("checkpoint") == "checkpoints/initial.pt"),
+                None,
+            )
+            if baseline_dev is None:
+                raise ValueError("Missing baseline Development evaluation")
+            expected_best = select_dual_milestone(
+                _dual_candidates(state),
+                baseline_dev["runs"]["argmax"]["cp"]["summary"]["W"],
+            )
+            selected = _read(directory / "selected.json", {})
+            if (
+                selected != expected_best
+                or confirmation["candidate"].get("checkpoint") != expected_best["path"]
+            ):
+                raise ValueError(
+                    "Saved dual selection or confirmed candidate differs from recomputation"
+                )
+        h2h_settings = h2h_conf.get("bootstrap", {})
+        h2h_result = h2h_world_bootstrap(
+            directory / h2h_conf["directory"],
+            h2h_conf["summary"]["matches"],
+            samples=h2h_settings.get("bootstrap_samples", 10000),
+            seed=h2h_settings.get("bootstrap_seed", 20261103),
+            clusters=h2h_settings.get("bootstrap_clusters", 16),
+        )
+        for key in ("W", "D", "L", "delta_wins"):
+            if h2h_result[key] != h2h_conf["summary"][key]:
+                raise ValueError(f"Saved H2H confirmation {key} differs from recomputation")
+        for name in ("delta", "CI95"):
+            if name in h2h_settings and not np.allclose(
+                h2h_result[name], h2h_settings[name], rtol=0, atol=1e-12
+            ):
+                raise ValueError(
+                    f"Saved H2H confirmation {name} differs from recomputation"
+                )
+        promotion = dual_promotion_decision(result, h2h_result)
+        for flag in ("promoted", "both_nonnegative", "significant_ci95"):
+            if saved_promotion.get(flag) != promotion[flag]:
+                raise ValueError(
+                    f"Saved dual promotion {flag} differs from recomputation"
+                )
+        for name in ("cp_delta", "cp_ci95", "h2h_delta", "h2h_ci95"):
+            if name not in saved_promotion or not np.allclose(
+                promotion[name], saved_promotion[name], rtol=0, atol=1e-12
+            ):
+                raise ValueError(
+                    f"Saved dual promotion {name} differs from recomputation"
+                )
+        result = {**result, "h2h": h2h_result, "promotion": promotion}
     return result
 
 
@@ -351,7 +455,7 @@ def _audit_stable(directory):
 
     check(
         "confirmation_bootstrap",
-        lambda: _confirmation_check(directory, state, confirmation),
+        lambda: _confirmation_check(directory, state, confirmation, config),
         None
         if {"baseline", "candidate"} <= confirmation.keys()
         or confirmation.get("status")

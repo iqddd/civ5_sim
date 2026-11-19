@@ -126,6 +126,7 @@ def prune_checkpoints(out, state):
     keep = {"initial.pt", Path(state["latest"]).name, Path(state["best"]["path"]).name}
     keep.update(p.name for p in paths[-2:])
     keep.update(Path(e["checkpoint"]).name for e in state["evaluated"].values())
+    keep.update(Path(e["path"]).name for e in state.get("self_play_archive", ()))
     journal = out / "checkpoint-retention.json"
     removed = read_json(journal) if journal.exists() else []
     for path in paths:

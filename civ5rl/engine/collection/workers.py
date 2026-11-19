@@ -22,6 +22,7 @@ from civ5sim.engine import step_batch
 class WorkerSlotState:
     env: object = None
     encoder: object = None
+    opp_encoder: object = None
     previous: object = None
     offered: bool = False
     done: bool = False
@@ -60,7 +61,16 @@ class BaseWorker:
                 if self.shared is not None
                 else None
             )
-            self.slots.append(WorkerSlotState(env=env, encoder=encoder))
+            opp_encoder = (
+                ObservationEncoder(
+                    context_from_spec(spec, side=1 - spec["learner_side"]), variant
+                )
+                if self.shared is not None and spec.get("opponent") == "policy"
+                else None
+            )
+            self.slots.append(
+                WorkerSlotState(env=env, encoder=encoder, opp_encoder=opp_encoder)
+            )
 
     def warmup(self, spec: ScenarioSpec):
         """Exercise CP once in an owned temporary episode, outside collection."""
@@ -68,6 +78,10 @@ class BaseWorker:
 
         spec = deepcopy(spec)
         spec["learner_side"] = 1  # Initial side zero belongs to CP in this episode.
+        spec["opponent"] = "cp"
+        spec.pop("opponent_id", None)
+        if not spec.get("opponent_search"):
+            spec.pop("opponent_search", None)
         started = perf_counter()
         env = DecisionEnv(spec)
         try:
@@ -94,6 +108,13 @@ class BaseWorker:
         state.encoder = (
             ObservationEncoder(context_from_spec(spec), variant)
             if self.shared is not None
+            else None
+        )
+        state.opp_encoder = (
+            ObservationEncoder(
+                context_from_spec(spec, side=1 - spec["learner_side"]), variant
+            )
+            if self.shared is not None and spec.get("opponent") == "policy"
             else None
         )
         state.previous = None
@@ -131,18 +152,24 @@ class BaseWorker:
 
     def remember(self, command: WorkerCommand):
         if self.shared is not None:
-            self.slots[command.slot].encoder.remember_action(
-                command.action, self.slots[command.slot].previous["observation"]
+            slot = self.slots[command.slot]
+            encoder = (
+                slot.opp_encoder
+                if slot.previous and slot.previous.get("is_opponent")
+                else slot.encoder
             )
+            encoder.remember_action(command.action, slot.previous["observation"])
 
     def encode(self, slot: int, state: WorkerState) -> float:
         if self.shared is None or state["done"]:
             return 0.0
         started = perf_counter()
+        entry = self.slots[slot]
+        encoder = entry.opp_encoder if state.get("is_opponent") else entry.encoder
         state.update(
             self.shared.write(
                 slot,
-                self.slots[slot].encoder.encode(state["observation"], state["actions"]),
+                encoder.encode(state["observation"], state["actions"]),
             )
         )
         return perf_counter() - started

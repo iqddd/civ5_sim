@@ -106,6 +106,10 @@ class _WaveState:
     pending: set
     decisions: int = 0
     generations: list | None = None
+    opp_hidden: object = None
+    opp_encoders: list | None = None
+    opp_rngs: list | None = None
+    opponent_ids: list | None = None
 
     def slot_state(self, i):
         return self.states[i]
@@ -113,11 +117,20 @@ class _WaveState:
     def slot_encoder(self, i):
         return self.encoders[i]
 
+    def slot_opp_encoder(self, i):
+        return self.opp_encoders[i]
+
     def slot_builder(self, i):
         return self.builders[i]
 
     def slot_rng(self, i):
         return self.rngs[i]
+
+    def slot_opp_rng(self, i):
+        return self.opp_rngs[i]
+
+    def slot_opponent_id(self, i):
+        return None if self.opponent_ids is None else self.opponent_ids[i]
 
     def slot_generation(self, i):
         return self.generations[i] if self.generations is not None else None
@@ -338,6 +351,7 @@ class WaveScheduler:
                     if offset < len(specs)
                 },
             )
+            collector.attach_wave_opponents(wave, specs, policy, worker_encoding)
             if collector.reply_size:
                 self._partial_wave(collector, policy, wave, worker_encoding, times)
                 wave.pending.clear()
@@ -418,6 +432,7 @@ class Collector:
         inference_wait_seconds=None,
         collection_diagnostics=False,
         worker_priority=None,
+        opponent_pool=None,
     ):
         from civ5rl.engine.collection.streaming import StreamingScheduler
         from civ5rl.provenance.validation import validate_config
@@ -425,6 +440,12 @@ class Collector:
         validate_config(config)
         self.config, self.factory, self.device = config, factory, device
         self.temperature = validate_temperature(config.get("policy_temperature", 1.0))
+        self.opponent_pool = opponent_pool
+        self.opponent_temperature = (
+            validate_temperature(opponent_pool.temperature)
+            if opponent_pool is not None
+            else self.temperature
+        )
         self.error_dir = error_dir
         self.workers = []
         self.shared = []
@@ -595,6 +616,8 @@ class Collector:
         import torch
 
         hidden = wave.hidden
+        opp_hidden = getattr(wave, "opp_hidden", None)
+        any_opponent = any(wave.slot_state(i).get("is_opponent") for i in live)
 
         from civ5rl.core.model import batch_inputs
 
@@ -611,32 +634,123 @@ class Collector:
                     "accepted_to_inference_prepare", clock[0] - request["accepted_ns"]
                 )
         start = perf_counter()
+        non_blocking = self.config.get("performance", {}).get(
+            "non_blocking_inputs", False
+        )
         encoded = [
             self.shared[self.slot_locations[i][0]].read(
                 self.slot_locations[i][1], wave.slot_state(i)
             )
             if worker_encoding
-            else wave.slot_encoder(i).encode(
+            else (
+                wave.slot_opp_encoder(i)
+                if wave.slot_state(i).get("is_opponent")
+                else wave.slot_encoder(i)
+            ).encode(
                 wave.slot_state(i)["observation"], wave.slot_state(i)["actions"]
             )
             for i in live
         ]
-        batch = batch_inputs(
-            encoded,
-            self.device,
-            non_blocking=self.config.get("performance", {}).get(
-                "non_blocking_inputs", False
-            ),
+        if not any_opponent:
+            batch = batch_inputs(
+                encoded,
+                self.device,
+                non_blocking=non_blocking,
+            )
+            times["encoding_seconds"] += perf_counter() - start
+            if diag:
+                diag.end("inference_prepare_h2d", clock)
+            start = perf_counter()
+            with torch.no_grad():
+                if policy.spatial_cuda_graphs:
+                    torch.compiler.cudagraph_mark_step_begin()
+                slots = torch.tensor(live, device=self.device)
+                h = hidden.index_select(1, slots) if hidden is not None else None
+                clock = diag.begin() if diag else None
+                cuda_events = None
+                if diag and str(self.device).startswith("cuda"):
+                    cuda_events = (
+                        torch.cuda.Event(enable_timing=True),
+                        torch.cuda.Event(enable_timing=True),
+                    )
+                    cuda_events[0].record()
+                logits, critic_values, next_hidden = policy(batch, h)
+                pieces = [
+                    policy_logits(logits, self.temperature).log_softmax(-1),
+                    critic_values[:, None],
+                ]
+                if h is not None:
+                    pieces.append(h[0])
+                # One D2H synchronization per inference batch, including diagnostic h.
+                output = torch.cat(pieces, -1)
+                if diag:
+                    if cuda_events:
+                        cuda_events[1].record()
+                    diag.end("forward_submit_and_output", clock)
+                    for slot in live:
+                        diag.requests[slot]["forward_submit_ns"] = clock[0]
+                    clock = diag.begin()
+                host = output.cpu().numpy()
+                if diag:
+                    at = diag.end("blocking_result_to_cpu", clock)
+                    for slot in live:
+                        diag.requests[slot]["host_result_ns"] = at
+                    if cuda_events:
+                        # The existing blocking D2H already completed these events.
+                        diag.add(
+                            "cuda_forward_and_output.stream",
+                            round(cuda_events[0].elapsed_time(cuda_events[1]) * 1e6),
+                        )
+                action_width = logits.shape[1]
+                log_probs = host[:, :action_width]
+                cpu_critic_values = host[:, action_width]
+                old_hidden = host[:, action_width + 1 :] if h is not None else None
+                if next_hidden is not None:
+                    hidden.index_copy_(1, slots, next_hidden)
+            times["inference_seconds"] += perf_counter() - start
+            times["inference_batches"] += 1
+            times["inference_batch_items"] += len(live)
+            return _InferenceOutput(encoded, log_probs, cpu_critic_values, old_hidden)
+
+        # Mixed learner + neural opponent batching:
+        # Learner turns and 'current' opponent turns share one forward on `policy`
+        # while keeping strictly isolated recurrent hidden states (`hidden` vs `opp_hidden`).
+        main_pos = []
+        opp_groups: dict[str, list[int]] = {}
+        for j, i in enumerate(live):
+            if not wave.slot_state(i).get("is_opponent"):
+                main_pos.append(j)
+            else:
+                opp_id = wave.slot_opponent_id(i) or "current"
+                if opp_id == "current":
+                    main_pos.append(j)
+                else:
+                    opp_groups.setdefault(opp_id, []).append(j)
+
+        main_batch = (
+            batch_inputs([encoded[j] for j in main_pos], self.device, non_blocking=non_blocking)
+            if main_pos
+            else None
         )
+        opp_batches = {
+            opp_id: batch_inputs(
+                [encoded[j] for j in pos_list], self.device, non_blocking=non_blocking
+            )
+            for opp_id, pos_list in opp_groups.items()
+        }
         times["encoding_seconds"] += perf_counter() - start
         if diag:
             diag.end("inference_prepare_h2d", clock)
+
         start = perf_counter()
+        log_probs_out: list[np.ndarray | None] = [None] * len(live)
+        cpu_critic_values = np.zeros(len(live), dtype=np.float32)
+        old_hidden = (
+            np.zeros((len(live), policy.hidden_size), dtype=np.float32)
+            if hidden is not None
+            else None
+        )
         with torch.no_grad():
-            if policy.spatial_cuda_graphs:
-                torch.compiler.cudagraph_mark_step_begin()
-            slots = torch.tensor(live, device=self.device)
-            h = hidden.index_select(1, slots) if hidden is not None else None
             clock = diag.begin() if diag else None
             cuda_events = None
             if diag and str(self.device).startswith("cuda"):
@@ -645,43 +759,99 @@ class Collector:
                     torch.cuda.Event(enable_timing=True),
                 )
                 cuda_events[0].record()
-            logits, critic_values, next_hidden = policy(batch, h)
-            pieces = [
-                policy_logits(logits, self.temperature).log_softmax(-1),
-                critic_values[:, None],
-            ]
-            if h is not None:
-                pieces.append(h[0])
-            # One D2H synchronization per inference batch, including diagnostic h.
-            output = torch.cat(pieces, -1)
+            if main_pos:
+                if policy.spatial_cuda_graphs:
+                    torch.compiler.cudagraph_mark_step_begin()
+                learner_pairs = [
+                    (k, live[j])
+                    for k, j in enumerate(main_pos)
+                    if not wave.slot_state(live[j]).get("is_opponent")
+                ]
+                opp_pairs = [
+                    (k, live[j])
+                    for k, j in enumerate(main_pos)
+                    if wave.slot_state(live[j]).get("is_opponent")
+                ]
+                if hidden is not None:
+                    h = torch.empty(
+                        (1, len(main_pos), policy.hidden_size),
+                        device=self.device,
+                        dtype=hidden.dtype,
+                    )
+                    if learner_pairs:
+                        l_ks = torch.tensor([k for k, _ in learner_pairs], device=self.device)
+                        l_slots = torch.tensor([s for _, s in learner_pairs], device=self.device)
+                        h.index_copy_(1, l_ks, hidden.index_select(1, l_slots))
+                    if opp_pairs:
+                        o_ks = torch.tensor([k for k, _ in opp_pairs], device=self.device)
+                        o_slots = torch.tensor([s for _, s in opp_pairs], device=self.device)
+                        h.index_copy_(1, o_ks, opp_hidden.index_select(1, o_slots))
+                else:
+                    h = None
+                logits, critic_values, next_hidden = policy(main_batch, h)
+                if next_hidden is not None:
+                    if learner_pairs:
+                        hidden.index_copy_(1, l_slots, next_hidden.index_select(1, l_ks))
+                    if opp_pairs:
+                        opp_hidden.index_copy_(1, o_slots, next_hidden.index_select(1, o_ks))
+                if self.opponent_temperature == self.temperature or not opp_pairs:
+                    scaled = policy_logits(logits, self.temperature)
+                else:
+                    temps = torch.tensor(
+                        [
+                            self.opponent_temperature
+                            if wave.slot_state(live[j]).get("is_opponent")
+                            else self.temperature
+                            for j in main_pos
+                        ],
+                        device=self.device,
+                        dtype=logits.dtype,
+                    )[:, None]
+                    scaled = logits / temps
+                pieces = [scaled.log_softmax(-1), critic_values[:, None]]
+                if h is not None:
+                    pieces.append(h[0])
+                host = torch.cat(pieces, -1).cpu().numpy()
+                action_width = logits.shape[1]
+                for k, j in enumerate(main_pos):
+                    log_probs_out[j] = host[k, :action_width]
+                    if not wave.slot_state(live[j]).get("is_opponent"):
+                        cpu_critic_values[j] = host[k, action_width]
+                        if old_hidden is not None:
+                            old_hidden[j] = host[k, action_width + 1 :]
+            for opp_id, pos_list in opp_groups.items():
+                if self.opponent_pool is None:
+                    raise RuntimeError(
+                        f"Self-play opponent {opp_id!r} requires an OpponentPool on Collector"
+                    )
+                opp_model = self.opponent_pool.model_for(opp_id, policy)
+                if opp_model.spatial_cuda_graphs:
+                    torch.compiler.cudagraph_mark_step_begin()
+                o_slots = torch.tensor([live[j] for j in pos_list], device=self.device)
+                h_opp = opp_hidden.index_select(1, o_slots) if opp_hidden is not None else None
+                logits, _, next_hidden = opp_model(opp_batches[opp_id], h_opp)
+                if next_hidden is not None and opp_hidden is not None:
+                    opp_hidden.index_copy_(1, o_slots, next_hidden)
+                host_lp = policy_logits(logits, self.opponent_temperature).log_softmax(-1).cpu().numpy()
+                for k, j in enumerate(pos_list):
+                    log_probs_out[j] = host_lp[k]
             if diag:
                 if cuda_events:
                     cuda_events[1].record()
-                diag.end("forward_submit_and_output", clock)
+                at = diag.end("forward_submit_and_output", clock)
                 for slot in live:
                     diag.requests[slot]["forward_submit_ns"] = clock[0]
-                clock = diag.begin()
-            host = output.cpu().numpy()
-            if diag:
-                at = diag.end("blocking_result_to_cpu", clock)
-                for slot in live:
                     diag.requests[slot]["host_result_ns"] = at
                 if cuda_events:
-                    # The existing blocking D2H already completed these events.
+                    torch.cuda.synchronize()
                     diag.add(
                         "cuda_forward_and_output.stream",
                         round(cuda_events[0].elapsed_time(cuda_events[1]) * 1e6),
                     )
-            action_width = logits.shape[1]
-            log_probs = host[:, :action_width]
-            cpu_critic_values = host[:, action_width]
-            old_hidden = host[:, action_width + 1 :] if h is not None else None
-            if next_hidden is not None:
-                hidden.index_copy_(1, slots, next_hidden)
         times["inference_seconds"] += perf_counter() - start
-        times["inference_batches"] += 1
+        times["inference_batches"] += int(bool(main_pos)) + len(opp_groups)
         times["inference_batch_items"] += len(live)
-        return _InferenceOutput(encoded, log_probs, cpu_critic_values, old_hidden)
+        return _InferenceOutput(encoded, log_probs_out, cpu_critic_values, old_hidden)
 
     def _dispatch_actions(
         self, ready, live, wave, inference: _InferenceOutput, worker_encoding, diag
@@ -692,23 +862,29 @@ class Collector:
         dispatch = [[] for _ in self.workers]
         for j, i in enumerate(live):
             state = wave.slot_state(i)
-            logp = inference.log_probs[j, : len(state["actions"])]
-            chosen = choose(np.exp(logp), wave.slot_rng(i))
-            action = wave.slot_builder(i).record_step(
-                state,
-                inference.encoded[j],
-                chosen,
-                logp,
-                inference.critic_values[j],
-                None if inference.old_hidden is None else inference.old_hidden[j],
-            )
-            if not worker_encoding:
-                wave.slot_encoder(i).remember_action(action, state["observation"])
+            logp = inference.log_probs[j][: len(state["actions"])]
+            if state.get("is_opponent"):
+                chosen = choose(np.exp(logp), wave.slot_opp_rng(i))
+                action = state["actions"][chosen]
+                if not worker_encoding:
+                    wave.slot_opp_encoder(i).remember_action(action, state["observation"])
+            else:
+                chosen = choose(np.exp(logp), wave.slot_rng(i))
+                action = wave.slot_builder(i).record_step(
+                    state,
+                    inference.encoded[j],
+                    chosen,
+                    logp,
+                    inference.critic_values[j],
+                    None if inference.old_hidden is None else inference.old_hidden[j],
+                )
+                if not worker_encoding:
+                    wave.slot_encoder(i).remember_action(action, state["observation"])
+                wave_decisions += 1
             generation = wave.slot_generation(i)
             worker, slot = self.slot_locations[i]
             item = WorkerCommand(slot, generation, action)
             dispatch[worker].append(item)
-            wave_decisions += 1
         if diag:
             diag.end("select_and_record_actions", clock)
         for w in ready:
@@ -747,6 +923,37 @@ class Collector:
     def next_wave_id(self):
         self._wave_id += 1
         return self._wave_id
+
+    def attach_wave_opponents(self, wave, specs, policy, worker_encoding):
+        import torch
+
+        wave.opponent_ids = [
+            s.get("opponent_id") if s.get("opponent") == "policy" else None
+            for s in specs
+        ]
+        wave.opp_rngs = [
+            random.Random(s["agent_seeds"][1 - s["learner_side"]])
+            if s.get("opponent") == "policy"
+            else None
+            for s in specs
+        ]
+        wave.opp_encoders = (
+            []
+            if worker_encoding
+            else [
+                ObservationEncoder(
+                    context_from_spec(s, side=1 - s["learner_side"]), policy.variant
+                )
+                if s.get("opponent") == "policy"
+                else None
+                for s in specs
+            ]
+        )
+        wave.opp_hidden = (
+            torch.zeros((1, len(specs), policy.hidden_size), device=self.device)
+            if policy.is_recurrent
+            else None
+        )
 
     def prepare_wave(self, specs, policy, reuse_encoded, worker_encoding):
         import torch

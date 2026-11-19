@@ -657,7 +657,7 @@ def summarize_rollout(episodes):
     )
     free = sum(sum(len(a) >= 2 for a in e["actions"]) for e in episodes)
     total = sum(len(e["chosen"]) for e in episodes)
-    return {
+    summary = {
         "episodes": len(episodes),
         "W": count["W"],
         "D": count["D"],
@@ -668,6 +668,38 @@ def summarize_rollout(episodes):
         "forced_decisions": total - free,
         "positive_reward_episodes": count["W"],
     }
+    if any(e["spec"].get("opponent") == "policy" for e in episodes):
+        buckets = {}
+        for e in episodes:
+            spec = e["spec"]
+            if spec.get("opponent") != "policy":
+                bucket = "cp"
+            else:
+                opp_id = spec.get("opponent_id") or "current"
+                bucket = "archive" if opp_id.startswith("archive:") else opp_id
+            row = buckets.setdefault(bucket, Counter())
+            outcome = (
+                "D"
+                if e["result"]["winner"] is None
+                else "W"
+                if e["result"]["winner"] == spec["learner_side"]
+                else "L"
+            )
+            row[outcome] += 1
+            row["episodes"] += 1
+            row["decisions"] += len(e["chosen"])
+        summary["by_opponent"] = {
+            name: {
+                "episodes": int(b["episodes"]),
+                "W": int(b["W"]),
+                "D": int(b["D"]),
+                "L": int(b["L"]),
+                "win_rate": b["W"] / max(1, b["episodes"]),
+                "decisions": int(b["decisions"]),
+            }
+            for name, b in sorted(buckets.items())
+        }
+    return summary
 
 
 def train(config, plan, out, device):

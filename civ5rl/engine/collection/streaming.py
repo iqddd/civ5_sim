@@ -30,7 +30,10 @@ class StreamingSlot:
     slot_index: int
     builder: EpisodeBuilder | None = None
     encoder: ObservationEncoder | None = None
+    opp_encoder: ObservationEncoder | None = None
     rng: random.Random | None = None
+    opp_rng: random.Random | None = None
+    opponent_id: str | None = None
     generation: int = 0
     episode_id: int | None = None
     state: dict | None = None
@@ -53,6 +56,7 @@ class StreamingSlot:
         worker_encoding: bool,
         temperature: float,
         hidden,
+        opp_hidden=None,
         now: float | None = None,
     ) -> float:
         from civ5rl.engine.collection.collector import EpisodeBuilder
@@ -70,7 +74,22 @@ class StreamingSlot:
             if worker_encoding
             else ObservationEncoder(context_from_spec(spec), policy.variant)
         )
+        self.opponent_id = (
+            spec.get("opponent_id") if spec.get("opponent") == "policy" else None
+        )
+        self.opp_encoder = (
+            None
+            if (worker_encoding or self.opponent_id is None)
+            else ObservationEncoder(
+                context_from_spec(spec, side=1 - spec["learner_side"]), policy.variant
+            )
+        )
         self.rng = random.Random(spec["agent_seeds"][spec["learner_side"]])
+        self.opp_rng = (
+            random.Random(spec["agent_seeds"][1 - spec["learner_side"]])
+            if self.opponent_id is not None
+            else None
+        )
         self.state = None
         # Lifetime rule 1 (episode-scoped): recurrent hidden state is zeroed on every new
         # episode assigned to this slot.
@@ -78,6 +97,8 @@ class StreamingSlot:
         # keeps growing monotonically across all episodes until collect_streaming finishes.
         if hidden is not None:
             hidden[:, self.slot_index].zero_()
+        if opp_hidden is not None:
+            opp_hidden[:, self.slot_index].zero_()
         current_time = perf_counter() if now is None else now
         return current_time - self.idle_since
 
@@ -99,7 +120,10 @@ class StreamingSlot:
         episode = self.builder.finalize(state)
         self.builder = None
         self.encoder = None
+        self.opp_encoder = None
         self.rng = None
+        self.opp_rng = None
+        self.opponent_id = None
         self.episode_id = None
         self.state = None
         self.idle_since = perf_counter() if now is None else now
@@ -111,10 +135,11 @@ class StreamingSlot:
 class _StreamingWave:
     """Streaming state with direct access to episode-owned slots."""
 
-    def __init__(self, wave_id: int, slots: list[StreamingSlot], hidden):
+    def __init__(self, wave_id: int, slots: list[StreamingSlot], hidden, opp_hidden=None):
         self.wave_id = wave_id
         self.slots = slots
         self.hidden = hidden
+        self.opp_hidden = opp_hidden
         self.pending = set()
         self.decisions = 0
 
@@ -124,11 +149,20 @@ class _StreamingWave:
     def slot_encoder(self, i):
         return self.slots[i].encoder
 
+    def slot_opp_encoder(self, i):
+        return self.slots[i].opp_encoder
+
     def slot_builder(self, i):
         return self.slots[i].builder
 
     def slot_rng(self, i):
         return self.slots[i].rng
+
+    def slot_opp_rng(self, i):
+        return self.slots[i].opp_rng
+
+    def slot_opponent_id(self, i):
+        return self.slots[i].opponent_id
 
     def slot_generation(self, i):
         return self.slots[i].generation
@@ -308,7 +342,12 @@ def _collect_streaming(
         if policy.is_recurrent
         else None
     )
-    wave = _StreamingWave(wave_id, slots, hidden)
+    opp_hidden = (
+        torch.zeros((1, capacity, policy.hidden_size), device=collector.device)
+        if policy.is_recurrent
+        else None
+    )
+    wave = _StreamingWave(wave_id, slots, hidden, opp_hidden)
     locations = collector.slot_locations
     global_slots = {location: i for i, location in enumerate(locations)}
     for worker, (connection, _) in enumerate(collector.workers):
@@ -441,6 +480,7 @@ def _collect_streaming(
                 worker_encoding=worker_encoding,
                 temperature=collector.temperature,
                 hidden=wave.hidden,
+                opp_hidden=wave.opp_hidden,
             )
             admitted += 1
             load[worker] += 1

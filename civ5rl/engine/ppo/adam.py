@@ -55,8 +55,13 @@ def grouped_optimizer(policy, config, device):
 def expected_counters(state, extra_ppo_steps=0):
     accepted = int(state.get("optimizer_steps", 0)) + extra_ppo_steps
     if "origin_Adam_counters" in state:
+        critic_steps = (
+            int(state.get("critic_progress", {}).get("steps", 0))
+            if state.get("value_optimizer") == "reset_then_preserve"
+            else 0
+        )
         return {
-            name: count + accepted
+            name: count + accepted + (critic_steps if name == "value" else 0)
             for name, count in state["origin_Adam_counters"].items()
         }
     return dict(

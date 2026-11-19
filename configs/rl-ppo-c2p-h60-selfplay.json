@@ -1,0 +1,65 @@
+{
+  "base_config": "configs/rl-ppo-c2p-h60-end-turn.json",
+  "output": "artifacts/rl/ppo-c2p-h60-selfplay",
+  "collection": {
+    "min_learner_decisions_per_update": 32768
+  },
+  "ppo": {
+    "epochs": 3,
+    "valid_tokens_per_minibatch": 2048,
+    "sequences_per_minibatch": 16,
+    "sequences_per_microbatch": 8,
+    "target_kl": 0.005,
+    "minibatch_kl_spike_threshold": 0.005,
+    "stop_kl": 0.008
+  },
+  "optimizer": {
+    "lr": 5e-06
+  },
+  "critic": {
+    "epochs": 4,
+    "active_seconds": 300,
+    "batch_size": 1024,
+    "lr": 0.0001,
+    "shuffle": true
+  },
+  "self_play": {
+    "enabled": true,
+    "cp_share": 0.5,
+    "current_share": 0.3,
+    "parent_share": 0.1,
+    "archive_share": 0.1,
+    "archive_interval_updates": 10,
+    "opponent_temperature": 0.5,
+    "namespace": "ppo_c2p_selfplay_v1_opponent"
+  },
+  "experiment": {
+    "parent_optimizer": "preserve",
+    "parent_optimizer_lr": 1e-05,
+    "value_optimizer": "reset_then_preserve",
+    "initial_value": "adapt_parent_first_rollout",
+    "start_episode": 110860,
+    "episode_id_source": {
+      "state": "artifacts/rl/ppo-c2p-h60-end-turn/state.json",
+      "state_sha256": "1a9c7ca60e19025b727edd4904de7c64c1bef41c98dd12a0c32a88818a513647",
+      "run": "artifacts/rl/ppo-c2p-h60-end-turn/run.json",
+      "run_sha256": "cc7eed6caf74e7446a973b22c61cf149f3a26fa84c523ded6931d4d1ab7157e6"
+    },
+    "decisions": 4194304,
+    "active_seconds": 18000,
+    "milestones": [
+      1048576,
+      2097152,
+      3145728,
+      4194304
+    ],
+    "early_gain_enabled": false,
+    "early_gain_min_wins": null,
+    "confirmation_min_win_rate_delta": null,
+    "confirmation_min_ci95_low": null,
+    "training_namespace": "ppo_c2p_selfplay_v1_training",
+    "shuffle_namespace": "ppo_c2p_selfplay_v1_shuffle",
+    "torch_namespace": "ppo_c2p_selfplay_v1_torch",
+    "critic_namespace": "ppo_c2p_selfplay_v1_critic"
+  }
+}

@@ -48,6 +48,7 @@ class BaseScenarioSpec(TypedDict):
     max_rounds: int
     max_calls_per_turn: int
     opponent: str
+    opponent_id: NotRequired[str]
     opponent_search: NotRequired[dict[str, Any]]
     reward_profile: NotRequired[str]
     agent_seeds: list[int]
@@ -108,6 +109,8 @@ class DecisionState(TypedDict):
     done: Literal[False]
     observation: dict[str, Any]
     actions: tuple[Action, ...]
+    acting_side: NotRequired[int]
+    is_opponent: NotRequired[bool]
 
 
 class FinishedState(TypedDict):

@@ -1,6 +1,6 @@
 """Saved-result analysis only: no match execution, policy loading or training."""
 
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -270,3 +270,128 @@ def eval_slices_summary(rows_or_directory, expected_n=None, *, plan=None, requir
             "outcomes": {value: outcomes[value] for value in "WDL"},
         }
     return slices
+
+
+def h2h_world_bootstrap(
+    rows_or_directory,
+    expected_matches,
+    *,
+    samples=10000,
+    seed=20261103,
+    clusters=16,
+    require_artifacts=True,
+):
+    """Clustered world bootstrap over per-game signed outcome (+1 W, 0 D, -1 L)."""
+    rows = _summary_rows(rows_or_directory, expected_matches, None, require_artifacts)
+    pairs = defaultdict(set)
+    by_world = defaultdict(list)
+    counts = Counter()
+    for (parent_world, case_id, side), (metric, _case, _path) in sorted(rows.items()):
+        pairs[(int(parent_world), int(case_id))].add(int(side))
+        result = outcome(metric)
+        counts[result] += 1
+        by_world[int(parent_world)].append(1 if result == "W" else -1 if result == "L" else 0)
+    total = counts["W"] + counts["D"] + counts["L"]
+    if total != expected_matches:
+        raise ValueError(f"Expected {expected_matches} H2H matches, got {total}")
+    if any(sides != {0, 1} for sides in pairs.values()):
+        raise ValueError("H2H evaluation requires complete mirrored pairs (side 0 and side 1)")
+    worlds = sorted(by_world)
+    if clusters is not None and len(worlds) != clusters:
+        raise ValueError(f"Wrong H2H bootstrap cluster count: expected {clusters}, got {len(worlds)}")
+    if len({len(by_world[w]) for w in worlds}) != 1:
+        raise ValueError("Unequal H2H cases per parent world")
+    world_means = {w: float(np.mean(by_world[w])) for w in worlds}
+    world_values = np.asarray([world_means[w] for w in worlds], dtype=np.float64)
+    ci = bootstrap_ci95(world_values, samples=samples, seed=seed)
+    delta_wins = int(counts["W"] - counts["L"])
+    return {
+        "matches": total,
+        "W": int(counts["W"]),
+        "D": int(counts["D"]),
+        "L": int(counts["L"]),
+        "delta_wins": delta_wins,
+        "delta": delta_wins / total,
+        "win_rate": counts["W"] / total,
+        "draw_rate": counts["D"] / total,
+        "loss_rate": counts["L"] / total,
+        "CI95": [float(v) for v in ci],
+        "bootstrap_clusters": len(worlds),
+        "bootstrap_samples": samples,
+        "bootstrap_seed": seed,
+        "world_deltas": {str(w): world_means[w] for w in worlds},
+    }
+
+
+def select_dual_milestone(candidates, baseline_cp_wins):
+    """Select best milestone under dual non-regression + max J = delta_W_cp + delta_W_h2h.
+
+    Admissible iff delta_w_cp >= 0, delta_w_h2h >= 0, and J > 0.
+    Tie-break: higher delta_w_cp, then earlier update. Fallback: checkpoints/initial.pt.
+    """
+    admissible = []
+    baseline_entry = None
+    for row in candidates:
+        delta_w_cp = int(row["cp_wins"]) - int(baseline_cp_wins)
+        delta_w_h2h = int(row["h2h_wins"]) - int(row["h2h_losses"])
+        j_score = delta_w_cp + delta_w_h2h
+        enriched = {
+            **row,
+            "delta_w_cp": delta_w_cp,
+            "delta_w_h2h": delta_w_h2h,
+            "J": j_score,
+            "admissible": delta_w_cp >= 0 and delta_w_h2h >= 0 and j_score > 0,
+        }
+        if row["path"] == "checkpoints/initial.pt":
+            baseline_entry = enriched
+        if enriched["admissible"]:
+            admissible.append(enriched)
+    if not admissible:
+        if baseline_entry is not None:
+            return {
+                "path": baseline_entry["path"],
+                "wins": baseline_entry["cp_wins"],
+                "update": baseline_entry["update"],
+                "decisions": baseline_entry["decisions"],
+                "policy_hash": baseline_entry["policy_hash"],
+                "delta_w_cp": 0,
+                "delta_w_h2h": baseline_entry["delta_w_h2h"],
+                "J": baseline_entry["delta_w_h2h"],
+                "selection_rule": "dual_nonregression_max_J",
+                "cp_summary": baseline_entry["cp_summary"],
+                "h2h_summary": baseline_entry["h2h_summary"],
+            }
+        raise ValueError("Missing baseline candidate for dual selection")
+    best = max(admissible, key=lambda r: (r["J"], r["delta_w_cp"], -int(r["update"])))
+    return {
+        "path": best["path"],
+        "wins": best["cp_wins"],
+        "update": best["update"],
+        "decisions": best["decisions"],
+        "policy_hash": best["policy_hash"],
+        "delta_w_cp": best["delta_w_cp"],
+        "delta_w_h2h": best["delta_w_h2h"],
+        "J": best["J"],
+        "selection_rule": "dual_nonregression_max_J",
+        "cp_summary": best["cp_summary"],
+        "h2h_summary": best["h2h_summary"],
+    }
+
+
+def dual_promotion_decision(cp_comparison, h2h_bootstrap):
+    """Promote candidate iff both deltas >= 0 and at least one CI95 lower bound > 0."""
+    cp_delta = float(cp_comparison["delta"])
+    cp_low = float(cp_comparison["CI95"][0])
+    h2h_delta = float(h2h_bootstrap["delta"])
+    h2h_low = float(h2h_bootstrap["CI95"][0])
+    both_nonnegative = cp_delta >= 0.0 and h2h_delta >= 0.0
+    significant = cp_low > 0.0 or h2h_low > 0.0
+    return {
+        "promoted": bool(both_nonnegative and significant),
+        "both_nonnegative": bool(both_nonnegative),
+        "significant_ci95": bool(significant),
+        "cp_delta": cp_delta,
+        "cp_ci95": list(cp_comparison["CI95"]),
+        "h2h_delta": h2h_delta,
+        "h2h_ci95": list(h2h_bootstrap["CI95"]),
+    }

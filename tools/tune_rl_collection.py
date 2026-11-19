@@ -61,7 +61,8 @@ def main():
     from civ5rl.config import load_config
     from civ5rl.experiments.ppo_artifacts import load_rollout
 
-    load_config(args.config)
+    cfg = load_config(args.config)
+    self_play = bool(cfg.get("self_play", {}).get("enabled"))
     machine = hardware()
     try:
         import pynvml
@@ -116,6 +117,7 @@ def main():
         "warmup_episodes": min(count, args.warmup_episodes or count),
         "warmup_workers": True,
         "collection_scheduler": args.scheduler,
+        "self_play": self_play,
         "tie_fraction": TIE_FRACTION,
         "confirmation_repeats_per_finalist": 1,
         "max_automatic_probes": 5,
@@ -148,6 +150,7 @@ def main():
     del episodes
     rows = {}
     signature = None
+    reference_positions = None
     reference_trace = None
     exhausted = False
     deadline = started + args.budget_seconds
@@ -227,7 +230,7 @@ def main():
     finalists = []
 
     def measure(candidate, confirmation=False):
-        nonlocal signature, reference_trace, exhausted
+        nonlocal signature, reference_positions, reference_trace, exhausted
         if exhausted or candidate.envs > max_envs:
             return None
         if not confirmation and candidate in rows:
@@ -327,11 +330,25 @@ def main():
             actual = (trial["commands_hash"], trial["results_hash"])
             if signature is None:
                 signature = actual
+                reference_positions = trial["positions"]
                 reference_trace = directory / "trace.npz"
-            if actual != signature:
+            hash_matched = actual == signature
+            if self_play:
+                trial["hash_matched_reference"] = hash_matched
+                comparable = (
+                    trial["positions"] > 0
+                    and trial["commands"] > 0
+                    and abs(trial["positions"] - reference_positions)
+                    <= max(1, reference_positions) * 0.15
+                )
+            else:
+                comparable = hash_matched
+            if not comparable:
                 row.status = "incomparable"
                 session["error"] = (
-                    "Commands/outcomes differ from the reference candidate"
+                    "Self-play workload positions diverged >15% from reference candidate"
+                    if self_play
+                    else "Commands/outcomes differ from the reference candidate"
                 )
             else:
                 row.status = "ok"
