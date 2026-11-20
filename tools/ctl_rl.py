@@ -28,6 +28,7 @@ def main(argv=None):
     cmd.add_argument("--manifest", type=Path, required=True)
     cmd.add_argument("--checkpoint", type=Path, required=True)
     cmd.add_argument("--out", type=Path, required=True)
+    cmd.add_argument("--turn-reset-mode", choices=("legacy", "end_turn"), help="Override the saved turn-reset rules for all cases")
     cmd = commands.add_parser("branch-replay", help="Replace model commands in a saved policy-vs-CP match")
     cmd.add_argument("--source", type=Path, required=True)
     cmd.add_argument("--command", dest="command_number", type=int, help="One-based command to replace")
@@ -110,7 +111,7 @@ def main(argv=None):
         result = (archive_evaluations if args.command == "archive-evaluations" else restore_evaluations)(args.run)
     elif args.command == "play-cases":
         from civ5rl.reporting.showcase import play_cases
-        result = play_cases(args.manifest, args.checkpoint, args.out)
+        result = play_cases(args.manifest, args.checkpoint, args.out, turn_reset_mode=args.turn_reset_mode)
     elif args.command == "branch-replay":
         from civ5rl.reporting.replay_branch import branch_replay
         from civ5sim import Action

@@ -59,6 +59,7 @@ def play(task):
                 case["max_rounds"],
                 seed=case["streams"]["battle"],
                 max_calls_per_turn=case["max_calls_per_turn"],
+                turn_reset_mode=case["scenario"].get("turn_reset_mode", "legacy"),
             ),
             agents,
             scenario=case["scenario"],
@@ -107,7 +108,7 @@ def play(task):
     return row
 
 
-def play_cases(manifest_path, checkpoint, out):
+def play_cases(manifest_path, checkpoint, out, *, turn_reset_mode=None):
     manifest_path, checkpoint, out = (
         Path(manifest_path).resolve(),
         Path(checkpoint).resolve(),
@@ -122,6 +123,17 @@ def play_cases(manifest_path, checkpoint, out):
     cases = source["cases"]
     if any(case.get("split") not in ("train", "development", "dev") for case in cases):
         raise ValueError("Only open cases are allowed")
+    if turn_reset_mode is not None:
+        from civ5rl.protocols.turn_reset import mode
+
+        mode({"environment": {"turn_reset_mode": turn_reset_mode}})
+        for case in cases:
+            scenario = case["scenario"]
+            scenario["turn_reset_mode"] = turn_reset_mode
+            case["scenario_hash"] = digest(scenario)
+            if "case_hash" in case:
+                case["case_hash"] = digest({k: v for k, v in case.items() if k != "case_hash"})
+        source["turn_reset_mode"] = turn_reset_mode
     if out.exists() and any(out.iterdir()):
         raise ValueError("Use a new empty output directory")
     checkpoint_sha256 = file_sha256(checkpoint)
@@ -171,7 +183,11 @@ def play_cases(manifest_path, checkpoint, out):
         inference=inference,
         all_replays_verified=True,
         closed_test_used=False,
-        viewer_summary=f"{checkpoint.parent.parent.name} / {checkpoint.stem}: argmax vs CP, W/D/L {wdl['W']}/{wdl['D']}/{wdl['L']}; same saved cases",
+        viewer_summary=(
+            f"{checkpoint.parent.parent.name} / {checkpoint.stem}: argmax vs CP, "
+            f"W/D/L {wdl['W']}/{wdl['D']}/{wdl['L']}; "
+            f"{', '.join(sorted({case['scenario'].get('turn_reset_mode', 'legacy') for case in cases}))}"
+        ),
     )
     write_json(out / "summary.json", result)
     return result
