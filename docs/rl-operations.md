@@ -393,6 +393,8 @@ OOM-тренд смотрите в `telemetry/cuda-memory.jsonl` на одина
 
 ```powershell
 python tools/bench_rl.py replay --run RUN --compare-git-rev HEAD --out OUT
+python tools/bench_rl.py ppo-update --config CONFIG --checkpoint CHECKPOINT --rollout ROLLOUT --minibatch-tokens 128 --out BASE
+python tools/bench_rl.py ppo-update --config CONFIG --checkpoint CHECKPOINT --rollout ROLLOUT --minibatch-tokens 128 --baseline-result BASE/benchmark.json --out OUT
 python tools/bench_rl.py full-cycle --config CONFIG --checkpoint CHECKPOINT --rollout ROLLOUT --out OUT --repeats 3 --device cuda
 python tools/bench_rl.py bc --config CONFIG --checkpoint CHECKPOINT --run CORPUS_RUN --scratch-dir .tmp/bc-bench --warmup 3 --steps 5 --trace-steps 3 --verify-parity --parity-steps 3 --out OUT
 python tools/bench_rl.py evaluation --run RUN --checkpoint CHECKPOINT --out OUT --cases 2 --workers 4 --warmup 3 --steps 5 --trace-steps 3
@@ -402,6 +404,7 @@ python tools/diagnose_cp_replay.py --rollout ROLLOUT --episode EPISODE --trace-f
 | Режим | Что измеряет |
 |---|---|
 | `replay` | Сохранённый rollout; `--compare-git-rev` сравнивает PPO backend выбранного commit |
+| `ppo-update` | Одна отбрасываемая эпоха PPO на сохранённом rollout с переиспользуемым эталоном паритета и времени |
 | `full-cycle` | Сбор и отбрасываемый PPO update; нужен PPO checkpoint с Adam |
 | `bc` | Прогретые учебные шаги; `--verify-parity` добавляет сверку с baseline |
 | `evaluation` | Матчи и inference выбранного checkpoint на сохранённых случаях |
@@ -411,6 +414,25 @@ python tools/diagnose_cp_replay.py --rollout ROLLOUT --episode EPISODE --trace-f
 `--trace-steps` сохраняет короткую Kineto-трассу и сводку ядер. Исходный RUN
 не изменяется. `--compare-git-rev` поддержан только для replay и не переключает
 целиком окружение, модель и native-библиотеки на указанный commit.
+
+`ppo-update` запускайте до и после правки на той же машине с checkpoint,
+содержащим Adam, и rollout, проходящим behavior precheck. Для короткого
+эталона используйте небольшой сохранённый rollout или `--episode-limit N`.
+Удерживайте одинаковыми входы, настройки батча и seed. Пример выше
+воспроизводит размер minibatch короткого аудита на 1 107 решениях.
+
+`benchmark.json` хранит по шагам отпечатки logits, градиентов до clipping
+и Adam, численные метрики loss и KL, включая `k3` в режиме epoch-or-spike,
+и решения о принятии. При расхождении команда перечисляет поля и возвращает
+код 1. `--check-rollback` добавляет принудительное отклонение первого шага
+и сверку восстановленного состояния. Включайте флаг в обеих ветвях при
+проверке изменений, которые затрагивают rollback.
+
+Время берётся из отдельных прогретых повторов полного update. Прогоны с
+новой компиляцией исключаются из медианы. Старый эталон годится для
+первичного отбора. Если разница сравнима с разбросом, переснимите обе ветви
+в одной сессии. Для решений о throughput полного цикла используйте штатный
+объём работы и профиль затронутой фазы.
 
 PPO на CUDA с BF16 по умолчанию переиспользует spatial CUDA Graph для
 no-grad блока 32 × 256 в режиме `default`. Для замера обычного compiled

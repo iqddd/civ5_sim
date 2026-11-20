@@ -1,4 +1,4 @@
-"""Bounded full-cycle PPO or saved-replay benchmark, optionally against Git."""
+"""Bounded RL benchmarks for saved replay, updates, collection and evaluation."""
 
 import argparse
 import json
@@ -213,7 +213,7 @@ def main():
     parser.add_argument(
         "phase",
         nargs="?",
-        choices=("full-cycle", "replay", "bc", "evaluation", "comparison", "comparison-collection"),
+        choices=("full-cycle", "replay", "ppo-update", "bc", "evaluation", "comparison", "comparison-collection"),
         default="full-cycle",
     )
     parser.add_argument(
@@ -231,13 +231,13 @@ def main():
         "--repeats",
         type=int,
         default=3,
-        help="Replay ABBA blocks or full-cycle measured trials",
+        help="Replay ABBA blocks or measured full-cycle/PPO update trials",
     )
     parser.add_argument(
         "--warmup",
         type=int,
         default=1,
-        help="Replay warmup passes per implementation (or BC warmup minibatches)",
+        help="Replay/PPO update warmup passes (or BC warmup minibatches)",
     )
     parser.add_argument(
         "--compare-git-rev", help="Replay baseline: ppo_fast.py from this Git revision"
@@ -245,8 +245,12 @@ def main():
     parser.add_argument(
         "--episode-limit",
         type=int,
-        help="Replay only: first N saved episodes, recorded in result",
+        help="Replay/PPO update: first N saved episodes",
     )
+    ppo_update = parser.add_argument_group("ppo-update")
+    ppo_update.add_argument("--baseline-result", type=Path, help="Saved ppo-update benchmark.json")
+    ppo_update.add_argument("--minibatch-tokens", type=int, help="Override valid tokens per PPO minibatch")
+    ppo_update.add_argument("--check-rollback", action="store_true", help="Also force and check a KL rejection")
     parser.add_argument(
         "--steps",
         type=int,
@@ -310,6 +314,10 @@ def main():
     collection.add_argument("--source-cases", type=int, default=8)
     collection.add_argument("--barrier-workers", type=int, default=8, help="Former per-fork barrier control; 0 skips")
     args = parser.parse_args()
+    if args.phase != "ppo-update" and (
+        args.baseline_result or args.minibatch_tokens is not None or args.check_rollback
+    ):
+        parser.error("--baseline-result, --minibatch-tokens and --check-rollback apply to ppo-update only")
     if args.phase == "comparison-collection":
         from civ5rl.reporting.comparison_collection_bench import run_benchmark
         return run_benchmark(args, parser)
@@ -344,11 +352,18 @@ def main():
         or (args.episode_limit is not None and args.episode_limit < 1)
     ):
         parser.error("repeats, warmup and episode limit must be positive")
-    if args.phase != "replay" and (args.compare_git_rev or args.episode_limit):
-        parser.error("--compare-git-rev/--episode-limit apply to replay only")
+    if args.compare_git_rev and args.phase != "replay":
+        parser.error("--compare-git-rev applies to replay only")
+    if args.episode_limit and args.phase not in ("replay", "ppo-update"):
+        parser.error("--episode-limit applies to replay and ppo-update only")
     config, inputs = resolve_inputs(args, parser)
     if args.phase == "replay":
         replay(args, parser, config, inputs)
+    elif args.phase == "ppo-update":
+        from civ5rl.reporting.ppo_update_benchmark import run_benchmark
+
+        if not run_benchmark(args, parser, config, inputs):
+            raise SystemExit(1)
     else:
         full_cycle(args, parser, config, inputs)
 
