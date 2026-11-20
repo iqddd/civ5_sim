@@ -5,6 +5,7 @@ import weakref
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import torch
 
 from civ5rl.engine.runtime.sequence import SequenceBuffer, allocation_with_reserve
@@ -15,6 +16,18 @@ MEMORY = {"driver_free_bytes": 0, "allocated_bytes": 20, "reserved_bytes": 70}
 
 
 class ResidentMemoryTests(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA pinned index transfers")
+    def test_outstanding_index_uploads_keep_distinct_contents(self):
+        buffer = SequenceBuffer(None, np.asarray([0, 64, 128]), None, device="cuda")
+        buffer.enable_async_transfers()
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            torch.cuda._sleep(20_000_000)
+            outputs = [buffer.indices([(1, i, i + 3), (0, i, i + 2)]) for i in range(16)]
+        stream.synchronize()
+        for i, result in enumerate(outputs):
+            self.assertEqual(result.tolist(), [64 + i, 65 + i, 66 + i, i, i + 1])
+
     def test_low_driver_free_does_not_reject_allocator_success(self):
         # Recorded low driver free is telemetry, not an allocation oracle.
         empty = torch.empty

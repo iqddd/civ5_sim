@@ -108,7 +108,7 @@ class GammaOneTests(unittest.TestCase):
             out = Path(temporary)
             write_json(out / "run.json", dict(config=cfg, kind=cfg["kind"], run_id=identity["run_id"]))
             clock = runner.ActiveClock(state, out)
-            calls = dict(features_for=runner.recurrent_features, behavior_hash=runner.behavior_digest,
+            calls = dict(features_for=runner.batched_recurrent_features, behavior_hash=runner.behavior_digest,
                          statistics=runner.critic_statistics, policy_hash=runner.policy_hash)
             from civ5rl.experiments import ppo_critic_adaptation as adaptation
             real_save = adaptation.atomic_save

@@ -446,6 +446,7 @@ class Collector:
         self.temperature = validate_temperature(config.get("policy_temperature", 1.0))
         self.opponent_pool = opponent_pool
         self.record_hidden = record_hidden
+        self._slot_staging = None
         self.opponent_temperature = (
             validate_temperature(opponent_pool.temperature)
             if opponent_pool is not None
@@ -617,11 +618,23 @@ class Collector:
             workers, live, wave, inference, worker_encoding, diagnostics
         )
 
+    def _pack_slot_indices(self, indices):
+        import torch
+
+        if not str(self.device).startswith("cuda"):
+            return torch.tensor(indices, device=self.device)
+        if self._slot_staging is None:
+            self._slot_staging = torch.empty(self.num_envs, dtype=torch.long, pin_memory=True)
+        host = self._slot_staging[:len(indices)]
+        host.numpy()[:] = indices
+        # The wave's blocking result transfer completes this copy before reuse.
+        return host.to(self.device, non_blocking=True)
+
     def _infer_live(self, policy, live, wave, worker_encoding, times, diag):
         import torch
 
         hidden = wave.hidden
-        hidden_offset = hidden.shape[1] // 2 if hidden is not None else 0
+        hidden_offset = hidden.shape[1] // 2 if hidden is not None else self.num_envs
         record_hidden = hidden is not None and self.record_hidden
         states = [wave.slot_state(i) for i in live]
         any_opponent = any(state.get("is_opponent") for state in states)
@@ -673,7 +686,7 @@ class Collector:
             with torch.no_grad():
                 if policy.spatial_cuda_graphs:
                     torch.compiler.cudagraph_mark_step_begin()
-                slots = torch.tensor(live, device=self.device)
+                slots = self._pack_slot_indices(live) if hidden is not None else None
                 h = hidden.index_select(1, slots) if hidden is not None else None
                 clock = diag.begin() if diag else None
                 cuda_events = None
@@ -747,6 +760,14 @@ class Collector:
             )
             for opp_id, pos_list in opp_groups.items()
         }
+        main_opponents = [bool(states[j].get("is_opponent")) for j in main_pos]
+        mixed_temperature = self.opponent_temperature != self.temperature and any(main_opponents)
+        slot_indices = None
+        if hidden is not None or mixed_temperature:
+            slot_indices = self._pack_slot_indices([
+                live[j] + hidden_offset * is_opponent
+                for j, is_opponent in zip(main_pos, main_opponents)
+            ] + [live[j] + hidden_offset for positions in opp_groups.values() for j in positions])
         times["encoding_seconds"] += perf_counter() - start
         if diag:
             diag.end("inference_prepare_h2d", clock)
@@ -773,38 +794,24 @@ class Collector:
             if main_pos:
                 if policy.spatial_cuda_graphs:
                     torch.compiler.cudagraph_mark_step_begin()
-                opponents = [bool(states[j].get("is_opponent")) for j in main_pos]
-                if hidden is not None:
-                    slots = torch.tensor(
-                        [live[j] + hidden_offset * is_opponent
-                         for j, is_opponent in zip(main_pos, opponents)],
-                        device=self.device,
-                    )
-                    h = hidden.index_select(1, slots)
-                else:
-                    h = None
+                slots = slot_indices[:len(main_pos)] if slot_indices is not None else None
+                h = hidden.index_select(1, slots) if hidden is not None else None
                 logits, critic_values, next_hidden = policy(main_batch, h)
                 if next_hidden is not None:
                     hidden.index_copy_(1, slots, next_hidden)
-                if self.opponent_temperature == self.temperature or not any(opponents):
+                if not mixed_temperature:
                     scaled = policy_logits(logits, self.temperature)
                 else:
-                    temps = torch.tensor(
-                        [
-                            self.opponent_temperature
-                            if is_opponent
-                            else self.temperature
-                            for is_opponent in opponents
-                        ],
-                        device=self.device,
-                        dtype=logits.dtype,
-                    )[:, None]
+                    temps = torch.where(
+                        slots >= hidden_offset, self.opponent_temperature, self.temperature
+                    ).to(logits.dtype)[:, None]
                     scaled = logits / temps
                 pieces = [scaled.log_softmax(-1), critic_values[:, None]]
                 if record_hidden:
                     pieces.append(h[0])
                 outputs.append((main_pos, torch.cat(pieces, -1)))
                 main_action_width = logits.shape[1]
+            slot_start = len(main_pos)
             for opp_id, pos_list in opp_groups.items():
                 if self.opponent_pool is None:
                     raise RuntimeError(
@@ -813,7 +820,9 @@ class Collector:
                 opp_model = self.opponent_pool.model_for(opp_id, policy)
                 if opp_model.spatial_cuda_graphs:
                     torch.compiler.cudagraph_mark_step_begin()
-                o_slots = torch.tensor([live[j] + hidden_offset for j in pos_list], device=self.device)
+                slot_stop = slot_start + len(pos_list)
+                o_slots = slot_indices[slot_start:slot_stop] if hidden is not None else None
+                slot_start = slot_stop
                 h_opp = hidden.index_select(1, o_slots) if hidden is not None else None
                 logits, _, next_hidden = opp_model(
                     opp_batches[opp_id], h_opp, compute_value=False

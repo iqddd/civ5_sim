@@ -81,23 +81,37 @@ class ControlledPPOTests(unittest.TestCase):
         self.assertIsNone(measure_replay(Model(), c, full_distribution=True)["full_kl_free"])
 
     def test_rejected_attempt_restores_empty_and_initialized_adam_in_place(self):
+        self._verify_adam_rollback("cpu")
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA foreach checks")
+    def test_cuda_adam_rollback_and_finiteness(self):
+        configure(17, "cuda")
+        self._verify_adam_rollback("cuda")
+
+    def _verify_adam_rollback(self, device):
         # Policy equality alone misses momentum/counter drift after rejection.
-        model = torch.nn.Linear(2, 2)
-        model.register_buffer("counter", torch.zeros(1))
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+        model = torch.nn.Linear(2, 2).to(device)
+        model.register_buffer("counter", torch.zeros(1, device=device))
+        model.register_buffer("alias", model.weight.detach()[0])
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.01, fused=device == "cuda")
+        inputs = torch.ones(1, 2, device=device)
         for initialized in (False, True):
             before = deepcopy(model.state_dict())
             states = deepcopy(optimizer.state_dict())
             refs = {p: {k: v for k, v in s.items() if torch.is_tensor(v)} for p, s in optimizer.state.items()}
             snap = AdamSnapshot(model, optimizer)
             rng = torch.get_rng_state().clone()
+            cuda_rng = torch.cuda.get_rng_state() if device == "cuda" else None
             optimizer.zero_grad(set_to_none=True)
-            model(torch.ones(1, 2)).sum().backward()
+            model(inputs).sum().backward()
             optimizer.step()
             model.counter.add_(1)
             torch.rand(4)
+            torch.rand(4, device=device)
             snap.restore()
             self.assertTrue(torch.equal(torch.get_rng_state(), rng))
+            if cuda_rng is not None:
+                self.assertTrue(torch.equal(torch.cuda.get_rng_state(), cuda_rng))
             for k, v in model.state_dict().items():
                 self.assertTrue(torch.equal(v, before[k]))
             restored = optimizer.state_dict()
@@ -110,9 +124,16 @@ class ControlledPPOTests(unittest.TestCase):
                 for key, ref in values.items():
                     self.assertIs(optimizer.state[param][key], ref)
             optimizer.zero_grad(set_to_none=True)
-            model(torch.ones(1, 2)).sum().backward()
+            model(inputs).sum().backward()
             optimizer.step()
         require_finite_state(model, optimizer)
+        moment = optimizer.state[model.weight]["exp_avg"]
+        moment.fill_(torch.finfo(moment.dtype).max)
+        require_finite_state(model, optimizer)
+        moment[0, 0] = torch.inf
+        with self.assertRaises(FloatingPointError):
+            require_finite_state(model, optimizer)
+        moment.zero_()
         with torch.no_grad():
             model.weight[0, 0] = float("nan")
         with self.assertRaises(FloatingPointError):

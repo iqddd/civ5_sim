@@ -149,15 +149,16 @@ def _build_collection_policy(
         policy.load_state_dict(live_policy.state_dict())
     perf = config.get("performance", {})
     policy.spatial_cell_padding = perf.get("spatial_cell_padding", 0)
+    amp = device_str.startswith("cuda") and config.get("numerics", {}).get("amp", False)
     # Opponent moves never enter behavior_replay/precheck: block size 4 eliminates
     # 32-row padding waste while giving StaticSpatialGraph one fixed padded shape.
     use_static_graph = (
-        device_str.startswith("cuda")
+        amp
         and perf.get("compile", False)
         and policy.spatial_cell_padding > 0
     )
     policy.enable_amp(
-        device_str.startswith("cuda"),
+        amp,
         spatial_batch_size=4 if use_static_graph else 0,
     )
     if perf.get("inverse_routing", False):

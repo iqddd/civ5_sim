@@ -249,7 +249,7 @@ class RolloutCache(SequenceBuffer):
             width = int(self.action_counts.max())
             behavior = np.full((decision_count, width), -np.inf, np.float32)
             full = [values for ep in episodes for values in ep["old_log_probs"]]
-            if len(full) != len(flat):
+            if len(full) != decision_count:
                 raise ValueError("Behavior distribution count differs from decisions")
             for index, (values, count) in enumerate(zip(full, self.action_counts)):
                 if len(values) != count or not np.isfinite(values).all():
@@ -646,6 +646,33 @@ def _compiled_replay_sums():
     return _COMPILED_REPLAY_SUMS
 
 
+_LOSS_METRICS = ("policy_loss", "value_loss", "entropy", "normalized_entropy", "clip_fraction")
+
+
+def _minibatch_diagnostics(loss, stats, old_logp, action_mask, track_kl, tokens):
+    k3_sum = free_tokens = None
+    if track_kl:
+        log_ratio = (stats["logp"] - old_logp).double()
+        k3 = (log_ratio.exp() - 1.0) - log_ratio
+        free_mask = action_mask.sum(-1) >= MIN_FREE_ACTIONS
+        k3_sum = k3.masked_fill(~free_mask, 0.0).sum()
+        free_tokens = free_mask.sum()
+    totals = torch.stack([stats[key] for key in _LOSS_METRICS]) * tokens
+    return torch.isfinite(loss), totals, k3_sum, free_tokens
+
+
+_COMPILED_MINIBATCH_DIAGNOSTICS = None
+
+
+def _compiled_minibatch_diagnostics():
+    global _COMPILED_MINIBATCH_DIAGNOSTICS
+    if _COMPILED_MINIBATCH_DIAGNOSTICS is None:
+        _COMPILED_MINIBATCH_DIAGNOSTICS = torch.compile(
+            _minibatch_diagnostics, dynamic=True, fullgraph=True
+        )
+    return _COMPILED_MINIBATCH_DIAGNOSTICS
+
+
 def _part_free_count(cache, spans):
     return sum(
         int(
@@ -945,12 +972,14 @@ class BatchedBackend:
             getattr(policy, "spatial_cell_padding", 0) or 0
         )
         self.kl_batch = options.get("kl_sequences_per_batch", 8)
+        self.diagnostics_runner = _minibatch_diagnostics
         if str(device).startswith("cuda") and options.get(
             "ppo_optimized_inputs", False
         ):
             self.cache.enable_compiled_gather()
             self.cache.enable_async_transfers()
             self.cache.enable_compiled_replay_sums()
+            self.diagnostics_runner = _compiled_minibatch_diagnostics()
         if options.get("ppo_cached_replay", False):
             self.cache.enable_cached_replay()
         if pinned_replay or options.get("ppo_pinned_replay", False):
@@ -962,13 +991,7 @@ class BatchedBackend:
         if str(device).startswith("cuda"):
             torch.cuda.synchronize()
         self.cache_seconds = perf_counter() - tick
-        self.names = (
-            "policy_loss",
-            "value_loss",
-            "entropy",
-            "normalized_entropy",
-            "clip_fraction",
-        )
+        self.names = _LOSS_METRICS
         self.totals = torch.zeros(len(self.names), device=device)
         self.gradients = []
         self.prefix_seconds = self.backward_seconds = 0.0
@@ -1008,6 +1031,11 @@ class BatchedBackend:
         return dict(self.replay)
 
     def backward(self, minibatch, count, entropy_coefficient):
+        tokens, diagnostics = self.backward_minibatch(minibatch, count, entropy_coefficient)
+        self.read_backward(diagnostics)
+        return tokens
+
+    def backward_minibatch(self, minibatch, count, entropy_coefficient):
         if self.policy.spatial_cuda_graphs:
             torch.compiler.cudagraph_mark_step_begin()
         tick = perf_counter()
@@ -1051,31 +1079,37 @@ class BatchedBackend:
                 value_coefficient=self.config["ppo"]["value_coefficient"],
                 temperature=self.temperature,
             )
-            if self.track_minibatch_kl:
-                log_ratio = (stats["logp"] - labels["old_logp"]).double()
-                k3 = (log_ratio.exp() - 1.0) - log_ratio
-                free_mask = batch["action_mask"].sum(-1) >= MIN_FREE_ACTIONS
-                k3_free_sum += k3.masked_fill(~free_mask, 0.0).sum()
-                free_tokens_total += free_mask.sum()
-            finite &= torch.isfinite(loss.detach())
             valid_tokens = sum(lengths)
-            weighted_loss = loss * (valid_tokens / count)
-            accumulator.backward(weighted_loss)
+            valid, totals, k3_sum, free_tokens = self.diagnostics_runner(
+                loss.detach(), stats, labels["old_logp"], batch["action_mask"],
+                self.track_minibatch_kl, valid_tokens,
+            )
+            if self.track_minibatch_kl:
+                k3_free_sum += k3_sum
+                free_tokens_total += free_tokens
+            finite &= valid
+            accumulator.backward(loss * (valid_tokens / count))
             self.backward_seconds += perf_counter() - tick
-            self.totals += (
-                torch.stack([stats[key] for key in self.names]) * valid_tokens
-            )
+            self.totals += totals
             tokens += valid_tokens
-        if not finite.item():
+        return tokens, (finite, k3_free_sum, free_tokens_total)
+
+    def read_backward(self, diagnostics, norm=None):
+        """Read the loss guard, pre-clip norm and optional KL proxy together."""
+        finite, k3_sum, free_tokens = diagnostics
+        fields = [finite]
+        if norm is not None:
+            fields.append(norm.detach())
+        if k3_sum is not None:
+            fields.extend((k3_sum, free_tokens))
+        valid, *metrics = torch.stack([v.double() for v in fields]).tolist()
+        if not valid:
             raise FloatingPointError("Non-finite batched PPO loss")
-        if self.track_minibatch_kl:
-            free_count = int(free_tokens_total.item())
-            self.last_minibatch_approx_kl = (
-                float(k3_free_sum.item()) / free_count if free_count > 0 else 0.0
-            )
-        else:
-            self.last_minibatch_approx_kl = 0.0
-        return tokens
+        norm_value = metrics.pop(0) if norm is not None else None
+        if norm_value is not None and not np.isfinite(norm_value):
+            raise FloatingPointError("Non-finite PPO gradient norm")
+        self.last_minibatch_approx_kl = metrics[0] / metrics[1] if metrics and metrics[1] else 0.0
+        return norm_value
 
     def measure_step_replay(self) -> StepReplay:
         exact = (

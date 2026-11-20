@@ -37,29 +37,30 @@ def load_policy(config, path, device):
     policy = Policy(variant)
     load_parent_model(policy, saved, config)
     policy = policy.to(device)
-    policy.spatial_cell_padding = config['performance'].get('spatial_cell_padding',0)
-    policy.enable_amp(str(device).startswith("cuda"), spatial_batch_size=32)
-    if config["performance"].get("inverse_routing", False):
+    performance = config["performance"]
+    cuda = str(device).startswith("cuda")
+    amp = cuda and config.get("numerics", {}).get("amp", False)
+    policy.spatial_cell_padding = performance.get("spatial_cell_padding", 0)
+    policy.enable_amp(amp, spatial_batch_size=performance.get("spatial_batch_size", 32))
+    if performance.get("inverse_routing", False):
         policy.enable_inverse_routing()
-    if config["performance"].get("optimized_routing", False):
+    if performance.get("optimized_routing", False):
         policy.enable_inverse_routing()
         policy.enable_action_routing()
         policy.enable_maximum_routing()
-    if str(device).startswith("cuda") and config["performance"]["compile"]:
+    if cuda and performance["compile"]:
         policy.enable_compile(
-            spatial_mode=config["performance"].get("spatial_compile_mode")
+            spatial_mode=performance.get("spatial_compile_mode")
         )
     for parameter in policy.value.parameters():
         parameter.requires_grad_(False)
-    if str(device).startswith("cuda"):
-        if config["performance"].get("coalesced_spatial", False):
+    if cuda:
+        if amp and performance.get("coalesced_spatial", False):
             policy.enable_coalesced_spatial()
-        policy.coalesced_accumulation = config["performance"].get(
-            "coalesced_accumulation", False
-        )
-        if config["performance"].get("recurrent_cuda_graphs", False):
+        policy.coalesced_accumulation = performance.get("coalesced_accumulation", False)
+        if performance.get("recurrent_cuda_graphs", False):
             policy.enable_recurrent_graphs(
-                max_shapes=config["performance"].get("recurrent_graph_max_shapes", 64)
+                max_shapes=performance.get("recurrent_graph_max_shapes", 64)
             )
     return policy
 

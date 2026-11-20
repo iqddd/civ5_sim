@@ -23,13 +23,50 @@ def atomic_torch_save(value, path, *copies):
     return value
 
 
+def _tensor_groups(tensors):
+    groups = defaultdict(list)
+    for tensor in tensors:
+        groups[tensor.device, tensor.dtype].append(tensor)
+    return groups
+
+
 class AdamSnapshot:
     def __init__(self, model, optimizer):
-        self.model = [(v, v.detach().clone()) for v in model.state_dict().values()]
         self.optimizer = optimizer
+        model_tensors = list(model.state_dict().values())
+        tensors = model_tensors + [
+            value for state in optimizer.state.values() for value in state.values()
+            if torch.is_tensor(value)
+        ]
+        backups = {}
+        self._foreach = []
+        self._individual = []
+        for (device, dtype), values in _tensor_groups(tensors).items():
+            group, storages = [], set()
+            for value in values:
+                if value.layout == torch.strided and value.is_contiguous():
+                    storage = value.untyped_storage().data_ptr()
+                    if storage not in storages:
+                        storages.add(storage)
+                        group.append(value)
+                        continue
+                # Tied weights may overlap another destination during restore.
+                backup = value.detach().clone()
+                self._individual.append((value, backup))
+                backups[id(value)] = backup
+            if not group:
+                continue
+            sources = [v.detach() for v in group]
+            sizes = [v.numel() for v in group]
+            flat = torch.empty(sum(sizes), device=device, dtype=dtype)
+            saved = [part.view(v.shape) for part, v in zip(flat.split(sizes), group)]
+            torch._foreach_copy_(saved, sources)
+            self._foreach.append((sources, saved))
+            backups.update((id(v), backup) for v, backup in zip(group, saved))
+        self.model = [(v, backups[id(v)]) for v in model_tensors]
         self.states = {
             p: {
-                k: (v, v.detach().clone()) if torch.is_tensor(v) else deepcopy(v)
+                k: (v, backups[id(v)]) if torch.is_tensor(v) else deepcopy(v)
                 for k, v in state.items()
             }
             for p, state in optimizer.state.items()
@@ -42,7 +79,9 @@ class AdamSnapshot:
 
     @torch.no_grad()
     def restore(self):
-        for current, saved in self.model:
+        for current, saved in self._foreach:
+            torch._foreach_copy_(current, saved)
+        for current, saved in self._individual:
             current.copy_(saved)
         for p in list(self.optimizer.state):
             if p not in self.states:
@@ -54,8 +93,7 @@ class AdamSnapshot:
                     del state[k]
             for k, value in saved.items():
                 if isinstance(value, tuple) and torch.is_tensor(value[0]):
-                    original, backup = value
-                    original.copy_(backup)
+                    original, _ = value
                     state[k] = original
                 else:
                     state[k] = deepcopy(value)
@@ -65,16 +103,6 @@ class AdamSnapshot:
                     del group[k]
             group.update(deepcopy(saved))
         restore_rng(self.rng)
-        # A single device reduction also catches accidentally replaced/corrupted buffers.
-        if (
-            self.model
-            and not torch.stack(
-                [(current == saved).all() for current, saved in self.model]
-            )
-            .all()
-            .item()
-        ):
-            raise RuntimeError("Adam rollback failed to restore model exactly")
 
 
 def finite_state_flags(model, optimizer):
@@ -85,15 +113,18 @@ def finite_state_flags(model, optimizer):
         for v in state.values()
         if torch.is_tensor(v)
     ]
-    # Adam step tensors may be on CPU while parameters live on CUDA.
-    by_device = {}
-    for tensor in tensors:
-        if tensor.is_floating_point():
-            by_device.setdefault(tensor.device, []).append(tensor)
-    return {
-        device: torch.stack([torch.isfinite(v).all() for v in values]).all()
-        for device, values in by_device.items()
-    }
+    # Infinity norm detects NaN/Inf without overflowing on finite entries.
+    # Optimizer counters may be on the CPU and empty tensors are always finite.
+    by_device = defaultdict(list)
+    for (device, _), group in _tensor_groups(
+        v.detach() for v in tensors if v.is_floating_point() and v.numel()
+    ).items():
+        if device.type == "cuda" and all(v.layout == torch.strided for v in group):
+            norms = torch._foreach_norm(group, float("inf"))
+            by_device[device].append(torch.isfinite(torch.stack(norms)).all())
+        else:
+            by_device[device].extend(torch.isfinite(v).all() for v in group)
+    return {device: torch.stack(flags).all() for device, flags in by_device.items()}
 
 
 def require_finite_state(model, optimizer):

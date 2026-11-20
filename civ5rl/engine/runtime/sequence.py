@@ -181,6 +181,7 @@ class SequenceBuffer:
             else required_bytes
         )
         self.async_transfers = False
+        self._host_index_slots = []
         self._gather_runner = None
 
     @classmethod
@@ -298,7 +299,21 @@ class SequenceBuffer:
         ]
 
     def indices(self, spans):
-        indices = torch.tensor(
+        if self.async_transfers:
+            size = sum(stop - start for _, start, stop in spans)
+            indices, copied = self._host_index_slot(size)
+            host = indices.numpy()
+            cursor = 0
+            for episode, start, stop in spans:
+                end = cursor + stop - start
+                offset = int(self.offsets[episode])
+                host[cursor:end] = np.arange(offset + start, offset + stop, dtype=np.int64)
+                cursor = end
+            gpu = indices.to(self.device, non_blocking=True)
+            if copied is not None:
+                copied.record(torch.cuda.current_stream(self.device))
+            return gpu
+        return torch.tensor(
             [
                 i
                 for episode_index, start, stop in spans
@@ -307,11 +322,26 @@ class SequenceBuffer:
                     int(self.offsets[episode_index]) + stop,
                 )
             ],
-            device="cpu" if self.async_transfers else self.device,
+            device=self.device,
         )
-        if self.async_transfers:
-            indices = indices.pin_memory().to(self.device, non_blocking=True)
-        return indices
+
+    def _host_index_slot(self, size):
+        # DMA can still be reading a live pinned slot after .to() returns.
+        # Reuse only completed slots and fall back to allocator-owned storage
+        # when several gathers are in flight, without waiting on the CPU.
+        for row, (storage, copied) in enumerate(self._host_index_slots):
+            if copied.query():
+                if len(storage) < size:
+                    storage = torch.empty(1 << (size - 1).bit_length(), dtype=torch.long, pin_memory=True)
+                    self._host_index_slots[row] = storage, copied
+                return storage[:size], copied
+        if len(self._host_index_slots) == 4:
+            return torch.empty(size, dtype=torch.long, pin_memory=True), None
+        capacity = 1 << max(0, (size - 1).bit_length())
+        storage = torch.empty(capacity, dtype=torch.long, pin_memory=True)
+        copied = torch.cuda.Event()
+        self._host_index_slots.append((storage, copied))
+        return storage[:size], copied
 
     def _gather(self, indices, width, *, include_behavior=True):
         if "action_spans" in self.data:
@@ -374,7 +404,7 @@ class SequenceBuffer:
         )
 
     def enable_async_transfers(self):
-        self.async_transfers = True
+        self.async_transfers = str(self.device).startswith("cuda")
 
 
 def take_counted_span(episode, start, stop, masks, limit):

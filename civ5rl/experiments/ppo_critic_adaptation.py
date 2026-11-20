@@ -10,6 +10,7 @@ import torch
 from torch.nn import functional as F
 
 from civ5rl.engine.runtime.budget import deadline_reached
+from civ5rl.engine.runtime.transactions import cpu_snapshot
 from civ5rl.engine.ppo.adam import expected_counters
 from civ5rl.engine.ppo.core import episode_returns, raw_gae_advantages
 from civ5rl.provenance import checkpoint
@@ -53,21 +54,25 @@ def adapt_critic(policy, optimizer, episodes, config, device, out, state, shuffl
     state["critic_progress"] = progress
     elapsed_before = progress["fit_seconds"]
 
-    def tick():
+    def tick(*, persist=True):
         progress["fit_seconds"] = elapsed_before + perf_counter() - started
         state["critic_fit_seconds"] = progress["fit_seconds"]
         state["Adam_counters"] = expected_counters(state)
-        clock.progress()
+        if persist:
+            clock.progress()
+        else:
+            clock.sync()
 
     def commit():
-        tick()
-        atomic_save(dict(identity=identity, behavior=behavior,
-                         value={k: v.detach().cpu() for k, v in policy.value.state_dict().items()},
-                         adam=[{k: v.detach().cpu() if isinstance(v, torch.Tensor) else v
-                                for k, v in optimizer.state.get(p, {}).items()}
-                               for p in value_group["params"]],
+        tick(persist=False)
+        model_adam = cpu_snapshot({
+            "value": policy.value.state_dict(),
+            "adam": [optimizer.state.get(p, {}) for p in value_group["params"]],
+        })
+        atomic_save(dict(identity=identity, behavior=behavior, **model_adam,
                          progress=dict(progress), rng=checkpoint.capture_rng(shuffle),
                          active_seconds=state["active_seconds"]), capsule_path)
+        clock.progress()
 
     fit_finished = False
     try:
@@ -82,19 +87,26 @@ def adapt_critic(policy, optimizer, episodes, config, device, out, state, shuffl
                 raise ValueError("Critic feature cache differs from frozen rollout/encoder")
             features = saved["features"]
         else:
-            features = torch.empty((len(returns), policy.hidden_size), dtype=torch.float32)
-            offset = 0
+            features = torch.empty((len(returns), policy.hidden_size), dtype=torch.float32, device=device)
+            offsets = np.cumsum([0, *[len(ep["chosen"]) for ep in episodes]])
+            cached = 0
+            last_progress = perf_counter()
             extraction_rng = checkpoint.capture_rng(shuffle)
             try:
-                for _, _, part in features_for(policy, episodes, device):
-                    features[offset:offset + len(part)] = part
-                    offset += len(part)
-                    tick()
+                for episode, start, part in features_for(policy, episodes, device):
+                    offset = int(offsets[episode]) + start
+                    features[offset:offset + len(part)].copy_(part, non_blocking=True)
+                    cached += len(part)
+                    # Keep budget recovery current without writing JSON for every block.
+                    now = perf_counter()
+                    if now - last_progress >= 1.0:
+                        tick()
+                        last_progress = now
             finally:
                 checkpoint.restore_rng(extraction_rng, shuffle)
-            if offset != len(returns):
+            if cached != len(returns):
                 raise ValueError("Incomplete critic feature cache")
-            atomic_save(dict(behavior=behavior, policy_hash=original_policy, features=features), cache_path)
+            atomic_save(dict(behavior=behavior, policy_hash=original_policy, features=features.cpu()), cache_path)
         # Small [positions, hidden] cache and labels move once, rather than per epoch/batch.
         features = features.to(device)
         labels = torch.from_numpy(returns).to(device)
@@ -116,7 +128,7 @@ def adapt_critic(policy, optimizer, episodes, config, device, out, state, shuffl
         epoch_order = None
         try:
             while progress["cursor"] < batches * settings["epochs"]:
-                tick()
+                tick(persist=False)
                 if progress["fit_seconds"] >= settings["active_seconds"] or deadline_reached(deadline):
                     break
                 epoch_idx, batch_idx = divmod(progress["cursor"], batches)
@@ -136,17 +148,20 @@ def adapt_critic(policy, optimizer, episodes, config, device, out, state, shuffl
                         loss = F.mse_loss(policy.value(features[sel]).squeeze(-1), labels[sel])
                     else:
                         loss = F.mse_loss(policy.value(features[first:stop]).squeeze(-1), labels[first:stop])
-                if not torch.isfinite(loss):
-                    raise FloatingPointError("Non-finite critic adaptation loss")
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(policy.value.parameters(), settings["max_gradient_norm"],
-                                               error_if_nonfinite=True)
+                norm = torch.nn.utils.clip_grad_norm_(policy.value.parameters(), settings["max_gradient_norm"])
+                finite_loss, finite_norm = torch.isfinite(torch.stack((loss.detach(), norm))).tolist()
+                if not finite_loss:
+                    raise FloatingPointError("Non-finite critic adaptation loss")
+                if not finite_norm:
+                    raise FloatingPointError("Non-finite critic adaptation gradient norm")
                 optimizer.step()
                 progress["steps"] += 1
                 progress["cursor"] += 1
                 progress["positions_processed"] += stop - first
                 commit()
-            commit()
+            if not capsule_path.exists():
+                commit()
         finally:
             value_group["lr"] = old_lr
             optimizer.zero_grad(set_to_none=True)

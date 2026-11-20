@@ -38,6 +38,23 @@ from tests.test_combat import scenario, unit
 
 
 class SelfPlayCorrectnessTests(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA precision configuration")
+    def test_cuda_learner_and_opponent_honor_disabled_amp(self):
+        from civ5rl.experiments.imitation_helpers import load_policy
+
+        cfg = load_config(ROOT / "configs/rl-ppo-c2p-h60-selfplay.json")
+        cfg["numerics"]["amp"] = False
+        cfg["performance"].update(compile=False, recurrent_cuda_graphs=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "initial.pt"
+            torch.save({"variant": "C2P", "model": Policy("C2P").state_dict()}, path)
+            learner = load_policy(cfg, path, "cuda")
+            opponent = OpponentPool(cfg, "cuda", tmp, parent_checkpoint=path).u0_policy
+            for policy in (learner, opponent):
+                self.assertFalse(policy.amp_enabled)
+                self.assertEqual(policy.spatial_batch_size, 0)
+                self.assertFalse(policy.coalesced_spatial)
+
     def test_opponent_pool_mix_and_archive_retention(self):
         cfg = load_config(ROOT / "configs/rl-ppo-c2p-h60-selfplay.json")
         validate_profile(cfg)

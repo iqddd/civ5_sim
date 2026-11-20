@@ -210,7 +210,7 @@ class _UpdateMetrics:
 class _MinibatchStep:
     epoch: int
     tokens: int
-    norm: torch.Tensor
+    norm: float
     started: float
 
     def record(self, attempt):
@@ -218,7 +218,7 @@ class _MinibatchStep:
             "step": attempt,
             "epoch": self.epoch + 1,
             "valid_tokens": self.tokens,
-            "gradient_norm_pre_clip": float(self.norm),
+            "gradient_norm_pre_clip": self.norm,
             "seconds": perf_counter() - self.started,
         }
 
@@ -420,13 +420,22 @@ def _optimizer_step(
     started = perf_counter()
     count = sum(stop - start for _, start, stop in minibatch)
     optimizer.zero_grad(set_to_none=True)
-    processed = backend.backward(minibatch, count, metrics.entropy_coefficient)
+    backward_minibatch = getattr(backend, "backward_minibatch", None)
+    if backward_minibatch is not None:
+        processed, diagnostics = backward_minibatch(minibatch, count, metrics.entropy_coefficient)
+    else:
+        processed = backend.backward(minibatch, count, metrics.entropy_coefficient)
     if processed != count:
         raise ValueError("PPO backend valid-token count mismatch")
     metrics.tokens += processed
     tick = perf_counter()
     norm = torch.nn.utils.clip_grad_norm_(
-        policy.parameters(), options["max_gradient_norm"], error_if_nonfinite=True
+        policy.parameters(), options["max_gradient_norm"],
+        error_if_nonfinite=backward_minibatch is None,
+    )
+    norm_value = (
+        backend.read_backward(diagnostics, norm)
+        if backward_minibatch is not None else float(norm)
     )
     backend.record_gradient(norm)
     gate.before_step()
@@ -435,7 +444,7 @@ def _optimizer_step(
     if gate.transactional:
         require_finite_state(policy, optimizer)
     metrics.optimizer_seconds += perf_counter() - tick
-    return _MinibatchStep(epoch, count, norm, started)
+    return _MinibatchStep(epoch, count, norm_value, started)
 
 
 def update(

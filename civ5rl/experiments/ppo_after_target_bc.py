@@ -17,7 +17,7 @@ from torch.nn import functional as F
 from civ5rl.engine.runtime.budget import ActiveBudget, DeadlineBudget, deadline_reached, resolve_deadline
 from civ5rl.core.model import batch_inputs
 from civ5rl.engine.collection.collector import Collector
-from civ5rl.engine.runtime.sequence import DEFAULT_PINNED_REPLAY_BYTES
+from civ5rl.engine.runtime.sequence import DEFAULT_PINNED_REPLAY_BYTES, DEFAULT_PREFIX_BLOCK_SIZE
 from civ5rl.engine.runtime.control import (
     RunLock,
     assert_not_closed,
@@ -243,6 +243,41 @@ def recurrent_features(policy, episodes, device):
             features, hidden = policy.sequence_memory(context, [len(part)], hidden)
             # Own the host data: compiled/CUDA runners may reuse their buffers.
             yield episode_index, start, features.detach().cpu().clone()
+
+
+@torch.no_grad()
+def batched_recurrent_features(policy, episodes, device):
+    """Stream bounded, episode-indexed FP32 feature blocks on the target device."""
+    block = DEFAULT_PREFIX_BLOCK_SIZE
+    group_size = 8
+    for first in range(0, len(episodes), group_size):
+        encoded = [encode_episode(ep, policy.variant) for ep in episodes[first:first + group_size]]
+        hidden = (
+            torch.zeros((1, len(encoded), policy.hidden_size), device=device)
+            if policy.is_recurrent else None
+        )
+        for start in range(0, max(map(len, encoded)), block):
+            parts = [(i, rows[start:start + block]) for i, rows in enumerate(encoded) if start < len(rows)]
+            lengths = [len(rows) for _, rows in parts]
+            slots = None
+            if hidden is not None and len(parts) != len(encoded):
+                slots = torch.tensor([i for i, _ in parts], device=device)
+            if policy.spatial_cuda_graphs:
+                torch.compiler.cudagraph_mark_step_begin()
+            batch = batch_inputs(
+                [row for _, rows in parts for row in rows], device,
+                non_blocking=True, spatial_only=True,
+            )
+            _, context = policy.encode_spatial(batch, return_cells=False)
+            features, last = policy.sequence_memory(
+                context, lengths, hidden if slots is None else hidden.index_select(1, slots),
+            )
+            if slots is None:
+                hidden = last
+            else:
+                hidden.index_copy_(1, slots, last)
+            for (i, _), values in zip(parts, features.split(lengths)):
+                yield first + i, start, values
 
 
 def prepare_critic(
@@ -1016,7 +1051,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                         compiler.monitor = monitor
                         state["critic"] = adapt_critic(
                             policy, optimizer, episodes, config, device, out, state, shuffle,
-                            identity, clock, deadline, features_for=recurrent_features,
+                            identity, clock, deadline, features_for=batched_recurrent_features,
                             behavior_hash=behavior_digest, statistics=critic_statistics,
                             policy_hash=policy_hash,
                         ) if adapts_value(config) else prepare_critic(
