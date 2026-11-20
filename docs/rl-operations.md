@@ -412,6 +412,11 @@ python tools/diagnose_cp_replay.py --rollout ROLLOUT --episode EPISODE --trace-f
 не изменяется. `--compare-git-rev` поддержан только для replay и не переключает
 целиком окружение, модель и native-библиотеки на указанный commit.
 
+PPO на CUDA с BF16 по умолчанию переиспользует spatial CUDA Graph для
+no-grad блока 32 × 256 в режиме `default`. Для замера обычного compiled
+forward в этом профиле задайте `performance.ppo_spatial_cuda_graph=false`
+в копии CONFIG.
+
 ## Профилирование collection и подбор runtime
 
 ```powershell

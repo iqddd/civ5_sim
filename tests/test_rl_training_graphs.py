@@ -7,10 +7,32 @@ import torch
 
 from civ5rl.core.model import Policy
 from civ5rl.core.schema import GLOBAL_DIM, PREV_ACTION_DIM, TILE_DIM
+from civ5rl.core.spatial import StaticSpatialGraph
 from civ5rl.core.training_graphs import RecurrentGraphs
 
 
 class TrainingGraphTests(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA graph replay requires CUDA")
+    @torch.no_grad()
+    def test_spatial_replay_reads_live_weights_and_preserves_previous_outputs(self):
+        weight = torch.full((), 2.0, device="cuda")
+        first = {"cells": torch.ones((32, 256), device="cuda")}
+        second = {"cells": torch.full_like(first["cells"], 3.0)}
+
+        def spatial(part):
+            cells = part["cells"] * weight
+            return cells, cells.sum(dim=1)
+
+        runner = StaticSpatialGraph(spatial, 32, 256)
+        expected_first = spatial(first)
+        actual_first = runner(first)
+        weight.fill_(5.0)
+        actual_second = runner(second)
+        for actual, expected in zip(actual_second, spatial(second)):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        for actual, expected in zip(actual_first, expected_first):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_coalesced_spatial_preserves_padded_block_gradients(self):
         torch.manual_seed(17)
         reference = Policy()

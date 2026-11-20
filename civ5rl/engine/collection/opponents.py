@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 from civ5rl.core.model import Policy
+from civ5rl.core.spatial import StaticSpatialGraph
 from civ5rl.provenance.common import seed_for
 
 
@@ -122,42 +123,6 @@ def maybe_archive_snapshot(
     return entry
 
 
-class _StaticSpatialGraph:
-    """Replay one padded spatial shape and read the archive runner's live weights.
-
-    The archive runner updates parameter storage in place. Capture the compiled
-    forward after warming its kernels, and copy outputs before another block can
-    overwrite them. Larger maps use the regular compiled forward.
-    """
-
-    def __init__(self, runner, cell_padding: int):
-        self._runner = runner
-        self._cell_padding = cell_padding
-        self._capture = None
-
-    def __call__(self, part: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
-        cells = part["cells"]
-        if torch.is_grad_enabled() or cells.shape[1] != self._cell_padding:
-            return self._runner(part)
-        if self._capture is None:
-            inputs = {key: value.clone() for key, value in part.items()}
-            current = torch.cuda.current_stream(cells.device)
-            stream = torch.cuda.Stream(device=cells.device)
-            stream.wait_stream(current)
-            with torch.cuda.stream(stream):
-                for _ in range(3):
-                    self._runner(inputs)
-            current.wait_stream(stream)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, stream=stream):
-                outputs = self._runner(inputs)
-            self._capture = graph, inputs, outputs
-        graph, inputs, (x, ctx) = self._capture
-        torch._foreach_copy_(list(inputs.values()), [part[key] for key in inputs])
-        graph.replay()
-        return x.clone(), ctx.clone()
-
-
 def _build_collection_policy(
     checkpoint_path: Path | str | None,
     config: dict[str, Any],
@@ -185,7 +150,7 @@ def _build_collection_policy(
     perf = config.get("performance", {})
     policy.spatial_cell_padding = perf.get("spatial_cell_padding", 0)
     # Opponent moves never enter behavior_replay/precheck: block size 4 eliminates
-    # 32-row padding waste while giving _StaticSpatialGraph one fixed [4, 256] shape.
+    # 32-row padding waste while giving StaticSpatialGraph one fixed padded shape.
     use_static_graph = (
         device_str.startswith("cuda")
         and perf.get("compile", False)
@@ -210,8 +175,8 @@ def _build_collection_policy(
             recompile_limit=perf.get("compile_recompile_limit", 32),
         )
         if use_static_graph:
-            policy._spatial_runner = _StaticSpatialGraph(
-                policy.spatial_runner, policy.spatial_cell_padding
+            policy._spatial_runner = StaticSpatialGraph(
+                policy.spatial_runner, policy.spatial_batch_size, policy.spatial_cell_padding
             )
     return policy
 

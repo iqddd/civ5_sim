@@ -23,6 +23,15 @@
 предвычисленными координатами. Весь короткий PPO занял 4,00 → 3,98 с.
 [Продолжение аудита](../artifacts/benchmarks/ppo-runtime-audit-2/report.md).
 
+Захват скомпилированного spatial-блока без градиента через CUDA Graph
+сократил медиану полного PPO update на 4,8–5,7% на RTX 4060 Ti.
+На 1 107 решениях совпали logits, `k3`, градиенты, состояния Adam и
+восстановление после rollback. Полный replay исторического rollout с
+926 spatial-вызовами ускорился на 5,9%. Граф добавил 118 МиБ reserved
+после очистки свободных блоков CUDA-аллокатора. Граф проверен в стендовом
+A/B и включён по умолчанию в PPO для CUDA BF16 с блоком 32 × 256 и режимом
+spatial compile `default`. [Замеры, паритет и трассы](../artifacts/benchmarks/ppo-no-grad-spatial-graph/report.md).
+
 ## Смешанный PPO и оценки на вехах
 
 - RTX 4060 Ti, i5-11600K, `ready`, 12 workers, 40 envs, `reply_size=4`.

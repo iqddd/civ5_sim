@@ -282,6 +282,7 @@ def run_replay_benchmark(
         )
     temperature = validate_temperature(config.get("policy_temperature", 1.0))
     require_rollout_temperature(episodes, temperature)
+    options = config.get("performance", {})
     # Check support before any warmup so an old T=1 backend cannot be silently
     # presented as the baseline for a cold-policy rollout.
     replay_kwargs = {}
@@ -298,6 +299,10 @@ def run_replay_benchmark(
         replay_kwargs[name] = {"full_distribution": True}
         if "temperature" in parameters:
             replay_kwargs[name]["temperature"] = temperature
+        if "forward" in parameters and hasattr(module, "ppo_replay_forward"):
+            replay_kwargs[name]["forward"] = module.ppo_replay_forward(
+                policy, spatial_graph=options.get("ppo_spatial_cuda_graph", True)
+            )
 
     hashes = _hashes(protected_inputs)
     initial_model = copy.deepcopy(policy.state_dict())
@@ -306,7 +311,6 @@ def run_replay_benchmark(
     ]
     initial_training = policy.training
     initial_rng = capture_rng()
-    options = config.get("performance", {})
     sequence_batch = options.get("kl_sequences_per_batch", 8)
     caches = {}
     records = []

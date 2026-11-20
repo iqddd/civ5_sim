@@ -25,7 +25,7 @@ from civ5rl.core.schema import (
     TILE,
     TILE_DIM,
 )
-from civ5rl.core.spatial import iter_spatial_blocks
+from civ5rl.core.spatial import StaticSpatialGraph, iter_spatial_blocks
 from civ5rl.core.variants import PolicyVariant, variant_spec
 
 GRU_GATES = 3
@@ -388,10 +388,16 @@ class CellUnitAttention(nn.Module):
 
 
 class _PolicyExecutor:
-    """Execution strategy, compilation, and batch padding outside nn.Module state."""
+    """Dispatch spatial batches, fixed blocks and the coalesced training path.
+
+    Eager and Inductor forwards use the same spatial math. StaticSpatialGraph
+    wraps the block forward for selected no-grad callers.
+    """
 
     def __init__(self):
         self.spatial_runner = None
+        self.spatial_compile_mode = None
+        self.replay_graph = None
         self.heads_runner = None
         self.memory_runner = None
 
@@ -406,11 +412,14 @@ class _PolicyExecutor:
     ):
         # Inference/no-grad replay/training have separate autograd specializations.
         # Keep a bounded cache, and retain fullgraph=True so fallback is never silent.
-        policy.spatial_cuda_graphs = spatial_mode == "reduce-overhead"
+        self.spatial_compile_mode = spatial_mode or mode
+        # Existing step markers are for Inductor-managed graphs.
+        policy.spatial_cuda_graphs = self.spatial_compile_mode == "reduce-overhead"
+        self.replay_graph = None
         self.spatial_runner = torch.compile(
             policy.spatial,
             dynamic=dynamic,
-            mode=spatial_mode or mode,
+            mode=self.spatial_compile_mode,
             fullgraph=True,
             recompile_limit=recompile_limit,
         )
@@ -427,7 +436,24 @@ class _PolicyExecutor:
 
         self.memory_runner = RecurrentGraphs(memory_module, max_shapes=max_shapes)
 
-    def encode_spatial(self, policy, batch, *, coalesced=None, return_cells=True):
+    def spatial_replay_runner(self, policy):
+        if (
+            self.spatial_compile_mode != "default"
+            or self.spatial_runner is None
+            or not policy.amp_enabled
+            or (policy.spatial_batch_size, policy.spatial_cell_padding) != (32, 256)
+        ):
+            return None
+        # Check storage once per PPO update. Optimizer steps and rollback update
+        # it in place; a model move or parameter replacement needs a new graph.
+        storage = tuple((p.device, p.dtype, p.data_ptr()) for p in policy.parameters())
+        if self.replay_graph is None or self.replay_graph[0] != storage:
+            self.replay_graph = storage, StaticSpatialGraph(self.spatial_runner, 32, 256)
+        return self.replay_graph[1]
+
+    def encode_spatial(
+        self, policy, batch, *, coalesced=None, return_cells=True, spatial_runner=None
+    ):
         extra = policy.spatial_cell_padding - batch["cells"].shape[1]
         if extra > 0:
             # Keep BF16 GEMM geometry independent of which map sizes happen
@@ -440,43 +466,54 @@ class _PolicyExecutor:
             }
         with policy.autocast(batch["cells"]):
             return self._encode_spatial(
-                policy, batch, coalesced=coalesced, return_cells=return_cells
+                policy, batch, coalesced=coalesced, return_cells=return_cells,
+                spatial_runner=spatial_runner,
             )
 
-    def _encode_spatial(self, policy, batch, *, coalesced, return_cells):
-        use_coalesced=policy.coalesced_spatial if coalesced is None else coalesced
+    def _encode_spatial(self, policy, batch, *, coalesced, return_cells, spatial_runner):
+        use_coalesced = policy.coalesced_spatial if coalesced is None else coalesced
         if use_coalesced and torch.is_grad_enabled():
-            if not policy.spatial_batch_size:
-                raise ValueError("Coalesced spatial training requires a fixed spatial block")
-            from civ5rl.core.training_graphs import CoalescedSpatial
-
-            parameters = tuple(
-                p
-                for name, p in policy.named_parameters()
-                if name.startswith(("projection.", "blocks.", "unit_attention.", "context."))
-                and p.requires_grad
+            x, context = self._coalesced_spatial(policy, batch)
+        elif policy.spatial_batch_size:
+            return self._fixed_spatial_blocks(
+                batch, policy.spatial_batch_size, spatial_runner or policy.spatial_runner,
+                return_cells=return_cells,
             )
-            x, context_embedding = CoalescedSpatial.apply(policy, batch, *parameters)
-            return x if return_cells else None, context_embedding
-        if policy.spatial_batch_size:
-            # BF16 GEMM output rounding can vary with the row count. Use the
-            # same GEMM shapes during action selection, replay and gradients.
-            # Padding rows are independent and discarded before memory/loss.
-            size = policy.spatial_batch_size
-            maps, contexts = [], []
-            runner = policy.spatial_runner
-            for part, count in iter_spatial_blocks(batch, size):
-                x, context_embedding = runner(part)
-                if return_cells:
-                    maps.append(x[:count])
-                contexts.append(context_embedding[:count])
-            return torch.cat(maps, 0) if return_cells else None, torch.cat(contexts, 0)
+        else:
+            x, context = self._spatial_batch(policy, batch)
+        return (x if return_cells else None), context
+
+    @staticmethod
+    def _coalesced_spatial(policy, batch):
+        if not policy.spatial_batch_size:
+            raise ValueError("Coalesced spatial training requires a fixed spatial block")
+        from civ5rl.core.training_graphs import CoalescedSpatial
+
+        parameters = tuple(
+            p
+            for name, p in policy.named_parameters()
+            if name.startswith(("projection.", "blocks.", "unit_attention.", "context."))
+            and p.requires_grad
+        )
+        return CoalescedSpatial.apply(policy, batch, *parameters)
+
+    @staticmethod
+    def _fixed_spatial_blocks(batch, size, runner, *, return_cells):
+        # Fixed BF16 GEMM geometry keeps action selection, replay and training
+        # consistent. Discard padded rows before memory and loss.
+        maps, contexts = [], []
+        for part, count in iter_spatial_blocks(batch, size):
+            x, context = runner(part)
+            if return_cells:
+                maps.append(x[:count])
+            contexts.append(context[:count])
+        return torch.cat(maps, 0) if return_cells else None, torch.cat(contexts, 0)
+
+    def _spatial_batch(self, policy, batch):
         if self.spatial_runner is not None and len(batch["cells"]) == 1:
-            padded = _pad_singleton_rows(batch)
-            x, context_embedding = self.spatial_runner(padded)
-            return x[:1] if return_cells else None, context_embedding[:1]
-        x, context_embedding = policy.spatial_runner(batch)
-        return x if return_cells else None, context_embedding
+            x, context = self.spatial_runner(_pad_singleton_rows(batch))
+            return x[:1], context[:1]
+        return policy.spatial_runner(batch)
 
     def score_heads(self, policy, batch, x, h, *, compute_value):
         with policy.autocast(x):
@@ -583,6 +620,7 @@ class Policy(nn.Module):
     @_spatial_runner.setter
     def _spatial_runner(self, runner):
         self._executor.spatial_runner = runner
+        self._executor.replay_graph = None
 
     @property
     def _heads_runner(self):
@@ -635,6 +673,7 @@ class Policy(nn.Module):
             raise ValueError("Execution options must be boolean")
         if coalesced_spatial and not self.spatial_batch_size:
             raise ValueError("Coalesced spatial training requires a fixed spatial block")
+        self._executor.replay_graph = None
         if attention_backend is not None:
             if attention_backend not in ("dense_fp32", "compact_fp32"):
                 raise ValueError("Unknown attention backend")
@@ -681,9 +720,13 @@ class Policy(nn.Module):
             spatial_mode=spatial_mode,
         )
 
-    def encode_spatial(self, batch, *, coalesced=None, return_cells=True):
+    def spatial_replay_runner(self):
+        return self._executor.spatial_replay_runner(self)
+
+    def encode_spatial(self, batch, *, coalesced=None, return_cells=True, spatial_runner=None):
         return self._executor.encode_spatial(
-            self, batch, coalesced=coalesced, return_cells=return_cells
+            self, batch, coalesced=coalesced, return_cells=return_cells,
+            spatial_runner=spatial_runner,
         )
 
     def score_heads(self, batch, x, h, *, compute_value=True):
@@ -713,9 +756,14 @@ class Policy(nn.Module):
             self, context_embedding, lengths, hidden, return_sequence=return_sequence
         )
 
-    def forward_sequences(self, batch, lengths, hidden=None, *, memory_only=False, compute_value=True):
+    def forward_sequences(
+        self, batch, lengths, hidden=None, *, memory_only=False, compute_value=True,
+        spatial_runner=None,
+    ):
         self._check_sequences(len(batch["cells"]), lengths, hidden)
-        x, context_embedding = self.encode_spatial(batch, return_cells=not memory_only)
+        x, context_embedding = self.encode_spatial(
+            batch, return_cells=not memory_only, spatial_runner=spatial_runner
+        )
         h, last = self.sequence_memory(context_embedding, lengths, hidden, return_sequence=not memory_only)
         if memory_only:
             return last

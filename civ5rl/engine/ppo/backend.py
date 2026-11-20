@@ -1,6 +1,7 @@
 """GPU-resident rollout and batched recurrent chunks; same PPO minibatch/targets."""
 
 from dataclasses import dataclass
+from functools import partial
 from time import perf_counter
 from typing import Literal, NamedTuple
 
@@ -542,10 +543,22 @@ class RolloutCache(SequenceBuffer):
         return data, labels, [stop - start for _, start, stop in spans]
 
 
+def ppo_replay_forward(policy, *, spatial_graph=True):
+    """Select the no-grad forward for PPO, independent of actor training."""
+    replay_runner = getattr(policy, "spatial_replay_runner", None)
+    if spatial_graph and replay_runner is not None:
+        if (runner := replay_runner()) is not None:
+            return partial(policy.forward_sequences, spatial_runner=runner)
+    return policy.forward_sequences
+
+
 @torch.no_grad()
-def prefixes(policy, cache: SequenceCache, spans, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
+def prefixes(
+    policy, cache: SequenceCache, spans, block_size=DEFAULT_PREFIX_BLOCK_SIZE, *, forward=None
+):
     if not policy.is_recurrent:
         return None
+    forward = forward or policy.forward_sequences
     hidden = torch.zeros((1, len(spans), policy.hidden_size), device=cache.device)
     is_cuda = str(cache.device).startswith("cuda")
     for offset in range(
@@ -565,14 +578,14 @@ def prefixes(policy, cache: SequenceCache, spans, block_size=DEFAULT_PREFIX_BLOC
         if policy.spatial_cuda_graphs:
             torch.compiler.cudagraph_mark_step_begin()
         if len(active) == len(spans):
-            hidden = policy.forward_sequences(batch, lengths, hidden, memory_only=True)
+            hidden = forward(batch, lengths, hidden, memory_only=True)
         else:
             slots = torch.tensor(
                 [slot for slot, _, _ in active],
                 dtype=torch.long,
                 pin_memory=is_cuda,
             ).to(cache.device, non_blocking=is_cuda)
-            last = policy.forward_sequences(
+            last = forward(
                 batch, lengths, hidden.index_select(1, slots), memory_only=True
             )
             hidden.index_copy_(1, slots, last)
@@ -776,9 +789,11 @@ def _replay_groups(cache, sequences_per_batch):
 
 @torch.no_grad()
 def measure_replay(
-    policy, cache, sequences_per_batch=8, *, full_distribution=False, temperature=1.0
+    policy, cache, sequences_per_batch=8, *, full_distribution=False, temperature=1.0,
+    forward=None,
 ):
     require_rollout_temperature(cache.episodes, temperature)
+    forward = forward or ppo_replay_forward(policy)
     device = cache.device
     totals = torch.zeros(len(_ReplaySums._fields), device=device)
     maximum = torch.zeros((), device=device)
@@ -802,7 +817,7 @@ def measure_replay(
                 if hidden is None
                 else (hidden if slots is None else hidden.index_select(1, slots))
             )
-            logits, value, last = policy.forward_sequences(
+            logits, value, last = forward(
                 batch,
                 lengths,
                 part_hidden,
@@ -905,6 +920,9 @@ class BatchedBackend:
             monitor,
         )
         options = config.get("performance", {})
+        self.replay_forward = ppo_replay_forward(
+            policy, spatial_graph=options.get("ppo_spatial_cuda_graph", True)
+        )
         self.temperature = validate_temperature(config.get("policy_temperature", 1.0))
         require_rollout_temperature(episodes, self.temperature)
         tick = perf_counter()
@@ -972,6 +990,7 @@ class BatchedBackend:
             self.kl_batch,
             full_distribution=True,
             temperature=self.temperature,
+            forward=self.replay_forward,
         )
         pre_kl, pre_error = self.replay["sampled_kl"], self.replay["max_logp_error"]
         self.replay_tolerance = validate_behavior_replay(
@@ -992,7 +1011,7 @@ class BatchedBackend:
         if self.policy.spatial_cuda_graphs:
             torch.compiler.cudagraph_mark_step_begin()
         tick = perf_counter()
-        hidden = prefixes(self.policy, self.cache, minibatch)
+        hidden = prefixes(self.policy, self.cache, minibatch, forward=self.replay_forward)
         self.prefix_seconds += perf_counter() - tick
         finite = torch.ones((), dtype=torch.bool, device=self.device)
         k3_free_sum = (
@@ -1070,6 +1089,7 @@ class BatchedBackend:
             self.kl_batch,
             full_distribution=exact,
             temperature=self.temperature,
+            forward=self.replay_forward,
         )
         self.last_replay = diagnostics
         if exact:
