@@ -66,6 +66,14 @@ class TemperatureTests(unittest.TestCase):
             * (old_logp.double() - logp.detach().double()).masked_fill(~torch.isfinite(logp), 0)
         ).sum(-1)
         torch.testing.assert_close(kl, expected, rtol=1e-5, atol=1e-7)
+        normalizer = old_logp.double().logsumexp(-1)
+        for scores in (old_logp, policy_logits(current.detach(), 0.5)):
+            reference_kl, reference_tv = categorical_distance(old_logp, scores, torch.isfinite(old_logp))
+            cached_kl, cached_tv = categorical_distance(
+                old_logp, scores, torch.isfinite(old_logp), normalizer
+            )
+            torch.testing.assert_close(cached_kl, reference_kl, rtol=0, atol=1e-12)
+            torch.testing.assert_close(cached_tv, reference_tv, rtol=0, atol=1e-12)
         default, _ = objective(
             current.detach(),
             values.detach(),

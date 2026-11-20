@@ -72,6 +72,23 @@ def make_context(s, side=0, max_rounds=30):
 
 
 class C2Tests(unittest.TestCase):
+    def test_cached_distance_geometry_matches_mixed_widths_and_compact_keys(self):
+        from civ5rl.core.model import _hex_bucket_table
+
+        widths = torch.arange(2, 17).repeat(2)
+        neighbors = torch.full((len(widths), 256, 6), -1, dtype=torch.long)
+        neighbors[:15, 0, 0] = widths[:15]
+        neighbors[15:, 0, 5] = widths[15:]
+        count = widths * 12
+        mask = torch.arange(256)[None, :] < count[:, None]
+        keys = torch.stack((torch.zeros_like(widths), count - 1, -torch.ones_like(widths)), 1)
+        for key_indices in (None, keys):
+            expected = hex_distance_buckets_from_neighbors(neighbors, mask, key_indices=key_indices)
+            actual = hex_distance_buckets_from_neighbors(
+                neighbors, mask, key_indices=key_indices, bucket_table=_hex_bucket_table()
+            )
+            torch.testing.assert_close(actual.long(), expected, rtol=0, atol=0)
+
     @classmethod
     def setUpClass(cls):
         configure(17, "cpu")

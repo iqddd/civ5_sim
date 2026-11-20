@@ -31,7 +31,17 @@ from civ5rl.core.variants import PolicyVariant, variant_spec
 GRU_GATES = 3
 
 
-def batch_inputs(items, device, *, non_blocking=False, spatial_only=False, min_cells=0, compact_units=False, actions_only=False):
+def batch_inputs(
+    items,
+    device,
+    *,
+    non_blocking=False,
+    spatial_only=False,
+    min_cells=0,
+    compact_units=False,
+    actions_only=False,
+    index_dtype=np.int64,
+):
     if not items or any(len(item.cells) == 0 for item in items):
         raise ValueError("Each batch item must contain at least one cell")
     batch_size = len(items)
@@ -42,7 +52,7 @@ def batch_inputs(items, device, *, non_blocking=False, spatial_only=False, min_c
         num_cells = max(min_cells, max(len(item.cells) for item in items))
         cells = np.zeros((batch_size, num_cells, TILE_DIM), np.float32)
         masks = np.zeros((batch_size, num_cells), bool)
-        neighbors = np.full((batch_size, num_cells, HEX_DIRECTIONS), -1, np.int64)
+        neighbors = np.full((batch_size, num_cells, HEX_DIRECTIONS), -1, index_dtype)
         for i, x in enumerate(items):
             cell_count = len(x.cells)
             cells[i, :cell_count] = x.cells
@@ -70,7 +80,7 @@ def batch_inputs(items, device, *, non_blocking=False, spatial_only=False, min_c
         values["unit_indices"] = indices
     if not spatial_only:
         num_actions = max(len(item.sources) for item in items)
-        sources = np.full((batch_size, num_actions), -1, np.int64)
+        sources = np.full((batch_size, num_actions), -1, index_dtype)
         targets = sources.copy()
         action_mask = np.zeros((batch_size, num_actions), bool)
         features = np.zeros((batch_size, num_actions, ACTION_DIM), np.float32)
@@ -133,7 +143,7 @@ class HexNeighborGather(torch.autograd.Function):
 
 
 class ActionEmbeddingGather(torch.autograd.Function):
-    """Small deterministic dense reduction replaces general sorted index backward."""
+    """Deterministically reduce action gradients over each cell's contiguous segment."""
 
     @staticmethod
     def forward(ctx, embeddings, indices):
@@ -146,11 +156,20 @@ class ActionEmbeddingGather(torch.autograd.Function):
     @staticmethod
     def backward(ctx, gradient):
         (indices,) = ctx.saved_tensors
-        routing = (indices.unsqueeze(-1) == torch.arange(ctx.num_cells, device=indices.device)).to(
-            gradient.dtype
+        if indices.shape[1] <= 32:
+            # A single small GEMM costs less than sorting short action lists.
+            cells = torch.arange(ctx.num_cells, device=indices.device)
+            routing = (indices.unsqueeze(-1) == cells).to(gradient.dtype)
+            with torch.autocast(gradient.device.type, enabled=False):
+                return torch.bmm(routing.transpose(1, 2), gradient), None
+        keys, order = indices.sort(dim=1, stable=True)
+        boundaries = torch.arange(ctx.num_cells + 1, device=indices.device)
+        offsets = torch.searchsorted(
+            keys, boundaries.expand(len(indices), -1).contiguous()
         )
-        with torch.autocast(gradient.device.type, enabled=False):
-            return torch.bmm(routing.transpose(1, 2), gradient), None
+        ordered = gradient.gather(1, order.unsqueeze(-1).expand_as(gradient))
+        # The first offset skips invalid indices. Empty cells get a zero gradient.
+        return torch.segment_reduce(ordered, "sum", offsets=offsets, axis=1, unsafe=True), None
 
 
 class MapMaximum(torch.autograd.Function):
@@ -187,16 +206,16 @@ class HexBlock(nn.Module):
         projected = F.linear(x, self.weight.reshape((SELF_AND_HEX_DIRECTIONS) * HEX_DIM, HEX_DIM)).reshape(
             b, n, SELF_AND_HEX_DIRECTIONS, HEX_DIM
         )
-        batch_index = torch.arange(b, device=x.device)[:, None, None]
-        directions = torch.arange(1, SELF_AND_HEX_DIRECTIONS, device=x.device)[None, None, :]
-        messages = (
-            HexNeighborGather.apply(projected, neighbors)
-            if self.inverse_routing
-            else projected[batch_index, neighbors.clamp_min(0), directions]
-        )
+        if self.inverse_routing:
+            messages = HexNeighborGather.apply(projected, neighbors).float()
+        else:
+            batch_index = torch.arange(b, device=x.device)[:, None, None]
+            directions = torch.arange(1, SELF_AND_HEX_DIRECTIONS, device=x.device)[None, None, :]
+            messages = projected[batch_index, neighbors.clamp_min(0), directions].float()
+            messages = messages * (neighbors >= 0).unsqueeze(-1)
         message = (
             projected[:, :, 0].float()
-            + (messages.float() * (neighbors >= 0).unsqueeze(-1)).sum(2)
+            + messages.sum(2)
             + self.bias
         )
         u = x + F.gelu(self.norm1(message))
@@ -204,27 +223,33 @@ class HexBlock(nn.Module):
 
 
 _HEX_QR_CPU: tuple[torch.Tensor, torch.Tensor] | None = None
+_HEX_BUCKETS_CPU: torch.Tensor | None = None
 
 
-def _hex_qr_cpu_tables() -> tuple[torch.Tensor, torch.Tensor]:
-    """Precomputed axial (q, r) coordinates for row_parity in {0, 1}, w in 2..MAX_MAP_AXIS."""
+def _hex_qr_cpu_tables():
     global _HEX_QR_CPU
     if _HEX_QR_CPU is None:
-        widths = MAX_MAP_AXIS - 1
-        qs = torch.zeros((2 * widths, MAX_MAP_CELLS), dtype=torch.int16)
-        rs = torch.zeros((2 * widths, MAX_MAP_CELLS), dtype=torch.int16)
-        idx = torch.arange(MAX_MAP_CELLS, dtype=torch.long)
-        for parity in (0, 1):
-            for w in range(2, MAX_MAP_AXIS + 1):
-                gid = parity * widths + (w - 2)
-                x = idx % w
-                y = idx // w
-                r = y + parity
-                q = x - ((r - (r & 1)) >> 1)
-                qs[gid] = q.to(torch.int16)
-                rs[gid] = r.to(torch.int16)
-        _HEX_QR_CPU = (qs, rs)
+        cells = np.arange(MAX_MAP_CELLS, dtype=np.int16)[None, :]
+        widths = np.tile(np.arange(2, MAX_MAP_AXIS + 1, dtype=np.int16), 2)[:, None]
+        parity = np.repeat(np.arange(2, dtype=np.int16), MAX_MAP_AXIS - 1)[:, None]
+        r = cells // widths + parity
+        q = cells % widths - ((r - (r & 1)) >> 1)
+        _HEX_QR_CPU = torch.from_numpy(q), torch.from_numpy(r)
     return _HEX_QR_CPU
+
+
+def _hex_bucket_table():
+    """One byte per pair for each supported width and row parity."""
+    global _HEX_BUCKETS_CPU
+    if _HEX_BUCKETS_CPU is None:
+        q, r = (coordinates.numpy() for coordinates in _hex_qr_cpu_tables())
+        dq = q[:, :, None] - q[:, None, :]
+        dr = r[:, :, None] - r[:, None, :]
+        distances = (np.abs(dq) + np.abs(dr) + np.abs(dq + dr)) >> 1
+        _HEX_BUCKETS_CPU = torch.from_numpy(
+            np.minimum(distances, C2_DISTANCE_BUCKETS - 1).astype(np.uint8)
+        )
+    return _HEX_BUCKETS_CPU
 
 
 def hex_distance_buckets_from_neighbors(
@@ -233,12 +258,23 @@ def hex_distance_buckets_from_neighbors(
     num_buckets: int = C2_DISTANCE_BUCKETS,
     key_indices=None,
     *,
+    bucket_table: torch.Tensor | None = None,
     qr_tables: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Exact pairwise hex distance buckets 0..num_buckets-1 from the neighbors graph."""
     _b, n, _ = neighbors.shape
     row_parity = (neighbors[:, 0, 5] >= 0).long()
     w = torch.where(neighbors[:, 0, 5] >= 0, neighbors[:, 0, 5], neighbors[:, 0, 0]).clamp_min(2)
+    key_mask = cell_mask if key_indices is None else key_indices >= 0
+    valid_pairs = cell_mask[:, :, None] & key_mask[:, None, :]
+    if bucket_table is not None and n <= MAX_MAP_CELLS and num_buckets == C2_DISTANCE_BUCKETS:
+        gid = row_parity * (MAX_MAP_AXIS - 1) + (w.clamp_max(MAX_MAP_AXIS) - 2)
+        if key_indices is None:
+            dist = bucket_table[gid, :n, :n]
+        else:
+            cells = torch.arange(n, device=neighbors.device)[None, :, None]
+            dist = bucket_table[gid[:, None, None], cells, key_indices[:, None, :].clamp_min(0)]
+        return torch.where(valid_pairs, dist, 0)
     if qr_tables is not None and n <= MAX_MAP_CELLS:
         qs, rs = qr_tables
         gid = row_parity * (MAX_MAP_AXIS - 1) + (w.clamp_max(MAX_MAP_AXIS) - 2)
@@ -255,8 +291,6 @@ def hex_distance_buckets_from_neighbors(
     dq = q[:, :, None] - key_q[:, None, :]
     dr = r[:, :, None] - key_r[:, None, :]
     dist = (dq.abs() + dr.abs() + (dq + dr).abs()) >> 1
-    key_mask = cell_mask if key_indices is None else key_indices >= 0
-    valid_pairs = cell_mask[:, :, None] & key_mask[:, None, :]
     return torch.where(valid_pairs, dist.clamp(0, num_buckets - 1), 0).to(torch.long)
 
 
@@ -275,7 +309,7 @@ class BucketBias(torch.autograd.Function):
     def forward(ctx, table, buckets):
         ctx.save_for_backward(buckets)
         ctx.num_buckets = table.shape[1]
-        return table[:, buckets]
+        return table[:, buckets.long()]
 
     @staticmethod
     def backward(ctx, grad):
@@ -306,9 +340,16 @@ class CellUnitAttention(nn.Module):
         self.kv_proj = nn.Linear(HEX_DIM, 2 * HEX_DIM)
         self.out_proj = nn.Linear(HEX_DIM, HEX_DIM)
         self.distance_bias = nn.Parameter(torch.zeros(C2_ATTN_HEADS, C2_DISTANCE_BUCKETS))
-        qr_q, qr_r = _hex_qr_cpu_tables()
-        self.register_buffer("_qr_q", qr_q.clone(), persistent=False)
-        self.register_buffer("_qr_r", qr_r.clone(), persistent=False)
+        qs, rs = _hex_qr_cpu_tables()
+        self.register_buffer("_qr_q", qs, persistent=False)
+        self.register_buffer("_qr_r", rs, persistent=False)
+        self.register_buffer("_bucket_table", None, persistent=False)
+
+    def enable_compact_geometry(self, enabled):
+        if not enabled:
+            self._bucket_table = None
+        elif self._bucket_table is None:
+            self._bucket_table = _hex_bucket_table().to(self.distance_bias.device)
 
     def forward_with_weights(self, x, cells, neighbors, cell_mask, key_indices=None):
         b, n, _ = x.shape
@@ -317,6 +358,7 @@ class CellUnitAttention(nn.Module):
             neighbors,
             cell_mask,
             key_indices=key_indices,
+            bucket_table=self._bucket_table if key_indices is not None else None,
             qr_tables=(self._qr_q, self._qr_r),
         )
         u = self.norm(x)
@@ -385,7 +427,7 @@ class _PolicyExecutor:
 
         self.memory_runner = RecurrentGraphs(memory_module, max_shapes=max_shapes)
 
-    def encode_spatial(self, policy, batch, *, coalesced=None):
+    def encode_spatial(self, policy, batch, *, coalesced=None, return_cells=True):
         extra = policy.spatial_cell_padding - batch["cells"].shape[1]
         if extra > 0:
             # Keep BF16 GEMM geometry independent of which map sizes happen
@@ -397,9 +439,11 @@ class _PolicyExecutor:
                 "cell_mask": F.pad(batch["cell_mask"], (0, extra), value=False),
             }
         with policy.autocast(batch["cells"]):
-            return self._encode_spatial(policy, batch, coalesced=coalesced)
+            return self._encode_spatial(
+                policy, batch, coalesced=coalesced, return_cells=return_cells
+            )
 
-    def _encode_spatial(self, policy, batch, *, coalesced=None):
+    def _encode_spatial(self, policy, batch, *, coalesced, return_cells):
         use_coalesced=policy.coalesced_spatial if coalesced is None else coalesced
         if use_coalesced and torch.is_grad_enabled():
             if not policy.spatial_batch_size:
@@ -412,31 +456,35 @@ class _PolicyExecutor:
                 if name.startswith(("projection.", "blocks.", "unit_attention.", "context."))
                 and p.requires_grad
             )
-            return CoalescedSpatial.apply(policy, batch, *parameters)
+            x, context_embedding = CoalescedSpatial.apply(policy, batch, *parameters)
+            return x if return_cells else None, context_embedding
         if policy.spatial_batch_size:
             # BF16 GEMM output rounding can vary with the row count. Use the
             # same GEMM shapes during action selection, replay and gradients.
             # Padding rows are independent and discarded before memory/loss.
             size = policy.spatial_batch_size
-            outputs = []
+            maps, contexts = [], []
             runner = policy.spatial_runner
             for part, count in iter_spatial_blocks(batch, size):
                 x, context_embedding = runner(part)
-                outputs.append((x[:count], context_embedding[:count]))
-            return tuple(torch.cat([output[i] for output in outputs], 0) for i in range(2))
+                if return_cells:
+                    maps.append(x[:count])
+                contexts.append(context_embedding[:count])
+            return torch.cat(maps, 0) if return_cells else None, torch.cat(contexts, 0)
         if self.spatial_runner is not None and len(batch["cells"]) == 1:
             padded = _pad_singleton_rows(batch)
             x, context_embedding = self.spatial_runner(padded)
-            return x[:1], context_embedding[:1]
-        return policy.spatial_runner(batch)
+            return x[:1] if return_cells else None, context_embedding[:1]
+        x, context_embedding = policy.spatial_runner(batch)
+        return x if return_cells else None, context_embedding
 
-    def score_heads(self, policy, batch, x, h):
+    def score_heads(self, policy, batch, x, h, *, compute_value):
         with policy.autocast(x):
-            return self._score_heads(policy, batch, x, h)
+            return self._score_heads(policy, batch, x, h, compute_value=compute_value)
 
-    def _score_heads(self, policy, batch, x, h):
+    def _score_heads(self, policy, batch, x, h, *, compute_value):
         if self.heads_runner is None:
-            return policy.heads(batch, x, h)
+            return policy.heads(batch, x, h, compute_value=compute_value)
         action_keys = ("sources", "targets", "action_features", "action_mask")
         if policy.variant_spec.attack_preview:
             action_keys += ("attack_preview",)
@@ -451,19 +499,27 @@ class _PolicyExecutor:
                 value = action_batch[key]
                 fill = -1 if key in ("sources", "targets") else 0
                 action_batch[key] = torch.cat((value, torch.full_like(value, fill)), 1)
-        logits, value = self.heads_runner(action_batch, x, h)
-        return logits[:num_rows, :num_actions], value[:num_rows]
+        logits, value = self.heads_runner(action_batch, x, h, compute_value=compute_value)
+        return logits[:num_rows, :num_actions], value[:num_rows] if compute_value else None
 
-    def run_recurrent_memory(self, policy, context_embedding, lengths, hidden):
+    def run_recurrent_memory(self, policy, context_embedding, lengths, hidden, *, return_sequence):
         # CUDA autocast can select FP16 for cuDNN RNN even inside BF16 autocast.
         # Keep both GRU arithmetic and stored army memory explicitly in FP32.
         with torch.autocast(context_embedding.device.type, enabled=False):
-            sequences = context_embedding.float().split(lengths)
-            padded = nn.utils.rnn.pad_sequence(sequences)
-            output, _ = (self.memory_runner or policy.memory)(
-                padded, None if hidden is None else hidden.float()
-            )
-        valid = torch.cat([output[:length, i] for i, length in enumerate(lengths)])
+            memory = self.memory_runner or policy.memory
+            hidden = None if hidden is None else hidden.float()
+            context = context_embedding.float()
+            length = lengths[0]
+            if all(other == length for other in lengths):
+                padded = context.reshape(len(lengths), length, -1).transpose(0, 1).contiguous()
+                output, last = memory(padded, hidden)
+                valid = output.transpose(0, 1).reshape_as(context) if return_sequence else None
+                return valid, last
+            output, _ = memory(nn.utils.rnn.pad_sequence(context.split(lengths)), hidden)
+        valid = (
+            torch.cat([output[:length, i] for i, length in enumerate(lengths)])
+            if return_sequence else None
+        )
         last = torch.stack([output[length - 1, i] for i, length in enumerate(lengths)])[None]
         return valid, last
 
@@ -583,6 +639,8 @@ class Policy(nn.Module):
             if attention_backend not in ("dense_fp32", "compact_fp32"):
                 raise ValueError("Unknown attention backend")
             self.attention_backend = attention_backend
+            if self.unit_attention is not None:
+                self.unit_attention.enable_compact_geometry(attention_backend == "compact_fp32")
         if inverse_routing is not None:
             for block in self.blocks:
                 block.inverse_routing = inverse_routing
@@ -623,11 +681,13 @@ class Policy(nn.Module):
             spatial_mode=spatial_mode,
         )
 
-    def encode_spatial(self, batch, *, coalesced=None):
-        return self._executor.encode_spatial(self, batch, coalesced=coalesced)
+    def encode_spatial(self, batch, *, coalesced=None, return_cells=True):
+        return self._executor.encode_spatial(
+            self, batch, coalesced=coalesced, return_cells=return_cells
+        )
 
-    def score_heads(self, batch, x, h):
-        return self._executor.score_heads(self, batch, x, h)
+    def score_heads(self, batch, x, h, *, compute_value=True):
+        return self._executor.score_heads(self, batch, x, h, compute_value=compute_value)
 
     def _check_sequences(self, batch_size, lengths, hidden):
         if (
@@ -642,20 +702,24 @@ class Policy(nn.Module):
         if self.is_recurrent:
             self._check_hidden(hidden, len(lengths))
 
-    def sequence_memory(self, context_embedding, lengths, hidden=None):
+    def sequence_memory(self, context_embedding, lengths, hidden=None, *, return_sequence=True):
         self._check_sequences(len(context_embedding), lengths, hidden)
         if not self.is_recurrent:
+            if not return_sequence:
+                return None, None
             with self.autocast(context_embedding):
                 return self.memory(context_embedding).float(), None
-        return self._executor.run_recurrent_memory(self, context_embedding, lengths, hidden)
+        return self._executor.run_recurrent_memory(
+            self, context_embedding, lengths, hidden, return_sequence=return_sequence
+        )
 
-    def forward_sequences(self, batch, lengths, hidden=None, *, memory_only=False):
+    def forward_sequences(self, batch, lengths, hidden=None, *, memory_only=False, compute_value=True):
         self._check_sequences(len(batch["cells"]), lengths, hidden)
-        x, context_embedding = self.encode_spatial(batch)
-        h, last = self.sequence_memory(context_embedding, lengths, hidden)
+        x, context_embedding = self.encode_spatial(batch, return_cells=not memory_only)
+        h, last = self.sequence_memory(context_embedding, lengths, hidden, return_sequence=not memory_only)
         if memory_only:
             return last
-        logits, value = self.score_heads(batch, x, h)
+        logits, value = self.score_heads(batch, x, h, compute_value=compute_value)
         return logits, value, last
 
     def _initialize(self):
@@ -714,7 +778,7 @@ class Policy(nn.Module):
             )
         return x, context_embedding
 
-    def heads(self, batch, x, h):
+    def heads(self, batch, x, h, *, compute_value=True):
         b, n, _ = x.shape
         offsets = torch.arange(b, device=x.device)[:, None] * n
         flat = x.reshape(b * n, self.hex_dim)
@@ -744,7 +808,7 @@ class Policy(nn.Module):
             else:
                 scores = self.action(action_input.float())
             logits = scores.squeeze(-1).masked_fill(~batch["action_mask"], -torch.inf)
-            value = self.value(h.float()).squeeze(-1)
+            value = self.value(h.float()).squeeze(-1) if compute_value else None
         return logits, value
 
     def _check_hidden(self, hidden: torch.Tensor | None, batch_size: int) -> None:
@@ -755,9 +819,9 @@ class Policy(nn.Module):
         ):
             raise ValueError(f"Hidden state must have shape (1, {batch_size}, {self.hidden_size})")
 
-    def forward(self, batch, hidden=None, *, sequence=False):
+    def forward(self, batch, hidden=None, *, sequence=False, compute_value=True):
         if not self.is_recurrent:
-            return self.forward_sequences(batch, [len(batch["cells"])], hidden)
+            return self.forward_sequences(batch, [len(batch["cells"])], hidden, compute_value=compute_value)
         self._check_hidden(hidden, 1 if sequence else len(batch["cells"]))
         x, context_embedding = self.encode_spatial(batch)
         # sequence=True: items are consecutive decisions of one episode.
@@ -765,7 +829,7 @@ class Policy(nn.Module):
         with torch.autocast(context_embedding.device.type, enabled=False):
             output, hidden = self.memory(recurrent_input.float(), None if hidden is None else hidden.float())
         h = output[:, 0] if sequence else output[0]
-        logits, value = self.score_heads(batch, x, h)
+        logits, value = self.score_heads(batch, x, h, compute_value=compute_value)
         return logits, value, hidden
 
 

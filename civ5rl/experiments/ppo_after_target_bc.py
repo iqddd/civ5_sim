@@ -6,7 +6,7 @@ import random
 import traceback
 from dataclasses import dataclass
 from enum import Enum
-from functools import partial
+from functools import cache, partial
 from pathlib import Path
 from time import perf_counter
 
@@ -238,8 +238,8 @@ def recurrent_features(policy, episodes, device):
             if policy.spatial_cuda_graphs:
                 torch.compiler.cudagraph_mark_step_begin()
             part = encoded[start : start + 128]
-            batch = batch_inputs(part, device, non_blocking=True)
-            _, context = policy.encode_spatial(batch)
+            batch = batch_inputs(part, device, non_blocking=True, spatial_only=True)
+            _, context = policy.encode_spatial(batch, return_cells=False)
             features, hidden = policy.sequence_memory(context, [len(part)], hidden)
             # Own the host data: compiled/CUDA runners may reuse their buffers.
             yield episode_index, start, features.detach().cpu().clone()
@@ -941,9 +941,11 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                 inference_min_batch=runtime.get("inference_min_batch", 0),
                 inference_wait_seconds=runtime.get("inference_wait_seconds", 0),
                 opponent_pool=opponent_pool,
+                record_hidden=False,
             ) as collector,
             monitor.capture_cuda_oom(policy),
         ):
+            checked_final_evaluation = False
             while not state["stop_reason"]:
                 critic_started = perf_counter() if state["phase"] == "critic" else None
                 if max_updates is not None and state["updates"] >= max_updates:
@@ -1095,7 +1097,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                             monitor=monitor,
                             deadline=deadline,
                             on_step=inspect_step,
-                            _backend=partial(BatchedBackend, pinned_replay=True),
+                            _backend=partial(BatchedBackend, pinned_replay=True, consume_encoded=True),
                         )
                         operation_ended = perf_counter()
                     metrics["runtime_compilation_seconds"] = sum(
@@ -1139,6 +1141,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                 state["pending_update"] = row
                 state["phase"] = Phase.COLLECT.value
                 state["latest"] = f"checkpoints/update-{state['rollouts']:04}.pt"
+                fingerprint = cache(lambda: policy_hash(policy.state_dict()))
                 archived = None
                 if opponent_pool is not None:
                     from civ5rl.engine.collection.opponents import maybe_archive_snapshot
@@ -1147,14 +1150,14 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                         state,
                         config,
                         checkpoint_relpath=state["latest"],
-                        policy_hash_value=policy_hash(policy.state_dict()),
+                        policy_hash_value=fingerprint,
                     )
                 monitor.mark("checkpoint")
                 save_boundary(
                     out, policy, optimizer, state, shuffle, config, identity, clock
                 )
                 if opponent_pool is not None and archived is not None:
-                    opponent_pool.sync_archive(state["self_play_archive"])
+                    opponent_pool.add_archive_snapshot(archived, policy)
                 with (out / "updates.jsonl").open("a", encoding="utf-8") as stream:
                     stream.write(json.dumps(row, allow_nan=False) + "\n")
                 state.pop("pending_update", None)
@@ -1171,11 +1174,11 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                     and point <= state["decisions"]
                     for point in config["experiment"]["milestones"]
                 )
-                changed = policy_hash(policy.state_dict()) not in state["evaluated"]
-                if due or (state["stop_reason"] and changed):
+                if due or (state["stop_reason"] and fingerprint() not in state["evaluated"]):
                     monitor.mark("evaluation")
                     development(config, plan, out, state, shuffle, clock)
                     monitor.record_cuda_memory(policy, "after_evaluation")
+                checked_final_evaluation = bool(state["stop_reason"])
                 if pause_due(out, "update", state["updates"]):
                     write_json(out / "status.json", {"status": "paused", "checkpoint": state["latest"]})
                     return
@@ -1184,7 +1187,7 @@ def train(config, plan, out, device, runtime_path=None, max_updates=None):
                 if max_updates is not None and state["updates"] >= max_updates and not state["stop_reason"]:
                     write_json(out / "status.json", {"status": "paused", "reason": "max_updates"})
                     return
-            if policy_hash(policy.state_dict()) not in state["evaluated"]:
+            if not checked_final_evaluation and policy_hash(policy.state_dict()) not in state["evaluated"]:
                 development(config, plan, out, state, shuffle, clock)
                 monitor.record_cuda_memory(policy, "after_evaluation")
             clock.progress()

@@ -100,18 +100,43 @@ _ACTION_TRIM_KEYS = (
     "attack_preview",
 )
 _COMPILED_GATHER = None
+_COMPILED_RAGGED_GATHER = None
+_PACKED_INDEX_KEYS = ("neighbors", "sources", "targets")
 
 
 def _gather_resident(data, indices, width):
-    gathered = {key: value.index_select(0, indices) for key, value in data.items()}
-    for key in _ACTION_TRIM_KEYS:
-        if key in gathered:
-            gathered[key] = gathered[key][:, :width].contiguous()
+    gathered = {}
+    for key, value in data.items():
+        if key in _ACTION_TRIM_KEYS:
+            value = value[:, :width]
+        rows = value.index_select(0, indices)
+        gathered[key] = rows.long() if key in _PACKED_INDEX_KEYS else rows
     return gathered
 
 
-def _compiled_gather():
-    global _COMPILED_GATHER
+def _gather_ragged(data, indices, width, include_behavior):
+    starts, counts = data["action_spans"].index_select(0, indices).unbind(-1)
+    columns = torch.arange(width, device=starts.device)
+    mask = columns < counts[:, None]
+    # Every flat action tensor ends in one shared padding row.
+    padding = data["sources"].shape[0] - 1
+    actions = torch.where(mask, starts[:, None] + columns, padding)
+    gathered = {"action_mask": mask}
+    for key, value in data.items():
+        if key == "action_spans" or (key == "old_log_probs" and not include_behavior):
+            continue
+        per_action = key in _ACTION_TRIM_KEYS or key == "old_log_probs"
+        rows = value[actions] if per_action else value.index_select(0, indices)
+        gathered[key] = rows.long() if key in _PACKED_INDEX_KEYS else rows
+    return gathered
+
+
+def _compiled_gather(*, ragged_actions=False):
+    global _COMPILED_GATHER, _COMPILED_RAGGED_GATHER
+    if ragged_actions:
+        if _COMPILED_RAGGED_GATHER is None:
+            _COMPILED_RAGGED_GATHER = torch.compile(_gather_ragged, dynamic=True, fullgraph=True)
+        return _COMPILED_RAGGED_GATHER
     if _COMPILED_GATHER is None:
         _COMPILED_GATHER = torch.compile(
             _gather_resident, dynamic=True, fullgraph=True
@@ -176,6 +201,7 @@ class SequenceBuffer:
         resident=False,
         deadline=None,
         reserve_bytes=DEFAULT_GPU_RESERVE_BYTES,
+        ragged_actions=False,
     ):
         flat = [item for episode in encoded for item in episode]
         action_counts = np.asarray([len(item.sources) for item in flat])
@@ -189,13 +215,21 @@ class SequenceBuffer:
             return packed
 
         # Derive shapes and dtypes from the canonical batching implementation.
-        template = batch_inputs(flat[:1], "cpu")
+        # Encoded cell indices fit in int16, including the invalid sentinel.
+        # Widen only the rows in use to satisfy the model's gather operations.
+        template = batch_inputs(flat[:1], "cpu", index_dtype=np.int16)
         rows = len(flat)
         cells = max(len(item.cells) for item in flat)
         actions = int(action_counts.max())
         shapes = {}
         axes = {field.name: field.axis for field in ENCODED_FIELDS}
         axes.update(cell_mask="cells", action_mask="actions")
+        if ragged_actions:
+            action_offsets = np.cumsum(np.r_[0, action_counts])
+            action_spans = np.column_stack((action_offsets[:-1], action_counts))
+            template.pop("action_mask")
+            template["action_spans"] = torch.from_numpy(action_spans[:1])
+            axes["action_spans"] = "fixed"
         for key, value in template.items():
             shape = list(value.shape)
             shape[0] = rows
@@ -203,6 +237,8 @@ class SequenceBuffer:
                 shape[1] = cells
             elif axes[key] == "actions":
                 shape[1] = actions
+                if ragged_actions:
+                    shape = [int(action_offsets[-1]) + 1, *value.shape[2:]]
             shapes[key] = shape
         required_bytes = sum(
             int(np.prod(shapes[key])) * value.element_size()
@@ -223,15 +259,32 @@ class SequenceBuffer:
         for first in range(0, rows, 256):
             if deadline_reached(deadline):
                 raise TimeoutError("Resident preparation exceeded optimization budget")
-            part = batch_inputs(flat[first : first + 256], device, non_blocking=True)
+            items = flat[first : first + 256]
+            part = batch_inputs(
+                items, device, non_blocking=True, index_dtype=np.int16, spatial_only=ragged_actions
+            )
             for key, target in data.items():
+                if ragged_actions and key in _ACTION_TRIM_KEYS:
+                    stop = first + len(items)
+                    dtype = np.int16 if key in _PACKED_INDEX_KEYS else np.float32
+                    values = np.concatenate([getattr(item, key) for item in items], dtype=dtype)
+                    destination = target[action_offsets[first] : action_offsets[stop]]
+                    destination.copy_(torch.from_numpy(values), non_blocking=True)
+                    continue
+                if key == "action_spans":
+                    continue
                 destination = target[first : first + len(part["cells"])]
                 destination.fill_(
-                    INVALID_INDEX if key in ("neighbors", "sources", "targets") else 0
+                    INVALID_INDEX if key in _PACKED_INDEX_KEYS else 0
                 )
                 destination[tuple(slice(0, size) for size in part[key].shape)] = part[
                     key
                 ]
+        if ragged_actions:
+            data["action_spans"].copy_(torch.from_numpy(action_spans), non_blocking=True)
+            for key in _ACTION_TRIM_KEYS:
+                if key in data:
+                    data[key][-1].fill_(INVALID_INDEX if key in _PACKED_INDEX_KEYS else 0)
         packed.update(
             data=data, required_bytes=required_bytes, memory_admission=admission
         )
@@ -260,10 +313,14 @@ class SequenceBuffer:
             indices = indices.pin_memory().to(self.device, non_blocking=True)
         return indices
 
-    def _gather(self, indices, width):
-        return _gather_resident(self.data, indices, width)
+    def _gather(self, indices, width, *, include_behavior=True):
+        if "action_spans" in self.data:
+            runner = self._gather_runner or _gather_ragged
+            return runner(self.data, indices, width, include_behavior)
+        runner = self._gather_runner or _gather_resident
+        return runner(self.data, indices, width)
 
-    def gather_inputs(self, spans, indices=None, *, device=None, min_cells=0):
+    def gather_inputs(self, spans, indices=None, *, device=None, min_cells=0, include_behavior=True):
         if self.data is None:
             return batch_inputs(
                 [
@@ -288,9 +345,7 @@ class SequenceBuffer:
             )
             for episode_index, start, stop in spans
         )
-        if self._gather_runner is not None:
-            return self._gather_runner(self.data, indices, width)
-        return _gather_resident(self.data, indices, width)
+        return self._gather(indices, width, include_behavior=include_behavior)
 
     def gather_spatial_inputs(self, spans):
         """Recurrent prefixes need neither action tensors nor PPO labels."""
@@ -311,10 +366,12 @@ class SequenceBuffer:
             offset = int(self.offsets[episode])
             return {key: self.data[key][offset + start : offset + stop] for key in keys}
         indices = self.indices(spans)
-        return {key: self.data[key].index_select(0, indices) for key in keys}
+        return _gather_resident({key: self.data[key] for key in keys}, indices, None)
 
     def enable_compiled_gather(self):
-        self._gather_runner = _compiled_gather()
+        self._gather_runner = _compiled_gather(
+            ragged_actions=self.data is not None and "action_spans" in self.data
+        )
 
     def enable_async_transfers(self):
         self.async_transfers = True

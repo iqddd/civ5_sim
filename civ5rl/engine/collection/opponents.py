@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +84,7 @@ def maybe_archive_snapshot(
     config: dict[str, Any],
     *,
     checkpoint_relpath: str,
-    policy_hash_value: str,
+    policy_hash_value: str | Callable[[], str],
 ) -> dict[str, Any] | None:
     """Append a pool snapshot every archive_interval updates when >=1 Adam step occurred."""
     settings = self_play_config(config)
@@ -99,10 +100,11 @@ def maybe_archive_snapshot(
         return None
     archive = state.setdefault("self_play_archive", [])
     snapshot_id = f"archive:{updates}"
-    if any(
-        item["id"] == snapshot_id or item.get("policy_hash") == policy_hash_value
-        for item in archive
-    ):
+    if any(item["id"] == snapshot_id for item in archive):
+        return None
+    if callable(policy_hash_value):
+        policy_hash_value = policy_hash_value()
+    if any(item.get("policy_hash") == policy_hash_value for item in archive):
         return None
     parent_hash = config.get("experiment", {}).get("parent_policy_hash")
     if parent_hash and policy_hash_value == parent_hash:
@@ -157,23 +159,29 @@ class _StaticSpatialGraph:
 
 
 def _build_collection_policy(
-    checkpoint_path: Path,
+    checkpoint_path: Path | str | None,
     config: dict[str, Any],
     device: str | torch.device,
+    *,
+    live_policy: Policy | None = None,
 ) -> Policy:
     """Load a frozen inference-only opponent policy with one bounded 4-row spatial graph."""
     from civ5rl.core.preview import extends_parent, load_parent_model
 
     device_str = str(device)
-    saved = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
-    variant = (
-        config["model"]["variant"]
-        if extends_parent(config)
-        else saved.get("variant") or config.get("model", {}).get("variant", "C")
-    )
-    policy = Policy(variant)
-    load_parent_model(policy, saved, config)
-    policy = policy.to(device_str)
+    if live_policy is None:
+        saved = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
+        variant = (
+            config["model"]["variant"]
+            if extends_parent(config)
+            else saved.get("variant") or config.get("model", {}).get("variant", "C")
+        )
+        policy = Policy(variant)
+        load_parent_model(policy, saved, config)
+        policy = policy.to(device_str)
+    else:
+        policy = Policy(live_policy.variant).to(device_str)
+        policy.load_state_dict(live_policy.state_dict())
     perf = config.get("performance", {})
     policy.spatial_cell_padding = perf.get("spatial_cell_padding", 0)
     # Opponent moves never enter behavior_replay/precheck: block size 4 eliminates
@@ -245,6 +253,27 @@ class OpponentPool:
         self._archive_weights: dict[str, list[torch.Tensor]] = {}
         self._active_archive_id: str | None = None
 
+    def add_archive_snapshot(self, entry: dict[str, Any], policy: Policy) -> None:
+        """Own a detached copy of the learner just written at the checkpoint boundary."""
+        snap_id = str(entry["id"])
+        if snap_id in self._archive_weights:
+            return
+        if self._archive_runner is None:
+            runner = _build_collection_policy(None, self.config, self.device, live_policy=policy)
+            self._set_archive_runner(snap_id, runner)
+            return
+        weights = dict(policy.named_parameters())
+        self._archive_weights[snap_id] = [
+            weights[name].detach().to(device=self.device, dtype=param.dtype, copy=True)
+            for name, param in self._archive_runner.named_parameters()
+        ]
+
+    def _set_archive_runner(self, snap_id, runner):
+        self._archive_runner = runner
+        self._archive_runner_params = list(runner.parameters())
+        self._archive_weights[snap_id] = [p.detach().clone() for p in self._archive_runner_params]
+        self._active_archive_id = snap_id
+
     def sync_archive(self, archive: list[dict[str, Any]]) -> None:
         """Load any newly archived snapshot weights onto device."""
         for entry in archive:
@@ -255,12 +284,7 @@ class OpponentPool:
             if not path.is_absolute():
                 path = self.run_dir / path
             if self._archive_runner is None:
-                self._archive_runner = _build_collection_policy(path, self.config, self.device)
-                self._archive_runner_params = list(self._archive_runner.parameters())
-                self._archive_weights[snap_id] = [
-                    p.detach().clone() for p in self._archive_runner_params
-                ]
-                self._active_archive_id = snap_id
+                self._set_archive_runner(snap_id, _build_collection_policy(path, self.config, self.device))
             else:
                 saved = torch.load(path, map_location="cpu", weights_only=False)
                 state_dict = saved["model"]

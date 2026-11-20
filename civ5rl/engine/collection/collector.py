@@ -37,7 +37,8 @@ class EpisodeBuilder:
     """Accumulate one episode while preserving the learner's dictionary format."""
 
     def __init__(
-        self, spec: ScenarioSpec, variant, reuse_encoded, hidden_size, temperature=1.0
+        self, spec: ScenarioSpec, variant, reuse_encoded, hidden_size, temperature=1.0,
+        *, record_hidden=True,
     ):
         self.reuse_encoded = reuse_encoded
         self.hidden_size = hidden_size
@@ -50,13 +51,16 @@ class EpisodeBuilder:
             "old_logp": [],
             "old_log_probs": [],
             "old_value": [],
-            "old_hidden": [],
             "decision_metrics": [],
         }
+        if record_hidden:
+            self.episode["old_hidden"] = []
         if reuse_encoded:
             self.episode.update(encoded=[], encoded_variant=variant)
 
-    def record_step(self, state: WorkerState, encoded, chosen, logp, value, old_hidden):
+    def record_step(
+        self, state: WorkerState, encoded, chosen, logp, probabilities, value, old_hidden
+    ):
         from civ5rl.protocols.diagnostic_metrics import decision_metrics
 
         ep = self.episode
@@ -69,15 +73,15 @@ class EpisodeBuilder:
         ep["old_logp"].append(float(logp[chosen]))
         ep["old_log_probs"].append(logp.copy())
         ep["decision_metrics"].append(
-            decision_metrics(state["actions"], chosen, np.exp(logp))
+            decision_metrics(state["actions"], chosen, probabilities)
         )
         ep["old_value"].append(float(value))
-        is_initial_step = len(ep["chosen"]) == 1
-        ep["old_hidden"].append(
-            None
-            if old_hidden is None or is_initial_step
-            else old_hidden.reshape(1, 1, self.hidden_size).copy()
-        )
+        if "old_hidden" in ep:
+            ep["old_hidden"].append(
+                None
+                if old_hidden is None or len(ep["chosen"]) == 1
+                else old_hidden.reshape(1, 1, self.hidden_size).copy()
+            )
         return action
 
     def finalize(self, state: WorkerState):
@@ -106,7 +110,6 @@ class _WaveState:
     pending: set
     decisions: int = 0
     generations: list | None = None
-    opp_hidden: object = None
     opp_encoders: list | None = None
     opp_rngs: list | None = None
     opponent_ids: list | None = None
@@ -433,6 +436,7 @@ class Collector:
         collection_diagnostics=False,
         worker_priority=None,
         opponent_pool=None,
+        record_hidden=True,
     ):
         from civ5rl.engine.collection.streaming import StreamingScheduler
         from civ5rl.provenance.validation import validate_config
@@ -441,6 +445,7 @@ class Collector:
         self.config, self.factory, self.device = config, factory, device
         self.temperature = validate_temperature(config.get("policy_temperature", 1.0))
         self.opponent_pool = opponent_pool
+        self.record_hidden = record_hidden
         self.opponent_temperature = (
             validate_temperature(opponent_pool.temperature)
             if opponent_pool is not None
@@ -616,8 +621,10 @@ class Collector:
         import torch
 
         hidden = wave.hidden
-        opp_hidden = getattr(wave, "opp_hidden", None)
-        any_opponent = any(wave.slot_state(i).get("is_opponent") for i in live)
+        hidden_offset = hidden.shape[1] // 2 if hidden is not None else 0
+        record_hidden = hidden is not None and self.record_hidden
+        states = [wave.slot_state(i) for i in live]
+        any_opponent = any(state.get("is_opponent") for state in states)
 
         from civ5rl.core.model import batch_inputs
 
@@ -639,17 +646,19 @@ class Collector:
         )
         encoded = [
             self.shared[self.slot_locations[i][0]].read(
-                self.slot_locations[i][1], wave.slot_state(i)
+                self.slot_locations[i][1],
+                state,
+                copy=not state.get("is_opponent") and wave.slot_builder(i).reuse_encoded,
             )
             if worker_encoding
             else (
                 wave.slot_opp_encoder(i)
-                if wave.slot_state(i).get("is_opponent")
+                if state.get("is_opponent")
                 else wave.slot_encoder(i)
             ).encode(
-                wave.slot_state(i)["observation"], wave.slot_state(i)["actions"]
+                state["observation"], state["actions"]
             )
-            for i in live
+            for i, state in zip(live, states)
         ]
         if not any_opponent:
             batch = batch_inputs(
@@ -679,7 +688,7 @@ class Collector:
                     policy_logits(logits, self.temperature).log_softmax(-1),
                     critic_values[:, None],
                 ]
-                if h is not None:
+                if record_hidden:
                     pieces.append(h[0])
                 # One D2H synchronization per inference batch, including diagnostic h.
                 output = torch.cat(pieces, -1)
@@ -704,7 +713,7 @@ class Collector:
                 action_width = logits.shape[1]
                 log_probs = host[:, :action_width]
                 cpu_critic_values = host[:, action_width]
-                old_hidden = host[:, action_width + 1 :] if h is not None else None
+                old_hidden = host[:, action_width + 1 :] if record_hidden else None
                 if next_hidden is not None:
                     hidden.index_copy_(1, slots, next_hidden)
             times["inference_seconds"] += perf_counter() - start
@@ -714,11 +723,11 @@ class Collector:
 
         # Mixed learner + neural opponent batching:
         # Learner turns and 'current' opponent turns share one forward on `policy`
-        # while keeping strictly isolated recurrent hidden states (`hidden` vs `opp_hidden`).
+        # while keeping their recurrent states in separate halves of one bank.
         main_pos = []
         opp_groups: dict[str, list[int]] = {}
-        for j, i in enumerate(live):
-            if not wave.slot_state(i).get("is_opponent"):
+        for j, (i, state) in enumerate(zip(live, states)):
+            if not state.get("is_opponent"):
                 main_pos.append(j)
             else:
                 opp_id = wave.slot_opponent_id(i) or "current"
@@ -747,7 +756,7 @@ class Collector:
         cpu_critic_values = np.zeros(len(live), dtype=np.float32)
         old_hidden = (
             np.zeros((len(live), policy.hidden_size), dtype=np.float32)
-            if hidden is not None
+            if record_hidden
             else None
         )
         with torch.no_grad():
@@ -764,54 +773,35 @@ class Collector:
             if main_pos:
                 if policy.spatial_cuda_graphs:
                     torch.compiler.cudagraph_mark_step_begin()
-                learner_pairs = [
-                    (k, live[j])
-                    for k, j in enumerate(main_pos)
-                    if not wave.slot_state(live[j]).get("is_opponent")
-                ]
-                opp_pairs = [
-                    (k, live[j])
-                    for k, j in enumerate(main_pos)
-                    if wave.slot_state(live[j]).get("is_opponent")
-                ]
+                opponents = [bool(states[j].get("is_opponent")) for j in main_pos]
                 if hidden is not None:
-                    h = torch.empty(
-                        (1, len(main_pos), policy.hidden_size),
+                    slots = torch.tensor(
+                        [live[j] + hidden_offset * is_opponent
+                         for j, is_opponent in zip(main_pos, opponents)],
                         device=self.device,
-                        dtype=hidden.dtype,
                     )
-                    if learner_pairs:
-                        l_ks = torch.tensor([k for k, _ in learner_pairs], device=self.device)
-                        l_slots = torch.tensor([s for _, s in learner_pairs], device=self.device)
-                        h.index_copy_(1, l_ks, hidden.index_select(1, l_slots))
-                    if opp_pairs:
-                        o_ks = torch.tensor([k for k, _ in opp_pairs], device=self.device)
-                        o_slots = torch.tensor([s for _, s in opp_pairs], device=self.device)
-                        h.index_copy_(1, o_ks, opp_hidden.index_select(1, o_slots))
+                    h = hidden.index_select(1, slots)
                 else:
                     h = None
                 logits, critic_values, next_hidden = policy(main_batch, h)
                 if next_hidden is not None:
-                    if learner_pairs:
-                        hidden.index_copy_(1, l_slots, next_hidden.index_select(1, l_ks))
-                    if opp_pairs:
-                        opp_hidden.index_copy_(1, o_slots, next_hidden.index_select(1, o_ks))
-                if self.opponent_temperature == self.temperature or not opp_pairs:
+                    hidden.index_copy_(1, slots, next_hidden)
+                if self.opponent_temperature == self.temperature or not any(opponents):
                     scaled = policy_logits(logits, self.temperature)
                 else:
                     temps = torch.tensor(
                         [
                             self.opponent_temperature
-                            if wave.slot_state(live[j]).get("is_opponent")
+                            if is_opponent
                             else self.temperature
-                            for j in main_pos
+                            for is_opponent in opponents
                         ],
                         device=self.device,
                         dtype=logits.dtype,
                     )[:, None]
                     scaled = logits / temps
                 pieces = [scaled.log_softmax(-1), critic_values[:, None]]
-                if h is not None:
+                if record_hidden:
                     pieces.append(h[0])
                 outputs.append((main_pos, torch.cat(pieces, -1)))
                 main_action_width = logits.shape[1]
@@ -823,11 +813,13 @@ class Collector:
                 opp_model = self.opponent_pool.model_for(opp_id, policy)
                 if opp_model.spatial_cuda_graphs:
                     torch.compiler.cudagraph_mark_step_begin()
-                o_slots = torch.tensor([live[j] for j in pos_list], device=self.device)
-                h_opp = opp_hidden.index_select(1, o_slots) if opp_hidden is not None else None
-                logits, _, next_hidden = opp_model(opp_batches[opp_id], h_opp)
-                if next_hidden is not None and opp_hidden is not None:
-                    opp_hidden.index_copy_(1, o_slots, next_hidden)
+                o_slots = torch.tensor([live[j] + hidden_offset for j in pos_list], device=self.device)
+                h_opp = hidden.index_select(1, o_slots) if hidden is not None else None
+                logits, _, next_hidden = opp_model(
+                    opp_batches[opp_id], h_opp, compute_value=False
+                )
+                if next_hidden is not None:
+                    hidden.index_copy_(1, o_slots, next_hidden)
                 opp_lp = policy_logits(logits, self.opponent_temperature).log_softmax(-1)
                 outputs.append((pos_list, opp_lp))
             # Enqueue all policy forward passes before one host-synchronizing D2H copy.
@@ -883,18 +875,20 @@ class Collector:
         for j, i in enumerate(live):
             state = wave.slot_state(i)
             logp = inference.log_probs[j][: len(state["actions"])]
+            probabilities = np.exp(logp)
             if state.get("is_opponent"):
-                chosen = choose(np.exp(logp), wave.slot_opp_rng(i))
+                chosen = choose(probabilities, wave.slot_opp_rng(i))
                 action = state["actions"][chosen]
                 if not worker_encoding:
                     wave.slot_opp_encoder(i).remember_action(action, state["observation"])
             else:
-                chosen = choose(np.exp(logp), wave.slot_rng(i))
+                chosen = choose(probabilities, wave.slot_rng(i))
                 action = wave.slot_builder(i).record_step(
                     state,
                     inference.encoded[j],
                     chosen,
                     logp,
+                    probabilities,
                     inference.critic_values[j],
                     None if inference.old_hidden is None else inference.old_hidden[j],
                 )
@@ -945,8 +939,6 @@ class Collector:
         return self._wave_id
 
     def attach_wave_opponents(self, wave, specs, policy, worker_encoding):
-        import torch
-
         wave.opponent_ids = [
             s.get("opponent_id") if s.get("opponent") == "policy" else None
             for s in specs
@@ -969,11 +961,6 @@ class Collector:
                 for s in specs
             ]
         )
-        wave.opp_hidden = (
-            torch.zeros((1, len(specs), policy.hidden_size), device=self.device)
-            if policy.is_recurrent
-            else None
-        )
 
     def prepare_wave(self, specs, policy, reuse_encoded, worker_encoding):
         import torch
@@ -985,6 +972,7 @@ class Collector:
                 reuse_encoded,
                 policy.hidden_size if policy.is_recurrent else 0,
                 self.temperature,
+                record_hidden=self.record_hidden,
             )
             for s in specs
         ]
@@ -1001,7 +989,7 @@ class Collector:
         )
         rngs = [random.Random(s["agent_seeds"][s["learner_side"]]) for s in specs]
         hidden = (
-            torch.zeros((1, len(specs), policy.hidden_size), device=self.device)
+            torch.zeros((1, 2 * len(specs), policy.hidden_size), device=self.device)
             if policy.is_recurrent
             else None
         )

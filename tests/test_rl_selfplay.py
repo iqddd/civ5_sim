@@ -198,6 +198,15 @@ class SelfPlayCorrectnessTests(unittest.TestCase):
             for p1, p2 in zip(runner.parameters(), arch.parameters()):
                 self.assertTrue(torch.equal(p1, p2))
 
+            live = deepcopy(policy)
+            pool_obj.add_archive_snapshot({"id": "archive:20"}, live)
+            with torch.no_grad():
+                next(live.parameters()).zero_()
+            for opponent_id, source in (("archive:20", policy), ("archive:10", arch)):
+                frozen = pool_obj.model_for(opponent_id, policy)
+                for saved, expected in zip(frozen.parameters(), source.parameters()):
+                    self.assertTrue(torch.equal(saved, expected))
+
             trusted = case_manifest(specs, source="test_selfplay", split="train", namespace="test_sp")
             # num_envs=2 across 4 episodes forces real slot reuse (assign over finished self-play slots)
             with Collector(
@@ -205,6 +214,7 @@ class SelfPlayCorrectnessTests(unittest.TestCase):
                 cpu_workers=1, num_envs=2, reply_size=1,
                 collection_scheduler="streaming",
                 opponent_pool=pool_obj,
+                record_hidden=False,
             ) as collector:
                 episodes, _, _ = collector.collect(
                     policy, None, 0, fixed_specs=bound_cases(trusted), trusted_manifest=trusted
@@ -212,11 +222,14 @@ class SelfPlayCorrectnessTests(unittest.TestCase):
 
             self.assertEqual(len(episodes), 4)
             for ep in episodes:
+                self.assertNotIn("old_hidden", ep)
                 self.assertEqual(len(ep["chosen"]), ep["result"]["learner_decisions"])
                 self.assertLessEqual(len(ep["chosen"]), ep["result"]["commands"])
                 for obs in ep["observations"]:
                     self.assertEqual(obs["side"], ep["spec"]["learner_side"])
-            backend = BatchedBackend(policy, episodes, cfg, "cpu")
+            backend = BatchedBackend(policy, episodes, cfg, "cpu", consume_encoded=True)
+            self.assertIsNone(backend.cache.encoded)
+            self.assertTrue(all("encoded" not in episode for episode in episodes))
             replay = backend.precheck()
             self.assertLessEqual(replay["full_kl"], 1e-6)
             self.assertLessEqual(replay["max_total_variation"], 0.005)
@@ -295,7 +308,13 @@ class SelfPlayCorrectnessTests(unittest.TestCase):
             )
             self.assertEqual((res["summary"]["W"], res["summary"]["D"], res["summary"]["L"]), (1, 0, 1))
             self.assertEqual(res["summary"]["delta_wins"], 0)
-            self.assertEqual(len(load_eval_rows(out / res["directory"], expected_n=2)), 2)
+            result_dir = out / res["directory"]
+            self.assertEqual(len(load_eval_rows(result_dir, expected_n=2)), 2)
+            for name in ("replay.json", "result.json", "final.json"):
+                self.assertEqual(
+                    (result_dir / "case-000-side-0" / name).read_bytes(),
+                    (result_dir / "case-000-side-1" / name).read_bytes(),
+                )
 
             # 3. In-memory h2h_world_bootstrap matches shared bootstrap_ci95
             rows = {}

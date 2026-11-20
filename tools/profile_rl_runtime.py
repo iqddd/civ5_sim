@@ -167,6 +167,10 @@ def main():
     parser.add_argument("--inference-min-batch", type=int)
     parser.add_argument("--inference-wait-seconds", type=float)
     parser.add_argument("--reference-trace", type=Path)
+    parser.add_argument(
+        "--record-hidden", action=argparse.BooleanOptionalAction, default=True,
+        help="Include recurrent states in the collection comparison trace",
+    )
     parser.add_argument("--native-library", type=Path)
     parser.add_argument("--python-profile", action="store_true")
     parser.add_argument("--collection-diagnostics", action="store_true")
@@ -359,6 +363,7 @@ def main():
                     collection_diagnostics=args.collection_diagnostics,
                     worker_priority=worker_priority,
                     opponent_pool=opponent_pool,
+                    record_hidden=args.record_hidden,
                     **runtime,
                 )
                 result.update(
@@ -475,7 +480,7 @@ def main():
                     trace = {}
                     for name in ("old_log_probs", "old_hidden", "old_value"):
                         parts = [
-                            np.asarray(v).reshape(-1) for ep in values for v in ep[name] if v is not None
+                            np.asarray(v).reshape(-1) for ep in values for v in ep.get(name, ()) if v is not None
                         ]
                         trace[name] = np.concatenate(parts) if parts else np.empty(0, np.float32)
                     if reference_trace is None and not warmup:

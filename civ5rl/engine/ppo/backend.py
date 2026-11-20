@@ -85,14 +85,31 @@ class ReplayPlan:
             yield group_size, parts
 
 
-def categorical_distance(behavior_log_probs, logits, mask):
+def categorical_distance(behavior_log_probs, logits, mask, behavior_log_normalizer=None):
     """Exact categorical KL and total variation; double avoids KL cancellation."""
-    logp = behavior_log_probs.double().log_softmax(-1)
+    behavior = behavior_log_probs.double()
+    logp = (
+        behavior.log_softmax(-1)
+        if behavior_log_normalizer is None
+        else behavior - behavior_log_normalizer[:, None]
+    )
     logq = logits.double().log_softmax(-1)
     p, q = logp.exp(), logq.exp()
-    return masked_kl_rows(logp, logq, mask, probabilities=p), (p - q).abs().sum(
-        -1
-    ) * 0.5
+    # Equivalent distributions can differ by FP64 roundoff after normalization.
+    kl = masked_kl_rows(logp, logq, mask, probabilities=p).clamp_min(0)
+    return kl, (p - q).abs().sum(-1) * 0.5
+
+
+_COMPILED_CATEGORICAL_DISTANCE = None
+
+
+def _compiled_categorical_distance():
+    global _COMPILED_CATEGORICAL_DISTANCE
+    if _COMPILED_CATEGORICAL_DISTANCE is None:
+        _COMPILED_CATEGORICAL_DISTANCE = torch.compile(
+            categorical_distance, dynamic=True, fullgraph=True
+        )
+    return _COMPILED_CATEGORICAL_DISTANCE
 
 
 def validate_behavior_replay(
@@ -158,9 +175,12 @@ class RolloutCache(SequenceBuffer):
         self.episodes, self.device = episodes, device
         encoded = [encode_episode(episode, variant) for episode in episodes]
         super().__init__(
-            device=device, **self._pack_encoded(encoded, device, resident=resident)
+            device=device, **self._pack_encoded(encoded, device, resident=resident, ragged_actions=True)
         )
-        flat = [x for episode in self.encoded for x in episode]
+        if self.data is not None:
+            self.encoded = None
+            del encoded
+        decision_count = int(self.offsets[-1])
         self.resident = resident
         self.cpu_labels = cpu_labels
         label_device = "cpu" if cpu_labels else device
@@ -189,8 +209,9 @@ class RolloutCache(SequenceBuffer):
             self.ragged_behavior = [
                 values for ep in episodes for values in ep["old_log_probs"]
             ]
-            if len(self.ragged_behavior) != len(flat):
+            if len(self.ragged_behavior) != decision_count:
                 raise ValueError("Behavior distribution count differs from decisions")
+            normalizers = np.empty(decision_count, dtype=np.float64)
             for i, (values, count) in enumerate(
                 zip(self.ragged_behavior, self.action_counts)
             ):
@@ -202,9 +223,30 @@ class RolloutCache(SequenceBuffer):
                     or not np.isclose(np.exp(values).sum(), 1.0, atol=1e-5, rtol=0)
                 ):
                     raise ValueError("Invalid ragged behavior distribution")
+                normalizers[i] = np.log(np.exp(values, dtype=np.float64).sum())
+            self.labels["behavior_log_normalizer"] = torch.from_numpy(normalizers)
+        elif self.has_behavior_distribution and self.data is not None:
+            behavior = [values for ep in episodes for values in ep["old_log_probs"]]
+            if len(behavior) != decision_count or any(
+                len(values) != count or not np.isfinite(values).all()
+                for values, count in zip(behavior, self.action_counts)
+            ):
+                raise ValueError("Invalid resident behavior distribution")
+            starts = np.cumsum(np.r_[0, self.action_counts[:-1]])
+            values = np.concatenate([*behavior, np.array([-np.inf], dtype=np.float32)], dtype=np.float32)
+            totals = np.add.reduceat(np.exp(values[:-1], dtype=np.float64), starts)
+            if not np.allclose(totals, 1.0, atol=1e-5, rtol=0):
+                raise ValueError("Behavior probabilities do not sum to one")
+            chosen = np.fromiter((i for ep in episodes for i in ep["chosen"]), dtype=np.int64)
+            if not np.array_equal(values[starts + chosen], np.asarray(
+                [v for ep in episodes for v in ep["old_logp"]], dtype=np.float32
+            )):
+                raise ValueError("Recorded chosen logp differs from behavior distribution")
+            self.data["old_log_probs"] = torch.from_numpy(values).to(device)
+            self.labels["behavior_log_normalizer"] = torch.from_numpy(np.log(totals)).to(device)
         elif self.has_behavior_distribution:
             width = int(self.action_counts.max())
-            behavior = np.full((len(flat), width), -np.inf, np.float32)
+            behavior = np.full((decision_count, width), -np.inf, np.float32)
             full = [values for ep in episodes for values in ep["old_log_probs"]]
             if len(full) != len(flat):
                 raise ValueError("Behavior distribution count differs from decisions")
@@ -220,12 +262,16 @@ class RolloutCache(SequenceBuffer):
                 )
             if not torch.allclose(
                 behavior.exp().sum(-1),
-                torch.ones(len(flat), device=device),
+                torch.ones(decision_count, device=device),
                 atol=1e-5,
                 rtol=0,
             ):
                 raise ValueError("Behavior probabilities do not sum to one")
             self.labels["old_log_probs"] = behavior
+            # Padding is -inf. The normalizer is independent of the minibatch width.
+            self.labels["behavior_log_normalizer"] = torch.cat(
+                [part.double().logsumexp(-1) for part in behavior.split(256)]
+            )
         self.resident_bytes = sum(
             v.numel() * v.element_size() for v in (self.data or {}).values()
         ) + sum(v.numel() * v.element_size() for v in self.labels.values())
@@ -234,6 +280,7 @@ class RolloutCache(SequenceBuffer):
         self._replay_plan: ReplayPlan | None = None
         self._replay_h2d_stream = None
         self._replay_sums_runner = None
+        self._categorical_distance_runner = None
         self._pinned_replay = None
         self._pinned_replay_limit = 0
         self.pinned_replay_bytes = 0
@@ -253,6 +300,8 @@ class RolloutCache(SequenceBuffer):
     def enable_compiled_replay_sums(self):
         if str(self.device).startswith("cuda") and self._replay_sums_runner is None:
             self._replay_sums_runner = _compiled_replay_sums()
+            if self.has_behavior_distribution:
+                self._categorical_distance_runner = _compiled_categorical_distance()
 
     def enable_cached_replay(self):
         """Cache inputs only; GRU state and logits always use current weights."""
@@ -457,7 +506,9 @@ class RolloutCache(SequenceBuffer):
             if self.cpu_labels
             else self.indices(spans)
         )
-        data = self.gather_inputs(spans, indices, device=device, min_cells=min_cells)
+        data = self.gather_inputs(
+            spans, indices, device=device, min_cells=min_cells, include_behavior=include_behavior
+        )
         if min_cells and "cells" in data and data["cells"].shape[1] < min_cells:
             extra = min_cells - data["cells"].shape[1]
             data = {
@@ -471,11 +522,15 @@ class RolloutCache(SequenceBuffer):
                 ),
             }
         selected = indices.cpu() if self.cpu_labels else indices
-        labels = {
-            k: v.index_select(0, selected).to(device)
-            for k, v in self.labels.items()
-            if include_behavior or k != "old_log_probs"
-        }
+        labels = {}
+        if "old_log_probs" in data:
+            labels["old_log_probs"] = data.pop("old_log_probs")
+        for key, value in self.labels.items():
+            if key in ("old_log_probs", "behavior_log_normalizer") and not include_behavior:
+                continue
+            if key == "old_log_probs":
+                value = value[:, :data["action_mask"].shape[1]]
+            labels[key] = value.index_select(0, selected).to(device)
         if include_behavior and self.ragged_behavior is not None:
             rows = [self.ragged_behavior[i] for i in selected.tolist()]
             behavior = np.full(
@@ -596,18 +651,19 @@ def _part_free_count(cache, spans):
 
 
 def _replay_group_specs(cache, sequences_per_batch):
+    lengths = np.diff(cache.offsets)
     for first in range(0, len(cache.episodes), sequences_per_batch):
         episodes = list(
             range(first, min(first + sequences_per_batch, len(cache.episodes)))
         )
         group_size = len(episodes)
-        max_length = max(len(cache.encoded[episode]) for episode in episodes)
+        max_length = max(lengths[episode] for episode in episodes)
         specs = []
         for offset in range(0, max_length, DEFAULT_PREFIX_BLOCK_SIZE):
             active = [
                 (slot, episode)
                 for slot, episode in enumerate(episodes)
-                if len(cache.encoded[episode]) > offset
+                if lengths[episode] > offset
             ]
             spans = [
                 Span(
@@ -615,7 +671,7 @@ def _replay_group_specs(cache, sequences_per_batch):
                     offset,
                     min(
                         offset + DEFAULT_PREFIX_BLOCK_SIZE,
-                        len(cache.encoded[episode]),
+                        int(lengths[episode]),
                     ),
                 )
                 for _, episode in active
@@ -731,6 +787,7 @@ def measure_replay(
     full_free_total = torch.zeros_like(full_total)
     max_tv = torch.zeros_like(full_total)
     runner = getattr(cache, "_replay_sums_runner", None) or _replay_sums
+    distance = getattr(cache, "_categorical_distance_runner", None) or categorical_distance
     for group_size, parts in _replay_groups(cache, sequences_per_batch):
         hidden = (
             torch.zeros((1, group_size, policy.hidden_size), device=device)
@@ -769,10 +826,11 @@ def measure_replay(
             free_count += part_free
             count += sum(lengths)
             if full_distribution and cache.has_behavior_distribution:
-                kl, tv = categorical_distance(
+                kl, tv = distance(
                     labels["old_log_probs"][:, : logits.shape[1]],
                     logits,
                     batch["action_mask"],
+                    labels.get("behavior_log_normalizer"),
                 )
                 full_total += kl.sum()
                 full_free_total += kl.masked_fill(
@@ -838,6 +896,7 @@ class BatchedBackend:
         *,
         force_batched=False,
         pinned_replay=False,
+        consume_encoded=False,
     ):
         self.policy, self.config, self.device, self.monitor = (
             policy,
@@ -860,6 +919,10 @@ class BatchedBackend:
             gamma=float(ppo_cfg.get("gamma", 1.0)),
             gae_lambda=float(ppo_cfg.get("gae_lambda", 1.0)),
         )
+        if consume_encoded and self.cache.resident:
+            for episode in episodes:
+                episode.pop("encoded", None)
+                episode.pop("encoded_variant", None)
         self.cache.spatial_cell_padding = int(
             getattr(policy, "spatial_cell_padding", 0) or 0
         )

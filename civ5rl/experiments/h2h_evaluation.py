@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import shutil
 import sys
 import traceback
 from collections import Counter
@@ -26,14 +27,18 @@ from civ5sim.engine import digest
 from civ5sim.match import MatchConfig, run_match
 
 
-def _h2h_worker_task(task, cand_conn, ref_conn):
-    """Run one policy-vs-policy match in a worker with two isolated ProxyAgents."""
-    config, case, cand_path, ref_path, directory = task
-    directory = Path(directory)
+def _validate_h2h_case(case):
     if case["split"] != "validation" or digest(
         {k: v for k, v in case.items() if k != "case_hash"}
     ) != case["case_hash"]:
         raise ValueError("Invalid validation case")
+
+
+def _h2h_worker_task(task, cand_conn, ref_conn):
+    """Run one policy-vs-policy match in a worker with two isolated ProxyAgents."""
+    config, case, cand_path, ref_path, directory = task
+    directory = Path(directory)
+    _validate_h2h_case(case)
     side = case["learner_side"]
     if cand_conn is not None and ref_conn is not None:
         cand_agent = ProxyAgent(cand_conn, "argmax")
@@ -113,10 +118,7 @@ def _h2h_worker_task(task, cand_conn, ref_conn):
             if isinstance(agent, ProxyAgent):
                 agent.close()
             if conn is not None:
-                try:
-                    conn.send(("close", ()))
-                except (OSError, EOFError):
-                    pass
+                # The coordinator owns the original endpoint across matches.
                 conn.close()
 
 
@@ -184,11 +186,9 @@ class DualPolicyExecutor:
             if mode != "argmax" or metrics:
                 raise ValueError("H2H evaluation requires argmax without selection metrics")
             inference.release_agent(agent)
-            previous = self.shared.pop(connection, None)
-            if previous is not None:
-                previous.close()
-            shared = EncodedSlots(slots=1)
-            self.shared[connection] = shared
+            shared = self.shared.get(connection)
+            if shared is None:
+                shared = self.shared[connection] = EncodedSlots(slots=1)
             new_agent = AgentSession(
                 mode, temperature, metrics, [AgentMember() for _ in inference.policies]
             )
@@ -307,19 +307,25 @@ class DualPolicyExecutor:
         thread = Thread(target=self._serve, name="h2h-evaluation-inference", daemon=True)
         thread.start()
         pending = {}
+        clients = []
 
-        def submit():
+        def submit(lane=None):
             try:
                 task = next(tasks)
             except StopIteration:
                 return False
-            c_srv, c_cli = Pipe()
-            r_srv, r_cli = Pipe()
-            with self.lock:
-                self.connections[c_srv] = ("candidate", None)
-                self.connections[r_srv] = ("reference", None)
-            future = executor.submit(_h2h_worker_task, task, c_cli, r_cli)
-            pending[future] = (c_cli, r_cli)
+            if lane is None:
+                c_srv, c_cli = Pipe()
+                r_srv, r_cli = Pipe()
+                with self.lock:
+                    self.connections[c_srv] = ("candidate", None)
+                    self.connections[r_srv] = ("reference", None)
+                lane = (c_cli, r_cli)
+                clients.extend(lane)
+            # A future finishes after the worker closes its handles and views.
+            # The next match resets both agents before accessing the same slots.
+            future = executor.submit(_h2h_worker_task, task, *lane)
+            pending[future] = lane
             return True
 
         try:
@@ -331,18 +337,15 @@ class DualPolicyExecutor:
                     raise RuntimeError(f"H2H evaluation inference failed:\n{self.error}")
                 done, _ = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
                 for future in done:
-                    c_cli, r_cli = pending.pop(future)
-                    c_cli.close()
-                    r_cli.close()
+                    lane = pending.pop(future)
                     yield future.result()
-                    submit()
+                    submit(lane)
         finally:
             self.stop.set()
             thread.join()
             self._fail_all("H2H evaluation coordinator stopped")
-            for c_cli, r_cli in pending.values():
-                c_cli.close()
-                r_cli.close()
+            for connection in clients:
+                connection.close()
             for connection, (role, agent) in list(self.connections.items()):
                 self._inference_for(role).release_agent(agent)
                 connection.close()
@@ -375,10 +378,10 @@ class DualPolicyExecutor:
 
 def h2h_evaluation_key(config, plan, out, candidate_path, reference_path, purpose, runtime_identity):
     import torch
-    from civ5rl.experiments.ppo_after_imitation import policy_hash
+    from civ5rl.engine.evaluation.executor import evaluation_policy_hash
 
-    cand_hash = policy_hash(torch.load(out / candidate_path, map_location="cpu", weights_only=False)["model"])
-    ref_hash = policy_hash(torch.load(out / reference_path, map_location="cpu", weights_only=False)["model"])
+    cand_hash = evaluation_policy_hash(out / candidate_path)
+    ref_hash = evaluation_policy_hash(out / reference_path)
     evaluator = digest(
         {
             "version": 1,
@@ -410,6 +413,46 @@ def evaluate_h2h(config, plan, out, candidate_path, reference_path, purpose):
         return _evaluate_h2h_impl(config, plan, out, candidate_path, reference_path, purpose)
 
 
+def _h2h_execution_plan(tasks, *, same_checkpoint):
+    """Serve both logical sides from one physical match for an identical policy."""
+    pending = [task for task in tasks if not (Path(task[4]) / "metrics.json").exists()]
+    if not same_checkpoint:
+        return pending, []
+    by_side = {(task[1]["case_id"], task[1]["learner_side"]): task for task in tasks}
+    pending_dirs = {task[4] for task in pending}
+    simulate, mirror = [], []
+    for task in pending:
+        _, case, _, _, target = task
+        side = case["learner_side"]
+        partner = by_side.get((case["case_id"], 1 - side))
+        if partner is None or {**partner[1], "learner_side": side, "case_hash": case["case_hash"]} != case:
+            simulate.append(task)
+            continue
+        if side == 0 and partner[4] in pending_dirs:
+            simulate.append(task)
+        else:
+            _validate_h2h_case(case)
+            mirror.append((Path(partner[4]), Path(target), case))
+    return simulate, mirror
+
+
+def _materialize_h2h_mirror(source, target, case):
+    started = perf_counter()
+    metrics = read_json(source / "metrics.json")
+    target.mkdir(parents=True, exist_ok=True)
+    write_json(target / "case.json", case)
+    for name in ("replay.json", "final.json", "result.json"):
+        shutil.copyfile(source / name, target / name)
+    side = case["learner_side"]
+    metrics.update(
+        side=side,
+        case_hash=case["case_hash"],
+        army_size=len(case["armies"][side]),
+        seconds=perf_counter() - started,
+    )
+    write_json(target / "metrics.json", metrics)
+
+
 def _evaluate_h2h_impl(config, plan, out, candidate_path, reference_path, purpose):
     from civ5rl.engine.evaluation.executor import evaluation_worker_pool, runtime_for
     from civ5rl.protocols.turn_reset import validate_case
@@ -439,8 +482,10 @@ def _evaluate_h2h_impl(config, plan, out, candidate_path, reference_path, purpos
             str(directory / f"case-{case['case_id']:03}-side-{case['learner_side']}"),
         )
         for case in cases
-        if not (directory / f"case-{case['case_id']:03}-side-{case['learner_side']}" / "metrics.json").exists()
     ]
+    tasks, mirrors = _h2h_execution_plan(
+        tasks, same_checkpoint=(out / candidate_path).resolve() == (out / reference_path).resolve()
+    )
     inference_stats = None
     if runtime.device == "cuda" and tasks:
         executor = DualPolicyExecutor(
@@ -461,6 +506,8 @@ def _evaluate_h2h_impl(config, plan, out, candidate_path, reference_path, purpos
                     f"H2H {purpose}: {min(first + runtime.workers, len(tasks))}/{len(tasks)} new matches",
                     flush=True,
                 )
+    for source, target, case in mirrors:
+        _materialize_h2h_mirror(source, target, case)
     bootstrap = h2h_world_bootstrap(
         directory,
         len(cases),

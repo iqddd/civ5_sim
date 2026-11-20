@@ -56,7 +56,7 @@ class StreamingSlot:
         worker_encoding: bool,
         temperature: float,
         hidden,
-        opp_hidden=None,
+        record_hidden=True,
         now: float | None = None,
     ) -> float:
         from civ5rl.engine.collection.collector import EpisodeBuilder
@@ -68,6 +68,7 @@ class StreamingSlot:
             reuse_encoded,
             policy.hidden_size if policy.is_recurrent else 0,
             temperature,
+            record_hidden=record_hidden,
         )
         self.encoder = (
             None
@@ -96,9 +97,7 @@ class StreamingSlot:
         # Lifetime rule 2 (wave-scoped): self.generation is intentionally NOT reset here and
         # keeps growing monotonically across all episodes until collect_streaming finishes.
         if hidden is not None:
-            hidden[:, self.slot_index].zero_()
-        if opp_hidden is not None:
-            opp_hidden[:, self.slot_index].zero_()
+            hidden[:, self.slot_index::hidden.shape[1] // 2].zero_()
         current_time = perf_counter() if now is None else now
         return current_time - self.idle_since
 
@@ -135,11 +134,10 @@ class StreamingSlot:
 class _StreamingWave:
     """Streaming state with direct access to episode-owned slots."""
 
-    def __init__(self, wave_id: int, slots: list[StreamingSlot], hidden, opp_hidden=None):
+    def __init__(self, wave_id: int, slots: list[StreamingSlot], hidden):
         self.wave_id = wave_id
         self.slots = slots
         self.hidden = hidden
-        self.opp_hidden = opp_hidden
         self.pending = set()
         self.decisions = 0
 
@@ -338,16 +336,11 @@ def _collect_streaming(
         diag = Diagnostics(8192, collection=wave_id)
     slots = [StreamingSlot(slot_index=i, idle_since=started) for i in range(capacity)]
     hidden = (
-        torch.zeros((1, capacity, policy.hidden_size), device=collector.device)
+        torch.zeros((1, 2 * capacity, policy.hidden_size), device=collector.device)
         if policy.is_recurrent
         else None
     )
-    opp_hidden = (
-        torch.zeros((1, capacity, policy.hidden_size), device=collector.device)
-        if policy.is_recurrent
-        else None
-    )
-    wave = _StreamingWave(wave_id, slots, hidden, opp_hidden)
+    wave = _StreamingWave(wave_id, slots, hidden)
     locations = collector.slot_locations
     global_slots = {location: i for i, location in enumerate(locations)}
     for worker, (connection, _) in enumerate(collector.workers):
@@ -480,7 +473,7 @@ def _collect_streaming(
                 worker_encoding=worker_encoding,
                 temperature=collector.temperature,
                 hidden=wave.hidden,
-                opp_hidden=wave.opp_hidden,
+                record_hidden=collector.record_hidden,
             )
             admitted += 1
             load[worker] += 1

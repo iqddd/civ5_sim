@@ -18,7 +18,7 @@ class InverseRoutingTests(unittest.TestCase):
             reference.requires_grad_()
             candidate = reference.detach().clone().requires_grad_()
             if operation == "actions":
-                indices = torch.tensor([[0, 0, 3, -1, 6], [2, 2, 2, 6, -1]])
+                indices = torch.tensor([[0, 0, 3, -1, 6], [2, 2, 2, 6, -1]]).repeat(1, 9)
                 expected = reference[torch.arange(2)[:, None], indices.clamp_min(0)] * (
                     indices >= 0
                 ).unsqueeze(-1)

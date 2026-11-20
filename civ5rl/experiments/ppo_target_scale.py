@@ -35,7 +35,7 @@ from civ5rl.experiments.evaluation import (
 )
 from civ5rl.experiments.imitation_helpers import assert_equal, isolated_rng
 from civ5rl.experiments.ppo_artifacts import load_rollout, save_rollout
-from civ5rl.experiments.ppo_after_imitation import optimizer_for, policy_hash, match_summary
+from civ5rl.experiments.ppo_after_imitation import optimizer_for, match_summary
 from civ5rl.protocols.corpus import validate_corpus
 from civ5rl.protocols.ppo_target_scale import KIND, TargetFactory, InvalidDataset, evaluation_cases, validate_profile
 from civ5rl.provenance import checkpoint
@@ -278,8 +278,10 @@ def initialize(config, plan, out):
 
 def evaluation_key(config,plan,out,path,purpose,runtime_identity):
     """Return the canonical cache key without running matches."""
+    from civ5rl.engine.evaluation.executor import evaluation_policy_hash
+
     fingerprint=('cp_mirror_'+digest(config['teacher_search'])[:32] if path=='cp'
-                 else policy_hash(torch.load(out/path,map_location='cpu',weights_only=False)['model']))
+                 else evaluation_policy_hash(out/path))
     import platform
     from civ5sim.combat_ai import LIBRARY_PATH
     # Version behavior explicitly; source formatting and module names are metadata.

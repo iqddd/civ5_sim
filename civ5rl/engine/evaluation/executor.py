@@ -49,6 +49,7 @@ _session = ContextVar("evaluation_session", default=None)
 class _EvaluationSession:
     def __init__(self):
         self.policies = OrderedDict()
+        self.checkpoint_hashes = {}
         self.workers = None
         self.executor = None
 
@@ -375,7 +376,7 @@ class BatchedInference:
         for member, policy in enumerate(policies):
             agents = [r[0].members[member] for r in requests]
             hidden = self.gather_hidden(policy, agents, member)
-            logits, _, last = policy(batch, hidden)
+            logits, _, last = policy(batch, hidden, compute_value=False)
             logits_all.append(logits)
             self.store_hidden(agents, last, member)
         self.batches += 1
@@ -417,7 +418,7 @@ class BatchedInference:
         hidden = self.gather_hidden(self.policy, agents)
         self.encoding_seconds += perf_counter() - started
         started = perf_counter()
-        logits, _, next_hidden = self.policy(batch, hidden)
+        logits, _, next_hidden = self.policy(batch, hidden, compute_value=False)
         fast = [
             r[1] != "observe"
             and r[0].mode == "argmax"
@@ -472,21 +473,31 @@ def prepare_evaluation_policy(policy, device):
     return policy
 
 
+def _checkpoint_identity(checkpoint):
+    path = Path(checkpoint).resolve()
+    stat = path.stat()
+    return path, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def evaluation_policy_hash(checkpoint):
+    from civ5rl.experiments.ppo_after_imitation import policy_hash
+
+    session = _session.get()
+    key = _checkpoint_identity(checkpoint) if session is not None else None
+    if session is not None and key in session.checkpoint_hashes:
+        return session.checkpoint_hashes[key]
+    fingerprint = policy_hash(torch.load(checkpoint, map_location="cpu", weights_only=False)["model"])
+    if session is not None:
+        session.checkpoint_hashes[key] = fingerprint
+    return fingerprint
+
+
 def load_evaluation_policy(checkpoint, device) -> Policy:
     """Reuse the two most recent CUDA checkpoints without changing their weights."""
     session = _session.get()
     key = None
     if session is not None and str(device).startswith("cuda"):
-        path = Path(checkpoint).resolve()
-        stat = path.stat()
-        key = (
-            str(device),
-            path,
-            stat.st_ino,
-            stat.st_size,
-            stat.st_mtime_ns,
-            stat.st_ctime_ns,
-        )
+        key = (str(device), *_checkpoint_identity(checkpoint))
         cached = session.policies.get(key)
         if cached is not None:
             session.policies.move_to_end(key)
