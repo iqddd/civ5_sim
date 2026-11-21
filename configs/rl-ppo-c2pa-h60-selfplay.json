@@ -5,6 +5,9 @@
     "variant": "C2PA",
     "expected_parameter_count": 2266434
   },
+  "performance": {
+    "collection_pinned_inputs": true
+  },
   "critic": {
     "active_seconds": 0
   },

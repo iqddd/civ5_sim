@@ -1,14 +1,45 @@
 import unittest
 
+import numpy as np
 import torch
 
-from civ5rl.core.model import Policy
+from civ5rl.core.model import PinnedBatchInputs, Policy, batch_inputs
+from civ5rl.core.observation import Encoded
 from civ5rl.core.preview import load_parent_model
-from civ5rl.core.schema import ACTION_DIM, ATTACK_PREVIEW_DIM, HEX_DIM, HIDDEN_SIZE
+from civ5rl.core.schema import (
+    ACTION_DIM, ATTACK_PREVIEW_DIM, GLOBAL_DIM, HEX_DIM, HEX_DIRECTIONS, HIDDEN_SIZE, PREV_ACTION_DIM, TILE_DIM,
+)
 from civ5rl.provenance.identity import policy_hash
 
 
 class ActionContextTests(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA staging requires a GPU")
+    def test_pinned_subbatches_match_pageable_across_reuse(self):
+        def example(cells, actions, seed):
+            rng = np.random.default_rng(seed)
+            return Encoded(
+                rng.random((cells, TILE_DIM), dtype=np.float32),
+                rng.random(GLOBAL_DIM, dtype=np.float32),
+                rng.random(PREV_ACTION_DIM, dtype=np.float32),
+                rng.integers(-1, cells, (cells, HEX_DIRECTIONS), dtype=np.int64),
+                rng.integers(-1, cells, actions, dtype=np.int64),
+                rng.integers(-1, cells, actions, dtype=np.int64),
+                rng.random((actions, ACTION_DIM), dtype=np.float32),
+                rng.random((actions, ATTACK_PREVIEW_DIM), dtype=np.float32),
+            )
+
+        first, second = PinnedBatchInputs(), PinnedBatchInputs()
+        for left, right in (
+            ([example(100, 1, 2), example(144, 56, 3)], [example(256, 174, 4)]),
+            ([example(100, 2, 5)], [example(100, 1, 6), example(144, 6, 7)]),
+        ):
+            batches = [batch_inputs(items, "cuda", staging=slot) for items, slot in ((left, first), (right, second))]
+            for items, packed in zip((left, right), batches, strict=True):
+                plain = batch_inputs(items, "cpu")
+                self.assertEqual(list(packed), list(plain))
+                for name, expected in plain.items():
+                    self.assertTrue(torch.equal(packed[name].cpu(), expected), name)
+
     def test_zero_start_gradients_and_masked_context(self):
         torch.manual_seed(17)
         parent, policy = Policy("C2P"), Policy("C2PA")
