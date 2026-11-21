@@ -186,10 +186,3 @@ def next_state_one(state, passed):
         },
         failure={"status": "failed", "reason": "D0_one_decision_update_limit"},
     )
-
-
-def report_one(directory, seed=17):
-    """Compatibility wrapper for the reporting tool."""
-    from tools.archive.report_rl_one import report_one as render_report
-
-    return render_report(directory, seed=seed)

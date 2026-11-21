@@ -1,13 +1,12 @@
 """The scale-up contract and public training coverage, without historical audits."""
 
+from civ5rl.config import load_config as resolve_config
 from civ5rl.protocols.common import (
     CoverageTracker,
     own_state_physical_hash,
-    require_config,
 )
 from civ5rl.protocols.ppo_after_imitation import TrainingFactory
-from civ5rl.config import load_config as resolve_config
-from civ5rl.provenance.common import ROOT, read_json
+from civ5rl.protocols.ppo_validation import validate_bounded_training
 from civ5sim.engine import digest
 
 KIND = "rl01.ppo_scale_up"
@@ -20,43 +19,9 @@ def load_config(path):
 
 
 def validate_profile(config):
-    reference = resolve_config(ROOT / "configs/rl-ppo-controlled-updates.json")
-    keys = (
-        "observation",
-        "environment",
-        "model",
-        "reward",
-        "collection",
-        "ppo",
-        "optimizer",
-        "numerics",
-        "performance",
-        "teacher_search",
-        "seed",
-        "workers",
-    )
-    require_config(
-        config,
-        {key: reference[key] for key in keys},
-        prefix="Unsupported scale-up configuration: ",
-    )
-    profiles = {
-        "scale_up": "configs/rl-ppo-scale-up.json",
-        "continuation": "configs/rl-ppo-scale-up-continuation.json",
-    }
-    profile = config.get("profile", "scale_up")
-    if profile not in profiles:
-        raise ValueError("Unsupported scale-up profile")
-    expected = read_json(ROOT / profiles[profile])
-    require_config(
-        config["experiment"],
-        expected["experiment"],
-        prefix="Unsupported scale-up configuration: experiment.",
-    )
-    if config["kind"] != KIND:
-        raise ValueError("Unsupported scale-up kind")
-    if config["output"] != expected["output"]:
-        raise ValueError("Unsupported scale-up output")
+    validate_bounded_training(config, kinds=(KIND,))
+    if config["experiment"]["initial_value"] != "preserve_parent":
+        raise ValueError("Continuing PPO requires the parent's critic and Adam")
 
 
 class ScaleUpFactory(TrainingFactory):

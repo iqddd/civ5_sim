@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from civ5rl.experiments.evaluation import clustered_paired_bootstrap
+from civ5rl.reporting.evaluation_audit import clustered_paired_bootstrap
 from civ5rl.provenance.audit import (
     verify_checkpoint_chain,
     verify_ppo_ledger,

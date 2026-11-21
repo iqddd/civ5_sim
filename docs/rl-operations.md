@@ -21,17 +21,25 @@ python tools/run_ppo.py resume --config CONFIG
 пишут результаты в output конфига. Доступные фазы зависят от протокола;
 список показывает `python tools/run_cp_imitation.py --help` или
 `python tools/run_ppo.py --help`.
+В target BC `--workers` задаёт число CPU-воркеров для сбора и подготовки
+учебных данных. Для оценочных матчей используйте `--evaluation-workers`.
 
 ## Анализ сохранённого запуска
 
 ```powershell
+python tools/run_cp_imitation.py report --config CONFIG --device cpu
+python tools/run_ppo.py report --config CONFIG
 python tools/ctl_rl.py audit --run RUN --out OUT
 python tools/ctl_rl.py compare --before BEFORE --after AFTER --expected-n MATCH_COUNT --out OUT
 python tools/ctl_rl.py snapshot --run RUN --out OUT --block-size 5 --last 20
 ```
 
+Для target BC фаза `report` читает сохранённый запуск и обновляет отчёт и
+доступные графики. Для неё достаточно CPU.
+
 | Команда | Вход | Выход |
 |---|---|---|
+| `run_ppo.py report` | CONFIG и сохранённое состояние RUN | Отчёт опыта по записанным результатам |
 | `audit` | Остановленный RUN | Проверки checkpoints, учёта шагов и полноты оценок |
 | `compare` | Два каталога оценок на одинаковых случаях | Разница побед и парный bootstrap по мирам |
 | `snapshot` | RUN; `--last` ограничивает число updates | JSON, Markdown и `learning-curves-detailed.png` |
@@ -200,6 +208,12 @@ python tools/run_comparison.py resume --config CONFIG
 Входной корпус проверяется по сохранённым hashes; результаты пишутся в output
 обучения. Исходный сбор не повторяется.
 
+Для `training.mode = epoch_kl` (режим по умолчанию) `training.max_epochs`
+задаёт число эпох (2), `training.pairs_per_step` — число пар за шаг (32),
+`training.initial_lr` — начальный LR (0,00001), `training.kl_limit` — предел
+полного KL на границе эпохи (0,015). `training_seconds` ограничивает время
+обучения, `workers` задаёт число воркеров сбора и оценки.
+
 Профиль `training.mode = full_corpus_step_kl` показывает принятые шаги,
 общее число попыток, отклонения, LR и последний принятый полный KL.
 История проверок — в `attempts.jsonl`, принятых шагов — в `steps.jsonl`.
@@ -221,7 +235,8 @@ python tools/run_comparison.py resume --config CONFIG
 подтверждение исходного выбора. `training.json` и progress JSON показывают
 последнее принятое состояние этих метрик; это дополнение к боевой оценке.
 Предстартовая сводка показывает время подготовки, шага и полного KL с
-диагностикой, ускорение относительно полнокорпусного пути и прогноз бюджета.
+диагностикой и прогноз для заданных `training.max_accepted_steps` и
+`training.max_retries`.
 
 Для CONFIG с `fit_continuation` используйте `precheck`, затем `resume`:
 продолжение записывается в отдельный output, сохраняя Adam, RNG, счётчики,
@@ -254,7 +269,8 @@ selection G; `selected.json` закрепляет кандидата. `result.js
 `evaluate`; Additional отключён. `precheck --out OUT` выполняет отбрасываемый
 smoke на реальных историях и опорах, не прогнозирует скорость полного обучения.
 Параметры исполнения `--history-microbatch N` и `--[no-]compile` задаются до fit
-и сохраняются для resume. Число исходных позиций на Adam задаёт CONFIG.
+и сохраняются для resume. `training.positions_per_step` задаёт число исходных
+позиций на шаг Adam, `training.max_epochs` задаёт предел числа эпох.
 `training.json`, `attempts.jsonl` и `steps.jsonl` показывают принятые шаги,
 отклонения, LR, парный loss, полный KL и изменения argmax на опорах.
 Бюджет включает подготовку и проверки; после начатой попытки завершаются
@@ -277,7 +293,8 @@ python tools/bench_rl.py comparison --config CONFIG --out OUT --warmup 1 --steps
 Для `rl01.turn_comparison_collection` доступны `prepare`, `precheck`, `collect`
 и `resume`. `prepare` закрепляет список в `positions.json`; `selection.json`
 показывает число подходящих и выбранных позиций. `precheck --out OUT` выполняет
-короткий отбрасываемый smoke. `collect --workers W` запускает продолжения,
+короткий отбрасываемый smoke. `--workers W` задаёт число воркеров в smoke и
+сборе. `collect` запускает продолжения,
 `resume` достраивает незавершённые задачи с теми же seeds. Обучение не запускается.
 Прогресс показывает завершённые продолжения и целевой объём. `result.json`
 содержит W/D/L вариантов, парные разницы с argmax и разнообразие последовательностей;
@@ -305,6 +322,9 @@ python tools/bench_rl.py comparison-collection --run RUN --config CONFIG --out O
 `comparison-collection`); OUT должен быть пустым и вне RUN. Выход —
 `summary.json`, телеметрия CPU/NVML и Kineto-трассы (или `recommended-runtime.json`
 и прогноз развилок за бюджет для `comparison-collection`).
+Для замера сравнительного цикла `--cases N` ограничивает число исходных
+матчей, а `--workers W`, `--max-batch N` и `--wait-seconds S` задают runtime
+параллельных матчей и inference.
 В сводке `steady_resources` показывает загрузку в рабочем окне,
 `drain_resources` — при доигрывании хвоста, `resources` — за обе части.
 Сравнивайте cont/s с загрузкой именно рабочего окна.

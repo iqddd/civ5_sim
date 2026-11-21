@@ -8,13 +8,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from test_rl import context, scenario
+
 from civ5rl.deploy.operations import package, verify_package
 from civ5rl.deploy.remote import _sha, input_group, stage_inputs
 from civ5rl.engine.imitation.storage import PreparedDemonstrations, prepare_inputs
-from civ5rl.experiments.imitation_target_scale import load_config
 from civ5rl.protocols.imitation import dump_episode
-from civ5rl.protocols.ppo_target_scale import TargetFactory
-from civ5rl.provenance.common import ROOT, configure, read_json
+from civ5rl.provenance.common import configure
 from civ5sim import Battle
 
 
@@ -156,26 +156,14 @@ class RemoteTests(unittest.TestCase):
 
     def test_scratch_dir_keeps_prepared_npz_outside_synced_run_directory(self):
         configure(17, "cpu")
-        plan = read_json(ROOT / "artifacts/rl/cp-imitation-target-scale/manifest.json")
-        base_cfg = load_config(ROOT / "configs/rl-cp-imitation-target-more-data.json")
-        factory = TargetFactory(base_cfg, plan["base"])
-        case = factory.case(
-            0, plan["base"]["worlds"]["training"][0], 10, 0, True, 0, "scratch_ns", n=5
-        )
-        with Battle(case["scenario"]) as battle:
+        case = scenario()
+        with Battle(case) as battle:
             obs = battle.observe(0)
             legal = tuple(battle.available_actions())
         episode = {
             "match_id": 0,
             "side": 0,
-            "context": {
-                "map": case["scenario"]["map"],
-                "side": 0,
-                "armies": case["armies"],
-                "max_rounds": 30,
-                "fog": True,
-                "random_damage": True,
-            },
+            "context": context(case),
             "decisions": [
                 {
                     "observation": obs,

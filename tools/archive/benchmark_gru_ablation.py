@@ -22,7 +22,7 @@ from civ5rl.engine.imitation.pipeline import (
 )
 from civ5rl.engine.ppo.backend import prefixes
 from civ5rl.engine.runtime.telemetry import ResourceMonitor
-from civ5rl.experiments.imitation_helpers import adam
+from civ5rl.experiments.imitation.helpers import adam
 from civ5rl.protocols.imitation import load_episode
 from civ5rl.provenance.common import configure, file_sha256, read_json, write_json
 

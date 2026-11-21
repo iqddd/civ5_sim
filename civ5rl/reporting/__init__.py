@@ -1,1 +1,3 @@
-"""Derived, read-only run summaries."""
+"""Reports, statistics, monitoring and replay for saved RL artifacts."""
+
+from __future__ import annotations

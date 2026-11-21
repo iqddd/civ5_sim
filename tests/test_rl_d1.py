@@ -8,15 +8,16 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
-from civ5rl.config import load_config
 from civ5rl.common import configure, read_json
-from civ5rl.engine.ppo.metrics import StepReplay
 from civ5rl.ppo import token_minibatches, update
 from civ5rl.validation import validate_config
 from test_rl_ppo_refactor import FakeBackend, ReverseRng
 
+from civ5rl.config import load_config
+from civ5rl.engine.ppo.metrics import StepReplay
 from civ5rl.protocols.diagnostic import gate
 from civ5rl.protocols.diagnostic_d1 import load_weights, next_state_d1, prepare_d1
+from civ5rl.provenance.common import ROOT
 
 
 class LowKLBackend(FakeBackend):
@@ -120,10 +121,14 @@ class D1Tests(unittest.TestCase):
         for k, v in policy.state_dict().items():
             torch.testing.assert_close(v, fast.state_dict()[k], rtol=2e-5, atol=1e-7)
 
-    def test_d1_initialization_data_and_gate(self):
+    def test_d1_initialization_uses_frozen_data_and_transfer_weights(self):
         from civ5rl.model import Policy
 
         validate_config(self.config)
+        for name in ("source_dataset", "initial_checkpoint"):
+            path = ROOT / self.config["diagnostic"][name]
+            if not path.is_file():
+                self.skipTest(f"Frozen D1 transfer check requires {path}")
         with tempfile.TemporaryDirectory() as tmp:
             data = prepare_d1(tmp, self.config)
         original = read_json(self.config["diagnostic"]["source_dataset"])
@@ -133,6 +138,8 @@ class D1Tests(unittest.TestCase):
         self.assertTrue(proof["all_model_parameters_bitwise_equal"])
         self.assertEqual(proof["previous_decisions"], 49152)
         self.assertEqual(len(torch.optim.Adam(policy.parameters()).state), 0)
+
+    def test_d1_gate_and_transition(self):
         base = [{"layout_id": i // 2, "side": i % 2, "win": False} for i in range(128)]
         for wins, passed in ((102, False), (103, True)):
             rows = [{**r, "win": i < wins} for i, r in enumerate(base)]

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from civ5rl.provenance.common import file_sha256
+from civ5rl.provenance.identity import policy_hash
 from civ5sim.engine import digest
 
 
@@ -38,10 +39,6 @@ def verify_checkpoint_identity(
 
     # File and manifest checks also run in Torch-free workers.
     import torch
-
-    # The runner uses these shared checks. Import its canonical policy hash
-    # at the call site to avoid an import cycle during runner initialization.
-    from civ5rl.experiments.ppo_after_imitation import policy_hash
 
     saved: dict[str, Any] = torch.load(path, map_location="cpu", weights_only=False)
     if policy_hash(saved["model"]) != expected_policy_hash:

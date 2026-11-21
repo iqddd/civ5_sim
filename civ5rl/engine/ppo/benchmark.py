@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from civ5rl.engine.ppo.core import update
+from civ5rl.engine.ppo.storage import save_rollout
 from civ5rl.engine.runtime import is_int_at_least
 from civ5rl.engine.runtime.sequence import (
     SequenceBuffer as PackedSequenceBuffer,
@@ -20,8 +21,7 @@ from civ5rl.engine.runtime.sequence import (
 from civ5rl.engine.runtime.sequence import (
     cuda_memory_snapshot as cuda_memory_snapshot,
 )
-from civ5rl.experiments.imitation_helpers import CompilationClock
-from civ5rl.experiments.ppo_artifacts import save_rollout
+from civ5rl.engine.runtime.telemetry import CompilationClock
 from civ5rl.provenance.common import file_sha256, load_module_from_git
 from civ5rl.provenance.rng import capture_rng, restore_rng
 

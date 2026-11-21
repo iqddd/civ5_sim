@@ -11,25 +11,51 @@
 
 | Пакет | Ответственность |
 |---|---|
-| `civ5rl.core` | Контракты входов, schema/encoding, модель, агент, `DecisionEnv` |
-| `civ5rl.engine.collection` | Сбор полных траекторий, стратегии планирования и CPU-воркеры |
-| `civ5rl.engine.ppo` | Цели и обновления PPO, batched backend, behavior replay и контроль KL |
-| `civ5rl.engine.imitation` | Behavior Cloning, кэши демонстраций и пакетирование на GPU |
-| `civ5rl.engine.comparison` | Попарное обучение, контроль KL, подготовка историй и продолжение обучения |
-| `civ5rl.engine.evaluation` | Параллельные матчи, batched inference и состояние GRU |
-| `civ5rl.engine.runtime` | Буферы, общая память, транзакции Adam, бюджеты и телеметрия |
-| `civ5rl.protocols` | Корпуса и случаи, диагностики, оценки, ограничения протоколов |
-| `civ5rl.experiments` | Сценарии опытов, общая подготовка и выполнение оценочных матчей |
-| `civ5rl.provenance` | Паспорта, checkpoint/lineage, миграции, валидация конфигураций |
-| `civ5rl.reporting` | Анализ сохранённых исходов, отчёты и парный bootstrap |
-| `civ5rl.deploy` | Упаковка и управление удалённым исполнением |
+| `civ5rl.core` | Контракты RL, схема и кодирование наблюдений, модель, агент и `DecisionEnv` |
+| `civ5rl.protocols` | Корпуса, оценочные случаи, метрики и проверка условий научных протоколов |
+| `civ5rl.provenance` | Паспорта и идентичность запусков, lineage, checkpoints, миграции и валидация |
+| `civ5rl.engine` | Общие механизмы исполнения. Воркеры и сбор траекторий (`collection`), цели и обновления PPO (`ppo`), обучение BC и кэши демонстраций (`imitation`), попарное обучение (`comparison`), матчи и пакетный инференс (`evaluation`), буферы, транзакции, бюджеты и телеметрия (`runtime`) |
+| `civ5rl.experiments` | Фазы конкретных опытов, оценки, предстартовые проверки и измерения |
+| `civ5rl.reporting` | Чтение сохранённых результатов и журналов, расчёт статистик, отчёты, графики и мониторинг прогресса |
+| `civ5rl.deploy` | Упаковка и перенос артефактов, подготовка окружения и удалённый запуск |
+| [`tools/`](rl-operations.md) | Пользовательские команды, разбор аргументов и вызов соответствующего кода `civ5rl` |
 
-`core` не зависит от `engine` или `protocols`; `engine` не импортирует CLI
-из `tools/`. Collector workers загружаются без Torch.
-Код использует канонические пути, например `civ5rl.core.observation`,
-`civ5rl.core.model`, `civ5rl.engine.collection.collector`, `civ5rl.engine.ppo.core`
-и `civ5rl.provenance.checkpoint`. Сценарии отдельных опытов находятся в
-`civ5rl.experiments`.
+В `experiments` пакет `imitation` управляет подготовкой корпуса и демонстраций,
+обучением BC и оценками. Пакет `ppo` ведёт запуски на основе checkpoints BC
+или PPO, включая сбор траекторий, адаптацию критика, обновления и итоговые оценки.
+`evaluation` организует парные оценки, прямые матчи и оценки ансамблей.
+`comparison` ведёт сбор парных доигрываний и обучение на них.
+В `checks` находятся предстартовые проверки, в `benchmarks` — исполняемые
+нагрузки и измерения, в `_shared` — общая работа с бюджетами, блокировками
+и проверкой входных артефактов.
+
+Обычный вызов идёт от CLI к сценарию опыта, а от него — к механизмам `engine`
+и к функциям `reporting`. Например, [PPO после target BC](../civ5rl/experiments/ppo/after_target_bc/__init__.py)
+вызывает обновления и матчи через `engine`, а итоговый отчёт формирует через
+`reporting`. [Показательные матчи](../civ5rl/reporting/showcase.py) запускаются
+через `engine.evaluation`. При [ветвлении реплея](../civ5rl/reporting/replay_branch.py)
+`engine.evaluation` проверяет и воспроизводит ходы, а матч продолжает
+`civ5sim.match`. Хранение и восстановление артефактов реализованы
+в `engine`. Например, [интерфейс хранения оценок в reporting](../civ5rl/reporting/evaluation_storage.py)
+переэкспортирует функции `engine.evaluation.storage`. Служебный модуль
+[`deploy.archive`](../civ5rl/deploy/archive.py) используется и при удалённой
+передаче, и при локальном хранении артефактов в `engine`. Удалённый воркер
+запускает CLI в отдельном процессе. [Точка входа воркера](../civ5rl/deploy/worker.py)
+
+У `core` нет прямых импортов из `engine` и `protocols`.
+[AST-проверка](../tests/test_civ5rl_dependencies.py) запрещает следующие импорты.
+
+| Откуда | Запрещённые импорты |
+|---|---|
+| `core`, `provenance`, `protocols`, `engine` | `reporting`, `experiments` |
+| `reporting` | `experiments` |
+| Весь `civ5rl` | `tests`, `tools` |
+
+Проверка учитывает локальные импорты, относительные пути и вызовы
+`import_module` или `__import__` с именем модуля в строковом литерале.
+Collector и CPU-воркеры загружаются без Torch. Для чтения старых pickle
+сохранены ленивые алиасы путей, например `civ5rl.observation` для
+`civ5rl.core.observation`. [Проверки загрузки](../tests/test_rl_package_layout.py)
 
 ## Информация и память
 
@@ -386,8 +412,9 @@ attack_preview начинается пустой. `origin_Adam_counters` нов�
 Git хранит код. Каталог запуска хранит веса, Adam, RNG, курсоры, счётчики,
 корпус и расход бюджета. Возврат к commit не восстанавливает эти артефакты.
 
-`prepare` записывает конфиг, manifest и краткие сведения об окружении, без
-архивирования исходников всего проекта. Первое обучение или сбор создаёт
+`prepare` записывает конфиг, manifest и краткие сведения об окружении.
+Архив исходников не нужен для подготовки, исполнения или продолжения.
+Первое обучение или сбор создаёт
 `execution.json`: commit и идентичность используемых нативных бинарников.
 Сами нативные бинарники сохраняются в execution-binaries, поскольку Git их
 не восстанавливает. Resume требует этот commit, чистое дерево кода и те же бинарники;
@@ -608,6 +635,9 @@ resume не применяет принятую попытку повторно.
 родителя на одинаковых Development случаях и seeds одним evaluator/runtime.
 Промежуточные checkpoints не участвуют в выборе. Additional отключён;
 при неизменных родительских весах оценки пропускаются.
+В исходном профиле со сравнением с сохранённой оценкой родителя Additional
+запускается при строгом приросте числа побед на Development. Порог определяется
+победами в проверенных записях родительской оценки для тех же случаев.
 
 Продолжение может переиспользовать Development исходного родителя при совпадении
 канонического ключа evaluator: модель, случаи/seeds, режим выбора, runtime/GPU,
@@ -642,8 +672,8 @@ Seeds продолжений привязаны к `(episode_id, decision_index,
 [конфиге](../configs/rl-c2p-rollout-comparison.json),
 [конфиге нового сбора](../configs/rl-c2p-rollout-comparison-v2-collection.json) и
 [ledger](experiment-ledger.md).
-Фиксированные условия определены в [протоколе](../civ5rl/experiments/rollout_comparison.py),
-[сборщике v2](../civ5rl/experiments/rollout_comparison_collection.py),
-[очереди](../civ5rl/experiments/comparison_queue.py) и
+Исполнение определено в [fit](../civ5rl/experiments/comparison/rollout_fit.py),
+[сборе](../civ5rl/experiments/comparison/rollout_collection.py),
+[очереди](../civ5rl/experiments/comparison/queue.py) и
 [обучении](../civ5rl/engine/comparison/training.py).
 Команды — в [операциях](rl-operations.md#сравнительное-обучение-по-доигрываниям).

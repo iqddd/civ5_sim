@@ -4,7 +4,7 @@ from copy import deepcopy
 import torch
 from civ5rl.core.agent import RLAgent
 from civ5rl.core.model import Policy
-from civ5rl.reporting.ensemble import EnsembleInference, mean_probabilities
+from civ5rl.experiments.evaluation.ensemble import EnsembleInference, mean_probabilities
 from civ5rl.provenance.common import configure
 from civ5sim import Battle
 from tests.test_combat import scenario, unit

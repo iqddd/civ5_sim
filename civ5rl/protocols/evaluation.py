@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from civ5rl.core.agent import RLAgent
+from civ5rl.engine.evaluation.replay import verify_replay
 from civ5rl.protocols.common import bootstrap_ci95, learner_outcome
 from civ5rl.provenance import bound_cases, case_manifest, validate_cases
 from civ5rl.provenance.common import write_json
@@ -149,8 +150,6 @@ def evaluate(policy, collector, specs, config, directory, monitor=None, trusted_
 
 
 def save_replays(policy, specs, device, directory, count=8, outcomes=None):
-    from tools.view_combat import prepare_replay
-
     selected = []
     if outcomes:
         for target in ("W", "L", "D"):
@@ -184,7 +183,7 @@ def save_replays(policy, specs, device, directory, count=8, outcomes=None):
         path = Path(directory) / f"match-{i:02}"
         outcome.save(path)
         write_json(path / "manifest-case.json", s)
-        prepare_replay(path / "replay.json")
+        verify_replay(path, project_relative=False)
         paths.append(str(path))
     return paths
 
@@ -213,6 +212,4 @@ def save_training_replay(episode, directory):
             "final_state_sha256": digest(final),
         }
         MatchOutcome(result, replay, final).save(directory)
-    from tools.view_combat import prepare_replay
-
-    prepare_replay(Path(directory) / "replay.json")
+    verify_replay(directory, project_relative=False)

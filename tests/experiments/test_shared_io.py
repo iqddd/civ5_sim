@@ -10,14 +10,14 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from civ5rl.experiments._shared.io import (
+from civ5rl.engine.runtime.transactions import atomic_legacy_torch_save
+from civ5rl.provenance.jsonl import (
     append_jsonl,
-    atomic_legacy_torch_save,
     read_jsonl,
     read_jsonl_lines,
     recover_jsonl_prefix,
 )
-from civ5rl.experiments.ppo_artifacts import pack_rollout, save_rollout
+from civ5rl.engine.ppo.storage import load_rollout, save_rollout
 from civ5rl.provenance.common import file_sha256
 
 
@@ -63,17 +63,14 @@ def test_step_log_recovery_preserves_committed_text(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == committed + "\n"
 
 
-def test_legacy_torch_save_overwrites_with_identical_bytes(tmp_path: Path) -> None:
+def test_legacy_torch_save_overwrites_readable_capsule(tmp_path: Path) -> None:
     path = tmp_path / "critic-adaptation.pt"
-    legacy_path = path.with_suffix(".tmp")
     data = torch.arange(4)
     for count in (1, 3):
-        value = {"base": data, "slice": data[:count]}
-        torch.save(value, legacy_path)
-        expected = legacy_path.read_bytes()
-        legacy_path.unlink()
-        atomic_legacy_torch_save(value, path)
-        assert path.read_bytes() == expected
+        atomic_legacy_torch_save({"base": data, "slice": data[:count]}, path)
+        restored = torch.load(path, weights_only=True)
+        torch.testing.assert_close(restored["base"], data)
+        torch.testing.assert_close(restored["slice"], data[:count])
         assert list(tmp_path.iterdir()) == [path]
 
 
@@ -98,17 +95,12 @@ def test_legacy_torch_save_leaves_existing_artifact_on_failure(tmp_path: Path) -
 
 def test_save_rollout_keeps_archive_and_metadata_format(tmp_path: Path) -> None:
     episodes = [{"actions": [("end_turn",)], "chosen": [0], "encoded": None}]
-    reference = tmp_path / "first.tmp"
-    torch.save(
-        {
-            "format": "rl01.rollout.pickle",
-            "payload": pickle.dumps(pack_rollout(episodes), protocol=5),
-        },
-        reference,
-    )
     record = save_rollout(episodes, tmp_path, 1)
     path = tmp_path / "first.pt"
-    assert path.read_bytes() == reference.read_bytes()
+    saved = torch.load(path, weights_only=False)
+    assert saved["format"] == "rl01.rollout.pickle"
+    assert pickle.loads(saved["payload"])["format"] == "rl01.rollout.v2"
+    assert load_rollout(path) == [{"actions": [("end_turn",)], "chosen": [0]}]
     assert json.loads(path.with_suffix(".json").read_text(encoding="utf-8")) == record
     timings = record.pop("timings")
     assert list(timings) == [

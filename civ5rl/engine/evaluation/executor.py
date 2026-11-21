@@ -16,6 +16,7 @@ Graphs; deterministic FP32 evaluation never inherits training AMP/TF32.
 
 import math
 import os
+import platform
 import selectors
 import sys
 import traceback
@@ -40,7 +41,13 @@ from civ5rl.engine.evaluation.proxy import (
 )
 from civ5rl.engine.evaluation.state import RecurrentStates
 from civ5rl.engine.runtime import is_int_at_least
+from civ5rl.engine.runtime.hardware import cgroup_limits, effective_cpu_budget
 from civ5rl.engine.runtime.shared import pool
+from civ5rl.provenance.common import ROOT, file_sha256
+from civ5rl.provenance.identity import policy_hash
+from civ5sim import combat_ai
+from civ5sim.engine import digest
+from civ5sim.telemetry import measure
 
 _options = ContextVar("evaluation_options", default={})
 _session = ContextVar("evaluation_session", default=None)
@@ -217,8 +224,6 @@ def _self_play_evaluation_workers():
     )
     available = len(affinity)
     if sys.platform == "linux":
-        from tools.rl_collection_hardware import cgroup_limits, effective_cpu_budget
-
         limits = cgroup_limits()
         available = math.floor(
             effective_cpu_budget(affinity, limits["cpu_quota"], limits["cpuset"])
@@ -480,8 +485,6 @@ def _checkpoint_identity(checkpoint):
 
 
 def evaluation_policy_hash(checkpoint):
-    from civ5rl.experiments.ppo_after_imitation import policy_hash
-
     session = _session.get()
     key = _checkpoint_identity(checkpoint) if session is not None else None
     if session is not None and key in session.checkpoint_hashes:
@@ -490,6 +493,41 @@ def evaluation_policy_hash(checkpoint):
     if session is not None:
         session.checkpoint_hashes[key] = fingerprint
     return fingerprint
+
+
+def evaluation_key(config, plan, out, path, purpose, runtime_identity):
+    """Return the canonical cache key without running matches."""
+    fingerprint = (
+        "cp_mirror_" + digest(config["teacher_search"])[:32]
+        if path == "cp"
+        else evaluation_policy_hash(out / path)
+    )
+
+    # Version behavior explicitly; source formatting and module names are metadata.
+    evaluator = digest(
+        {
+            "version": 1,
+            "platform": platform.system(),
+            "torch": str(torch.__version__),
+            "planner": file_sha256(combat_ai.LIBRARY_PATH),
+            "kernel": file_sha256(
+                ROOT / "build" / ("combat.dll" if sys.platform == "win32" else "libcombat.so")
+            ),
+        }
+    )
+    key = digest(
+        {
+            "purpose": purpose,
+            "policy": fingerprint,
+            "mode": "argmax",
+            "temperature": config.get("policy_temperature", 1.0),
+            "cases": [c["case_hash"] for c in plan[purpose]],
+            "evaluator": evaluator,
+            "runtime": runtime_identity,
+            "search": config["teacher_search"],
+        }
+    )
+    return fingerprint, key
 
 
 def load_evaluation_policy(checkpoint, device) -> Policy:
@@ -512,7 +550,8 @@ def load_evaluation_policy(checkpoint, device) -> Policy:
 
 
 class EvaluationExecutor:
-    def __init__(self, checkpoint, runtime):
+    def __init__(self, checkpoint, runtime, *, inference_metrics=None):
+        self.inference_metrics = inference_metrics
         self.runtime = runtime.resolve()
         # Load through the CPU path so training AMP and compile options do not
         # leak into this FP32 evaluator. Allocation uses the parent's allocator.
@@ -661,10 +700,11 @@ class EvaluationExecutor:
                     if perf_counter() >= until:
                         break
                 self.wait_seconds += perf_counter() - started
-                results = self.inference.infer_encoded([r[1] for r in pending])
+                with measure(self.inference_metrics, "inference"):
+                    results = self.inference.infer_encoded([r[1] for r in pending])
                 for (connection, _), result in zip(pending, results):
                     connection.send(("ok", result))
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - deliver thread failures to waiting workers.
             # Keep diagnostic text, not a traceback retaining agents/GPU tensors.
             self.error = traceback.format_exc()
             self._fail_all(f"{type(exc).__name__}: {exc}")

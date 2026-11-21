@@ -1,10 +1,10 @@
 """Focused correctness tests for mixed self-play PPO, 3-group Adam inheritance, and dual H2H selection."""
 
+import tempfile
+import unittest
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
-import tempfile
-import unittest
 
 import torch
 
@@ -18,20 +18,21 @@ from civ5rl.engine.collection.opponents import (
 )
 from civ5rl.engine.ppo.adam import check_counters, expected_counters, grouped_optimizer
 from civ5rl.engine.ppo.backend import BatchedBackend
-from civ5rl.experiments.h2h_evaluation import (
-    dual_promotion_decision,
-    evaluate_h2h,
-    select_dual_milestone,
-)
-from civ5rl.experiments.ppo_after_imitation import summarize_rollout
-from civ5rl.experiments.ppo_after_target_bc import load_initial_optimizer
-from civ5rl.experiments.ppo_artifacts import prune_checkpoints
+from civ5rl.experiments.evaluation.h2h import evaluate_h2h
+from civ5rl.experiments.ppo.after_imitation import summarize_rollout
+from civ5rl.experiments.ppo.after_target_bc.optimizer import load_initial_optimizer
+from civ5rl.experiments.ppo.checkpoints import prune_checkpoints
 from civ5rl.protocols.common import bootstrap_ci95
 from civ5rl.protocols.memory import flat_map
 from civ5rl.protocols.ppo_after_target_bc import validate_profile
 from civ5rl.provenance import bound_cases, case_manifest
 from civ5rl.provenance.common import ROOT, configure, write_json
-from civ5rl.reporting.evaluation_audit import h2h_world_bootstrap, load_eval_rows
+from civ5rl.reporting.evaluation_audit import (
+    dual_promotion_decision,
+    h2h_world_bootstrap,
+    load_eval_rows,
+    select_dual_milestone,
+)
 from civ5rl.reporting.operations import _confirmation_check
 from civ5sim.engine import digest
 from tests.test_combat import scenario, unit
@@ -40,7 +41,7 @@ from tests.test_combat import scenario, unit
 class SelfPlayCorrectnessTests(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA precision configuration")
     def test_cuda_learner_and_opponent_honor_disabled_amp(self):
-        from civ5rl.experiments.imitation_helpers import load_policy
+        from civ5rl.experiments.imitation.helpers import load_policy
 
         cfg = load_config(ROOT / "configs/rl-ppo-c2p-h60-selfplay.json")
         cfg["numerics"]["amp"] = False

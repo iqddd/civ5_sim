@@ -3,6 +3,9 @@
 import shutil
 from collections import defaultdict
 from copy import deepcopy
+from os import PathLike
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import torch
 
@@ -21,6 +24,17 @@ def atomic_torch_save(value, path, *copies):
         with atomic_output(target) as temporary:
             shutil.copyfile(path, temporary)
     return value
+
+
+def atomic_legacy_torch_save(value: object, path: str | PathLike[str]) -> None:
+    """Publish the path-based Torch archive used by rollouts and critic capsules."""
+    path = Path(path)
+    # Torch uses the temporary file's stem as the ZIP entry prefix. A private
+    # directory lets us keep that stem while isolating concurrent writers.
+    with TemporaryDirectory(dir=path.parent, prefix=".write-") as directory:
+        temporary = Path(directory) / path.with_suffix(".tmp").name
+        torch.save(value, temporary)
+        temporary.replace(path)
 
 
 def _tensor_groups(tensors):

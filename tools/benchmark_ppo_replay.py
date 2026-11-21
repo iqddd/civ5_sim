@@ -1,5 +1,7 @@
 """Bounded, fixed-weight PPO replay benchmark; never runs Adam or a match."""
 
+from __future__ import annotations
+
 import argparse
 import sys
 from pathlib import Path
@@ -13,13 +15,13 @@ sys.path.insert(0, str(ROOT))
 def main():
     import torch
 
-    from civ5sim.engine import digest
     from civ5rl.config import load_config
     from civ5rl.engine.ppo.backend import RolloutCache, measure_replay
+    from civ5rl.engine.ppo.storage import load_rollout
     from civ5rl.engine.runtime.telemetry import ResourceMonitor
-    from civ5rl.experiments.imitation_helpers import load_policy
-    from civ5rl.experiments.ppo_artifacts import load_rollout
+    from civ5rl.experiments.imitation.helpers import load_policy
     from civ5rl.provenance.common import configure, file_sha256, write_json
+    from civ5sim.engine import digest
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)

@@ -8,11 +8,11 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
-from civ5rl.config import load_config
 from civ5rl.common import configure, read_json
 from civ5rl.model import Policy
 from civ5rl.validation import validate_config
 
+from civ5rl.config import load_config
 from civ5rl.protocols.diagnostic_d1 import load_weights
 from civ5rl.protocols.multishot import (
     STAGE,
@@ -29,6 +29,7 @@ from civ5rl.protocols.multishot_metrics import (
     transition,
 )
 from civ5rl.provenance import bound_cases, validate_cases
+from civ5rl.provenance.common import ROOT
 from civ5sim import Action
 
 
@@ -36,12 +37,18 @@ class MultishotTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.config = load_config("configs/rl-diagnostic-multishot.json")
-        cls.dataset = read_json(
-            "artifacts/rl/diagnostic-multishot/manifests/manifest.json"
-        )
 
     def setUp(self):
         configure(17)
+
+    def require_archived_inputs(self, *entries):
+        directory = ROOT / "artifacts/rl/diagnostic-multishot/manifests"
+        manifest = directory / "manifest.json"
+        paths = [manifest, *(ROOT / self.config["diagnostic"][name] for name in entries)]
+        for path in paths:
+            if not path.is_file():
+                self.skipTest(f"Frozen multishot check requires {path}")
+        return read_json(manifest)
 
     def short_config(self):
         config = deepcopy(self.config)
@@ -55,13 +62,14 @@ class MultishotTests(unittest.TestCase):
         return config
 
     def test_frozen_inputs_corpus_controls_and_native_certificates(self):
+        frozen_dataset = self.require_archived_inputs("source_dataset", "initial_checkpoint", "random_checkpoint")
         validate_config(self.config)
         specification(self.config, full_config=True)
         # Exhaustive control games run during corpus preparation, not every test.
         directory = Path("artifacts/rl/diagnostic-multishot/manifests")
         dataset = prepare(directory, self.config)
         proof = read_json(directory / "construction-verification.json")
-        self.assertEqual(dataset, self.dataset)
+        self.assertEqual(dataset, frozen_dataset)
         self.assertEqual(proof["verified_cases"], 384)
         self.assertEqual(proof["control_games"], 6528)
         self.assertEqual(proof["passive_games"], 384)
@@ -98,7 +106,8 @@ class MultishotTests(unittest.TestCase):
         from civ5rl.collector import Collector
         from civ5rl.ppo_fast import RolloutCache
 
-        spec = bound_cases(self.dataset[STAGE]["dev"])[0]
+        dataset = self.require_archived_inputs("initial_checkpoint")
+        spec = bound_cases(dataset[STAGE]["dev"])[0]
         ref = control_episode(spec)
         self.assertGreaterEqual(
             sum(m["ranged_chosen"] for m in ref["decision_metrics"]), 2
@@ -113,7 +122,7 @@ class MultishotTests(unittest.TestCase):
         config = self.short_config()
         with (
             tempfile.TemporaryDirectory() as tmp,
-            Collector(config, factory(self.dataset), "cpu", Path(tmp)) as collector,
+            Collector(config, factory(dataset), "cpu", Path(tmp)) as collector,
         ):
             episodes, _, _ = collector.collect(policy, STAGE, 0)
         self.assertTrue(any(len(ep["chosen"]) > 1 for ep in episodes))
@@ -177,8 +186,14 @@ class MultishotTests(unittest.TestCase):
             "episode_ended",
             sequence_metrics(episode([observation(0)], [0]))["contact_absence_reasons"],
         )
-        spec = bound_cases(self.dataset[STAGE]["dev"])[0]
-        summary, _ = summarize([control_episode(spec, passive=True)])
+        passive = episode([observation(0), observation(2)], [1, 1])
+        passive.update(
+            spec={"episode_id": 0, "layout_id": 0, "learner_side": 0, "scenario": {"units": []}},
+            result={"winner": None, "reward": 0, "reason": "round_limit", "rounds": 1,
+                    "damage_dealt": [0, 0], "remaining_hp": [100, 40]},
+            decision_metrics=[],
+        )
+        summary, _ = summarize([passive])
         self.assertEqual(summary["contact_immediate_use"]["denominator"], 0)
         self.assertIsNone(summary["contact_immediate_use"]["value"])
         self.assertIsNone(summary["contact_probability"]["value"])
@@ -214,6 +229,7 @@ class MultishotTests(unittest.TestCase):
     def test_pretraining_stops_have_no_Adam_steps(self):
         from tools.archive import run_rl_multishot as runner
 
+        dataset = self.require_archived_inputs("initial_checkpoint", "random_checkpoint")
         config = self.short_config()
 
         def fake_evaluate(policy, collector, dataset, directory, monitor, control=None):
@@ -230,7 +246,7 @@ class MultishotTests(unittest.TestCase):
                 "torch.optim.Adam.step", side_effect=AssertionError("unexpected Adam")
             ),
         ):
-            result = runner.run_seed(config, self.dataset, tmp, "cpu")
+            result = runner.run_seed(config, dataset, tmp, "cpu")
             self.assertEqual(result["status"], "solved_at_transfer")
             saved = torch.load(Path(tmp) / "checkpoints/initial.pt", weights_only=False)
             self.assertEqual(saved["optimizer"]["state"], {})
@@ -239,7 +255,7 @@ class MultishotTests(unittest.TestCase):
         def zero_evaluate(*args, **kwargs):
             return {"games": 128, "wins": 0, "seconds": 0}, []
 
-        cases = bound_cases(self.dataset[STAGE]["train"])[:2]
+        cases = bound_cases(dataset[STAGE]["train"])[:2]
         passive = [control_episode(s, passive=True) for s in cases]
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -257,7 +273,7 @@ class MultishotTests(unittest.TestCase):
                 "torch.optim.Adam.step", side_effect=AssertionError("unexpected Adam")
             ),
         ):
-            result = runner.run_seed(config, self.dataset, tmp, "cpu")
+            result = runner.run_seed(config, dataset, tmp, "cpu")
             self.assertEqual(result["status"], "no_positive_reward_in_initial_rollout")
             self.assertEqual(result["update"], 0)
             self.assertGreater(result["decisions"], 0)

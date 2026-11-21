@@ -1,5 +1,7 @@
 """Local RL experiment control and artifact-only analysis."""
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -10,7 +12,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from civ5rl.engine.runtime.control import close_run, request_pause
 from civ5rl.engine.runtime.telemetry import performance_markdown, summarize_performance
 from civ5rl.provenance.common import write_json
-from civ5rl.reporting.operations import audit_run, compare, extend_budget, wait_and_finalize
+from civ5rl.reporting.operations import (
+    audit_run,
+    compare,
+    extend_budget,
+    wait_and_finalize,
+)
 from civ5rl.reporting.snapshot import write_snapshot
 
 
@@ -28,21 +35,59 @@ def main(argv=None):
     cmd.add_argument("--manifest", type=Path, required=True)
     cmd.add_argument("--checkpoint", type=Path, required=True)
     cmd.add_argument("--out", type=Path, required=True)
-    cmd.add_argument("--turn-reset-mode", choices=("legacy", "end_turn"), help="Override the saved turn-reset rules for all cases")
-    cmd = commands.add_parser("branch-replay", help="Replace model commands in a saved policy-vs-CP match")
+    cmd.add_argument(
+        "--turn-reset-mode",
+        choices=("legacy", "end_turn"),
+        help="Override the saved turn-reset rules for all cases",
+    )
+    cmd = commands.add_parser(
+        "branch-replay", help="Replace model commands in a saved policy-vs-CP match"
+    )
     cmd.add_argument("--source", type=Path, required=True)
-    cmd.add_argument("--command", dest="command_number", type=int, help="One-based command to replace")
+    cmd.add_argument(
+        "--command",
+        dest="command_number",
+        type=int,
+        help="One-based command to replace",
+    )
     actions = cmd.add_mutually_exclusive_group(required=True)
-    actions.add_argument("--continue-to-round", type=int, help="Extend a saved match with original model time horizon")
-    actions.add_argument("--forbid-move-to", type=int, nargs=2, metavar=("X", "Y"), help="Forbid move/swap targets for the current model turn only")
-    actions.add_argument("--actions", type=Path, help="JSON list of native actions with integer target tile indices")
-    actions.add_argument("--action", choices=("move", "melee", "ranged", "skip", "fortify", "swap", "end_turn"))
+    actions.add_argument(
+        "--continue-to-round",
+        type=int,
+        help="Extend a saved match with original model time horizon",
+    )
+    actions.add_argument(
+        "--forbid-move-to",
+        type=int,
+        nargs=2,
+        metavar=("X", "Y"),
+        help="Forbid move/swap targets for the current model turn only",
+    )
+    actions.add_argument(
+        "--actions",
+        type=Path,
+        help="JSON list of native actions with integer target tile indices",
+    )
+    actions.add_argument(
+        "--action",
+        choices=("move", "melee", "ranged", "skip", "fortify", "swap", "end_turn"),
+    )
     cmd.add_argument("--unit", type=int, default=-1)
-    cmd.add_argument("--target", type=int, nargs=2, metavar=("X", "Y"), help="Zero-based map coordinates")
+    cmd.add_argument(
+        "--target",
+        type=int,
+        nargs=2,
+        metavar=("X", "Y"),
+        help="Zero-based map coordinates",
+    )
     cmd.add_argument("--checkpoint", type=Path)
     cmd.add_argument("--out", type=Path)
     cmd.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
-    cmd.add_argument("--check-only", action="store_true", help="Check prefix/legality without loading models or writing results")
+    cmd.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Check prefix/legality without loading models or writing results",
+    )
     for name in (
         "snapshot",
         "performance",
@@ -101,20 +146,37 @@ def main(argv=None):
     cmd.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "evaluate-ensemble":
-        from civ5rl.reporting.ensemble import evaluate_ensemble
+        from civ5rl.experiments.evaluation.ensemble import evaluate_ensemble
+
         result = evaluate_ensemble(args.run, args.checkpoints, args.out)
     elif args.command == "record-host-resume":
         from civ5rl.reporting.host_resume import record_host_resume
+
         result = record_host_resume(args.run, args.host_id, args.reason)
     elif args.command in ("archive-evaluations", "restore-evaluations"):
-        from civ5rl.reporting.evaluation_storage import archive_evaluations, restore_evaluations
-        result = (archive_evaluations if args.command == "archive-evaluations" else restore_evaluations)(args.run)
+        from civ5rl.engine.evaluation.storage import (
+            archive_evaluations,
+            restore_evaluations,
+        )
+
+        result = (
+            archive_evaluations
+            if args.command == "archive-evaluations"
+            else restore_evaluations
+        )(args.run)
     elif args.command == "play-cases":
         from civ5rl.reporting.showcase import play_cases
-        result = play_cases(args.manifest, args.checkpoint, args.out, turn_reset_mode=args.turn_reset_mode)
+
+        result = play_cases(
+            args.manifest,
+            args.checkpoint,
+            args.out,
+            turn_reset_mode=args.turn_reset_mode,
+        )
     elif args.command == "branch-replay":
         from civ5rl.reporting.replay_branch import branch_replay
         from civ5sim import Action
+
         source = args.source / "replay.json" if args.source.is_dir() else args.source
         replay = json.loads(source.read_text(encoding="utf-8"))
         target = -1
@@ -123,7 +185,7 @@ def main(argv=None):
             m = replay["initial"]["map"]
             if not (0 <= x < m["width"] and 0 <= y < m["height"]):
                 parser.error("target coordinates are outside the map")
-            target = y*m["width"]+x
+            target = y * m["width"] + x
         if args.actions and (args.target is not None or args.unit != -1):
             parser.error("--actions cannot be combined with --unit/--target")
         forbidden = []
@@ -132,19 +194,41 @@ def main(argv=None):
             m = replay["initial"]["map"]
             if not (0 <= x < m["width"] and 0 <= y < m["height"]):
                 parser.error("forbidden target is outside the map")
-            forbidden = [y*m["width"]+x]
+            forbidden = [y * m["width"] + x]
         if args.command_number is None and args.continue_to_round is None:
             parser.error("--command is required unless --continue-to-round is used")
-        replacement = [] if forbidden or args.continue_to_round is not None else json.loads(args.actions.read_text(encoding="utf-8")) if args.actions else Action(args.action,args.unit,target)
+        replacement = (
+            []
+            if forbidden or args.continue_to_round is not None
+            else json.loads(args.actions.read_text(encoding="utf-8"))
+            if args.actions
+            else Action(args.action, args.unit, target)
+        )
         if args.actions and not isinstance(replacement, list):
             parser.error("--actions must contain a JSON list")
-        result = branch_replay(source,args.command_number,replacement,
-                               checkpoint=args.checkpoint,out=args.out,device=args.device,check_only=args.check_only,forbidden_move_targets=forbidden,continue_to_round=args.continue_to_round)
+        result = branch_replay(
+            source,
+            args.command_number,
+            replacement,
+            checkpoint=args.checkpoint,
+            out=args.out,
+            device=args.device,
+            check_only=args.check_only,
+            forbidden_move_targets=forbidden,
+            continue_to_round=args.continue_to_round,
+        )
     elif args.command == "progress":
         from civ5rl.reporting.progress_process import watch_progress
-        return watch_progress(run=args.run, deployment=args.deployment, watch=args.watch,
-                              interval=args.interval, alpha=args.alpha,
-                              exclude_compilation=args.exclude_compilation, json_output=args.json)
+
+        return watch_progress(
+            run=args.run,
+            deployment=args.deployment,
+            watch=args.watch,
+            interval=args.interval,
+            alpha=args.alpha,
+            exclude_compilation=args.exclude_compilation,
+            json_output=args.json,
+        )
     elif args.command == "snapshot":
         result = write_snapshot(
             args.run, args.out, last=args.last, block_size=args.block_size
@@ -158,9 +242,14 @@ def main(argv=None):
         result = audit_run(args.run, args.out)
     elif args.command == "overhead":
         from civ5rl.reporting.overhead import write_overhead
+
         result = write_overhead(
-            args.run, args.out, reference_start=args.reference_start,
-            reference_stop=args.reference_stop, through_update=args.through_update, deployments=args.deployment,
+            args.run,
+            args.out,
+            reference_start=args.reference_start,
+            reference_stop=args.reference_stop,
+            through_update=args.through_update,
+            deployments=args.deployment,
         )
     elif args.command == "compare":
         result = compare(
@@ -180,7 +269,9 @@ def main(argv=None):
     elif args.command == "close":
         result = close_run(args.run, args.reason)
     elif args.command == "extend-budget":
-        result = extend_budget(args.run, args.additional_seconds, args.reason, request_id=args.request_id)
+        result = extend_budget(
+            args.run, args.additional_seconds, args.reason, request_id=args.request_id
+        )
     else:
         result = wait_and_finalize(
             args.run,

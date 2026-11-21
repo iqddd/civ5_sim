@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from civ5rl.engine.runtime.control import is_active
-from civ5rl.experiments._shared.critic_ops import (
+from civ5rl.experiments.ppo.critic import (
     behavior_digest,
     critic_statistics,
     refresh_episode_old_values,
@@ -24,8 +24,8 @@ from civ5rl.experiments._shared.lifecycle import (
     PersistedActiveSessionClock,
     experiment_run_guard,
 )
-from civ5rl.experiments._shared.markdown import MarkdownReport, format_wdl, render_table
-from civ5rl.experiments.ppo_after_imitation import policy_hash
+from civ5rl.reporting.markdown import MarkdownReport, format_wdl, render_table
+from civ5rl.provenance.identity import policy_hash
 from civ5rl.provenance.common import read_json, write_json
 
 if TYPE_CHECKING:

@@ -1,8 +1,10 @@
 """Run-independent work, rate and budget estimates. No training dependencies."""
 
+from __future__ import annotations
+
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-import math
 from typing import Protocol
 
 
@@ -45,6 +47,7 @@ class Adapter(Protocol):
     Implement observe(source) -> Observation. Experiment-specific phase plans
     belong in adapter subclasses, not conditionals in the estimator or CLI.
     """
+
     def observe(self, source) -> Observation: ...
 
 
@@ -62,10 +65,27 @@ def estimate(observation, *, alpha=0.1, exclude_compilation=False):
             rate = current if rate is None else alpha * current + (1 - alpha) * rate
             used += 1
     remaining = max(0, observation.target - observation.completed) if observation.target is not None else None
-    work_eta = 0.0 if observation.work_stopped or remaining == 0 else remaining / rate if remaining is not None and rate else None
-    stages = [dict(name=s.name, count=s.count, conditional=s.conditional, budget=s.budget,
-                   eta_seconds=0.0 if s.count == 0 else s.count * s.seconds_each if s.seconds_each is not None else None)
-              for s in observation.stages]
+    work_eta = (
+        0.0
+        if observation.work_stopped or remaining == 0
+        else remaining / rate
+        if remaining is not None and rate
+        else None
+    )
+    stages = [
+        {
+            "name": s.name,
+            "count": s.count,
+            "conditional": s.conditional,
+            "budget": s.budget,
+            "eta_seconds": 0.0
+            if s.count == 0
+            else s.count * s.seconds_each
+            if s.seconds_each is not None
+            else None,
+        }
+        for s in observation.stages
+    ]
 
     def total(values):
         return sum(values) if all(v is not None for v in values) else None
@@ -76,23 +96,46 @@ def estimate(observation, *, alpha=0.1, exclude_compilation=False):
     budgets = {}
     for name, budget in observation.budgets.items():
         left = max(0.0, budget["limit_seconds"] - budget["spent_seconds"])
-        required = total(([work_eta] if name == observation.work_budget else []) +
-                         [s["eta_seconds"] for s in stages if not s["conditional"] and s["budget"] == name])
+        required = total(
+            ([work_eta] if name == observation.work_budget else [])
+            + [s["eta_seconds"] for s in stages if not s["conditional"] and s["budget"] == name]
+        )
         if not budget.get("work_estimate_complete", True):
             required = None
-        budgets[name] = {**budget, "remaining_seconds": left, "eta_required_seconds": required,
-                         "fits": required <= left if required is not None else None}
+        budgets[name] = {
+            **budget,
+            "remaining_seconds": left,
+            "eta_required_seconds": required,
+            "fits": required <= left if required is not None else None,
+        }
     now = datetime.now(UTC)
     suspended = observation.status in {"paused", "technical_error", "closed_by_user", "interrupted"}
-    return dict(schema=1, observed_at=now.isoformat(), status=observation.status, phase=observation.phase,
-                unit=observation.unit, completed=observation.completed, target=observation.target,
-                remaining=remaining, ema_alpha=alpha, ema_per_second=rate, rate_samples=used,
-                exclude_compilation=exclude_compilation, eta_work_seconds=work_eta,
-                eta_other_seconds=other, eta_conditional_seconds=conditional,
-                eta_total_seconds=total_eta, eta_assumes_resume=suspended,
-                estimated_finish_at=(now + timedelta(seconds=total_eta)).isoformat()
-                if total_eta is not None and not suspended and observation.status not in {"unknown", "complete"} else None,
-                stages=stages, budgets=budgets, details=observation.details, warnings=observation.warnings)
+    return {
+        "schema": 1,
+        "observed_at": now.isoformat(),
+        "status": observation.status,
+        "phase": observation.phase,
+        "unit": observation.unit,
+        "completed": observation.completed,
+        "target": observation.target,
+        "remaining": remaining,
+        "ema_alpha": alpha,
+        "ema_per_second": rate,
+        "rate_samples": used,
+        "exclude_compilation": exclude_compilation,
+        "eta_work_seconds": work_eta,
+        "eta_other_seconds": other,
+        "eta_conditional_seconds": conditional,
+        "eta_total_seconds": total_eta,
+        "eta_assumes_resume": suspended,
+        "estimated_finish_at": (now + timedelta(seconds=total_eta)).isoformat()
+        if total_eta is not None and not suspended and observation.status not in {"unknown", "complete"}
+        else None,
+        "stages": stages,
+        "budgets": budgets,
+        "details": observation.details,
+        "warnings": observation.warnings,
+    }
 
 
 def duration(seconds):
@@ -102,33 +145,55 @@ def duration(seconds):
 def format_progress(result):
     rate = result["ema_per_second"]
     target = "?" if result["target"] is None else f"{result['target']:,.0f}"
-    budgets = " ".join(f"{k} {duration(v['remaining_seconds'])} fits={v['fits']}" for k, v in result["budgets"].items())
+    budgets = " ".join(
+        f"{k} {duration(v['remaining_seconds'])} fits={v['fits']}" for k, v in result["budgets"].items()
+    )
     rate_text = f"{rate:.1f}" if rate is not None else "?"
-    stages = ", ".join(f"{s['name']}:{s['count']}" for s in result["stages"] if not s["conditional"] and s["count"])
+    stages = ", ".join(
+        f"{s['name']}:{s['count']}" for s in result["stages"] if not s["conditional"] and s["count"]
+    )
     control = result.get("budget_control", {})
     applied = control.get("applied") or {}
-    revision = f" | budget revision {applied.get('revision', '?')}/{control['requested_revision']} applied/requested" if control else ""
+    revision = (
+        f" | budget revision {applied.get('revision', '?')}/{control['requested_revision']} applied/requested"
+        if control
+        else ""
+    )
     details = result.get("details", {})
-    attempts = (f" | attempts {details['attempts']}, rejected {details.get('rejected_attempts',0)}"
-                + (f", LR {details['lr']:g}" if details.get('lr') is not None else '')
-                if details.get('attempts') is not None else '')
-    learning = details.get('learning') or {}
-    alternative = learning.get('pairs',{}).get('alternative')
-    learned = (f" | alternatives preferred {alternative['preferred']}/{alternative['count']}"
-               f", argmax {alternative['better_argmax']}"
-               f", anchor changes {learning['anchors']['all']['changed']}"
-               if alternative else '')
+    attempts = (
+        f" | attempts {details['attempts']}, rejected {details.get('rejected_attempts', 0)}"
+        + (f", LR {details['lr']:g}" if details.get("lr") is not None else "")
+        if details.get("attempts") is not None
+        else ""
+    )
+    learning = details.get("learning") or {}
+    alternative = learning.get("pairs", {}).get("alternative")
+    learned = (
+        f" | alternatives preferred {alternative['preferred']}/{alternative['count']}"
+        f", argmax {alternative['better_argmax']}"
+        f", anchor changes {learning['anchors']['all']['changed']}"
+        if alternative
+        else ""
+    )
     groups = details.get("adam_counters")
-    adam = (f" | Adam shared/actor {groups['shared_actor']}, value {groups['value']}"
-            + (f", preview {groups['attack_preview']}" if "attack_preview" in groups else "")
-            if groups else
-            f" | Adam {details['adam_total']} total ({details['adam_inherited']} inherited + {details['adam_new_accepted']} new)"
-            if details.get("adam_inherited") and "adam_total" in details else "")
-    return (f"{result['observed_at']} | {result['status']}/{result['phase']} | "
-            f"{result['completed']:,.0f}/{target} {result['unit']} | EMA {rate_text}"
-            f" {result['unit']}/s | ETA work {duration(result['eta_work_seconds'])} | "
-            f"other {duration(result['eta_other_seconds'])} ({stages or 'none'}) | total {duration(result['eta_total_seconds'])} | "
-            f"conditional +{duration(result['eta_conditional_seconds'])} | {budgets}" +
-            (f" | finish ~{result['estimated_finish_at']}" if result["estimated_finish_at"] else "") +
-            revision + adam + attempts + learned +
-            (" | assumes resume" if result["eta_assumes_resume"] else ""))
+    adam = (
+        f" | Adam shared/actor {groups['shared_actor']}, value {groups['value']}"
+        + (f", preview {groups['attack_preview']}" if "attack_preview" in groups else "")
+        if groups
+        else f" | Adam {details['adam_total']} total ({details['adam_inherited']} inherited + {details['adam_new_accepted']} new)"
+        if details.get("adam_inherited") and "adam_total" in details
+        else ""
+    )
+    return (
+        f"{result['observed_at']} | {result['status']}/{result['phase']} | "
+        f"{result['completed']:,.0f}/{target} {result['unit']} | EMA {rate_text}"
+        f" {result['unit']}/s | ETA work {duration(result['eta_work_seconds'])} | "
+        f"other {duration(result['eta_other_seconds'])} ({stages or 'none'}) | total {duration(result['eta_total_seconds'])} | "
+        f"conditional +{duration(result['eta_conditional_seconds'])} | {budgets}"
+        + (f" | finish ~{result['estimated_finish_at']}" if result["estimated_finish_at"] else "")
+        + revision
+        + adam
+        + attempts
+        + learned
+        + (" | assumes resume" if result["eta_assumes_resume"] else "")
+    )

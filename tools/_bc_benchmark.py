@@ -1,6 +1,5 @@
 """Post-compilation BC training benchmark, NVML utilization, and Kineto trace."""
 
-import gzip
 import json
 import math
 import os
@@ -11,136 +10,27 @@ from pathlib import Path
 from time import perf_counter
 
 import torch
-from torch.profiler import ProfilerActivity, profile, record_function
-
 from civ5rl.engine.imitation.core import label_minibatches
 from civ5rl.engine.imitation.pipeline import backward_minibatch_async
 from civ5rl.engine.imitation.storage import PreparedDemonstrations, prepare_inputs
-from civ5rl.engine.runtime.telemetry import ResourceMonitor, analyze_telemetry, integrate_gpu_interval
+from civ5rl.engine.runtime.telemetry import (
+    CompilationClock,
+    ResourceMonitor,
+    analyze_telemetry,
+    integrate_gpu_interval,
+)
 from civ5rl.engine.runtime.transactions import FrozenParamsCheck, bc_optimizer_step
-from civ5rl.experiments.imitation_helpers import CompilationClock, adam, load_policy
-from civ5rl.experiments.imitation_target_scale import (
+from civ5rl.experiments.benchmarks.profiling import summarize_kineto_trace
+from civ5rl.experiments.imitation.helpers import adam, load_policy
+from civ5rl.experiments.imitation.target_scale import (
     _chunk_priority_order,
+)
+from civ5rl.experiments.imitation.target_scale import (
     load_config as load_target_bc_config,
 )
 from civ5rl.provenance.common import configure, file_sha256, read_json, seed_for, write_json
 from civ5rl.provenance.rng import capture_rng, restore_rng
-
-
-def _merge_intervals(intervals):
-    if not intervals:
-        return 0.0, []
-    ordered = sorted(intervals)
-    merged = [list(ordered[0])]
-    for start, end in ordered[1:]:
-        if start <= merged[-1][1]:
-            if end > merged[-1][1]:
-                merged[-1][1] = end
-        else:
-            merged.append([start, end])
-    total = sum(end - start for start, end in merged)
-    return total, merged
-
-
-def summarize_kineto_trace(trace_path, wall_seconds):
-    opener = gzip.open if str(trace_path).endswith(".gz") else open
-    with opener(trace_path, "rt", encoding="utf-8") as stream:
-        payload = json.load(stream)
-    events = payload.get("traceEvents", [])
-
-    kernel_intervals = []
-    memcpy_intervals = []
-    memset_intervals = []
-    kernel_by_name = {}
-    memcpy_by_name = {}
-    cuda_runtime_by_name = {}
-    annotations = {}
-
-    for ev in events:
-        if ev.get("ph") != "X":
-            continue
-        dur = float(ev.get("dur", 0.0))
-        ts = float(ev.get("ts", 0.0))
-        cat = ev.get("cat", "")
-        name = ev.get("name", "")
-        if cat == "kernel":
-            kernel_intervals.append((ts, ts + dur))
-            rec = kernel_by_name.setdefault(name, {"count": 0, "us": 0.0})
-            rec["count"] += 1
-            rec["us"] += dur
-        elif cat == "gpu_memcpy":
-            memcpy_intervals.append((ts, ts + dur))
-            rec = memcpy_by_name.setdefault(name, {"count": 0, "us": 0.0})
-            rec["count"] += 1
-            rec["us"] += dur
-        elif cat == "gpu_memset":
-            memset_intervals.append((ts, ts + dur))
-        elif cat == "cuda_runtime":
-            rec = cuda_runtime_by_name.setdefault(name, {"count": 0, "us": 0.0})
-            rec["count"] += 1
-            rec["us"] += dur
-        elif cat == "user_annotation":
-            rec = annotations.setdefault(name, {"count": 0, "us": 0.0})
-            rec["count"] += 1
-            rec["us"] += dur
-
-    kernel_us, merged_kernels = _merge_intervals(kernel_intervals)
-    memcpy_us, _ = _merge_intervals(memcpy_intervals)
-    memset_us, _ = _merge_intervals(memset_intervals)
-    any_gpu_us, merged_gpu = _merge_intervals(
-        [*kernel_intervals, *memcpy_intervals, *memset_intervals]
-    )
-
-    gaps_us = [
-        merged_gpu[i + 1][0] - merged_gpu[i][1]
-        for i in range(len(merged_gpu) - 1)
-        if merged_gpu[i + 1][0] > merged_gpu[i][1]
-    ]
-    wall_us = wall_seconds * 1e6
-
-    top_kernels = sorted(
-        ({"name": k, "count": v["count"], "ms": v["us"] / 1000.0} for k, v in kernel_by_name.items()),
-        key=lambda item: item["ms"],
-        reverse=True,
-    )[:20]
-    top_runtime = sorted(
-        ({"name": k, "count": v["count"], "ms": v["us"] / 1000.0} for k, v in cuda_runtime_by_name.items()),
-        key=lambda item: item["ms"],
-        reverse=True,
-    )[:20]
-    memcpy_summary = sorted(
-        ({"name": k, "count": v["count"], "ms": v["us"] / 1000.0} for k, v in memcpy_by_name.items()),
-        key=lambda item: item["ms"],
-        reverse=True,
-    )
-    annotation_summary = sorted(
-        ({"name": k, "count": v["count"], "ms": v["us"] / 1000.0} for k, v in annotations.items()),
-        key=lambda item: item["ms"],
-        reverse=True,
-    )
-
-    return {
-        "wall_ms": wall_us / 1000.0,
-        "gpu_kernel_busy_ms": kernel_us / 1000.0,
-        "gpu_kernel_busy_pct_of_wall": 100.0 * kernel_us / wall_us if wall_us else 0.0,
-        "gpu_memcpy_ms": memcpy_us / 1000.0,
-        "gpu_memset_ms": memset_us / 1000.0,
-        "gpu_any_engine_busy_ms": any_gpu_us / 1000.0,
-        "gpu_any_engine_busy_pct_of_wall": 100.0 * any_gpu_us / wall_us if wall_us else 0.0,
-        "gpu_idle_gaps": {
-            "count": len(gaps_us),
-            "total_ms": sum(gaps_us) / 1000.0,
-            "gaps_over_100us_count": sum(1 for g in gaps_us if g >= 100.0),
-            "gaps_over_100us_ms": sum(g for g in gaps_us if g >= 100.0) / 1000.0,
-            "gaps_over_1ms_count": sum(1 for g in gaps_us if g >= 1000.0),
-            "gaps_over_1ms_ms": sum(g for g in gaps_us if g >= 1000.0) / 1000.0,
-            "max_gap_ms": max(gaps_us, default=0.0) / 1000.0,
-        },
-        "user_annotations": annotation_summary,
-        "memcpy_breakdown": memcpy_summary,
-        "top_cuda_runtime": top_runtime,
-        "top_kernels": top_kernels,
-    }
+from torch.profiler import ProfilerActivity, profile, record_function
 
 
 def _execute_bc_steps(

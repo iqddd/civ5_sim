@@ -1,5 +1,7 @@
 """Bounded streaming Collection tuning on a fixed policy and workload."""
 
+from __future__ import annotations
+
 import argparse
 import json
 import math
@@ -14,14 +16,18 @@ from time import perf_counter
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from tools.rl_collection_hardware import hardware
 from tools._collection_tuning import (
-    DEFAULT_ENV_CAPACITY, TIE_FRACTION, Candidate, Measurements,
-    preferred, streaming_candidates,
+    DEFAULT_ENV_CAPACITY,
+    TIE_FRACTION,
+    Candidate,
+    Measurements,
+    preferred,
+    streaming_candidates,
 )
-from tools._common import write_json, file_sha256
-from tools._resources import collection_resources
+from tools._common import file_sha256, write_json
 from tools._process import stop_tree
+from tools._resources import collection_resources
+from tools.rl_collection_hardware import hardware
 
 
 def main():
@@ -38,9 +44,7 @@ def main():
         help="Cases in each Collection warmup; 0 uses the full workload",
     )
     parser.add_argument("--candidates", help="Explicit list, e.g. 12/12/1,16/16/1")
-    parser.add_argument(
-        "--scheduler", choices=("ready", "streaming"), default="streaming"
-    )
+    parser.add_argument("--scheduler", choices=("ready", "streaming"), default="streaming")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.scheduler != "streaming" and not args.candidates:
@@ -50,17 +54,12 @@ def main():
         args.warmup_episodes < 0
         or not math.isfinite(args.budget_seconds)
         or args.budget_seconds <= 0
-        or (
-            args.cpu_budget is not None
-            and (not math.isfinite(args.cpu_budget) or args.cpu_budget <= 0)
-        )
+        or (args.cpu_budget is not None and (not math.isfinite(args.cpu_budget) or args.cpu_budget <= 0))
     ):
-        parser.error(
-            "CPU/time budgets must be positive finite numbers; warmup cases must be nonnegative"
-        )
+        parser.error("CPU/time budgets must be positive finite numbers; warmup cases must be nonnegative")
     sys.path.insert(0, str(ROOT))
     from civ5rl.config import load_config
-    from civ5rl.experiments.ppo_artifacts import load_rollout
+    from civ5rl.engine.ppo.storage import load_rollout
 
     cfg = load_config(args.config)
     self_play = bool(cfg.get("self_play", {}).get("enabled"))
@@ -76,11 +75,7 @@ def main():
         pynvml.nvmlShutdown()
     except Exception as exc:  # noqa: BLE001 -- GPU metadata may be unavailable in dry-run
         machine["GPU_query_error"] = f"{type(exc).__name__}: {exc}"
-    cpu_budget = (
-        args.cpu_budget
-        if args.cpu_budget is not None
-        else machine["effective_cpu_budget"]
-    )
+    cpu_budget = args.cpu_budget if args.cpu_budget is not None else machine["effective_cpu_budget"]
     base = max(1, math.floor(cpu_budget) if self_play else math.ceil(cpu_budget))
     episodes = load_rollout(args.rollout)
     count = (
@@ -107,10 +102,12 @@ def main():
             smaller = max(capacity // 2, 2 * base)
             candidates = [
                 Candidate(envs, workers, reply, scheduler="streaming")
-                for envs, reply in dict.fromkeys((
-                    (capacity, 1),
-                    (smaller, 2 if smaller > 2 * base else 1),
-                ))
+                for envs, reply in dict.fromkeys(
+                    (
+                        (capacity, 1),
+                        (smaller, 2 if smaller > 2 * base else 1),
+                    )
+                )
                 for workers in (base, 2 * base)
             ]
         else:
@@ -138,8 +135,7 @@ def main():
         "max_envs": max_envs,
         "initial_env_capacity": candidates[0].envs,
         "initial_refill_expected": count > candidates[0].envs,
-        "cpu_stat_enabled": sys.platform == "linux"
-        and bool(machine.get("cgroup", {}).get("quota_sources")),
+        "cpu_stat_enabled": sys.platform == "linux" and bool(machine.get("cgroup", {}).get("quota_sources")),
         "initial_candidates": [str(c) for c in candidates],
         "results": [],
     }
@@ -147,9 +143,7 @@ def main():
         print(json.dumps(report, indent=2))
         return
     if args.out.exists() and any(p.name != "run.lock" for p in args.out.iterdir()):
-        parser.error(
-            "Output directory must be empty; use a new directory for each search"
-        )
+        parser.error("Output directory must be empty; use a new directory for each search")
     args.out.mkdir(parents=True, exist_ok=True)
     protected = [
         args.config.resolve(),
@@ -199,11 +193,7 @@ def main():
                 "median_seconds": r.median,
                 "min_seconds": min((t["seconds"] for t in r.trials), default=None),
                 "max_seconds": max((t["seconds"] for t in r.trials), default=None),
-                "decisions_per_second": (
-                    decision_rate(r)
-                    if r.median is not None
-                    else None
-                ),
+                "decisions_per_second": (decision_rate(r) if r.median is not None else None),
                 "trials": r.trials,
                 "confirmations": r.confirmations,
                 "sessions": r.sessions,
@@ -224,9 +214,7 @@ def main():
         ]
         for item in report["results"]:
             if item["median_seconds"] is None:
-                lines.append(
-                    f"| {item['candidate']} | — | — | — | 0 | {item['status']} |"
-                )
+                lines.append(f"| {item['candidate']} | — | — | — | 0 | {item['status']} |")
                 continue
             lines.append(
                 f"| {item['candidate']} | {item['median_seconds']:.3f} | "
@@ -270,9 +258,7 @@ def main():
                 row.status = "not_started"
             save()
             return row
-        directory = (
-            args.out / str(candidate).replace("/", "-") / f"session-{len(row.sessions)}"
-        )
+        directory = args.out / str(candidate).replace("/", "-") / f"session-{len(row.sessions)}"
         directory.mkdir(parents=True)
         command = [
             sys.executable,
@@ -333,12 +319,8 @@ def main():
                 stop_tree(process)
                 exhausted = True
                 session["error"] = type(exc).__name__
-        session.update(
-            wall_seconds=perf_counter() - tick, returncode=process.returncode
-        )
-        session["collection_resources"] = collection_resources(
-            directory / "resources.jsonl"
-        )
+        session.update(wall_seconds=perf_counter() - tick, returncode=process.returncode)
+        session["collection_resources"] = collection_resources(directory / "resources.jsonl")
         path = directory / "result.json"
         if path.exists():
             output = json.loads(path.read_text(encoding="utf-8"))
@@ -365,8 +347,7 @@ def main():
                 comparable = (
                     trial["positions"] > 0
                     and trial["commands"] > 0
-                    and abs(trial["positions"] - reference_positions)
-                    <= max(1, reference_positions) * 0.15
+                    and abs(trial["positions"] - reference_positions) <= max(1, reference_positions) * 0.15
                 )
             else:
                 comparable = hash_matched
@@ -410,19 +391,14 @@ def main():
                 measure(replace(best.candidate, reply=2))
         if compare_worker_counts:
             for workers in (base, 2 * base):
-                valid = [
-                    r for r in rows.values()
-                    if r.status == "ok" and r.candidate.workers == workers
-                ]
+                valid = [r for r in rows.values() if r.status == "ok" and r.candidate.workers == workers]
                 if valid:
                     finalists.append(max(valid, key=decision_rate))
             if len(finalists) == 2:
                 for row in finalists:
                     measure(row.candidate, confirmation=True)
         while not compare_worker_counts and not exhausted:
-            valid = sorted(
-                (r for r in rows.values() if r.status == "ok"), key=lambda r: r.median
-            )
+            valid = sorted((r for r in rows.values() if r.status == "ok"), key=lambda r: r.median)
             best = preferred(valid)
             if best is None:
                 break
@@ -439,9 +415,7 @@ def main():
                 row.status = "confirmation_failed"
     finally:
         changed = [
-            path
-            for path, digest in report["protected_inputs"].items()
-            if file_sha256(Path(path)) != digest
+            path for path, digest in report["protected_inputs"].items() if file_sha256(Path(path)) != digest
         ]
         report["protected_inputs_unchanged"] = not changed
         save()

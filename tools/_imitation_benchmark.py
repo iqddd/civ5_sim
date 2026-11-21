@@ -6,7 +6,7 @@ remains part of execution provenance despite living under tools/.
 
 from time import perf_counter
 
-from civ5rl.experiments.imitation_helpers import pool
+from civ5rl.engine.runtime.shared import pool
 from civ5rl.protocols.imitation import load_episode, match_task, task_for
 from civ5rl.provenance.common import read_json, write_json
 

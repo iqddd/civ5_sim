@@ -1,5 +1,7 @@
 """Replay fixed episodes or collect fixed cases, without training or changing run state."""
 
+from __future__ import annotations
+
 import argparse
 import hashlib
 import json
@@ -85,7 +87,11 @@ def load_collection_policy(config, checkpoint):
     from civ5rl.core.preview import extends_parent, load_parent_model
 
     saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    variant = config["model"]["variant"] if extends_parent(config) and saved["variant"] == "C2" else saved["variant"]
+    variant = (
+        config["model"]["variant"]
+        if extends_parent(config) and saved["variant"] == "C2"
+        else saved["variant"]
+    )
     policy = Policy(variant)
     if variant != saved["variant"]:
         load_parent_model(policy, saved, config)
@@ -168,7 +174,9 @@ def main():
     parser.add_argument("--inference-wait-seconds", type=float)
     parser.add_argument("--reference-trace", type=Path)
     parser.add_argument(
-        "--record-hidden", action=argparse.BooleanOptionalAction, default=True,
+        "--record-hidden",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Include recurrent states in the collection comparison trace",
     )
     parser.add_argument("--native-library", type=Path)
@@ -225,8 +233,8 @@ def main():
     sys.path.insert(0, str(args.source_root.resolve()))
     import torch
 
+    from civ5rl.engine.ppo.storage import load_rollout
     from civ5rl.engine.runtime.telemetry import ResourceMonitor
-    from civ5rl.experiments.ppo_artifacts import load_rollout
     from civ5rl.provenance.common import configure, file_sha256, write_json
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -279,13 +287,15 @@ def main():
                     parser.error("Collection requires --config and --checkpoint")
                 from civ5rl.config import load_config
                 from civ5rl.engine.collection.collector import Collector
-                from civ5rl.experiments.imitation_helpers import CompilationClock
+                from civ5rl.engine.runtime.telemetry import CompilationClock
                 from civ5rl.provenance import bound_cases, case_manifest
                 from civ5sim.engine import digest
 
                 config = load_config(args.config)
                 from copy import deepcopy
+
                 from civ5rl.protocols.turn_reset import mode
+
                 selected_mode = mode(config)
                 # Saved episodes carry layouts only in collection benchmarks, never replay labels.
                 # Build fresh rollouts in the requested physics without changing source evidence.
@@ -480,7 +490,10 @@ def main():
                     trace = {}
                     for name in ("old_log_probs", "old_hidden", "old_value"):
                         parts = [
-                            np.asarray(v).reshape(-1) for ep in values for v in ep.get(name, ()) if v is not None
+                            np.asarray(v).reshape(-1)
+                            for ep in values
+                            for v in ep.get(name, ())
+                            if v is not None
                         ]
                         trace[name] = np.concatenate(parts) if parts else np.empty(0, np.float32)
                     if reference_trace is None and not warmup:

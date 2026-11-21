@@ -9,12 +9,15 @@ import numpy as np
 import torch
 
 from civ5rl.config import load_config
-from civ5rl.engine.runtime.transactions import AdamSnapshot, require_finite_state
-from civ5rl.engine.ppo.core import update
 from civ5rl.engine.ppo.backend import measure_replay
+from civ5rl.engine.ppo.core import update
 from civ5rl.engine.ppo.metrics import StepReplay
-from civ5rl.protocols.ppo_after_imitation import advance_controlled_rollout, prepare_cases
-from civ5rl.provenance.common import read_json, configure
+from civ5rl.engine.runtime.transactions import AdamSnapshot, require_finite_state
+from civ5rl.protocols.ppo_after_imitation import (
+    advance_controlled_rollout,
+    prepare_cases,
+)
+from civ5rl.provenance.common import ROOT, configure, read_json
 from civ5rl.provenance.validation import validate_config
 
 
@@ -221,9 +224,16 @@ class ControlledPPOTests(unittest.TestCase):
         )
         advance_controlled_rollout(state, {"optimizer_steps": 1, "attempted_optimizer_steps": 1}, 4)
         self.assertEqual(state["zero_accepted_streak"], 0)
+
+    def test_controlled_rollout_reuses_frozen_case_splits(self):
         validate_config(self.config)
+        parent_manifest = ROOT / self.config["experiment"]["parent_run"] / "manifest.json"
+        parent_passport = parent_manifest.with_name("passport.json")
+        for path in (parent_manifest, parent_passport):
+            if not path.is_file():
+                self.skipTest(f"Frozen controlled PPO split check requires {path}")
         new = prepare_cases(self.config)
-        old = read_json("artifacts/rl/ppo-after-imitation/manifest.json")
+        old = read_json(parent_manifest)
         self.assertEqual(new["development"], old["development"])
         self.assertEqual(new["confirmation"], old["confirmation"])
 

@@ -14,10 +14,14 @@ from civ5rl.core.model import Policy, batch_inputs
 from civ5rl.engine.ppo.core import episode_returns, raw_gae_advantages, update
 from civ5rl.engine.ppo.adam import check_counters, grouped_optimizer
 from civ5rl.engine.ppo.backend import BatchedBackend
-from civ5rl.experiments import ppo_after_target_bc as runner
-from civ5rl.experiments.imitation_helpers import assert_equal
-from civ5rl.experiments.ppo_after_imitation import optimizer_for
-from civ5rl.experiments.ppo_critic_adaptation import adapt_critic
+from civ5rl.experiments.ppo import critic as adaptation
+from civ5rl.experiments.ppo.after_target_bc.boundary import ActiveClock, save_boundary
+from civ5rl.experiments.ppo.after_target_bc.optimizer import load_initial_optimizer
+from civ5rl.experiments.imitation.helpers import assert_equal
+from civ5rl.engine.ppo.adam import optimizer_for
+from civ5rl.experiments.ppo.critic import adapt_critic
+from civ5rl.engine.ppo.core import encode_episode
+from civ5rl.provenance.identity import policy_hash
 from civ5rl.protocols.ppo_after_target_bc import load_config, validate_profile
 from civ5rl.provenance import checkpoint
 from civ5rl.provenance.audit import verify_checkpoint_chain
@@ -48,10 +52,9 @@ class GammaOneTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
             write_json(out / "run.json", dict(config=cfg, kind=cfg["kind"], run_id="budget-test"))
-            clock = runner.ActiveClock(state, out)
-            kwargs = dict(behavior_hash=lambda _: "fixed", statistics=runner.critic_statistics,
-                          policy_hash=runner.policy_hash)
-            from civ5rl.experiments import ppo_critic_adaptation as adaptation
+            clock = ActiveClock(state, out)
+            kwargs = dict(behavior_hash=lambda _: "fixed", statistics=adaptation.critic_statistics,
+                          policy_hash=policy_hash)
             with patch.object(adaptation, "perf_counter", side_effect=lambda: current[0]):
                 with self.assertRaisesRegex(RuntimeError, "compile interrupted"):
                     adapt_critic(policy, optimizer, episodes, cfg, "cpu", out, state,
@@ -92,12 +95,12 @@ class GammaOneTests(unittest.TestCase):
         parent_adam.param_groups[0]["foreach"] = True
         saved = dict(model=deepcopy(policy.state_dict()), optimizer=deepcopy(parent_adam.state_dict()),
                      variant="C", state=dict(optimizer_steps=12644, critic_complete=True, phase="collect"))
-        adam = runner.load_initial_optimizer(policy, saved, cfg)
+        adam = load_initial_optimizer(policy, saved, cfg)
         self.assertTrue(all(g["foreach"] for g in adam.param_groups))
         shared = {n: deepcopy(adam.state[p]) for n, p in policy.named_parameters() if not n.startswith("value.")}
         self.assertTrue(all(p not in adam.state for p in policy.value.parameters()))
         episodes = continuation.PPOContinuationTests.episodes(self, policy)
-        original_behavior = runner.behavior_digest(episodes)
+        original_behavior = adaptation.behavior_digest(episodes)
         original_weights = deepcopy(policy.state_dict())
         state = dict(optimizer_steps=0, attempted_steps=0, rejected_steps=0, updates=0,
                      phase="critic", decisions=8, origin_Adam_counter=12644,
@@ -107,10 +110,9 @@ class GammaOneTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             out = Path(temporary)
             write_json(out / "run.json", dict(config=cfg, kind=cfg["kind"], run_id=identity["run_id"]))
-            clock = runner.ActiveClock(state, out)
-            calls = dict(features_for=runner.batched_recurrent_features, behavior_hash=runner.behavior_digest,
-                         statistics=runner.critic_statistics, policy_hash=runner.policy_hash)
-            from civ5rl.experiments import ppo_critic_adaptation as adaptation
+            clock = ActiveClock(state, out)
+            calls = dict(features_for=adaptation.batched_recurrent_features, behavior_hash=adaptation.behavior_digest,
+                         statistics=adaptation.critic_statistics, policy_hash=policy_hash)
             real_save = adaptation.atomic_save
 
             def fail_after_first_commit(value, path):
@@ -125,7 +127,7 @@ class GammaOneTests(unittest.TestCase):
             # Simulate reloading the earlier full boundary; the capsule must
             # restore its own value weights, Adam and RNG before continuing.
             policy.load_state_dict(saved["model"])
-            adam = runner.load_initial_optimizer(policy, saved, cfg)
+            adam = load_initial_optimizer(policy, saved, cfg)
             result = adapt_critic(policy, adam, episodes, cfg, "cpu", out, state, rng,
                                   identity, clock, None, **calls)
             self.assertEqual(result["steps"], 4)
@@ -135,10 +137,10 @@ class GammaOneTests(unittest.TestCase):
                 if not n.startswith("value."):
                     assert_equal(adam.state[p], shared[n])
                     self.assertTrue(torch.equal(p, original_weights[n]))
-            self.assertEqual(runner.behavior_digest(episodes), original_behavior)
+            self.assertEqual(adaptation.behavior_digest(episodes), original_behavior)
             self.assertEqual(adam.param_groups[1]["lr"], 1e-5)
             # Refresh must actually use the adapted value head.
-            encoded = runner.encode_episode(episodes[0], "C")
+            encoded = encode_episode(episodes[0], "C")
             with torch.no_grad():
                 logits_after, values, _ = policy(batch_inputs(encoded, "cpu"), sequence=True)
             np.testing.assert_allclose(episodes[0]["old_value"], values.numpy(), atol=2e-7)
@@ -160,7 +162,7 @@ class GammaOneTests(unittest.TestCase):
             self.assertEqual(rejected["optimizer_steps"], 0)
             assert_equal(policy.state_dict(), weights)
             assert_equal(adam.state_dict(), moments)
-            runner.save_boundary(out, policy, adam, state, rng, cfg, identity)
+            save_boundary(out, policy, adam, state, rng, cfg, identity)
             restored = Policy()
             restored_adam = grouped_optimizer(restored, cfg, "cpu")
             checkpoint.restore(out / state["latest"], restored, restored_adam, rng, cfg, identity)

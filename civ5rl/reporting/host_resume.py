@@ -1,5 +1,7 @@
 """Record an explicit host transfer at an unchanged paused PPO boundary."""
 
+from __future__ import annotations
+
 import shutil
 import tempfile
 import zipfile
@@ -39,12 +41,31 @@ def record_host_resume(run, host_id, reason):
         with zipfile.ZipFile(target / "sources-after.zip", "w", zipfile.ZIP_DEFLATED) as archive:
             for name in changes:
                 archive.write(ROOT / name, name)
-        files = {name: file_sha256(target / name) for name in (
-            "checkpoint.pt", "state-before.json", "ledger-before.jsonl", "identity-after.json", "sources-after.zip")}
-        record = dict(schema=1, kind="rl01.host_resume", reason=reason, host_id=host_id,
-                      before_identity=identity_digest(before), after_identity=identity_digest(after),
-                      platform_before=before["platform"], platform_after=after["platform"],
-                      source_changes=changes, checkpoint=state["latest"], updates=state["updates"],
-                      decisions=state["decisions"], Adam_counters=state.get("Adam_counters"), files=files)
+        files = {
+            name: file_sha256(target / name)
+            for name in (
+                "checkpoint.pt",
+                "state-before.json",
+                "ledger-before.jsonl",
+                "identity-after.json",
+                "sources-after.zip",
+            )
+        }
+        record = {
+            "schema": 1,
+            "kind": "rl01.host_resume",
+            "reason": reason,
+            "host_id": host_id,
+            "before_identity": identity_digest(before),
+            "after_identity": identity_digest(after),
+            "platform_before": before["platform"],
+            "platform_after": after["platform"],
+            "source_changes": changes,
+            "checkpoint": state["latest"],
+            "updates": state["updates"],
+            "decisions": state["decisions"],
+            "Adam_counters": state.get("Adam_counters"),
+            "files": files,
+        }
         write_json(target / "revision.json", record)
         return verify_revision(target / "revision.json", before, after)

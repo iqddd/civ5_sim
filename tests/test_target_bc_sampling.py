@@ -12,7 +12,7 @@ from civ5rl.core.agent import RLAgent, action_probabilities
 from civ5rl.core.context import context_for
 from civ5rl.core.model import Policy
 from civ5rl.core.observation import ObservationEncoder
-from civ5rl.experiments.target_bc_sampling import completed_case, mode_key
+from civ5rl.experiments.evaluation.sampling import completed_case, mode_key
 from civ5rl.protocols.common import flat_map
 from civ5rl.provenance.common import choose, configure, write_json
 from civ5sim import Action, Battle

@@ -13,9 +13,11 @@ from civ5rl.core.model import Policy
 from civ5rl.engine.evaluation.executor import evaluation_options, runtime_for
 from civ5rl.engine.ppo.core import update
 from civ5rl.engine.ppo.backend import BatchedBackend
-from civ5rl.experiments import ppo_after_target_bc as runner
-from civ5rl.experiments.imitation_helpers import assert_equal, isolated_rng
-from civ5rl.experiments.ppo_after_imitation import optimizer_for
+from civ5rl.experiments.ppo.after_target_bc import evaluation as runner
+from civ5rl.experiments.ppo.after_target_bc.initialization import validate_episode_origin
+from civ5rl.experiments.ppo.after_target_bc.optimizer import load_initial_optimizer
+from civ5rl.experiments.imitation.helpers import assert_equal, isolated_rng
+from civ5rl.engine.ppo.adam import optimizer_for
 from civ5rl.protocols.ppo_after_target_bc import check_development_gain, load_config
 from civ5rl.provenance import checkpoint
 from civ5rl.provenance.audit import verify_checkpoint_chain, verify_ppo_ledger
@@ -70,16 +72,16 @@ class PPOContinuationTests(unittest.TestCase):
             source = dict(state=str(state_path), state_sha256=file_sha256(state_path),
                           run=str(run_path), run_sha256=file_sha256(run_path))
             experiment = dict(parent_sha256="parent", start_episode=18, episode_id_source=source)
-            runner.validate_episode_origin(experiment, parent_final)
+            validate_episode_origin(experiment, parent_final)
             for change in ({"start_episode": 17},
                            {"episode_id_source": {**source, "state_sha256": "bad"}}):
                 with self.assertRaises(ValueError):
-                    runner.validate_episode_origin({**experiment, **change}, parent_final)
+                    validate_episode_origin({**experiment, **change}, parent_final)
             record["config"]["experiment"]["parent_sha256"] = "unrelated"
             write_json(run_path, record)
             source = {**source, "run_sha256": file_sha256(run_path)}
             with self.assertRaises(ValueError):
-                runner.validate_episode_origin({**experiment, "episode_id_source": source}, parent_final)
+                validate_episode_origin({**experiment, "episode_id_source": source}, parent_final)
 
     def test_two_inherited_adam_origins_survive_update_rollback_and_resume(self):
         # A single origin silently corrupts the adapted critic's Adam clock.
@@ -104,7 +106,7 @@ class PPOContinuationTests(unittest.TestCase):
         saved = dict(model=deepcopy(policy.state_dict()), optimizer=deepcopy(adam.state_dict()),
                      variant="C", state=dict(optimizer_steps=12527, critic_complete=True, phase="collect",
                                              Adam_counters=origins))
-        inherited = runner.load_initial_optimizer(policy, saved, cfg)
+        inherited = load_initial_optimizer(policy, saved, cfg)
         assert_equal(inherited.state_dict(), saved["optimizer"])
         rng = random.Random(987)
         metrics = update(policy, inherited, self.episodes(policy), cfg, 0, "cpu", rng, _backend=BatchedBackend)
@@ -168,7 +170,7 @@ class PPOContinuationTests(unittest.TestCase):
             item["step"].fill_(12644)
         saved = dict(model=deepcopy(policy.state_dict()), optimizer=deepcopy(adam.state_dict()),
                      variant="C", state=dict(optimizer_steps=12644, critic_complete=True, phase="collect"))
-        inherited = runner.load_initial_optimizer(policy, saved, cfg)
+        inherited = load_initial_optimizer(policy, saved, cfg)
         assert_equal(inherited.state_dict(), saved["optimizer"])
         episodes = self.episodes(policy)
         rng = random.Random(987)

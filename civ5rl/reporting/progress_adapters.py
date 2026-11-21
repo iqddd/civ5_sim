@@ -1,5 +1,7 @@
 """Artifact semantics for run families, with explicit experiment overrides."""
 
+from __future__ import annotations
+
 from collections import Counter
 from statistics import median
 
@@ -14,10 +16,18 @@ def _phase(source, fallback):
     status = _status(source)
     if status in {"complete", "paused", "technical_error", "closed_by_user"}:
         return status
-    events = [source.last(p) for p in ("telemetry/phases.jsonl", "training-telemetry/phases.jsonl",
-                                       "training-telemetry/resources.jsonl")]
+    events = [
+        source.last(p)
+        for p in (
+            "telemetry/phases.jsonl",
+            "training-telemetry/phases.jsonl",
+            "training-telemetry/resources.jsonl",
+        )
+    ]
     recent = [e for e in events if e.get("timestamp_utc", "") >= source.session.get("started_at", "")]
-    return max(recent, key=lambda e: e.get("timestamp_utc", "")).get("phase", fallback) if recent else fallback
+    return (
+        max(recent, key=lambda e: e.get("timestamp_utc", "")).get("phase", fallback) if recent else fallback
+    )
 
 
 def _evaluations(source, purpose):
@@ -57,10 +67,14 @@ def _warnings(source):
 
 def _phase_seconds(source, phase):
     rows = source.rows("training-telemetry/phases.jsonl")
-    values = [b["elapsed_seconds"] - a["elapsed_seconds"] for a, b in zip(rows, rows[1:])
-              if a.get("phase") == phase and a.get("session_id") == b.get("session_id")
-              and a.get("timestamp_utc", "") >= source.session.get("started_at", "")
-              and b["elapsed_seconds"] > a["elapsed_seconds"]]
+    values = [
+        b["elapsed_seconds"] - a["elapsed_seconds"]
+        for a, b in zip(rows, rows[1:])
+        if a.get("phase") == phase
+        and a.get("session_id") == b.get("session_id")
+        and a.get("timestamp_utc", "") >= source.session.get("started_at", "")
+        and b["elapsed_seconds"] > a["elapsed_seconds"]
+    ]
     return median(values[-3:]) if values else None
 
 
@@ -76,8 +90,13 @@ class PPOAdapter:
             work = row.get("total_decisions", previous_work + row.get("decisions", 0))
             active = row.get("active_seconds")
             if active is not None and row.get("rollout", row.get("update", 0)) > start:
-                samples.append(Sample(work - previous_work, active - previous_active,
-                                      row.get("ppo", {}).get("runtime_compilation_seconds", 0) or 0))
+                samples.append(
+                    Sample(
+                        work - previous_work,
+                        active - previous_active,
+                        row.get("ppo", {}).get("runtime_compilation_seconds", 0) or 0,
+                    )
+                )
             previous_work = work
             if active is not None:
                 previous_active = active
@@ -88,21 +107,50 @@ class PPOAdapter:
         budgets = {}
         if limit is not None:
             limit += source.read("active-budget.json", {}).get("additional_active_seconds", 0)
-            budgets["active"] = dict(limit_seconds=limit, spent_seconds=state.get("active_seconds", previous_active))
+            budgets["active"] = {
+                "limit_seconds": limit,
+                "spent_seconds": state.get("active_seconds", previous_active),
+            }
         grouped = state.get("Adam_counters")
-        return Observation(_status(source), _phase(source, state.get("phase", "unknown")), "decisions", previous_work, target,
-                           samples=samples, budgets=budgets, work_budget="active",
-                           stages=[] if complete or type(self) is not PPOAdapter else [Stage("unmodeled_remaining_phases", 1, None)],
-                           work_stopped=complete or bool(state.get("stop_reason")),
-                           details=dict(collected=state.get("decisions"), updates=state.get("updates"),
-                                        adam_inherited=state.get("origin_Adam_counters", state.get("origin_Adam_counter", experiment.get("parent_optimizer_steps", 0))),
-                                        adam_new_accepted=state.get("optimizer_steps", 0),
-                                        **({"adam_counters": grouped,
-                                            "critic_preparation_steps": state.get("critic_progress", {}).get("steps", 0)}
-                                           if grouped is not None else {"adam_total": state.get("origin_Adam_counter", experiment.get("parent_optimizer_steps", 0)) + state.get("optimizer_steps", 0)}),
-                                        rate_scope="collection_and_optimization_active_time",
-                                        session_id=source.session.get("id")),
-                           warnings=_warnings(source))
+        return Observation(
+            _status(source),
+            _phase(source, state.get("phase", "unknown")),
+            "decisions",
+            previous_work,
+            target,
+            samples=samples,
+            budgets=budgets,
+            work_budget="active",
+            stages=[]
+            if complete or type(self) is not PPOAdapter
+            else [Stage("unmodeled_remaining_phases", 1, None)],
+            work_stopped=complete or bool(state.get("stop_reason")),
+            details={
+                "collected": state.get("decisions"),
+                "updates": state.get("updates"),
+                "adam_inherited": state.get(
+                    "origin_Adam_counters",
+                    state.get("origin_Adam_counter", experiment.get("parent_optimizer_steps", 0)),
+                ),
+                "adam_new_accepted": state.get("optimizer_steps", 0),
+                **(
+                    {
+                        "adam_counters": grouped,
+                        "critic_preparation_steps": state.get("critic_progress", {}).get("steps", 0),
+                    }
+                    if grouped is not None
+                    else {
+                        "adam_total": state.get(
+                            "origin_Adam_counter", experiment.get("parent_optimizer_steps", 0)
+                        )
+                        + state.get("optimizer_steps", 0)
+                    }
+                ),
+                "rate_scope": "collection_and_optimization_active_time",
+                "session_id": source.session.get("id"),
+            },
+            warnings=_warnings(source),
+        )
 
 
 class TargetBCPPOAdapter(PPOAdapter):
@@ -118,8 +166,12 @@ class TargetBCPPOAdapter(PPOAdapter):
         stopped = bool(state.get("stop_reason"))
         # After an early training stop, future decision milestones are abandoned;
         # the runner evaluates the final changed policy once instead.
-        pending = [p for p in experiment["milestones"] if str(p) not in points
-                   and p <= (state.get("decisions", 0) if stopped else experiment["decisions"])]
+        pending = [
+            p
+            for p in experiment["milestones"]
+            if str(p) not in points
+            and p <= (state.get("decisions", 0) if stopped else experiment["decisions"])
+        ]
         evaluated = state.get("evaluated", {})
         if stopped:
             latest = state.get("latest")
@@ -135,22 +187,38 @@ class TargetBCPPOAdapter(PPOAdapter):
         if confirmation is None and observation.status != "complete":
             # Two policies on Additional-256. Scale by the actual dev workload.
             evaluations = source.read("evaluations.json", {}).values()
-            counts = [r.get("runs", {}).get("argmax", {}).get("cp", {}).get("summary", {}).get("matches")
-                      for r in evaluations if r.get("purpose") == purpose]
+            counts = [
+                r.get("runs", {}).get("argmax", {}).get("cp", {}).get("summary", {}).get("matches")
+                for r in evaluations
+                if r.get("purpose") == purpose
+            ]
             matches = next((n for n in counts if n), None)
             additional = seconds * 512 / matches if seconds is not None and matches else None
             observation.stages.append(Stage("additional_256_two_policies", 1, additional, conditional=True))
             if dual:
                 h2h_evals = source.read("evaluations-h2h.json", {}).values()
-                h2h_counts = [r.get("summary", {}).get("matches") for r in h2h_evals if r.get("purpose") == purpose]
+                h2h_counts = [
+                    r.get("summary", {}).get("matches") for r in h2h_evals if r.get("purpose") == purpose
+                ]
                 h2h_matches = next((n for n in h2h_counts if n), None)
-                h2h_additional = h2h_seconds * 256 / h2h_matches if h2h_seconds is not None and h2h_matches else None
+                h2h_additional = (
+                    h2h_seconds * 256 / h2h_matches if h2h_seconds is not None and h2h_matches else None
+                )
                 observation.stages.append(Stage("additional_256_h2h", 1, h2h_additional, conditional=True))
         observation.details["pending_development_points"] = pending
-        observation.details["early_gain_required_wins"] = state.get("early_gain_required_wins") if experiment.get("early_gain_enabled", True) else None
+        observation.details["early_gain_required_wins"] = (
+            state.get("early_gain_required_wins") if experiment.get("early_gain_enabled", True) else None
+        )
         observation.details["turn_reset_mode"] = cfg.get("environment", {}).get("turn_reset_mode", "legacy")
         observation.details["evaluation_runtime"] = source.read("evaluation-runtime.json", {}).get("runtime")
-        observation.warnings.append("Additional-256 depends on selection" + (" and the experiment's development gate." if experiment.get("early_gain_enabled", True) else "; no continuation gate in this experiment."))
+        observation.warnings.append(
+            "Additional-256 depends on selection"
+            + (
+                " and the experiment's development gate."
+                if experiment.get("early_gain_enabled", True)
+                else "; no continuation gate in this experiment."
+            )
+        )
         return observation
 
 
@@ -189,19 +257,38 @@ class BCAdapter:
         active = max(state.get("active_seconds", 0), training.get("active_seconds", 0), previous_active)
         budgets = {}
         if cfg.get("training_seconds") is not None:
-            budgets["active"] = dict(limit_seconds=cfg["training_seconds"] + source.read("active-budget.json", {}).get("additional_active_seconds", 0), spent_seconds=active,
-                                     work_estimate_complete=has_active or training.get("status") == "complete")
+            budgets["active"] = {
+                "limit_seconds": cfg["training_seconds"]
+                + source.read("active-budget.json", {}).get("additional_active_seconds", 0),
+                "spent_seconds": active,
+                "work_estimate_complete": has_active or training.get("status") == "complete",
+            }
         warnings = _warnings(source)
         if not has_active:
-            warnings.append("BC rate uses step timers without complete active-time measurements; while training, budget fit is unknown.")
-        observation = Observation(_status(source), _phase(source, _status(source)),
-                                  "steps" if cfg.get("max_adam_steps") is not None else "labels",
-                                  completed, target, samples=samples, budgets=budgets,
-                                  work_budget="active", work_stopped=training.get("status") == "complete" or _status(source) == "complete",
-                                  stages=[] if _status(source) == "complete" or type(self) is not BCAdapter else [Stage("unmodeled_remaining_phases", 1, None)],
-                                  details=dict(epoch=state.get("epoch"), steps=len(rows),
-                                               rate_scope="training_active_time" if has_active else "optimizer_steps_only",
-                                               session_id=source.session.get("id")), warnings=warnings)
+            warnings.append(
+                "BC rate uses step timers without complete active-time measurements; while training, budget fit is unknown."
+            )
+        observation = Observation(
+            _status(source),
+            _phase(source, _status(source)),
+            "steps" if cfg.get("max_adam_steps") is not None else "labels",
+            completed,
+            target,
+            samples=samples,
+            budgets=budgets,
+            work_budget="active",
+            work_stopped=training.get("status") == "complete" or _status(source) == "complete",
+            stages=[]
+            if _status(source) == "complete" or type(self) is not BCAdapter
+            else [Stage("unmodeled_remaining_phases", 1, None)],
+            details={
+                "epoch": state.get("epoch"),
+                "steps": len(rows),
+                "rate_scope": "training_active_time" if has_active else "optimizer_steps_only",
+                "session_id": source.session.get("id"),
+            },
+            warnings=warnings,
+        )
         return observation
 
 
@@ -217,16 +304,22 @@ class TargetScaleBCAdapter(BCAdapter):
             completed_epochs = {r["epoch"] for r in training.get("epochs", [])}
             pending = [e for e in pending if e in completed_epochs]
             latest = training.get("latest")
-            if latest and not any(r.get("checkpoint") == latest for r in source.read("evaluations.json", {}).values()):
+            if latest and not any(
+                r.get("checkpoint") == latest for r in source.read("evaluations.json", {}).values()
+            ):
                 pending = ["final"]
         if cfg.get("skip_milestone_evaluations"):
             pending = []
         if observation.status == "complete":
             pending = []
-        observation.stages.append(Stage("development", len(pending), _evaluation_seconds(source, "development")))
+        observation.stages.append(
+            Stage("development", len(pending), _evaluation_seconds(source, "development"))
+        )
         if source.read("confirmation.json") is None and observation.status != "complete":
             observation.stages.append(Stage("confirmation", 1, None, conditional=True))
-        observation.warnings.append("Development timing excludes separate fixed-training diagnostics and final report work.")
+        observation.warnings.append(
+            "Development timing excludes separate fixed-training diagnostics and final report work."
+        )
         return observation
 
 
@@ -237,8 +330,12 @@ class C2BCAdapter(BCAdapter):
         evaluated = source.read("evaluations.json", {}).values()
         seen = {r.get("checkpoint") for r in evaluated if r.get("purpose") == "development_512"}
         # Four references plus saved milestone candidates, then latest if distinct.
-        paths = {"cp", "checkpoints/reference-bc-epoch-10.pt", "checkpoints/reference-update-0037.pt",
-                 "checkpoints/reference-bc-more-data-epoch-10.pt"}
+        paths = {
+            "cp",
+            "checkpoints/reference-bc-epoch-10.pt",
+            "checkpoints/reference-update-0037.pt",
+            "checkpoints/reference-bc-more-data-epoch-10.pt",
+        }
         paths.update(f"checkpoints/epoch-{int(e):02d}.pt" for e in cfg.get("evaluate_epochs", []))
         training = source.read("training.json", {})
         if training.get("status") == "complete":
@@ -246,10 +343,20 @@ class C2BCAdapter(BCAdapter):
             if training.get("latest"):
                 paths.add(training["latest"])
         pending = paths - seen if observation.status != "complete" else set()
-        observation.stages.append(Stage("development_512", len(pending), _evaluation_seconds(source, "development_512")))
-        epochs_done = len([r for r in training.get("epochs", source.read("state.json", {}).get("epochs_history", [])) if r.get("completed")])
+        observation.stages.append(
+            Stage("development_512", len(pending), _evaluation_seconds(source, "development_512"))
+        )
+        epochs_done = len(
+            [
+                r
+                for r in training.get("epochs", source.read("state.json", {}).get("epochs_history", []))
+                if r.get("completed")
+            ]
+        )
         offline_pending = 0 if observation.work_stopped else max(0, cfg.get("epochs", 0) - epochs_done)
-        observation.stages.append(Stage("offline_metrics", offline_pending, _phase_seconds(source, "offline_metrics")))
+        observation.stages.append(
+            Stage("offline_metrics", offline_pending, _phase_seconds(source, "offline_metrics"))
+        )
         if source.read("confirmation.json") is None and observation.status != "complete":
             observation.stages.append(Stage("additional_256", 1, None, conditional=True))
         return observation
@@ -268,23 +375,44 @@ class RolloutComparisonAdapter:
             budget = source.read("phase-budgets/collection.json", {})
             spent_seconds = budget.get("seconds", collection.get("seconds", 0))
             return Observation(
-                status, "collection", "forks", completed_forks,
-                source.config.get("max_forks", 1024), samples=samples,
-                stages=[Stage("comparative_training", 1, None),
-                        Stage("development_512", 1, None, conditional=True)],
-                budgets={"collection": dict(limit_seconds=7200, spent_seconds=spent_seconds,
-                                            work_estimate_complete=False)},
+                status,
+                "collection",
+                "forks",
+                completed_forks,
+                source.config.get("max_forks", 1024),
+                samples=samples,
+                stages=[
+                    Stage("comparative_training", 1, None),
+                    Stage("development_512", 1, None, conditional=True),
+                ],
+                budgets={
+                    "collection": {
+                        "limit_seconds": 7200,
+                        "spent_seconds": spent_seconds,
+                        "work_estimate_complete": False,
+                    }
+                },
                 work_budget="collection",
-                details=dict(selected_forks=len(forks), source_battles=len(collection.get("sources", []))),
-                warnings=["Collection ETA excludes future source-battle waves; completion is also bounded by the collection deadline."],
+                details={"selected_forks": len(forks), "source_battles": len(collection.get("sources", []))},
+                warnings=[
+                    "Collection ETA excludes future source-battle waves; completion is also bounded by the collection deadline."
+                ],
             )
 
         pairs = dataset.get("pairs", [])
-        full_corpus = source.config.get('training',{}).get('mode') in ('full_corpus_step_kl','frozen_heads_step_kl')
-        target_steps = (source.config['training']['max_accepted_steps'] if full_corpus else
-                        2 * ((len(pairs) + 31) // 32))
+        full_corpus = source.config.get("training", {}).get("mode") in (
+            "full_corpus_step_kl",
+            "frozen_heads_step_kl",
+        )
+        target_steps = (
+            source.config["training"]["max_accepted_steps"] if full_corpus else 2 * ((len(pairs) + 31) // 32)
+        )
         rows = source.rows("steps.jsonl")
-        samples = [Sample(1, row.get('cycle_seconds',row['step_seconds'])) for row in rows if row.get("step_seconds", 0) > 0]
+        samples = [
+            Sample(1, row.get("cycle_seconds", row["step_seconds"]))
+            for row in rows
+            if row.get("step_seconds", 0) > 0
+        ]
         budget = source.read("phase-budgets/training.json", {})
         training_status = training.get("status")
         training_finished = training_status in ("complete", "no_accepted_pairs")
@@ -292,21 +420,55 @@ class RolloutComparisonAdapter:
         completed_steps = training.get("training_steps", training.get("steps", 0))
         stages = []
         if status != "complete" and training_status != "no_accepted_pairs":
-            stages = ([Stage("paired_development_512", 1, None, conditional=completed_steps==0)] if full_corpus else
-                      [Stage("development_512", 1, None, conditional=True),
-                       Stage("additional_256_two_policies", 1, None, conditional=True)])
-            if full_corpus and training_finished and not training.get('changed'):
-                stages=[]
+            stages = (
+                [Stage("paired_development_512", 1, None, conditional=completed_steps == 0)]
+                if full_corpus
+                else [
+                    Stage("development_512", 1, None, conditional=True),
+                    Stage("additional_256_two_policies", 1, None, conditional=True),
+                ]
+            )
+            if full_corpus and training_finished and not training.get("changed"):
+                stages = []
         return Observation(
-            status, phase, "steps", completed_steps, target_steps, samples=samples,
+            status,
+            phase,
+            "steps",
+            completed_steps,
+            target_steps,
+            samples=samples,
             stages=stages,
-            budgets={"training": dict(limit_seconds=source.config.get('training_seconds',1800), spent_seconds=budget.get("seconds", 0),
-                                      work_estimate_complete=False)},
-            work_budget="training", work_stopped=training_finished,
-            details=dict(accepted_pairs=len(pairs), selected_forks=dataset.get("selected_forks"),
-                         completed_forks=dataset.get("completed_forks"),
-                         **({k:training.get(k) for k in ('attempts','rejected_attempts','lr','last_full_kl','pending','learning','inherited_steps','inherited_seconds')}
-                            if full_corpus else {})),
+            budgets={
+                "training": {
+                    "limit_seconds": source.config.get("training_seconds", 1800),
+                    "spent_seconds": budget.get("seconds", 0),
+                    "work_estimate_complete": False,
+                }
+            },
+            work_budget="training",
+            work_stopped=training_finished,
+            details={
+                "accepted_pairs": len(pairs),
+                "selected_forks": dataset.get("selected_forks"),
+                "completed_forks": dataset.get("completed_forks"),
+                **(
+                    {
+                        k: training.get(k)
+                        for k in (
+                            "attempts",
+                            "rejected_attempts",
+                            "lr",
+                            "last_full_kl",
+                            "pending",
+                            "learning",
+                            "inherited_steps",
+                            "inherited_seconds",
+                        )
+                    }
+                    if full_corpus
+                    else {}
+                ),
+            },
         )
 
 
@@ -319,71 +481,142 @@ class RolloutCollectionAdapter:
         budget = source.read("phase-budgets/collection.json", {})
         scheduler = collection.get("scheduler", {})
         return Observation(
-            _status(source), "collection", "forks", sum(f["status"] == "completed" for f in forks),
+            _status(source),
+            "collection",
+            "forks",
+            sum(f["status"] == "completed" for f in forks),
             source.config.get("max_forks"),
             samples=[Sample(row["work"], row["seconds"]) for row in collection.get("samples", [])],
-            budgets={"collection": dict(limit_seconds=source.config.get("collection_seconds", 7200),
-                                        spent_seconds=budget.get("seconds", collection.get("seconds", 0)),
-                                        work_estimate_complete=False)},
-            work_budget="collection", work_stopped=bool(collection.get("complete")),
-            details=dict(selected_forks=len(forks), source_battles=len(collection.get("sources", [])),
-                         labels=dict(Counter(f.get("label") for f in forks if f["status"] == "completed")),
-                         **{k: scheduler.get(k) for k in ("active_forks", "buffered_forks", "completed_continuations",
-                                                           "idle_worker_fraction")}),
-            warnings=["Collection is bounded by its deadline; max_forks is an upper limit, not an expected volume."],
+            budgets={
+                "collection": {
+                    "limit_seconds": source.config.get("collection_seconds", 7200),
+                    "spent_seconds": budget.get("seconds", collection.get("seconds", 0)),
+                    "work_estimate_complete": False,
+                }
+            },
+            work_budget="collection",
+            work_stopped=bool(collection.get("complete")),
+            details={
+                "selected_forks": len(forks),
+                "source_battles": len(collection.get("sources", [])),
+                "labels": dict(Counter(f.get("label") for f in forks if f["status"] == "completed")),
+                **{
+                    k: scheduler.get(k)
+                    for k in (
+                        "active_forks",
+                        "buffered_forks",
+                        "completed_continuations",
+                        "idle_worker_fraction",
+                    )
+                },
+            },
+            warnings=[
+                "Collection is bounded by its deadline; max_forks is an upper limit, not an expected volume."
+            ],
         )
 
 
 class ActionValueAdapter:
     """Completed training epochs; confirmation is an offline, unmodeled stage."""
+
     def observe(self, source):
-        training=source.read('training.json', {})
-        return Observation(_status(source), source.read('status.json', {}).get('phase','preparation'),
-            'epochs', training.get('epoch',0), source.config.get('epochs',100),
-            samples=[Sample(1,row['seconds']) for row in training.get('history',[])],
-            work_stopped=training.get('complete',False),
-            budgets={'training':dict(limit_seconds=source.config.get('training_seconds',1800),
-                spent_seconds=training.get('seconds',0),work_estimate_complete=True)},work_budget='training',
-            stages=[] if source.read('result.json') else [Stage('offline_confirmation',1,None)],
-            details=dict(steps=training.get('steps',0),best=training.get('best')))
+        training = source.read("training.json", {})
+        return Observation(
+            _status(source),
+            source.read("status.json", {}).get("phase", "preparation"),
+            "epochs",
+            training.get("epoch", 0),
+            source.config.get("epochs", 100),
+            samples=[Sample(1, row["seconds"]) for row in training.get("history", [])],
+            work_stopped=training.get("complete", False),
+            budgets={
+                "training": {
+                    "limit_seconds": source.config.get("training_seconds", 1800),
+                    "spent_seconds": training.get("seconds", 0),
+                    "work_estimate_complete": True,
+                }
+            },
+            work_budget="training",
+            stages=[] if source.read("result.json") else [Stage("offline_confirmation", 1, None)],
+            details={"steps": training.get("steps", 0), "best": training.get("best")},
+        )
 
 
 class TurnCollectionAdapter:
-    def observe(self,source):
-        state=source.read('collection.json',{});selection=source.read('selection.json',{})
-        return Observation(_status(source),source.read('status.json',{}).get('phase','selection'),
-            'continuations',state.get('completed',0),selection.get('target_continuations'),
-            samples=[Sample(state['completed'],state['seconds'])] if state.get('completed') and state.get('seconds') else [],
-            work_stopped=state.get('complete',False),details=dict(positions=selection.get('selected')))
+    def observe(self, source):
+        state = source.read("collection.json", {})
+        selection = source.read("selection.json", {})
+        return Observation(
+            _status(source),
+            source.read("status.json", {}).get("phase", "selection"),
+            "continuations",
+            state.get("completed", 0),
+            selection.get("target_continuations"),
+            samples=[Sample(state["completed"], state["seconds"])]
+            if state.get("completed") and state.get("seconds")
+            else [],
+            work_stopped=state.get("complete", False),
+            details={"positions": selection.get("selected")},
+        )
 
 
 class UnknownAdapter:
     def observe(self, source):
-        return Observation(_status(source), "unknown", "work", 0, None,
-                           stages=[Stage("unmodeled_work", 1, None)],
-                           warnings=[f"No progress adapter for {source.config.get('kind')!r}; ETA is unknown."])
+        return Observation(
+            _status(source),
+            "unknown",
+            "work",
+            0,
+            None,
+            stages=[Stage("unmodeled_work", 1, None)],
+            warnings=[f"No progress adapter for {source.config.get('kind')!r}; ETA is unknown."],
+        )
 
 
 class TurnFitAdapter:
-    def observe(self,source):
-        training=source.read('training.json',{})
-        rows=source.rows('attempts.jsonl')
-        budget=source.read('phase-budgets/training.json',{})
-        return Observation(_status(source),source.read('status.json',{}).get('phase','preparation'),
-            'steps',training.get('training_steps',0),source.config['training']['max_accepted_steps'],
-            samples=[Sample(1,r['seconds']) for r in rows if r.get('accepted') and r.get('seconds',0)>0],
-            budgets={'training':dict(limit_seconds=source.config['training_seconds'],spent_seconds=budget.get('seconds',0),
-                                    work_estimate_complete=False)},work_budget='training',
-            work_stopped=training.get('status')=='complete',
-            details={k:training.get(k) for k in ('attempts','rejected_attempts','epoch','cursor','lr','last_full_kl','learning')},
-            warnings=['Preparation and retries are included in the budget; Development requires an explicit evaluate command.'])
+    def observe(self, source):
+        training = source.read("training.json", {})
+        rows = source.rows("attempts.jsonl")
+        budget = source.read("phase-budgets/training.json", {})
+        return Observation(
+            _status(source),
+            source.read("status.json", {}).get("phase", "preparation"),
+            "steps",
+            training.get("training_steps", 0),
+            source.config["training"]["max_accepted_steps"],
+            samples=[Sample(1, r["seconds"]) for r in rows if r.get("accepted") and r.get("seconds", 0) > 0],
+            budgets={
+                "training": {
+                    "limit_seconds": source.config["training_seconds"],
+                    "spent_seconds": budget.get("seconds", 0),
+                    "work_estimate_complete": False,
+                }
+            },
+            work_budget="training",
+            work_stopped=training.get("status") == "complete",
+            details={
+                k: training.get(k)
+                for k in (
+                    "attempts",
+                    "rejected_attempts",
+                    "epoch",
+                    "cursor",
+                    "lr",
+                    "last_full_kl",
+                    "learning",
+                )
+            },
+            warnings=[
+                "Preparation and retries are included in the budget; Development requires an explicit evaluate command."
+            ],
+        )
 
 
 # Exact experiment adapters take precedence over family adapters. New run types
 # register an adapter; the estimator, recorder, transport and CLI stay unchanged.
 ADAPTERS = {
-    'rl01.turn_comparison_fit': TurnFitAdapter,
-    'rl01.turn_comparison_collection': TurnCollectionAdapter,
+    "rl01.turn_comparison_fit": TurnFitAdapter,
+    "rl01.turn_comparison_collection": TurnCollectionAdapter,
     "rl01.action_value": ActionValueAdapter,
     "rl01.rollout_comparison": RolloutComparisonAdapter,
     "rl01.rollout_comparison_collection": RolloutCollectionAdapter,

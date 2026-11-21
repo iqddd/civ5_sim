@@ -1,18 +1,30 @@
 """Catch silent cross-battle GRU contamination and forced-action omissions."""
 
-from copy import deepcopy
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
-from civ5rl.core.agent import RLAgent
 from civ5rl.config import load_config
+from civ5rl.core.agent import RLAgent
 from civ5rl.core.model import Policy, batch_inputs
 from civ5rl.core.observation import ordered_actions
-from civ5rl.engine.evaluation.executor import BatchedInference, EvaluationExecutor, EvaluationRuntime, evaluation_options, runtime_for
-from civ5rl.experiments.ppo_target_scale import evaluation_task, evaluate
+from civ5rl.engine.evaluation.executor import (
+    BatchedInference,
+    EvaluationExecutor,
+    EvaluationRuntime,
+    evaluation_options,
+    runtime_for,
+)
+from civ5rl.experiments.evaluation.matches import (
+    evaluate_target_scale as evaluate,
+)
+from civ5rl.experiments.evaluation.matches import (
+    target_scale_evaluation_task as evaluation_task,
+)
 from civ5rl.provenance.common import configure, read_json, write_json
 from civ5sim import Action, Battle
 from civ5sim.engine import digest
@@ -39,6 +51,7 @@ class BatchedEvaluationTests(unittest.TestCase):
         # A recycled slot must not import another battle's memory; a removed
         # agent must return its storage even outside the RPC executor lifecycle.
         from types import SimpleNamespace
+
         from civ5rl.core.observation import ObservationEncoder
         configure(17, 'cuda')
         policy = Policy('C2').to('cuda').eval()
@@ -103,7 +116,7 @@ class BatchedEvaluationTests(unittest.TestCase):
         configure(17,'cpu')
         with tempfile.TemporaryDirectory() as temp:
             checkpoint=Path(temp)/'policy.pt';policy=Policy('C2')
-            torch.save(dict(variant='C2',model=policy.state_dict(),config={}),checkpoint)
+            torch.save({'variant': 'C2','model': policy.state_dict(),'config': {}},checkpoint)
             tasks=[(str(checkpoint),scenario(),mode,metrics)
                    for mode,metrics in (('argmax',False),('sample',True),('argmax',True))]
             expected=dict(public_sequence(t) for t in tasks)
@@ -163,20 +176,29 @@ class BatchedEvaluationTests(unittest.TestCase):
             root = Path(temp)
             checkpoint = root / "policy.pt"
             policy = Policy("C2")
-            torch.save(dict(variant="C2", model=policy.state_dict(), config={}), checkpoint)
+            torch.save({'variant': "C2", 'model': policy.state_dict(), 'config': {}}, checkpoint)
             initial = scenario()
-            case = dict(scenario=initial, armies=context(initial)["armies"], learner_side=0,
-                        max_rounds=3, split="validation", agent_seeds=[42, 43], case_id=0,
-                        parent_world=0, placement="test", map_size=10)
+            case = {'scenario': initial, 'armies': context(initial)["armies"], 'learner_side': 0,
+                        'max_rounds': 3, 'split': "validation", 'agent_seeds': [42, 43], 'case_id': 0,
+                        'parent_world': 0, 'placement': "test", 'map_size': 10}
             case["case_hash"] = digest(case)
             cfg = load_config("configs/rl-ppo-after-target-bc.json")
             historical, fresh = root / "historical", root / "fresh"
-            write_json(historical / "run.json", dict(kind=cfg["kind"]))
-            write_json(fresh / "run.json", dict(evaluation_runtime_default="auto"))
+            write_json(historical / "run.json", {'kind': cfg["kind"]})
+            write_json(fresh / "run.json", {'evaluation_runtime_default': "auto"})
             self.assertEqual(runtime_for(historical, cfg).device, "cpu")
             self.assertEqual(runtime_for(fresh, cfg).device, "cuda" if torch.cuda.is_available() else "cpu")
             cpu = root / "cpu"
+            with patch(
+                "civ5rl.engine.evaluation.matches.combat_metrics",
+                side_effect=RuntimeError("interrupted combat metrics"),
+            ), self.assertRaisesRegex(RuntimeError, "interrupted combat metrics"):
+                evaluation_task((cfg, case, str(checkpoint), str(cpu)))
+            self.assertTrue((cpu / "result.json").is_file())
+            self.assertFalse((cpu / "metrics.json").exists())
             expected = evaluation_task((cfg, case, str(checkpoint), str(cpu)))
+            self.assertEqual(read_json(cpu / "metrics.json"), expected)
+            self.assertIn("damage_dealt", expected)
             tasks = [(cfg, case, str(checkpoint), str(root / f"shared-{i}")) for i in range(2)]
             service = EvaluationExecutor(checkpoint, EvaluationRuntime("cpu", workers=2))
             actual = list(service.run(evaluation_task, tasks))
@@ -210,7 +232,7 @@ class BatchedEvaluationTests(unittest.TestCase):
             list(retry.run(evaluation_task, [(cfg, case, str(checkpoint), str(second))]))
             self.assertEqual(read_json(second / "metrics.json")["winner"], expected["winner"])
             # The public evaluator must not serve a GPU request from CPU cache.
-            plan = dict(development=[case])
+            plan = {'development': [case]}
             with evaluation_options(device="cpu", workers=1):
                 cpu_point = evaluate(cfg, plan, root, "policy.pt", "development")
             if torch.cuda.is_available():

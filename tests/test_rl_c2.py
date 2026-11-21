@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from civ5map.runtime import distance as runtime_hex_distance
 from civ5rl.core.model import (
     BucketBias,
     Policy,
@@ -22,14 +23,13 @@ from civ5rl.core.observation import (
     distance,
     ordered_actions,
 )
-from civ5map.runtime import distance as runtime_hex_distance
 from civ5rl.core.schema import GLOBAL
 from civ5rl.engine.imitation.storage import (
     PreparedDemonstrations,
     prepare_inputs,
 )
-from civ5rl.experiments.imitation_target_scale import (
-    _format_corpus_entry,
+from civ5rl.experiments.imitation.corpus import format_corpus_entry
+from civ5rl.experiments.imitation.target_scale import (
     load_config,
 )
 from civ5rl.protocols.corpus import context_for
@@ -98,6 +98,7 @@ class C2Tests(unittest.TestCase):
         # alter the policy while ordinary runs would still complete successfully.
         from copy import deepcopy
         from dataclasses import replace
+
         from civ5rl.core.model import CellUnitAttention
         from civ5rl.core.schema import TILE
         s=make_scenario(10)
@@ -306,102 +307,51 @@ class C2Tests(unittest.TestCase):
                             and np.all(buckets[:, n_tiles:] == 0)
                         )
 
-        # Also verify on real cropped corpus scenarios across sizes 10, 12, 16 and both parities (0 and 1).
-        target_manifest = read_json(
-            ROOT / "artifacts/rl/cp-imitation-target-scale/manifest.json"
-        )
-        seen_real = {}
-        for split_name in ("development", "confirmation", "training"):
-            for case in target_manifest.get(split_name, []):
-                sc = case.get("scenario")
-                if not sc:
-                    continue
+        from civ5map.maps import crop
+
+        world = flat_map(18)
+        world["tiles"][36]["elevation"] = "mountain"
+        world["tiles"][57]["elevation"] = "hills"
+        cropped_steps = []
+        for size in (10, 12, 16):
+            for parity in (0, 1):
+                sc = make_scenario(size, parity)
+                sc["map"] = crop(world, 0, parity, width=size, height=size)
                 m = sc["map"]
-                key = (int(m["width"]), int(m["row_parity"]))
-                if key not in seen_real and int(m["width"]) in (10, 12, 16):
-                    seen_real[key] = sc
-            if len(seen_real) == 6:
-                break
-        # If training cases in manifest store lazy world specs, materialize any missing (size, parity) from real worlds.
-        if len(seen_real) < 6:
-            from civ5map.maps import crop, load as load_map
-
-            corpus_manifest = read_json(ROOT / "artifacts/rl/corpus/manifest.json")
-            first_world_entry = next(
-                w for w in corpus_manifest["maps"] if w["split"] == "train"
-            )
-            world_map = load_map(ROOT / first_world_entry["path"])
-            for size in (10, 12, 16):
-                for parity in (0, 1):
-                    if (size, parity) in seen_real:
-                        continue
-                    y_crop = (
-                        0
-                        if (world_map["row_parity"] % 2) == parity
-                        else 1
+                self.assertEqual((m["width"], m["height"], m["row_parity"]), (size, size, parity))
+                enc = ObservationEncoder(make_context(sc), "C2")
+                with Battle(sc) as b:
+                    obs = b.observe(0)
+                    actions = ordered_actions(b.available_actions())
+                step = enc.encode(obs, actions)
+                cropped_steps.append((size, m, step))
+                inp = batch_inputs([step], "cpu", min_cells=256)
+                buckets = hex_distance_buckets_from_neighbors(
+                    inp["neighbors"], inp["cell_mask"]
+                )[0].numpy()
+                n_tiles = size * size
+                expected = np.zeros((n_tiles, n_tiles), dtype=np.int64)
+                for i in range(n_tiles):
+                    qi, ri = axial(m, i)
+                    for j in range(n_tiles):
+                        qj, rj = axial(m, j)
+                        d_obs = distance(m, i, j)
+                        d_rt = runtime_hex_distance(qi - qj, ri - rj)
+                        self.assertEqual(d_obs, d_rt)
+                        expected[i, j] = min(d_obs, 15)
+                np.testing.assert_array_equal(buckets[:n_tiles, :n_tiles], expected)
+                if n_tiles < 256:
+                    self.assertTrue(
+                        np.all(buckets[n_tiles:, :] == 0)
+                        and np.all(buckets[:, n_tiles:] == 0)
                     )
-                    cropped = crop(world_map, 2, y_crop, width=size, height=size)
-                    self.assertEqual(cropped["row_parity"], parity)
-                    passable_tiles = [
-                        idx
-                        for idx, t in enumerate(cropped["tiles"])
-                        if t["elevation"] not in ("mountain", "water")
-                    ]
-                    seen_real[(size, parity)] = {
-                        "schema": 1,
-                        "kind": "civ5sim.scenario",
-                        "map": cropped,
-                        "fog": True,
-                        "random_damage": True,
-                        "seed": 17,
-                        "active_side": 0,
-                        "units": [
-                            {"type": "warrior", "side": 0, "tile": passable_tiles[0]},
-                            {"type": "archer", "side": 1, "tile": passable_tiles[-1]},
-                        ],
-                    }
-
-        self.assertEqual(
-            set(seen_real.keys()),
-            {(10, 0), (10, 1), (12, 0), (12, 1), (16, 0), (16, 1)},
-        )
-        real_encoded = []
-        for (size, parity), sc in sorted(seen_real.items()):
-            m = sc["map"]
-            self.assertEqual((m["width"], m["height"], m["row_parity"]), (size, size, parity))
-            enc = ObservationEncoder(make_context(sc), "C2")
-            with Battle(sc) as b:
-                obs = b.observe(0)
-                actions = ordered_actions(b.available_actions())
-            step = enc.encode(obs, actions)
-            real_encoded.append((size, m, step))
-            inp = batch_inputs([step], "cpu", min_cells=256)
-            buckets = hex_distance_buckets_from_neighbors(
-                inp["neighbors"], inp["cell_mask"]
-            )[0].numpy()
-            n_tiles = size * size
-            expected = np.zeros((n_tiles, n_tiles), dtype=np.int64)
-            for i in range(n_tiles):
-                qi, ri = axial(m, i)
-                for j in range(n_tiles):
-                    qj, rj = axial(m, j)
-                    d_obs = distance(m, i, j)
-                    d_rt = runtime_hex_distance(qi - qj, ri - rj)
-                    self.assertEqual(d_obs, d_rt)
-                    expected[i, j] = min(d_obs, 15)
-            np.testing.assert_array_equal(buckets[:n_tiles, :n_tiles], expected)
-            if n_tiles < 256:
-                self.assertTrue(
-                    np.all(buckets[n_tiles:, :] == 0)
-                    and np.all(buckets[:, n_tiles:] == 0)
-                )
 
         # Also verify mixed-size padded batch (10, 12, 16 with both parities together in one batch).
-        mixed_inp = batch_inputs([item[2] for item in real_encoded], "cpu", min_cells=256)
+        mixed_inp = batch_inputs([item[2] for item in cropped_steps], "cpu", min_cells=256)
         mixed_buckets = hex_distance_buckets_from_neighbors(
             mixed_inp["neighbors"], mixed_inp["cell_mask"]
         ).numpy()
-        for idx, (size, m, _) in enumerate(real_encoded):
+        for idx, (size, m, _) in enumerate(cropped_steps):
             n_tiles = size * size
             for i in (0, 1, size - 1, size, n_tiles // 2, n_tiles - 1):
                 for j in (0, 1, size - 1, size, n_tiles // 2, n_tiles - 1):
@@ -409,30 +359,25 @@ class C2Tests(unittest.TestCase):
                         int(mixed_buckets[idx, i, j]), min(distance(m, i, j), 15)
                     )
 
-    def test_bucket_bias_forward_exact_and_backward_equivalence_on_real_batch(self):
-        """BucketBias must match direct table[:, buckets] bitwise in forward and <=1e-5 rel in backward on real data."""
-        from civ5rl.protocols.imitation import load_episode
-
-        old_col = read_json(
-            ROOT / "artifacts/rl/cp-imitation-target-scale/collection.json"
-        )
+    def test_bucket_bias_forward_exact_and_backward_equivalence_on_mixed_batch(self):
+        """Compare BucketBias with direct indexing on two simulator histories."""
         encoded_steps = []
         chosen_indices = []
-        for row in old_col["matches"][:4]:
-            mid = int(row["match_id"])
-            ep = load_episode(
-                ROOT
-                / f"artifacts/rl/cp-imitation-target-scale/data/match-{mid:06d}/demonstration-side-0.json.gz"
-            )
-            enc = ObservationEncoder(ep["context"], "C2")
-            for dec in ep["decisions"][:8]:
-                acts = [Action(**a) for a in dec["actions"]]
-                ordered = ordered_actions(acts)
-                chosen_act = acts[int(dec["chosen"])]
-                encoded_steps.append(enc.encode(dec["observation"], ordered))
-                chosen_indices.append(ordered.index(chosen_act))
-                enc.remember_action(chosen_act, dec["observation"])
-        self.assertGreaterEqual(len(encoded_steps), 16)
+        for size, parity in ((10, 0), (12, 1)):
+            sc = make_scenario(size, parity)
+            sc["units"][2]["tile"] = 23
+            sc["units"][3]["tile"] = 24
+            enc = ObservationEncoder(make_context(sc), "C2")
+            with Battle(sc) as battle:
+                for _ in range(8):
+                    obs = battle.observe(0)
+                    actions = ordered_actions(battle.available_actions())
+                    chosen = Action("end_turn")
+                    encoded_steps.append(enc.encode(obs, actions))
+                    chosen_indices.append(actions.index(chosen))
+                    enc.remember_action(chosen, obs)
+                    battle.step(chosen)
+                    battle.step(chosen)
 
         devices = ["cpu", *(["cuda"] if torch.cuda.is_available() else [])]
         for dev in devices:
@@ -588,7 +533,7 @@ class C2Tests(unittest.TestCase):
             root = Path(tmp)
             ep_path = root / "data/match-000000/demonstration-side-0.json.gz"
             dump_episode(ep_path, episode)
-            entry = _format_corpus_entry(
+            entry = format_corpus_entry(
                 {
                     "match_id": 0,
                     "side": 0,
@@ -624,7 +569,12 @@ class C2Tests(unittest.TestCase):
     def test_development_512_and_holdout_126_disjointness(self):
         """Development-512 must be disjoint from dev-128/conf-256; Holdout-126 must use only the 7 holdout worlds."""
         cfg = load_config(ROOT / "configs/rl-cp-imitation-target-c2.json")
-        orig = read_json(ROOT / cfg["target_manifest"])
+        target_manifest = ROOT / cfg["target_manifest"]
+        corpus_manifest_path = ROOT / "artifacts/rl/corpus/manifest.json"
+        for path in (target_manifest, corpus_manifest_path):
+            if not path.is_file():
+                self.skipTest(f"Frozen development and holdout check requires {path}")
+        orig = read_json(target_manifest)
         base = orig["base"]
         existing = [*orig["development"], *orig["confirmation"]]
         dev512 = development_512_cases(cfg, base, existing_cases=existing)
@@ -649,7 +599,7 @@ class C2Tests(unittest.TestCase):
         self.assertFalse(existing_sigs & dev512_sigs)
         self.assertEqual(len(dev512_sigs), 256)
 
-        corpus_manifest = read_json(ROOT / "artifacts/rl/corpus/manifest.json")
+        corpus_manifest = read_json(corpus_manifest_path)
         holdout126 = holdout_126_cases(
             cfg, corpus_manifest, training_worlds=base["worlds"]["training"]
         )

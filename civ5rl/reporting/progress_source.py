@@ -1,5 +1,7 @@
 """Incremental artifact reader used by progress adapters and process recorders."""
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
 
@@ -38,7 +40,12 @@ class ArtifactSource:
         old = self._logs.get(name)
         # Also reset on replacement or a same-size rewrite. Incomplete trailing
         # records are retried next time; malformed committed records are errors.
-        if old is None or old[0] != stat.st_ino or stat.st_size < old[1] or (stat.st_size == old[1] and stat.st_mtime_ns != old[2]):
+        if (
+            old is None
+            or old[0] != stat.st_ino
+            or stat.st_size < old[1]
+            or (stat.st_size == old[1] and stat.st_mtime_ns != old[2])
+        ):
             old = (stat.st_ino, 0, stat.st_mtime_ns, [])
         inode, offset, _, rows = old
         with path.open("rb") as stream:
@@ -55,7 +62,11 @@ class ArtifactSource:
 
     @property
     def config(self):
-        return self.config_override or self.read("resolved-config.json") or self.read("run.json", {}).get("config", {})
+        return (
+            self.config_override
+            or self.read("resolved-config.json")
+            or self.read("run.json", {}).get("config", {})
+        )
 
     @property
     def session(self):

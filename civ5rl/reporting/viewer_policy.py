@@ -1,12 +1,20 @@
 """Read-only probabilities on an exact recorded public history (no CP calls)."""
 
+from __future__ import annotations
+
+import gc
 import json
 import math
 import os
+import sys
 import threading
 from collections import OrderedDict
 from dataclasses import asdict
 from pathlib import Path
+
+from civ5rl.core.observation import ordered_actions, public_map
+from civ5rl.engine.evaluation.replay import apply_replay_step
+from civ5sim import Action, Battle
 
 
 class ViewerPolicies:
@@ -31,17 +39,21 @@ class ViewerPolicies:
             self.cache.clear()
             self.policies.clear()
             # Avoid importing Torch for viewers that never loaded a model.
-            import gc
-            import sys
             gc.collect()
             torch = sys.modules.get("torch")
             if torch is not None and torch.cuda.is_initialized():
                 torch.cuda.empty_cache()
 
     def catalog(self):
-        return [{"id": m["id"], "label": m.get("label", m["id"]),
-                 "side": m.get("side", 1), "available": m["checkpoint"].is_file()}
-                for m in self.models.values()]
+        return [
+            {
+                "id": m["id"],
+                "label": m.get("label", m["id"]),
+                "side": m.get("side", 1),
+                "available": m["checkpoint"].is_file(),
+            }
+            for m in self.models.values()
+        ]
 
     def probabilities(self, path, model_id, frame, temperature):
         if not math.isfinite(temperature) or not 0 < temperature <= 10:
@@ -66,20 +78,23 @@ class ViewerPolicies:
                 return result
             import torch
 
-            probabilities = (torch.tensor(result["logits"], dtype=torch.float32) / temperature).softmax(0).tolist()
+            probabilities = (
+                (torch.tensor(result["logits"], dtype=torch.float32) / temperature).softmax(0).tolist()
+            )
             order = sorted(range(len(probabilities)), key=probabilities.__getitem__, reverse=True)
             return {k: v for k, v in result.items() if k not in ("logits", "actions")} | {
                 "temperature": temperature,
-                "actions": [{**result["actions"][i], "probability": probabilities[i],
-                             "argmax": i == order[0]} for i in order],
+                "actions": [
+                    {**result["actions"][i], "probability": probabilities[i], "argmax": i == order[0]}
+                    for i in order
+                ],
             }
 
     def _infer(self, path, model, policy_key, frame):
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         import torch
+
         from civ5rl.core.agent import RLAgent
-        from civ5rl.core.observation import ordered_actions
-        from civ5sim.engine import Action, Battle, digest
 
         replay = json.loads(path.read_text(encoding="utf-8"))
         if not 0 <= frame <= len(replay["steps"]):
@@ -94,7 +109,10 @@ class ViewerPolicies:
         )
         active_side = (replay["initial"]["state"]["side"] + turn - replay["initial"]["state"]["turn"]) % 2
         if active_side != side:
-            return {"available": False, "message": f"Сейчас ход стороны {'AB'[active_side]}. Модель настроена за {'AB'[side]}."}
+            return {
+                "available": False,
+                "message": f"Сейчас ход стороны {'AB'[active_side]}. Модель настроена за {'AB'[side]}.",
+            }
         if policy_key not in self.policies:
             torch.use_deterministic_algorithms(True)
             torch.backends.cuda.matmul.allow_tf32 = False
@@ -111,13 +129,18 @@ class ViewerPolicies:
             raise ValueError("Для восстановления контекста нужен result.json")
         result = json.loads(result_path.read_text(encoding="utf-8"))
         config = result["config"]
-        from civ5rl.core.observation import public_map
 
-        agent.reset({"map": public_map(replay["initial"]["map"]), "side": side,
-                     "armies": config["armies"],
-                     "max_rounds": replay.get("experiment", {}).get("model_time_horizon", config["max_rounds"]),
-                     "fog": config["fog"], "random_damage": config["random_damage"],
-                     "seed": result["seeds"][f"agent{side}"]})
+        agent.reset(
+            {
+                "map": public_map(replay["initial"]["map"]),
+                "side": side,
+                "armies": config["armies"],
+                "max_rounds": replay.get("experiment", {}).get("model_time_horizon", config["max_rounds"]),
+                "fog": config["fog"],
+                "random_damage": config["random_damage"],
+                "seed": result["seeds"][f"agent{side}"],
+            }
+        )
 
         def inputs(battle):
             observation = battle.observe(side)
@@ -137,13 +160,17 @@ class ViewerPolicies:
                 if battle.observe()["active_side"] == side:
                     observation, actions = inputs(battle)
                     agent.observe_step(observation, actions, Action(**step["action"]))
-                actual = battle.step(step["action"])
-                if asdict(actual) != step["result"] or digest(battle.snapshot()) != step["state_sha256"]:
-                    raise ValueError(f"История расходится на команде {number}")
+                apply_replay_step(battle, step, mismatch=f"История расходится на команде {number}")
             observation, actions = inputs(battle)
             logits = agent._infer(observation, actions)[0].float().cpu().tolist()
             recorded = replay["steps"][frame]["action"]
-            return {"available": True, "frame": frame, "next_command": frame + 1,
-                    "model": model["id"], "side": side, "runtime": f"{agent.device.upper()} FP32",
-                    "logits": logits,
-                    "actions": [{"action": asdict(a), "recorded": asdict(a) == recorded} for a in actions]}
+            return {
+                "available": True,
+                "frame": frame,
+                "next_command": frame + 1,
+                "model": model["id"],
+                "side": side,
+                "runtime": f"{agent.device.upper()} FP32",
+                "logits": logits,
+                "actions": [{"action": asdict(a), "recorded": asdict(a) == recorded} for a in actions],
+            }

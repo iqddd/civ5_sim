@@ -1,5 +1,7 @@
 """Replay a saved episode and record the first divergence and optional CP traces."""
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -101,7 +103,7 @@ def diagnose(episode, *, trace_from=None):
 
 
 def main():
-    from civ5rl.experiments.ppo_artifacts import load_rollout
+    from civ5rl.engine.ppo.storage import load_rollout
     from civ5rl.provenance.common import file_sha256
 
     parser = argparse.ArgumentParser(description=__doc__)

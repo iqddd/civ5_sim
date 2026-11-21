@@ -271,7 +271,7 @@ class ManagementTests(unittest.TestCase):
                 )
                 self.assertEqual(compare.call_args.kwargs["seed"], 42)
                 self.assertEqual(compare.call_args.kwargs["samples"], 100)
-            with patch("tools.remote_rl.pull", return_value={}) as pull:
+            with patch("civ5rl.deploy.operations.pull", return_value={}) as pull:
                 remote_cli(["pull", "--deployment", temp])
                 self.assertFalse(pull.call_args.kwargs["delete_instance"])
                 remote_cli(["pull", "--deployment", temp, "--delete-instance"])

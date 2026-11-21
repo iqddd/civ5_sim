@@ -20,7 +20,7 @@ def write(path, value):
 
 class OperationsTest(unittest.TestCase):
     def test_budget_extension_preserves_config_and_spent_time(self):
-        from civ5rl.experiments.ppo_after_target_bc import ActiveClock
+        from civ5rl.experiments.ppo.after_target_bc.boundary import ActiveClock
         from civ5rl.reporting.operations import extend_budget
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -37,7 +37,7 @@ class OperationsTest(unittest.TestCase):
             self.assertEqual(clock.limit(record["config"]), 18000)
             self.assertGreaterEqual(state["active_seconds"], 10800)
             self.assertEqual((root / "run.json").read_bytes(), frozen)
-            with patch("civ5rl.experiments.ppo_after_target_bc.perf_counter", return_value=100):
+            with patch("civ5rl.experiments.ppo.after_target_bc.boundary.perf_counter", return_value=100):
                 self.assertAlmostEqual(clock.deadline(record["config"]), 7300, places=1)
 
     def fixture(self, directory):
@@ -101,7 +101,7 @@ class OperationsTest(unittest.TestCase):
             self.assertTrue(target_bc_evaluation_due(run["config"], state, current_policy_hash="new"))
             with self.assertRaisesRegex(ValueError, "development evaluation"):
                 close_run(root, "done")
-            from civ5rl.experiments import ppo_after_target_bc as runner
+            from civ5rl.experiments.ppo.after_target_bc import training as runner
 
             order = []
             policy = MagicMock()

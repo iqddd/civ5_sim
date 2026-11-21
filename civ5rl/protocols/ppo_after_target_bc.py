@@ -4,50 +4,21 @@ import math
 
 from civ5rl.config import load_config as resolve_config
 from civ5rl.engine.runtime.control import TrainingCounters
-from civ5rl.provenance.common import ROOT
+from civ5rl.protocols.ppo_validation import validate_bounded_training
 
 KIND = "rl01.ppo_after_target_bc"
 
 
 def validate_profile(config):
-    if config.get("output") == "artifacts/rl/ppo-c2p-h60-selfplay":
-        profile = "rl-ppo-c2p-h60-selfplay.json"
-    elif config.get("output") == "artifacts/rl/ppo-c2p-h60-end-turn":
-        profile = "rl-ppo-c2p-h60-end-turn.json"
-    elif config.get("output") == "artifacts/rl/ppo-c2-h60-gae-gamma1-lambda099-attack-preview":
-        profile = "rl-ppo-c2-h60-gae-gamma1-lambda099-attack-preview.json"
-    elif config.get("output") == "artifacts/rl/ppo-c2-h60-gae-gamma1-lambda099":
-        profile = "rl-ppo-c2-h60-gae-gamma1-lambda099.json"
-    elif config.get("output") == "artifacts/rl/ppo-c2-h60-gae-gamma1-continuation":
-        profile = "rl-ppo-c2-h60-gae-gamma1-continuation.json"
-    elif config.get("output") == "artifacts/rl/ppo-c2-h60-gae-gamma1":
-        profile = "rl-ppo-c2-h60-gae-gamma1.json"
-    elif config.get("output") == "artifacts/rl/ppo-c2-h60-gae-continuation":
-        profile = "rl-ppo-c2-h60-gae-continuation.json"
-    elif config.get("output") == "artifacts/rl/ppo-c2-h60-gae":
-        profile = "rl-ppo-c2-h60-gae.json"
-    elif config.get("policy_temperature", 1) == 0.5:
-        profile = "rl-ppo-target-bc-t05.json"
-    else:
-        profile = "rl-ppo-after-target-bc.json"
-    expected = resolve_config(ROOT / "configs" / profile)
-    if config != expected:
-        raise ValueError(
-            "Configuration differs from the fixed PPO-after-target-BC profile"
-        )
-    if (
-        config["kind"] != KIND
-        or config["collection"]["num_envs"] != 16
-        or config["collection"]["cpu_workers"] != 4
-        or config["ppo"]["sequences_per_microbatch"] != 8
-        or config["performance"]["worker_reply_size"] != 4
-        or config["optimizer"]["lr"] not in (1e-5, 5e-6)
-        or config["reward"]["loss"] != 0
-        or (config["experiment"]["parent_optimizer_steps"] != 0
-            and config["experiment"].get("parent_optimizer") != "preserve")
+    validate_bounded_training(config, kinds=(KIND,))
+    experiment = config["experiment"]
+    mode = experiment["initial_value"]
+    inherited = experiment.get("parent_optimizer") == "preserve"
+    if (mode in ("preserve_parent", "adapt_parent_first_rollout")) != inherited or (
+        not inherited and (mode != "fit_first_rollout" or experiment["parent_optimizer_steps"] != 0)
     ):
-        raise ValueError("Unsupported local PPO-after-target-BC conditions")
-    if config["experiment"].get("time_budget_check"):
+        raise ValueError("Initial value handling is incompatible with the parent optimizer")
+    if experiment.get("time_budget_check"):
         compute_time_budget_check(config)
 
 

@@ -11,9 +11,10 @@ import sys
 from collections import Counter, defaultdict
 from contextlib import ExitStack
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import perf_counter
+from typing import Any, cast
 
 from civ5rl.core.observation import ordered_actions
 from civ5rl.protocols.common import self_digest
@@ -24,6 +25,69 @@ from civ5sim.combat_ai import Aggression, SearchConfig
 from civ5sim.cp_agent import CPAgent
 from civ5sim.engine import digest
 from civ5sim.match import run_match
+
+
+@dataclass(frozen=True)
+class MatchTask:
+    config: dict
+    manifest: dict
+    case: dict
+    output_dir: str
+    contender: Any
+    opponent: str
+    device: str = "cpu"
+
+    @property
+    def directory(self) -> str:
+        return self.output_dir
+
+    def __iter__(self):
+        yield self.config
+        yield self.manifest
+        yield self.case
+        yield self.output_dir
+        yield self.contender
+        yield self.opponent
+        yield self.device
+
+    def __getitem__(self, index: int | slice):
+        return (
+            self.config,
+            self.manifest,
+            self.case,
+            self.output_dir,
+            self.contender,
+            self.opponent,
+            self.device,
+        )[index]
+
+    def __len__(self) -> int:
+        return 7
+
+    @classmethod
+    def from_task(cls, task: Any) -> "MatchTask":
+        if isinstance(task, cls):
+            return task
+        if isinstance(task, (tuple, list)) and len(task) == 7:
+            return cls(*task)
+        if (
+            hasattr(task, "config")
+            and hasattr(task, "case")
+            and (hasattr(task, "output_dir") or hasattr(task, "directory"))
+        ):
+            return cls(
+                config=task.config,
+                manifest=task.manifest,
+                case=task.case,
+                output_dir=cast(
+                    str,
+                    getattr(task, "output_dir", None) or getattr(task, "directory", None),
+                ),
+                contender=task.contender,
+                opponent=task.opponent,
+                device=getattr(task, "device", "cpu"),
+            )
+        raise TypeError(f"Cannot coerce {type(task)} to MatchTask")
 
 
 def dump_episode(path, episode):
@@ -340,8 +404,6 @@ def task_for(
     *,
     as_tuple=False,
 ):
-    from civ5rl.experiments.evaluation import MatchTask
-
     task = MatchTask(
         config=config,
         manifest=manifest,

@@ -16,9 +16,9 @@ from civ5rl.engine.runtime.transactions import AdamSnapshot
 from civ5rl.engine.ppo.core import encode_episode
 from civ5rl.engine.ppo.adam import check_counters, grouped_optimizer
 from civ5rl.engine.runtime.shared import EncodedSlots
-from civ5rl.experiments.imitation_helpers import assert_equal
-from civ5rl.experiments.ppo_after_target_bc import load_initial_optimizer
-from civ5rl.experiments.ppo_artifacts import pack_rollout, unpack_rollout
+from civ5rl.experiments.imitation.helpers import assert_equal
+from civ5rl.experiments.ppo.after_target_bc.optimizer import load_initial_optimizer
+from civ5rl.engine.ppo.storage import pack_rollout, unpack_rollout
 from civ5rl.protocols.ppo_after_target_bc import load_config
 from civ5rl.provenance import checkpoint
 from civ5rl.provenance.common import configure

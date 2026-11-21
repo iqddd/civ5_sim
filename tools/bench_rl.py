@@ -1,5 +1,7 @@
 """Bounded RL benchmarks for saved replay, updates, collection and evaluation."""
 
+from __future__ import annotations
+
 import argparse
 import json
 import random
@@ -50,9 +52,9 @@ def resolve_inputs(args, parser):
 def replay(args, parser, config, inputs):
     import civ5rl.engine.ppo.backend as current
     from civ5rl.engine.ppo.benchmark import load_replay_baseline, run_replay_benchmark
+    from civ5rl.engine.ppo.storage import load_rollout
     from civ5rl.engine.runtime.telemetry import ResourceMonitor
-    from civ5rl.experiments.imitation_helpers import load_policy
-    from civ5rl.experiments.ppo_artifacts import load_rollout
+    from civ5rl.experiments.imitation.helpers import load_policy
     from civ5rl.provenance.common import (
         configure,
         file_sha256,
@@ -80,9 +82,13 @@ def replay(args, parser, config, inputs):
     # execution sources to make the comparison's dependency scope explicit.
     shared = [
         p
-        for p in {Path(module.__file__).resolve() for name,module in tuple(sys.modules.items())
-                  if name.startswith(("civ5rl.","civ5sim.","civ5map."))
-                  and getattr(module,"__file__",None) and Path(module.__file__).is_file()}
+        for p in {
+            Path(module.__file__).resolve()
+            for name, module in tuple(sys.modules.items())
+            if name.startswith(("civ5rl.", "civ5sim.", "civ5map."))
+            and getattr(module, "__file__", None)
+            and Path(module.__file__).is_file()
+        }
         if p.resolve() != Path(current.__file__).resolve()
     ]
     protected = list(dict.fromkeys([*inputs, Path(current.__file__), *shared]))
@@ -140,12 +146,12 @@ def replay(args, parser, config, inputs):
 def full_cycle(args, parser, config, inputs):
     import torch
 
-    from civ5rl.engine.ppo.benchmark import run_full_cycle_benchmark
     from civ5rl.engine.collection.collector import Collector
+    from civ5rl.engine.ppo.adam import optimizer_for
+    from civ5rl.engine.ppo.benchmark import run_full_cycle_benchmark
+    from civ5rl.engine.ppo.storage import load_rollout
     from civ5rl.engine.runtime.telemetry import ResourceMonitor
-    from civ5rl.experiments.imitation_helpers import load_policy
-    from civ5rl.experiments.ppo_after_imitation import optimizer_for
-    from civ5rl.experiments.ppo_artifacts import load_rollout
+    from civ5rl.experiments.imitation.helpers import load_policy
     from civ5rl.provenance import bound_cases, case_manifest
     from civ5rl.provenance.common import configure, write_json
     from civ5rl.provenance.rng import restore_rng
@@ -213,7 +219,15 @@ def main():
     parser.add_argument(
         "phase",
         nargs="?",
-        choices=("full-cycle", "replay", "ppo-update", "bc", "evaluation", "comparison", "comparison-collection"),
+        choices=(
+            "full-cycle",
+            "replay",
+            "ppo-update",
+            "bc",
+            "evaluation",
+            "comparison",
+            "comparison-collection",
+        ),
         default="full-cycle",
     )
     parser.add_argument(
@@ -222,8 +236,18 @@ def main():
         help="Resolve saved config, latest checkpoint and rollout from RUN",
     )
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--history-microbatch", type=int, default=2, help="Whole-turn fit histories per GPU microbatch")
-    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True, help="Whole-turn fit CUDA compilation")
+    parser.add_argument(
+        "--history-microbatch",
+        type=int,
+        default=2,
+        help="Whole-turn fit histories per GPU microbatch",
+    )
+    parser.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whole-turn fit CUDA compilation",
+    )
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--rollout", type=Path)
     parser.add_argument("--out", type=Path, required=True)
@@ -248,14 +272,21 @@ def main():
         help="Replay/PPO update: first N saved episodes",
     )
     ppo_update = parser.add_argument_group("ppo-update")
-    ppo_update.add_argument("--baseline-result", type=Path, help="Saved ppo-update benchmark.json")
-    ppo_update.add_argument("--minibatch-tokens", type=int, help="Override valid tokens per PPO minibatch")
-    ppo_update.add_argument("--check-rollback", action="store_true", help="Also force and check a KL rejection")
+    ppo_update.add_argument(
+        "--baseline-result", type=Path, help="Saved ppo-update benchmark.json"
+    )
+    ppo_update.add_argument(
+        "--minibatch-tokens", type=int, help="Override valid tokens per PPO minibatch"
+    )
+    ppo_update.add_argument(
+        "--check-rollback",
+        action="store_true",
+        help="Also force and check a KL rejection",
+    )
     parser.add_argument(
         "--steps",
         type=int,
-        default=450,
-        help="BC only: number of measured Adam steps",
+        help="BC and comparison: number of measured Adam steps",
     )
     parser.add_argument(
         "--trace-steps",
@@ -296,48 +327,105 @@ def main():
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=17)
-    parser.add_argument("--cases", type=int, default=3, help="Evaluation benchmark only")
-    parser.add_argument("--workers", type=int, default=4, help="Evaluation benchmark only")
-    parser.add_argument("--max-batch", type=int, default=32, help="Evaluation benchmark only")
-    parser.add_argument("--wait-seconds", type=float, default=0.001, help="Evaluation benchmark only")
+    parser.add_argument(
+        "--cases", type=int, help="Evaluation and rollout-comparison saved case count"
+    )
+    parser.add_argument(
+        "--workers", type=int, help="Evaluation and rollout-comparison workers"
+    )
+    parser.add_argument(
+        "--max-batch",
+        type=int,
+        default=32,
+        help="Evaluation and comparison inference batch",
+    )
+    parser.add_argument(
+        "--wait-seconds",
+        type=float,
+        default=0.001,
+        help="Evaluation and comparison batch wait",
+    )
     collection = parser.add_argument_group("comparison-collection")
-    collection.add_argument("--worker-counts", default="6,8,12,16", help="Comma-separated W candidates")
-    collection.add_argument("--inference-services", type=int, default=0,
-                            help="Isolated GPU inference processes; 0 uses the in-process thread")
-    collection.add_argument('--prefix-states',action='store_true',
-                            help='Restore branch GRU state at reset and skip prefix observe RPCs')
-    collection.add_argument("--forks", type=int, default=64, help="Saved forks in the measured work")
-    collection.add_argument("--seconds", type=float, default=300, help="Measured window per mode")
+    collection.add_argument(
+        "--worker-counts", default="6,8,12,16", help="Comma-separated W candidates"
+    )
+    collection.add_argument(
+        "--inference-services",
+        type=int,
+        default=0,
+        help="Isolated GPU inference processes; 0 uses the in-process thread",
+    )
+    collection.add_argument(
+        "--prefix-states",
+        action="store_true",
+        help="Restore branch GRU state at reset and skip prefix observe RPCs",
+    )
+    collection.add_argument(
+        "--forks", type=int, default=64, help="Saved forks in the measured work"
+    )
+    collection.add_argument(
+        "--seconds", type=float, default=300, help="Measured window per mode"
+    )
     collection.add_argument("--warmup-forks", type=int, default=4)
-    collection.add_argument('--warmup-measured-work', action='store_true',
-                            help='Warm up with one complete pass of the measured forks before timing the same work')
+    collection.add_argument(
+        "--warmup-measured-work",
+        action="store_true",
+        help="Warm up with one complete pass of the measured forks before timing the same work",
+    )
     collection.add_argument("--source-cases", type=int, default=8)
-    collection.add_argument("--barrier-workers", type=int, default=8, help="Former per-fork barrier control; 0 skips")
+    collection.add_argument(
+        "--barrier-workers",
+        type=int,
+        default=8,
+        help="Former per-fork barrier control; 0 skips",
+    )
     args = parser.parse_args()
     if args.phase != "ppo-update" and (
         args.baseline_result or args.minibatch_tokens is not None or args.check_rollback
     ):
-        parser.error("--baseline-result, --minibatch-tokens and --check-rollback apply to ppo-update only")
+        parser.error(
+            "--baseline-result, --minibatch-tokens and --check-rollback apply to ppo-update only"
+        )
     if args.phase == "comparison-collection":
-        from civ5rl.reporting.comparison_collection_bench import run_benchmark
+        from civ5rl.experiments.benchmarks.comparison_collection import run_benchmark
+
         return run_benchmark(args, parser)
     if args.phase == "comparison":
-        if args.config and json.loads(args.config.read_text(encoding='utf-8')).get('kind')=='rl01.turn_comparison_fit':
-            if not any(a=='--steps' or a.startswith('--steps=') for a in sys.argv[1:]):args.steps=1
-            from civ5rl.reporting.turn_fit import benchmark
-            return benchmark(args,parser)
-        if args.config and json.loads(args.config.read_text(encoding='utf-8')).get('training',{}).get('mode') in ('full_corpus_step_kl','frozen_heads_step_kl'):
-            if not any(a=='--steps' or a.startswith('--steps=') for a in sys.argv[1:]):args.steps=1
-            from civ5rl.reporting.comparison_control_smoke import benchmark
-            return benchmark(args,parser)
-        if not any(a=="--steps" or a.startswith("--steps=") for a in sys.argv[1:]):args.steps=3
-        from civ5rl.reporting.comparison_performance import run_benchmark
-        return run_benchmark(args,parser)
+        config = (
+            json.loads(args.config.read_text(encoding="utf-8")) if args.config else {}
+        )
+        if config.get("kind") == "rl01.turn_comparison_fit":
+            if args.steps is None:
+                args.steps = 1
+            from civ5rl.experiments.benchmarks.turn_fit import benchmark
+
+            return benchmark(args, parser)
+        if config.get("training", {}).get("mode") in (
+            "full_corpus_step_kl",
+            "frozen_heads_step_kl",
+        ):
+            if args.steps is None:
+                args.steps = 1
+            from civ5rl.experiments.benchmarks.comparison_control import benchmark
+
+            return benchmark(args, parser)
+        if args.steps is None:
+            args.steps = 3
+        from civ5rl.experiments.benchmarks.comparison_performance import run_benchmark
+
+        return run_benchmark(args, parser)
     if args.phase == "evaluation":
         from tools._evaluation_benchmark import run_evaluation_benchmark
+
+        if args.cases is None:
+            args.cases = 3
+        if args.workers is None:
+            args.workers = 4
         run_evaluation_benchmark(args, parser)
         return
     if args.phase == "bc":
+        if args.steps is None:
+            args.steps = 450
         if args.config is None or args.checkpoint is None:
             parser.error("bc benchmark requires --config and --checkpoint")
         if args.steps < 1 or args.warmup < 0 or args.trace_steps < 0:
@@ -360,7 +448,7 @@ def main():
     if args.phase == "replay":
         replay(args, parser, config, inputs)
     elif args.phase == "ppo-update":
-        from civ5rl.reporting.ppo_update_benchmark import run_benchmark
+        from civ5rl.experiments.benchmarks.ppo_update import run_benchmark
 
         if not run_benchmark(args, parser, config, inputs):
             raise SystemExit(1)

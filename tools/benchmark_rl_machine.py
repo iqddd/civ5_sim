@@ -1,12 +1,13 @@
 """Machine benchmark disabled pending rework; all entrypoints raise NotImplementedError."""
 
+from __future__ import annotations
+
 # TODO: Rework this benchmark before enabling any of its functions. The v1
 # series is closed. Separate runtime tuning from final machine measurements,
 # agree on the fixed workload/refill behavior, validate tuner completion and
 # GPU identity, and separate execution provenance from measurement provenance.
 # The former implementation is retained below for that rework, but every
 # module-defined entrypoint (including helpers and the CLI) is disabled.
-
 import argparse
 import hashlib
 import json
@@ -24,11 +25,11 @@ from time import perf_counter
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from tools.rl_collection_hardware import hardware
-from tools._common import write_json, file_sha256
-from tools._resources import collection_resources
 from tools._collection_tuning import initial_candidates
+from tools._common import file_sha256, write_json
 from tools._process import stop_tree
+from tools._resources import collection_resources
+from tools.rl_collection_hardware import hardware
 
 METHOD = "cp-collection-v1"
 TOOLS = (
@@ -52,9 +53,7 @@ def read(path):
 
 def fingerprint(value):
     raise NotImplementedError(_REWORK_REASON)
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def text_sha(path):
@@ -71,10 +70,7 @@ def source_hashes():
         for p in (ROOT / directory).rglob("*")
         if p.is_file() and p.suffix in (".py", ".cpp", ".h", ".inc")
     ]
-    paths += [
-        ROOT / "build" / name
-        for name in ("combat_rules.h", "cp_geometry.inc", "combat_rules.json")
-    ]
+    paths += [ROOT / "build" / name for name in ("combat_rules.h", "cp_geometry.inc", "combat_rules.json")]
     paths += [
         ROOT / name
         for name in (
@@ -136,7 +132,7 @@ def prepare(args):
     raise NotImplementedError(_REWORK_REASON)
     sys.path.insert(0, str(ROOT))
     from civ5rl.config import load_config
-    from civ5rl.experiments.ppo_artifacts import load_rollout
+    from civ5rl.engine.ppo.storage import load_rollout
     from civ5sim.engine import digest
 
     if args.out.exists() and any(args.out.iterdir()):
@@ -171,9 +167,7 @@ def prepare(args):
     }.items():
         coverage[label] = dict(Counter(extract(ep) for ep in selected))
     coverage["unit_types"] = dict(
-        Counter(
-            unit["type"] for ep in selected for unit in ep["spec"]["scenario"]["units"]
-        )
+        Counter(unit["type"] for ep in selected for unit in ep["spec"]["scenario"]["units"])
     )
     manifest = {
         "schema": 1,
@@ -187,15 +181,11 @@ def prepare(args):
         "cpu_signature": {
             "commands_hash": digest([ep["joint_commands"] for ep in selected]),
             "results_hash": digest(
-                [
-                    {k: v for k, v in ep["result"].items() if k != "timings"}
-                    for ep in selected
-                ]
+                [{k: v for k, v in ep["result"].items() if k != "timings"} for ep in selected]
             ),
         },
         "files": {
-            name: file_sha256(args.out / name)
-            for name in ("config.json", "rollout.pt", "checkpoint.pt")
+            name: file_sha256(args.out / name) for name in ("config.json", "rollout.pt", "checkpoint.pt")
         },
         "config_input_hashes": sorted(
             {file_sha256(args.config), text_sha(args.config), file_sha256(args.out / "config.json")}
@@ -235,10 +225,7 @@ def verify_bundle(bundle):
     manifest = read(bundle / "manifest.json")
     if manifest["method"] != METHOD:
         raise ValueError("Unsupported benchmark method")
-    if (
-        fingerprint({k: v for k, v in manifest.items() if k != "workload_id"})
-        != manifest["workload_id"]
-    ):
+    if fingerprint({k: v for k, v in manifest.items() if k != "workload_id"}) != manifest["workload_id"]:
         raise ValueError("Bundle manifest was modified")
     for name, expected in manifest["files"].items():
         if file_sha256(bundle / name) != expected:
@@ -319,9 +306,7 @@ def run(args):
             base = reference["benchmarks"].get(name) if reference else row
             comparable = base and base.get("signature") == row.get("signature")
             if name == "collection" and reference:
-                comparable = comparable and reference["hardware"].get(
-                    "GPUs"
-                ) == machine.get("GPUs")
+                comparable = comparable and reference["hardware"].get("GPUs") == machine.get("GPUs")
             row["comparable_to_reference"] = bool(comparable)
             row["score"] = (
                 100 * base["median_seconds"] / row["median_seconds"]
@@ -332,14 +317,10 @@ def run(args):
                 row["score_per_dollar_per_hour"] = row["score"] / args.price_per_hour
         serial, parallel = scores.get("cp_serial"), scores.get("cp_parallel")
         if serial and parallel:
-            parallel["speedup_over_serial"] = (
-                serial["median_seconds"] / parallel["median_seconds"]
-            )
+            parallel["speedup_over_serial"] = serial["median_seconds"] / parallel["median_seconds"]
         report["elapsed_seconds"] = perf_counter() - started
         report["budget_exhausted"] = perf_counter() >= deadline
-        report["preliminary"] = len(scores) < 3 or any(
-            row["preliminary"] for row in scores.values()
-        )
+        report["preliminary"] = len(scores) < 3 or any(row["preliminary"] for row in scores.values())
         write_json(args.out / "summary.json", report)
         lines = [
             f"# {manifest['name']} — {args.machine_label or machine['CPU']}",
@@ -398,24 +379,16 @@ def run(args):
                 session["error"] = type(exc).__name__
                 if isinstance(exc, KeyboardInterrupt):
                     raise
-        session.update(
-            returncode=process.returncode, wall_seconds=perf_counter() - tick
-        )
+        session.update(returncode=process.returncode, wall_seconds=perf_counter() - tick)
         if (directory / "resources.jsonl").exists():
-            session["resources"] = collection_resources(
-                directory / "resources.jsonl", "cpu"
-            )
+            session["resources"] = collection_resources(directory / "resources.jsonl", "cpu")
         save()
         if process.returncode:
             session.setdefault("error", "See stdout.log")
             return None
         return directory
 
-    cpu_deadline = (
-        deadline
-        if args.reuse_collection
-        else min(deadline, started + args.budget_seconds * 0.45)
-    )
+    cpu_deadline = deadline if args.reuse_collection else min(deadline, started + args.budget_seconds * 0.45)
     cpu_rows = {}
     history_reference = None
 
@@ -452,21 +425,12 @@ def run(args):
         output = read(directory / "result.json")
         history_reference = history_reference or directory / "result.json"
         report["sessions"][-1]["setup_seconds"] = output["setup_seconds"]
-        report["sessions"][-1]["history_verification_seconds"] = output[
-            "history_verification_seconds"
-        ]
-        report["sessions"][-1]["native_library_sha256"] = output[
-            "native_library_sha256"
-        ]
+        report["sessions"][-1]["history_verification_seconds"] = output["history_verification_seconds"]
+        report["sessions"][-1]["native_library_sha256"] = output["native_library_sha256"]
         trials = output["trials"]
-        if any(
-            {k: t[k] for k in manifest["cpu_signature"]} != manifest["cpu_signature"]
-            for t in trials
-        ):
+        if any({k: t[k] for k in manifest["cpu_signature"]} != manifest["cpu_signature"] for t in trials):
             raise AssertionError("CPU workload differs from the bundle")
-        row = cpu_rows.setdefault(
-            workers, {"workers": workers, "trials": [], "confirmations": []}
-        )
+        row = cpu_rows.setdefault(workers, {"workers": workers, "trials": [], "confirmations": []})
         row["trials"].extend(trials)
         if confirmation or repeat == 3:
             row["confirmations"].extend(trials)
@@ -478,15 +442,12 @@ def run(args):
         return statistics.median(t["seconds"] for t in row["trials"])
 
     def cpu_result(row):
-        trials = (
-            row["confirmations"] if len(row["confirmations"]) >= 3 else row["trials"]
-        )
+        trials = row["confirmations"] if len(row["confirmations"]) >= 3 else row["trials"]
         return {
             **summarize(trials, manifest["commands"], "commands"),
             "workers": row["workers"],
             "trials": trials,
-            "episodes_per_second": manifest["episodes"]
-            / statistics.median(t["seconds"] for t in trials),
+            "episodes_per_second": manifest["episodes"] / statistics.median(t["seconds"] for t in trials),
             "signature": manifest["cpu_signature"],
             "preliminary": len(row["confirmations"]) < 3,
         }
@@ -500,9 +461,7 @@ def run(args):
         counts = sorted(
             {
                 c.workers
-                for c in initial_candidates(
-                    machine["effective_cpu_budget"], manifest["auto_env_limit"]
-                )
+                for c in initial_candidates(machine["effective_cpu_budget"], manifest["auto_env_limit"])
             }
         )
         for workers in counts:
@@ -511,10 +470,7 @@ def run(args):
         candidates = [cpu_rows[w] for w in counts if w in cpu_rows]
         if len(candidates) >= 2:
             best = min(candidates, key=cpu_time)
-            if (
-                best is candidates[-1]
-                and cpu_time(best) <= cpu_time(candidates[-2]) * 0.95
-            ):
+            if best is candidates[-1] and cpu_time(best) <= cpu_time(candidates[-2]) * 0.95:
                 extra = 2 * max(1, math.floor(machine["effective_cpu_budget"]))
                 if extra <= manifest["auto_env_limit"] and extra not in cpu_rows:
                     measure_cpu(extra)
@@ -534,17 +490,12 @@ def run(args):
             )
             pool = finalists if confirmed else list(cpu_rows.values())
             best_time = min(
-                statistics.median(
-                    t["seconds"] for t in (r["confirmations"] or r["trials"])
-                )
-                for r in pool
+                statistics.median(t["seconds"] for t in (r["confirmations"] or r["trials"])) for r in pool
             )
             close = [
                 r
                 for r in pool
-                if statistics.median(
-                    t["seconds"] for t in (r["confirmations"] or r["trials"])
-                )
+                if statistics.median(t["seconds"] for t in (r["confirmations"] or r["trials"]))
                 <= best_time * 1.03
             ]
             best = min(close, key=lambda r: r["workers"])
@@ -561,9 +512,7 @@ def run(args):
                 raise ValueError("Only the frozen Collection reference may be reused")
             for field in ("CPU", "cpu_affinity", "effective_cpu_budget", "platform"):
                 if collection["hardware"][field] != machine[field]:
-                    raise ValueError(
-                        f"Reused Collection belongs to different hardware: {field}"
-                    )
+                    raise ValueError(f"Reused Collection belongs to different hardware: {field}")
             if collection["hardware"].get("GPUs") != machine.get("GPUs"):
                 raise ValueError("Reused Collection belongs to a different GPU class")
             shutil.copyfile(args.reuse_collection, args.out / "collection-reused.json")
@@ -613,15 +562,12 @@ def run(args):
                 )
                 if k in selected
             },
-            "at_search_limit": selected["num_envs"]
-            == collection.get("max_envs", manifest["auto_env_limit"]),
+            "at_search_limit": selected["num_envs"] == collection.get("max_envs", manifest["auto_env_limit"]),
             "trials": trials,
             "sessions": selected["sessions"],
         }
         expected_gpu = manifest.get("collection_GPU_class")
-        result["GPU_class_matches_workload"] = (
-            expected_gpu is None or expected_gpu == machine.get("GPUs")
-        )
+        result["GPU_class_matches_workload"] = expected_gpu is None or expected_gpu == machine.get("GPUs")
         result["preliminary"] |= not result["GPU_class_matches_workload"]
         if args.price_per_hour:
             result["dollars_per_million_decisions"] = (
@@ -663,14 +609,8 @@ def compare(args):
                 and base["signature"] == actual["signature"]
             )
             if name == "collection":
-                valid = valid and baseline["hardware"].get("GPUs") == report[
-                    "hardware"
-                ].get("GPUs")
-            row[name] = (
-                100 * base["median_seconds"] / actual["median_seconds"]
-                if valid
-                else None
-            )
+                valid = valid and baseline["hardware"].get("GPUs") == report["hardware"].get("GPUs")
+            row[name] = 100 * base["median_seconds"] / actual["median_seconds"] if valid else None
         collection = report["benchmarks"].get("collection", {})
         row["runtime"] = collection.get("runtime")
         row["collection_score_per_dollar_per_hour"] = (
@@ -695,10 +635,7 @@ def compare(args):
 
         runtime = row["runtime"]
         runtime = (
-            "/".join(
-                str(runtime[k])
-                for k in ("num_envs", "cpu_workers", "worker_reply_size")
-            )
+            "/".join(str(runtime[k]) for k in ("num_envs", "cpu_workers", "worker_reply_size"))
             if runtime
             else "—"
         )
@@ -714,9 +651,7 @@ def main():
     raise NotImplementedError(_REWORK_REASON)
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    create = sub.add_parser(
-        "prepare", help="Freeze inputs once, without collecting data"
-    )
+    create = sub.add_parser("prepare", help="Freeze inputs once, without collecting data")
     for name in ("config", "checkpoint", "rollout", "out"):
         create.add_argument(f"--{name}", type=Path, required=True)
     create.add_argument("--name", default="combat-cp-v1")
@@ -728,17 +663,13 @@ def main():
     execute.add_argument("--budget-seconds", type=float, default=900)
     execute.add_argument("--price-per-hour", type=float)
     execute.add_argument("--machine-label")
-    execute.add_argument(
-        "--reference", type=Path, help="First machine's summary.json for score=100"
-    )
+    execute.add_argument("--reference", type=Path, help="First machine's summary.json for score=100")
     execute.add_argument(
         "--reuse-collection",
         type=Path,
         help="Reuse the frozen reference on its original machine",
     )
-    comparison = sub.add_parser(
-        "compare", help="Compare saved runs; first machine scores 100"
-    )
+    comparison = sub.add_parser("compare", help="Compare saved runs; first machine scores 100")
     comparison.add_argument("summaries", nargs="+", type=Path)
     comparison.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()

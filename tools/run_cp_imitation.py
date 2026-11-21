@@ -64,13 +64,13 @@ def main(argv=None):
         parser.error("--game applies only to prepare-corpus")
     kind = config.get("kind")
     modules = {
-        "rl01.cp_imitation": "imitation_base",
-        "rl01.cp_imitation_target_scale": "imitation_target_scale",
-        "rl01.cp_imitation_target_more_data": "imitation_target_scale",
-        "rl01.cp_imitation_target_c2": "imitation_target_scale",
-        "rl01.cp_imitation_own_states": "imitation_own_states",
-        "rl01.cp_imitation_more_data": "imitation_more_data",
-        "rl01.cp_imitation_continuation": "imitation_continuation",
+        "rl01.cp_imitation": "imitation.base",
+        "rl01.cp_imitation_target_scale": "imitation.target_scale",
+        "rl01.cp_imitation_target_more_data": "imitation.target_scale",
+        "rl01.cp_imitation_target_c2": "imitation.target_scale",
+        "rl01.cp_imitation_own_states": "imitation.own_states",
+        "rl01.cp_imitation_more_data": "imitation.more_data",
+        "rl01.cp_imitation_continuation": "imitation.continuation",
     }
     if kind not in modules:
         parser.error(f"Unsupported imitation kind: {kind!r}")
@@ -118,7 +118,7 @@ def _execute(args, config, kind, module, out, workers):
         return module.run(args.phase, config, out, workers, args.device, args.cycle)
     if kind != "rl01.cp_imitation":
         return module.run(args.phase, config, out, workers, args.device)
-    from civ5rl.experiments.report_cp_imitation import report
+    from civ5rl.reporting.cp_imitation import report
 
     if args.phase != "report":
         manifest, identity = module.initialize(config, out)

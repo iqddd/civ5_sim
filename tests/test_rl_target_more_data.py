@@ -7,6 +7,8 @@ import unittest
 from dataclasses import asdict
 from pathlib import Path
 
+from test_rl import context, scenario
+
 from civ5rl.engine.imitation.core import label_minibatches
 from civ5rl.engine.imitation.storage import (
     PreparedDemonstrations,
@@ -14,16 +16,14 @@ from civ5rl.engine.imitation.storage import (
     prepare_inputs,
 )
 from civ5rl.engine.runtime.sequence import Span
-from civ5rl.experiments.imitation_target_scale import (
-    _format_corpus_entry,
-    load_config,
+from civ5rl.experiments.imitation.corpus import format_corpus_entry
+from civ5rl.experiments.imitation.restoration import (
     reconcile_state_vs_steplog,
     restore_epoch_cursor_and_batches,
-    select_best_candidate,
 )
+from civ5rl.experiments.imitation.selection import select_best_candidate
 from civ5rl.protocols.imitation import dump_episode
-from civ5rl.protocols.ppo_target_scale import TargetFactory
-from civ5rl.provenance.common import ROOT, configure, read_json
+from civ5rl.provenance.common import configure
 from civ5sim import Action, Battle
 
 
@@ -31,36 +31,21 @@ class TargetMoreDataTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         configure(17, "cpu")
-        cls.config = load_config(ROOT / "configs/rl-cp-imitation-target-more-data.json")
-        cls.plan = read_json(ROOT / cls.config["target_manifest"])
 
     def test_old_and_new_histories_with_same_match_and_side_never_collide(self):
         """Old and new episodes with match_id=0, side=0 must stay strictly isolated."""
-        factory = TargetFactory(self.config, self.plan["base"])
-        case_old = factory.case(
-            0, self.plan["base"]["worlds"]["training"][0], 10, 0, True, 0, "old_ns", n=5
-        )
-        case_new = factory.case(
-            0, self.plan["base"]["worlds"]["training"][1], 10, 1, False, 0, "new_ns", n=5
-        )
-        with Battle(case_old["scenario"]) as b_old:
+        old, new = scenario(), scenario()
+        new["units"][0]["tile"] = 22
+        with Battle(old) as b_old, Battle(new) as b_new:
             obs_old = b_old.observe(0)
             legal_old = tuple(b_old.available_actions())
-        with Battle(case_new["scenario"]) as b_new:
             obs_new = b_new.observe(0)
             legal_new = tuple(b_new.available_actions())
 
         ep_old = {
             "match_id": 0,
             "side": 0,
-            "context": {
-                "map": case_old["scenario"]["map"],
-                "side": 0,
-                "armies": case_old["armies"],
-                "max_rounds": 30,
-                "fog": True,
-                "random_damage": True,
-            },
+            "context": context(old),
             "decisions": [
                 {
                     "observation": obs_old,
@@ -79,14 +64,7 @@ class TargetMoreDataTests(unittest.TestCase):
         ep_new = {
             "match_id": 0,
             "side": 0,
-            "context": {
-                "map": case_new["scenario"]["map"],
-                "side": 0,
-                "armies": case_new["armies"],
-                "max_rounds": 30,
-                "fog": True,
-                "random_damage": True,
-            },
+            "context": context(new),
             "decisions": [
                 {
                     "observation": obs_new,
@@ -116,7 +94,7 @@ class TargetMoreDataTests(unittest.TestCase):
             dump_episode(old_path, ep_old)
             dump_episode(new_path, ep_new)
 
-            entry_old = _format_corpus_entry(
+            entry_old = format_corpus_entry(
                 {
                     "match_id": 0,
                     "side": 0,
@@ -129,7 +107,7 @@ class TargetMoreDataTests(unittest.TestCase):
                 10,
                 5,
             )
-            entry_new = _format_corpus_entry(
+            entry_new = format_corpus_entry(
                 {
                     "match_id": 0,
                     "side": 0,
@@ -159,9 +137,7 @@ class TargetMoreDataTests(unittest.TestCase):
             self.assertEqual(lengths_0, [2])
             self.assertEqual(lengths_1, [3])
             self.assertEqual(labels_0["indices"].tolist(), [0, 0])
-            self.assertEqual(
-                labels_1["indices"].tolist(), [len(legal_new) - 1, 0, 0]
-            )
+            self.assertEqual(labels_1["indices"].tolist(), [len(legal_new) - 1, 0, 0])
 
             # Duplicate entry_id must be rejected immediately.
             with self.assertRaisesRegex(
@@ -285,6 +261,7 @@ class TargetMoreDataTests(unittest.TestCase):
 
     def test_candidate_selection_and_tie_breaking_rules(self):
         """Verify baseline preference, PPO update 37 preference, and earlier BC checkpoint preference."""
+
         def point(name, wins, steps=0, epoch=0):
             return {
                 "checkpoint": name,
@@ -315,7 +292,9 @@ class TargetMoreDataTests(unittest.TestCase):
         cand_e5 = point("checkpoints/epoch-05.pt", 32, steps=4875, epoch=5)
         res1 = select_best_candidate(bc_base, ppo_ref, [cand_e2, cand_e5])
         self.assertTrue(res1["baseline_retained"])
-        self.assertEqual(res1["best"]["checkpoint"], "checkpoints/reference-update-0037.pt")
+        self.assertEqual(
+            res1["best"]["checkpoint"], "checkpoints/reference-update-0037.pt"
+        )
         self.assertEqual(res1["best_wins"], 32)
         self.assertEqual(res1["required_new_candidate_wins"], 33)
 
@@ -332,7 +311,9 @@ class TargetMoreDataTests(unittest.TestCase):
         ppo_tie = point("checkpoints/reference-update-0037.pt", 30, steps=0, epoch=0)
         res3 = select_best_candidate(bc_tie, ppo_tie, [])
         self.assertTrue(res3["baseline_retained"])
-        self.assertEqual(res3["best"]["checkpoint"], "checkpoints/reference-update-0037.pt")
+        self.assertEqual(
+            res3["best"]["checkpoint"], "checkpoints/reference-update-0037.pt"
+        )
 
         # Case 4: If BC epoch 10 exceeds PPO update 37 on re-evaluation -> BC epoch 10 becomes the active baseline threshold.
         bc_higher = point("checkpoints/initial.pt", 35, steps=0, epoch=0)

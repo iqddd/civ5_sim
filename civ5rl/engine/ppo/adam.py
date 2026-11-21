@@ -26,6 +26,18 @@ def parameter_group(name):
     )
 
 
+def optimizer_for(policy, config, device):
+    optimizer_config = config["optimizer"]
+    return torch.optim.Adam(
+        policy.parameters(),
+        lr=optimizer_config["lr"],
+        betas=tuple(optimizer_config["betas"]),
+        eps=optimizer_config["eps"],
+        weight_decay=optimizer_config["weight_decay"],
+        fused=str(device).startswith("cuda"),
+    )
+
+
 def grouped_optimizer(policy, config, device):
     settings = config["optimizer"]
     named = list(policy.named_parameters())

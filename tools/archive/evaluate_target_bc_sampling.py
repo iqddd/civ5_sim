@@ -17,7 +17,7 @@ def main():
         "--config", type=Path, default=ROOT / "configs/rl-target-bc-sampling.json"
     )
     args = parser.parse_args()
-    from civ5rl.experiments.target_bc_sampling import run
+    from civ5rl.experiments.evaluation.sampling import run
     from civ5rl.provenance.common import read_json
 
     run(read_json(args.config), args.phase)

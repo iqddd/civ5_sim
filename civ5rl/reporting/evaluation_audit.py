@@ -1,13 +1,198 @@
-"""Saved-result analysis only: no match execution, policy loading or training."""
+"""Saved match readers, outcome statistics, and paired comparisons."""
+
+from __future__ import annotations
 
 from collections import Counter, defaultdict
+from collections.abc import Iterable, Mapping
 from pathlib import Path
+from typing import Any, Literal, TypedDict
 
 import numpy as np
 
-from civ5rl.protocols.common import bootstrap_ci95, learner_outcome
+from civ5rl.core.env import learner_outcome
+from civ5rl.protocols.common import bootstrap_ci95
 from civ5rl.provenance.common import ROOT, read_json
 from civ5sim.engine import digest
+
+Outcome = Literal["W", "D", "L"]
+CaseKey = tuple[int | str, int | str, int]
+SideSource = Literal["case", "metrics"]
+MatchRow = Mapping[str, Any]
+DEFAULT_MATCH_FILES = (
+    "case.json",
+    "metrics.json",
+    "result.json",
+    "final.json",
+    "replay.json",
+)
+OUTCOME_ORDER: tuple[Outcome, ...] = ("W", "D", "L")
+
+
+class _WDLCounts(TypedDict):
+    matches: int
+    W: int
+    D: int
+    L: int
+    win_rate: float
+
+
+class WDLSummary(_WDLCounts, total=False):
+    actions: dict[str, int]
+    seconds: float
+    mean_rounds: float
+    draw_reasons: dict[str, int]
+
+
+def classify_outcome(winner: int | None, learner_side: int) -> Outcome:
+    """Classify the saved winner from the learner's side."""
+    return learner_outcome(winner, learner_side)
+
+
+def summarize_wdl(rows: Iterable[MatchRow], *, extra_metrics: bool = False) -> WDLSummary:
+    """Count metric outcomes, with optional timing, actions, and draw reasons.
+
+    Each row supplies winner and side. The optional timing and action aggregates
+    follow the fields present in the metric schema. Empty inputs have a zero
+    win rate. The caller checks any expected count and completion status.
+    """
+    counts: Counter[Outcome] = Counter()
+    actions: Counter[str] = Counter()
+    draw_reasons: Counter[str] = Counter()
+    seconds: list[float] = []
+    rounds: list[int] = []
+    has_actions = False
+    for row in rows:
+        outcome = classify_outcome(row["winner"], row["side"])
+        counts[outcome] += 1
+        if extra_metrics:
+            if "seconds" in row:
+                seconds.append(row["seconds"])
+            if "rounds" in row:
+                rounds.append(row["rounds"])
+            if "actions_by_kind" in row:
+                has_actions = True
+                actions.update(row["actions_by_kind"])
+            if outcome == "D":
+                draw_reasons[row["reason"]] += 1
+
+    n = sum(counts.values())
+    summary: WDLSummary = {
+        "matches": n,
+        "W": counts["W"],
+        "D": counts["D"],
+        "L": counts["L"],
+        "win_rate": counts["W"] / n if n else 0.0,
+    }
+    if extra_metrics:
+        summary["draw_reasons"] = dict(draw_reasons)
+        if has_actions:
+            summary["actions"] = dict(actions)
+        if seconds:
+            summary["seconds"] = sum(seconds)
+        if rounds:
+            summary["mean_rounds"] = sum(rounds) / len(rounds)
+    return summary
+
+
+def verify_match_artifacts(case_dir: str | Path, required_files: Iterable[str] = DEFAULT_MATCH_FILES) -> bool:
+    """Check file presence for one match without loading or replaying artifacts."""
+    directory = Path(case_dir)
+    return all((directory / name).is_file() for name in required_files)
+
+
+def _match_directories(source: str | Path, *, sort: bool = True, strict: bool = False) -> Iterable[Path]:
+    directory = Path(source)
+    if strict:
+        paths = (
+            path for path in directory.iterdir() if path.is_dir() and not path.name.startswith((".", "__"))
+        )
+    else:
+        paths = (path.parent for path in directory.glob("*/metrics.json"))
+    return sorted(paths) if sort else paths
+
+
+def _read_case_and_metric(directory: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    return read_json(directory / "case.json"), read_json(directory / "metrics.json")
+
+
+def _completed_metrics(directory: str | Path, expected: int, *, message: str):
+    rows = [read_json(path / "metrics.json") for path in _match_directories(directory)]
+    if len(rows) != expected or any(row["status"] != "completed" for row in rows):
+        raise ValueError(message)
+    return rows
+
+
+def match_summary(directory: str | Path, expected: int) -> WDLSummary:
+    """Summarize the expected number of completed match metrics."""
+    return summarize_wdl(_completed_metrics(directory, expected, message="Incomplete evaluation"))
+
+
+def collect_summary(directory: str | Path) -> WDLSummary:
+    """Summarize the 64 completed matches of a CP imitation evaluation."""
+    rows = _completed_metrics(directory, 64, message=f"Incomplete battle evaluation: {directory}")
+    summary = summarize_wdl(rows)
+    summary["actions"] = dict(sum((Counter(row["actions_by_kind"]) for row in rows), Counter()))
+    summary["draw_reasons"] = dict(Counter(row["reason"] for row in rows if row["winner"] is None))
+    return summary
+
+
+def collect_paired_outcomes(
+    eval_dir: str | Path,
+    *,
+    side_source: SideSource = "case",
+    check_duplicates: bool = False,
+    sort: bool = True,
+) -> tuple[dict[CaseKey, int], dict[CaseKey, dict[str, Any]], dict[CaseKey, Outcome]]:
+    """Collect wins, case metadata, and W/D/L from saved metrics in matching order.
+
+    World and case identifiers come from case.json and keep their types. The
+    requested side source controls the key only. Outcomes use metrics winner and
+    side. Missing metrics are skipped, and missing case metadata is an error.
+    With duplicate checks disabled, the last matching directory wins.
+    """
+    if side_source not in ("case", "metrics"):
+        raise ValueError(f"Unknown learner side source: {side_source}")
+    wins: dict[CaseKey, int] = {}
+    cases: dict[CaseKey, dict[str, Any]] = {}
+    outcomes: dict[CaseKey, Outcome] = {}
+    for directory in _match_directories(eval_dir, sort=sort):
+        case, metric = _read_case_and_metric(directory)
+        key = (
+            case["parent_world"],
+            case["case_id"],
+            case["learner_side"] if side_source == "case" else metric["side"],
+        )
+        if check_duplicates and key in wins:
+            raise ValueError(f"Duplicate evaluation case {key}: {directory}")
+        outcome = classify_outcome(metric["winner"], metric["side"])
+        wins[key] = int(outcome == "W")
+        cases[key] = case
+        outcomes[key] = outcome
+    return wins, cases, outcomes
+
+
+def select_outcome_representatives(
+    source: str | Path | Iterable[Path], *, wdl_order: bool = False
+) -> dict[Outcome, Path]:
+    """Choose the first match directory for each observed outcome.
+
+    An evaluation directory is traversed by sorted match filename. An iterable
+    of match directories preserves its incoming order.
+    """
+    directories: Iterable[Path]
+    if isinstance(source, (str, Path)):
+        directories = _match_directories(source)
+    else:
+        directories = source
+    selected: dict[Outcome, Path] = {}
+    for directory in directories:
+        row = read_json(directory / "metrics.json")
+        selected.setdefault(classify_outcome(row["winner"], row["side"]), directory)
+        if wdl_order and len(selected) == len(OUTCOME_ORDER):
+            break
+    if wdl_order:
+        return {outcome: selected[outcome] for outcome in OUTCOME_ORDER if outcome in selected}
+    return selected
 
 
 def paired_world_bootstrap(before, after, *, samples, seed, clusters=16, cases=None, cases_per_world=4):
@@ -49,7 +234,7 @@ def paired_world_bootstrap(before, after, *, samples, seed, clusters=16, cases=N
 
 def outcome(metric):
     """Return the learner's W/D/L outcome for a completed metric."""
-    return learner_outcome(metric["winner"], metric["side"])
+    return classify_outcome(metric["winner"], metric["side"])
 
 
 def _extract_plan_keys(plan):
@@ -101,18 +286,11 @@ def load_eval_rows(directory, expected_n=None, *, plan=None, require_artifacts=T
     if not directory.is_absolute():
         directory = ROOT / directory
     rows = {}
-    for match in sorted(p for p in directory.iterdir() if p.is_dir()):
-        if match.name.startswith((".", "__")):
-            continue
-        required = (
-            ("case.json", "metrics.json", "result.json", "final.json", "replay.json")
-            if require_artifacts
-            else ("case.json", "metrics.json")
-        )
-        if any(not (match / name).is_file() for name in required):
+    required = DEFAULT_MATCH_FILES if require_artifacts else ("case.json", "metrics.json")
+    for match in _match_directories(directory, strict=True):
+        if not verify_match_artifacts(match, required):
             raise ValueError(f"Missing evaluation artifact: {match}")
-        case = read_json(match / "case.json")
-        metric = read_json(match / "metrics.json")
+        case, metric = _read_case_and_metric(match)
         result = read_json(match / "result.json") if (match / "result.json").is_file() else None
         if require_artifacts:
             for name in ("final.json", "replay.json"):
@@ -244,15 +422,7 @@ def _summary_rows(rows_or_directory, expected_n, plan, require_artifacts):
 def eval_wdl_summary(rows_or_directory, expected_n=None, *, plan=None, require_artifacts=True):
     """Compute W/D/L counts and win rate from loaded rows or an evaluation directory."""
     rows = _summary_rows(rows_or_directory, expected_n, plan, require_artifacts)
-    counts = Counter(outcome(v[0]) for v in rows.values())
-    n = len(rows)
-    return {
-        "matches": n,
-        "W": counts["W"],
-        "D": counts["D"],
-        "L": counts["L"],
-        "win_rate": (counts["W"] / n) if n > 0 else 0.0,
-    }
+    return summarize_wdl(row[0] for row in rows.values())
 
 
 wdl_summary = eval_wdl_summary

@@ -1,6 +1,6 @@
 """Scientific boundaries: turn openings, world-balanced selection and paired RNG."""
 import unittest
-from civ5rl.experiments.turn_comparison import position_candidates,select_positions,branch_spec
+from civ5rl.experiments.comparison.turn_collection import position_candidates,select_positions,branch_spec
 
 
 class TurnComparisonTests(unittest.TestCase):
@@ -41,7 +41,7 @@ class TurnComparisonTests(unittest.TestCase):
 
     def test_cluster_bootstrap_retains_position_weighting(self):
         # Equal-world averaging would silently turn this mean from .5 into 0.
-        from civ5rl.experiments.turn_confirmation import paired_statistics
+        from civ5rl.experiments.comparison.turn_confirmation import paired_statistics
         from itertools import product
         import numpy as np
         result=paired_statistics([1,1,1,2],[1,1,1,-1],samples=10000,seed=20261103)

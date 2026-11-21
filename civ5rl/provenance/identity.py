@@ -1,16 +1,27 @@
 """Normalize execution identities with explicit source comparison policy."""
 
+import hashlib
 from pathlib import Path
+
+
+def policy_hash(model):
+    """Fingerprint actor tensors in sorted key order for evaluation and lineage."""
+    hasher = hashlib.sha256()
+    for key, value in sorted(model.items()):
+        if not key.startswith("value."):
+            hasher.update(key.encode())
+            hasher.update(value.detach().cpu().contiguous().numpy().tobytes())
+    return hasher.hexdigest()
 
 
 def is_readonly_source(path):
     """One source-role policy for discovery and old/new passport comparisons.
 
     Mixed orchestration/evaluator modules remain execution code. New tooling
-    belongs in the dedicated reporting/deploy namespaces or non-execution CLI.
+    belongs in the reporting, deploy, and benchmark namespaces or non-execution CLI.
     """
     name = str(path).replace("\\", "/")
-    if name.startswith(("civ5rl/reporting/", "civ5rl/deploy/", "tests/")):
+    if name.startswith(("civ5rl/reporting/", "civ5rl/deploy/", "civ5rl/experiments/benchmarks/", "tests/")):
         return True
     if name in (
         "civ5rl/engine/ppo/benchmark.py",

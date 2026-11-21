@@ -1,7 +1,7 @@
 """Silent math/selection failures would invalidate counterfactual labels."""
 import unittest
 import torch
-from civ5rl.experiments.comparison_collection import preference,select_forks
+from civ5rl.experiments.comparison.executor import preference,select_forks
 from civ5rl.engine.comparison.training import pair_loss,categorical_kl
 
 class ComparisonTests(unittest.TestCase):
@@ -14,11 +14,11 @@ class ComparisonTests(unittest.TestCase):
         from types import SimpleNamespace
         from civ5rl.provenance.common import ROOT,read_json,write_json,file_sha256
         from civ5rl.provenance.checkpoint import passport
-        from civ5rl.experiments.rollout_comparison_collection import finalize_collection
-        from civ5rl.experiments.rollout_comparison import prepare_collection_input
-        from civ5rl.reporting.comparison_storage import restore_tree
+        from civ5rl.experiments.comparison.rollout_collection import finalize_collection
+        from civ5rl.experiments.comparison.rollout_fit import prepare_collection_input
+        from civ5rl.engine.comparison.storage import restore_tree
         from civ5rl.engine.comparison.inputs import Histories
-        from civ5rl.experiments.comparison_prefix import SourcePrefixes
+        from civ5rl.experiments.comparison.prefix import SourcePrefixes
         from civ5rl.engine.evaluation.executor import EvaluationRuntime
         from civ5rl.core.model import Policy
         from tests.test_combat import scenario,unit
@@ -74,7 +74,7 @@ class ComparisonTests(unittest.TestCase):
         from civ5rl.core.observation import ObservationEncoder,ordered_actions
         from civ5rl.engine.evaluation.executor import EvaluationRuntime
         from civ5rl.engine.evaluation.proxy import ProxyAgent
-        from civ5rl.experiments.comparison_prefix import SourcePrefixes
+        from civ5rl.experiments.comparison.prefix import SourcePrefixes
         from civ5rl.provenance.common import configure,write_json
         from civ5rl.protocols.memory import flat_map
         from civ5sim import Battle,Action
@@ -172,7 +172,7 @@ class ComparisonTests(unittest.TestCase):
         from copy import deepcopy
         from civ5rl.engine.runtime.transactions import atomic_torch_save
         from civ5rl.provenance.rng import capture_rng,restore_rng
-        from civ5rl.experiments.imitation_helpers import assert_equal
+        from civ5rl.experiments.imitation.helpers import assert_equal
         for device in ('cpu',*(['cuda'] if torch.cuda.is_available() else [])):
             model=torch.nn.Linear(4,3).to(device)
             optimizer=torch.optim.Adam(model.parameters(),lr=1e-5)
@@ -329,7 +329,7 @@ class ComparisonTests(unittest.TestCase):
         import tempfile
         from pathlib import Path
         from civ5rl.provenance.common import write_json,read_json
-        from civ5rl.experiments.rollout_comparison import _collect
+        from civ5rl.experiments.comparison.rollout_fit import _collect
         class Budget:
             def elapsed(self):return 7205.
         with tempfile.TemporaryDirectory() as temporary:
@@ -382,7 +382,7 @@ class ComparisonTests(unittest.TestCase):
 
     def test_two_stage_label_matches_one_stage_preference(self):
         import random
-        from civ5rl.experiments.comparison_queue import two_stage_label
+        from civ5rl.experiments.comparison.queue import two_stage_label
         rng = random.Random(17)
         for _ in range(200):
             winners = {(r, a): rng.choice([0, 1, None]) for r in range(8) for a in (0, 1)}
@@ -406,7 +406,7 @@ class ComparisonTests(unittest.TestCase):
         from dataclasses import replace
         from civ5rl.core.model import Policy
         from civ5rl.core.observation import ObservationEncoder, ordered_actions
-        from civ5rl.experiments.comparison_queue import SelectiveProposalInference
+        from civ5rl.experiments.comparison.queue import SelectiveProposalInference
         from civ5rl.protocols.memory import flat_map
         from civ5sim import Battle
         from tests.test_combat import scenario, unit

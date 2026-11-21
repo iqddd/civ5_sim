@@ -1,15 +1,18 @@
 """Process lifecycle recording and local/SSH viewing of normalized progress."""
 
+from __future__ import annotations
+
 import json
 import math
 import os
-from pathlib import Path
 import sys
 import threading
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
+from civ5rl.deploy.remote import _connection, _read, _remote_path, _ssh_json
 from civ5rl.reporting.progress import estimate, format_progress
 from civ5rl.reporting.progress_adapters import adapter_for
 from civ5rl.reporting.progress_source import ArtifactSource
@@ -40,7 +43,9 @@ def collect_progress(source, *, alpha=0.1, exclude_compilation=False):
                 result["estimated_finish_at"] = None
                 result["eta_assumes_resume"] = True
             if stale:
-                result["warnings"].append("Process heartbeat is stale; a fresh artifact read does not confirm that training is alive.")
+                result["warnings"].append(
+                    "Process heartbeat is stale; a fresh artifact read does not confirm that training is alive."
+                )
     return result
 
 
@@ -72,7 +77,7 @@ class ProcessProgress:
     def __enter__(self):
         try:
             self._start()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - observation must not stop a run
             print(f"Progress observer disabled: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         return self
 
@@ -82,16 +87,22 @@ class ProcessProgress:
         steps = self.source.rows("steps.jsonl")
         state = self.source.read("state.json", {})
         logged_steps = max((r.get("step", 0) for r in steps), default=0)
-        self.session = dict(id=uuid4().hex, pid=os.getpid(), interval_seconds=self.interval,
-                            started_at=datetime.now(UTC).isoformat(),
-                            active_seconds=state.get("active_seconds", 0),
-                            # A resumed pending rollout has already been partly
-                            # processed on another process. Skip that mixed cycle.
-                            ppo_rollout=max(state.get("rollouts", 0),
-                                            max((r.get("rollout", r.get("update", 0)) for r in updates), default=0)),
-                            bc_step=min(logged_steps, state.get("Adam_steps", logged_steps)),
-                            evaluation_keys=list(self.source.read("evaluations.json", {})),
-                            h2h_evaluation_keys=list(self.source.read("evaluations-h2h.json", {})))
+        self.session = {
+            "id": uuid4().hex,
+            "pid": os.getpid(),
+            "interval_seconds": self.interval,
+            "started_at": datetime.now(UTC).isoformat(),
+            "active_seconds": state.get("active_seconds", 0),
+            # A resumed pending rollout has already been partly
+            # processed on another process. Skip that mixed cycle.
+            "ppo_rollout": max(
+                state.get("rollouts", 0),
+                max((r.get("rollout", r.get("update", 0)) for r in updates), default=0),
+            ),
+            "bc_step": min(logged_steps, state.get("Adam_steps", logged_steps)),
+            "evaluation_keys": list(self.source.read("evaluations.json", {})),
+            "h2h_evaluation_keys": list(self.source.read("evaluations-h2h.json", {})),
+        }
         self.thread = threading.Thread(target=self._loop, name="run-progress", daemon=True)
         self.thread.start()
 
@@ -120,7 +131,7 @@ class ProcessProgress:
     def _safe_publish(self, running, error=None):
         try:
             self._publish(running, error)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - observation must not stop a run
             message = f"{type(exc).__name__}: {exc}"
             if message != self.last_error:
                 print(f"Progress observer: {message}", file=sys.stderr, flush=True)
@@ -139,8 +150,6 @@ class ProcessProgress:
 
 
 def remote_progress(deployment_dir, *, alpha=0.1, exclude_compilation=False):
-    from civ5rl.deploy.remote import _connection, _read, _remote_path, _ssh_json
-
     deployment = _read(Path(deployment_dir) / "deployment.json")
     if deployment.get("instance_deleted"):
         raise ValueError("Instance was deleted; inspect the pulled local run with --run")
@@ -157,12 +166,28 @@ from civ5rl.reporting.progress_process import collect_progress
 source = ArtifactSource(Path(p['root']) / p['output'])
 print(json.dumps(collect_progress(source, alpha=p['alpha'], exclude_compilation=p['exclude_compilation']), allow_nan=False))
 """
-    return _ssh_json(_connection(deployment["instance"]), code,
-                     dict(root=root, output=deployment["output"], alpha=alpha, exclude_compilation=exclude_compilation))
+    return _ssh_json(
+        _connection(deployment["instance"]),
+        code,
+        {
+            "root": root,
+            "output": deployment["output"],
+            "alpha": alpha,
+            "exclude_compilation": exclude_compilation,
+        },
+    )
 
 
-def watch_progress(*, run=None, deployment=None, watch=False, interval=900, alpha=0.1,
-                   exclude_compilation=False, json_output=False):
+def watch_progress(
+    *,
+    run=None,
+    deployment=None,
+    watch=False,
+    interval=900,
+    alpha=0.1,
+    exclude_compilation=False,
+    json_output=False,
+):
     if not math.isfinite(interval) or interval <= 0:
         raise ValueError("Interval must be positive and finite")
     if not math.isfinite(alpha) or not 0 < alpha <= 1:
@@ -172,19 +197,33 @@ def watch_progress(*, run=None, deployment=None, watch=False, interval=900, alph
     try:
         while True:
             try:
-                result = collect_progress(source, alpha=alpha, exclude_compilation=exclude_compilation) if source else remote_progress(
-                    deployment, alpha=alpha, exclude_compilation=exclude_compilation)
-            except Exception as error:
+                result = (
+                    collect_progress(source, alpha=alpha, exclude_compilation=exclude_compilation)
+                    if source
+                    else remote_progress(deployment, alpha=alpha, exclude_compilation=exclude_compilation)
+                )
+            except Exception as error:  # noqa: BLE001 - watch mode retries transport and observation errors
                 if not watch:
                     raise
                 print(f"Progress unavailable: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
                 time.sleep(interval)
                 continue
-            print(json.dumps(result, ensure_ascii=False, allow_nan=False) if json_output else format_progress(result), flush=True)
+            print(
+                json.dumps(result, ensure_ascii=False, allow_nan=False)
+                if json_output
+                else format_progress(result),
+                flush=True,
+            )
             if not json_output:
                 for warning in result["warnings"]:
                     print(f"  {warning}", flush=True)
-            if not watch or result["status"] in {"complete", "paused", "technical_error", "closed_by_user", "interrupted"}:
+            if not watch or result["status"] in {
+                "complete",
+                "paused",
+                "technical_error",
+                "closed_by_user",
+                "interrupted",
+            }:
                 break
             time.sleep(interval)
     except KeyboardInterrupt:

@@ -19,6 +19,46 @@ from civ5rl.engine.runtime import is_int_at_least
 from civ5rl.provenance.common import write_json
 
 
+class CompilationClock:
+    """Track compilation intervals and unregister callbacks on every exit."""
+
+    def __init__(self):
+        self.intervals = []
+        self.active = None
+        self.monitor = None
+
+    def __enter__(self):
+        from torch._dynamo.callback import callback_handler
+
+        self.handler = callback_handler
+        self.handler.register_start_callback(self.start)
+        self.handler.register_end_callback(self.end)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            self.handler.remove_start_callback(self.start)
+        finally:
+            self.handler.remove_end_callback(self.end)
+        if self.active is not None:
+            self.end(None)
+
+    def start(self, args):
+        self.active = time.perf_counter()
+        if self.monitor:
+            self.previous_phase = dict(self.monitor.state)
+            self.monitor.mark("compilation")
+
+    def end(self, args):
+        self.intervals.append((self.active, time.perf_counter()))
+        self.active = None
+        if self.monitor:
+            self.monitor.mark(**self.previous_phase)
+
+    def seconds(self, start, stop):
+        return sum(max(0, min(stop, b) - max(start, a)) for a, b in self.intervals)
+
+
 class ResourceMonitor:
     _GPU_FIELDS = (
         "gpu_core_load_percent",
@@ -61,7 +101,7 @@ class ResourceMonitor:
         """
         started = time.perf_counter()
         try:
-            from civ5rl.reporting.cuda_memory import (
+            from civ5rl.engine.runtime.cuda_memory import (
                 dump_oom_snapshot,
                 sample_cuda_memory,
             )

@@ -1,9 +1,12 @@
 """Torch-free worker proxy and task wrapper for batched evaluation/collection."""
 
+from __future__ import annotations
+
 from contextvars import ContextVar
 
 from civ5rl.core.observation import ordered_actions
 from civ5rl.core.selection import ActionSelection
+from civ5sim.telemetry import measure
 
 _client = ContextVar("evaluation_client", default=None)
 _proxies = ContextVar("evaluation_proxies", default=None)
@@ -13,7 +16,14 @@ class ProxyAgent(ActionSelection):
     """Player-only Agent RPC. No model or CUDA state is allocated in a worker."""
 
     def __init__(
-        self, connection, mode, temperature=1.0, collect_selection_metrics=False
+        self,
+        connection,
+        mode,
+        temperature=1.0,
+        collect_selection_metrics=False,
+        *,
+        encoding_metrics=None,
+        metrics_side=None,
     ):
         self.connection, self.mode = connection, mode
         self.temperature, self.collect_selection_metrics = (
@@ -21,6 +31,8 @@ class ProxyAgent(ActionSelection):
             collect_selection_metrics,
         )
         self.events = []
+        self.encoding_metrics = encoding_metrics
+        self.metrics_side = metrics_side
         self.shared = None
         proxies = _proxies.get()
         if proxies is not None:
@@ -39,9 +51,7 @@ class ProxyAgent(ActionSelection):
         from civ5rl.engine.runtime.shared import EncodedSlots
 
         self.close()
-        info = self.call(
-            "reset", self.mode, self.temperature, self.collect_selection_metrics
-        )
+        info = self.call("reset", self.mode, self.temperature, self.collect_selection_metrics)
         self.shared = EncodedSlots(descriptor=info["shared"])
         self.requires_attack_preview = info["attack_preview"]
         self.prefix_skip = info.get("prefix_skip", 0)
@@ -49,21 +59,25 @@ class ProxyAgent(ActionSelection):
         self.capture_prefixes = info.get("capture_prefixes", False)
         self.reset_public_state(context, info["variant"])
 
+    def _encode(self, observation, actions):
+        if self.encoding_metrics is None:
+            return self.encoder.encode(observation, actions)
+        with measure(self.encoding_metrics, "public_encoding", side=self.metrics_side):
+            return self.encoder.encode(observation, actions)
+
     def act(self, observation, actions):
         if self.prefix_skip:
             raise ValueError("Restored public prefix is incomplete")
         self.prefix_restored = False
         actions = ordered_actions(actions)
-        encoded = self.encoder.encode(observation, actions)
+        encoded = self._encode(observation, actions)
         result = self.call("act", self.shared.write(0, encoded))
         if "index" in result:
             action = self.action_from_index(result["index"], observation, actions)
         else:
             import torch
 
-            action = self.action_from_logits(
-                torch.from_numpy(result["logits"])[None], observation, actions
-            )
+            action = self.action_from_logits(torch.from_numpy(result["logits"])[None], observation, actions)
         self.events.extend(result.get("events", ()))
         return action
 
@@ -76,7 +90,7 @@ class ProxyAgent(ActionSelection):
         actions = ordered_actions(actions)
         if forced_action not in actions:
             raise ValueError("Forced action is not legal")
-        encoded = self.encoder.encode(observation, actions)
+        encoded = self._encode(observation, actions)
         if getattr(self, "prefix_restored", False) and not self.prefix_skip:
             raise ValueError("Restored prefix exhausted before branch boundary")
         if self.prefix_skip:
@@ -100,11 +114,25 @@ class ProxyAgent(ActionSelection):
 
 
 def evaluation_agent(
-    checkpoint, mode, *, temperature=1.0, collect_selection_metrics=False, cpu_seed=None
+    checkpoint,
+    mode,
+    *,
+    temperature=1.0,
+    collect_selection_metrics=False,
+    cpu_seed=None,
+    encoding_metrics=None,
+    metrics_side=None,
 ):
     connection = _client.get()
     if connection is not None:
-        return ProxyAgent(connection, mode, temperature, collect_selection_metrics)
+        return ProxyAgent(
+            connection,
+            mode,
+            temperature,
+            collect_selection_metrics,
+            encoding_metrics=encoding_metrics,
+            metrics_side=metrics_side,
+        )
     from civ5rl.core.agent import RLAgent
 
     if cpu_seed is not None:

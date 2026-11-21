@@ -939,6 +939,7 @@ class BatchedBackend:
         force_batched=False,
         pinned_replay=False,
         consume_encoded=False,
+        sequence_observer=None,
     ):
         self.policy, self.config, self.device, self.monitor = (
             policy,
@@ -950,6 +951,10 @@ class BatchedBackend:
         self.replay_forward = ppo_replay_forward(
             policy, spatial_graph=options.get("ppo_spatial_cuda_graph", True)
         )
+        self.training_forward = policy.forward_sequences
+        if sequence_observer is not None:
+            self.replay_forward = self._observe_sequences(self.replay_forward, sequence_observer)
+            self.training_forward = self._observe_sequences(self.training_forward, sequence_observer)
         self.temperature = validate_temperature(config.get("policy_temperature", 1.0))
         require_rollout_temperature(episodes, self.temperature)
         tick = perf_counter()
@@ -1003,6 +1008,17 @@ class BatchedBackend:
         self.micro_chunks = (
             config["ppo"].get("sequences_per_microbatch", 1) if batched else 1
         )
+
+    @staticmethod
+    def _observe_sequences(forward, observer):
+        """Trace scored logits without observing recurrent prefix-only forwards."""
+        def observed(*args, **kwargs):
+            output = forward(*args, **kwargs)
+            if not kwargs.get("memory_only"):
+                observer(output[0], training=torch.is_grad_enabled())
+            return output
+
+        return observed
 
     def precheck(self):
         if self.monitor:
@@ -1060,7 +1076,7 @@ class BatchedBackend:
             spans = minibatch[micro_start : micro_start + self.micro_chunks]
             tick = perf_counter()
             batch, labels, lengths = self.cache.batch(spans, include_behavior=False)
-            logits, value, _ = self.policy.forward_sequences(
+            logits, value, _ = self.training_forward(
                 batch,
                 lengths,
                 None

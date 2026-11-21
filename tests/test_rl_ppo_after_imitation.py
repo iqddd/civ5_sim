@@ -4,19 +4,19 @@ import random
 import tempfile
 import unittest
 from copy import deepcopy
-from unittest.mock import patch
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import torch
 
-from civ5rl.engine.ppo.core import token_minibatches, update
 from civ5rl.engine.ppo.backend import measure_replay
+from civ5rl.engine.ppo.core import token_minibatches, update
 from civ5rl.engine.ppo.metrics import StepReplay
-from civ5rl.experiments.evaluation import paired_world_bootstrap
 from civ5rl.protocols.ppo_after_imitation import TrainingFactory, prepare_cases
-from civ5rl.provenance.common import configure, read_json
+from civ5rl.provenance.common import ROOT, configure, read_json
 from civ5rl.provenance.validation import validate_config
+from civ5rl.reporting.evaluation_audit import paired_world_bootstrap
 
 
 class PPOAfterTests(unittest.TestCase):
@@ -27,7 +27,7 @@ class PPOAfterTests(unittest.TestCase):
 
     def test_packed_rollout_preserves_legal_order_and_ragged_behavior(self):
         # PPO's in-memory check cannot detect a corrupt diagnostic serialization.
-        from civ5rl.experiments.ppo_artifacts import load_rollout, save_rollout
+        from civ5rl.engine.ppo.storage import load_rollout, save_rollout
         from civ5sim import Action
 
         end, attack = Action("end_turn"), Action("ranged", 0, 5)
@@ -36,7 +36,10 @@ class PPOAfterTests(unittest.TestCase):
                 "observations": [{"turn": 0}, {"turn": 1}],
                 "actions": [(attack, end), (end,)],
                 "chosen": [1, 0],
-                "old_log_probs": [np.log(np.asarray([0.25, 0.75], np.float32)), np.zeros(1, np.float32)],
+                "old_log_probs": [
+                    np.log(np.asarray([0.25, 0.75], np.float32)),
+                    np.zeros(1, np.float32),
+                ],
                 "old_logp": [float(np.log(np.float32(0.75))), 0.0],
                 "old_value": [0.125, 0.25],
                 "result": {"reward": 0},
@@ -45,18 +48,34 @@ class PPOAfterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             save_rollout(episodes, directory, 1)
             restored = load_rollout(Path(directory) / "first.pt")
-        for key in ("observations", "actions", "chosen", "old_logp", "old_value", "result"):
+        for key in (
+            "observations",
+            "actions",
+            "chosen",
+            "old_logp",
+            "old_value",
+            "result",
+        ):
             self.assertEqual(episodes[0][key], restored[0][key])
-        for expected, actual in zip(episodes[0]["old_log_probs"], restored[0]["old_log_probs"]):
+        for expected, actual in zip(
+            episodes[0]["old_log_probs"], restored[0]["old_log_probs"]
+        ):
             np.testing.assert_array_equal(expected, actual)
             self.assertEqual(expected.dtype, actual.dtype)
 
-    def test_profile_split_balance_and_confirmation_are_frozen(self):
+    def test_profile_rejects_loss_reward_shaping(self):
         validate_config(self.config)
         wrong = deepcopy(self.config)
         wrong["reward"]["loss"] = -1
         with self.assertRaisesRegex(ValueError, "reward.loss"):
             validate_config(wrong)
+
+    def test_profile_split_balance_and_confirmation_are_frozen(self):
+        parent_manifest = (
+            ROOT / self.config["experiment"]["parent_run"] / "manifest.json"
+        )
+        if not parent_manifest.is_file():
+            self.skipTest(f"Frozen PPO split check requires {parent_manifest}")
         plan = prepare_cases(self.config)
         self.assertEqual(len(plan["development"]), 64)
         self.assertEqual(len(plan["confirmation"]), 256)
@@ -75,9 +94,15 @@ class PPOAfterTests(unittest.TestCase):
             set(Counter((c["learner_side"], c["placement"]) for c in cases).values()),
             {32},
         )
-        self.assertFalse({c["parent_world"] for c in cases} & set(plan["base"]["worlds"]["validation"]))
+        self.assertFalse(
+            {c["parent_world"] for c in cases}
+            & set(plan["base"]["worlds"]["validation"])
+        )
         self.assertTrue(
-            all(c["opponent"] == "cp" and c["reward_profile"] == "win_probability" for c in cases)
+            all(
+                c["opponent"] == "cp" and c["reward_profile"] == "win_probability"
+                for c in cases
+            )
         )
 
     def test_free_KL_has_correct_denominator_and_all_forced_is_null(self):
@@ -101,7 +126,9 @@ class PPOAfterTests(unittest.TestCase):
                 return (
                     {
                         "logits": torch.tensor([[0.0, 0.0], [0.0, -1e9], [0.0, -1e9]]),
-                        "action_mask": torch.tensor([[True, True], [True, False], [True, False]]),
+                        "action_mask": torch.tensor(
+                            [[True, True], [True, False], [True, False]]
+                        ),
                     },
                     {
                         "indices": torch.zeros(3, dtype=torch.long),
@@ -112,7 +139,9 @@ class PPOAfterTests(unittest.TestCase):
                 )
 
         result = measure_replay(Model(), Cache())
-        self.assertAlmostEqual(result["sampled_kl_free"], result["sampled_kl"] * 3, places=6)
+        self.assertAlmostEqual(
+            result["sampled_kl_free"], result["sampled_kl"] * 3, places=6
+        )
         self.assertEqual(result["free_decisions"], 1)
         cache = Cache()
         cache.action_counts = np.ones(3, dtype=int)
@@ -130,7 +159,9 @@ class PPOAfterTests(unittest.TestCase):
 
     def test_deadline_stops_before_step_or_after_required_KL_and_remainder(self):
         config = deepcopy(self.config)
-        episodes = [{"chosen": [0] * 1027, "old_value": [0.0] * 1027, "result": {"reward": 1}}]
+        episodes = [
+            {"chosen": [0] * 1027, "old_value": [0.0] * 1027, "result": {"reward": 1}}
+        ]
         clock = [0.0]
 
         class Backend:
@@ -167,7 +198,9 @@ class PPOAfterTests(unittest.TestCase):
 
         model = torch.nn.Linear(1, 1, bias=False)
         opt = torch.optim.Adam(model.parameters())
-        with patch("civ5rl.engine.runtime.budget.perf_counter", side_effect=lambda: clock[0]):
+        with patch(
+            "civ5rl.engine.runtime.budget.perf_counter", side_effect=lambda: clock[0]
+        ):
             result = update(
                 model,
                 opt,
@@ -184,7 +217,9 @@ class PPOAfterTests(unittest.TestCase):
         self.assertEqual(result["stop_reason"], "active_time_limit")
         self.assertEqual(result["optimizer_step_records"][0]["valid_tokens"], 1024)
         clock[0] = 101.0
-        with patch("civ5rl.engine.runtime.budget.perf_counter", side_effect=lambda: clock[0]):
+        with patch(
+            "civ5rl.engine.runtime.budget.perf_counter", side_effect=lambda: clock[0]
+        ):
             result = update(
                 model,
                 opt,
@@ -198,7 +233,9 @@ class PPOAfterTests(unittest.TestCase):
             )
         self.assertEqual((result["optimizer_steps"], Backend.instance.kl_calls), (0, 0))
         batches = list(token_minibatches([(0, 0, 1027)], 1024))
-        self.assertEqual([sum(b - a for _, a, b in spans) for spans in batches], [1024, 3])
+        self.assertEqual(
+            [sum(b - a for _, a, b in spans) for spans in batches], [1024, 3]
+        )
 
     def test_confirmation_bootstrap_keeps_sixteen_cases_per_world(self):
         cases = {
@@ -209,7 +246,9 @@ class PPOAfterTests(unittest.TestCase):
         }
         a = dict.fromkeys(cases, 0)
         b = dict.fromkeys(cases, 1)
-        result = paired_world_bootstrap(a, b, samples=10000, seed=20261103, cases=cases, cases_per_world=16)
+        result = paired_world_bootstrap(
+            a, b, samples=10000, seed=20261103, cases=cases, cases_per_world=16
+        )
         self.assertEqual(result["CI95"], [1.0, 1.0])
         b.pop(next(iter(b)))
         with self.assertRaises(ValueError):

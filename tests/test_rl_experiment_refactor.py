@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from civ5rl.engine.runtime.telemetry import analyze_telemetry
-from civ5rl.experiments.evaluation import paired_world_bootstrap
+from civ5rl.reporting.evaluation_audit import paired_world_bootstrap
 from civ5rl.provenance.lineage import verify_parent_lineage
 
 

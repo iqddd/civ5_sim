@@ -6,11 +6,11 @@ from typing import Any
 
 import pytest
 
-from civ5rl.experiments._shared.evaluation_runner import (
+from civ5rl.experiments.evaluation.paired import (
     evaluate_paired_dev512,
     run_chunked_pool,
 )
-from civ5rl.experiments._shared.outcomes import (
+from civ5rl.reporting.evaluation_audit import (
     MatchRow,
     classify_outcome,
     collect_paired_outcomes,

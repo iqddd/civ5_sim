@@ -14,8 +14,9 @@ from civ5rl.protocols.common import (
     own_state_physical_hash,
 )
 from civ5rl.protocols.corpus import ScenarioFactory, map_path
+from civ5rl.protocols.ppo_validation import validate_bounded_training
 from civ5rl.protocols.turn_reset import mode as turn_reset_mode
-from civ5rl.provenance.common import ROOT, read_json, seed_for
+from civ5rl.provenance.common import seed_for
 from civ5sim import Battle
 from civ5sim.engine import digest
 
@@ -90,46 +91,9 @@ def load_config(path):
 
 
 def validate_profile(config):
-    expected = read_json(ROOT / "configs/rl-ppo-target-scale.json")
-    reference = resolve_config(ROOT / expected["base_config"])
-    for section in (
-        "observation",
-        "environment",
-        "model",
-        "reward",
-        "optimizer",
-        "numerics",
-        "teacher_search",
-        "seed",
-        "workers",
-    ):
-        if config[section] != reference[section]:
-            raise ValueError(f"Unsupported target-scale {section}")
-    if config["kind"] != KIND or config["output"] != expected["output"]:
-        raise ValueError("Unsupported target-scale identity")
-    for key, value in expected["experiment"].items():
-        if config["experiment"][key] != value:
-            raise ValueError(f"Unsupported target-scale experiment.{key}")
-    collection = deepcopy(reference["collection"])
-    envs = config["collection"]["num_envs"]
-    workers = config["collection"]["cpu_workers"]
-    if envs not in (4, 8, 16, 24, 32, 64) or workers not in (4, 6, 8, 16, 32) or envs % workers:
-        raise ValueError("Unsupported number of target-scale environments")
-    collection.update(num_envs=envs, cpu_workers=workers, envs_per_worker=envs // workers)
-    if config["collection"] != collection:
-        raise ValueError("Unsupported target-scale collection")
-    ppo = deepcopy(reference["ppo"])
-    micro = config["ppo"]["sequences_per_microbatch"]
-    if micro not in (1, 2, 4, 8):
-        raise ValueError("Unsupported target-scale microbatch")
-    ppo["sequences_per_microbatch"] = micro
-    if config["ppo"] != ppo:
-        raise ValueError("Unsupported target-scale PPO")
-    performance = {**reference["performance"], **expected["performance"]}
-    performance["worker_reply_size"] = min(4, envs // workers)
-    performance["kl_sequences_per_batch"] = micro
-    if config["performance"] != performance:
-        raise ValueError("Unsupported target-scale performance")
+    validate_bounded_training(config, kinds=(KIND,))
+    if config["experiment"]["initial_value"] != "preserve_parent":
+        raise ValueError("Continuing PPO requires the parent's critic and Adam")
 
 
 class TargetFactory:

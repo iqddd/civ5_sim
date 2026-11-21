@@ -5,11 +5,12 @@ import json
 import random
 from copy import deepcopy
 
-from civ5rl.protocols.common import require_config, self_digest
+from civ5rl.protocols.common import self_digest
 from civ5rl.protocols.corpus import ScenarioFactory, validate_corpus
 from civ5rl.protocols.imitation_own_states import (
     own_state_physical_hash as physical_hash,
 )
+from civ5rl.protocols.ppo_validation import validate_bounded_training
 from civ5rl.provenance.common import ROOT, read_json
 from civ5rl.provenance.common import file_sha256 as file_hash
 from civ5sim.engine import digest
@@ -23,66 +24,20 @@ def controlled(config):
 
 
 def validate_profile(config):
-    fixed = {
-        "seed": 17,
-        "workers": 4,
-        "collection.num_envs": 128,
-        "collection.cpu_workers": 4,
-        "collection.envs_per_worker": 32,
-        "collection.min_learner_decisions_per_update": 8192,
-        "ppo.epochs": 4,
-        "ppo.sequence_length": 128,
-        "ppo.sequences_per_microbatch": 8,
-        "ppo.valid_tokens_per_minibatch": 1024,
-        "ppo.clip_ratio": 0.2,
-        "ppo.value_coefficient": 0.5,
-        "ppo.max_gradient_norm": 0.5,
-        "ppo.stop_kl": 0.015,
-        "ppo.entropy_coefficient": 0,
-        "ppo.kl_population": "free",
-        "ppo.kl_measurement": "whole_rollout_after_optimizer_step",
-        "optimizer.lr": 1e-5 if controlled(config) else 1e-4,
-        "optimizer.betas": [0.9, 0.999],
-        "optimizer.eps": 1e-5,
-        "optimizer.weight_decay": 0,
-        "performance.spatial_batch_size": 32,
-        "performance.collection_scheduler": "ready",
-        "performance.compile": True,
-        "performance.compile_dynamic": True,
-        "environment.max_calls_per_turn": 2000,
-        "experiment.decisions": 1048576,
-        "experiment.active_seconds": 7200,
-        "experiment.milestones": [131072, 262144, 524288, 1048576],
-        "experiment.bootstrap_samples": 10000,
-        "experiment.bootstrap_seed": 20261103,
-        "experiment.confirmation_layouts_per_world": 8,
-        "experiment.initial_value": "zero_last_layer",
-        "experiment.parent_sha256": "035581230481bb5cc5cbd02f6a947549dc2ccb30d3797c7acbad25d5268ba7a1",
-    }
-    if controlled(config):
-        fixed.update(
-            {
-                "ppo.step_acceptance": "full_categorical_kl_rollback",
-                "experiment.parent": "artifacts/rl/ppo-after-imitation/checkpoints/initial.pt",
-                "experiment.parent_run": "artifacts/rl/ppo-after-imitation",
-                "experiment.parent_sha256": "ad1ec38bd730822c5a1328fddb8437cce641141251340ce45c8b64686bf4413e",
-                "experiment.protocol": "docs/rl-ppo-controlled-updates.md",
-                "experiment.max_zero_accepted_rollouts": 3,
-            }
-        )
-    elif config["ppo"].get("step_acceptance") is not None:
-        raise ValueError("Unsupported configuration: ppo.step_acceptance")
-    require_config(config, fixed)
-    if "lr_schedule" in config["optimizer"] or "entropy_schedule" in config["ppo"]:
-        raise ValueError("This protocol has no schedules")
-    if type(config["performance"].get("ppo_cached_replay", False)) is not bool:
-        raise ValueError("Invalid configuration: performance.ppo_cached_replay")
-    reply_size = config["performance"].get("worker_reply_size", 0)
-    if type(reply_size) is not int or reply_size not in (0, 8, 16):
-        raise ValueError("Invalid configuration: performance.worker_reply_size")
-    parent = read_json(ROOT / "configs/rl-cp-imitation-own-states.json")
-    if config["teacher_search"] != parent["teacher_search"]:
-        raise ValueError("Unsupported configuration: teacher_search")
+    validate_bounded_training(config, kinds=(KIND, CONTROLLED_KIND))
+    ppo, experiment = config["ppo"], config["experiment"]
+    if experiment["initial_value"] != "zero_last_layer":
+        raise ValueError("PPO after imitation initializes the critic's last layer to zero")
+    if "lr_schedule" in config["optimizer"] or "entropy_schedule" in ppo:
+        raise ValueError("This protocol requires constant learning rate and entropy coefficient")
+    expected_acceptance = "full_categorical_kl_rollback" if controlled(config) else None
+    if ppo.get("step_acceptance") != expected_acceptance:
+        raise ValueError("Step acceptance differs from the selected PPO protocol")
+    if controlled(config) and (
+        type(experiment["max_zero_accepted_rollouts"]) is not int
+        or experiment["max_zero_accepted_rollouts"] < 1
+    ):
+        raise ValueError("max_zero_accepted_rollouts must be a positive integer")
 
 
 def advance_controlled_rollout(state, metrics, number):

@@ -1,5 +1,6 @@
 """Remote execution entrypoint inside the prepared repository worktree."""
 
+# ruff: noqa: E402
 import argparse
 import json
 import subprocess
@@ -11,7 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from civ5rl.deploy.remote import _read, _resolve_config, _write
-from tools.rl_collection_hardware import hardware
+from civ5rl.engine.runtime.hardware import hardware
 
 BC_KINDS = {
     "rl01.cp_imitation_target_more_data",

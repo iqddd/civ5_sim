@@ -1,14 +1,18 @@
 """Silent risks in the new critic handoff and economical stopping rules."""
 
+import tempfile
 import unittest
 from copy import deepcopy
+from pathlib import Path
 
 import numpy as np
 import torch
+from test_rl import context, scenario
 
 from civ5rl.config import load_config
 from civ5rl.core.model import Policy, batch_inputs
-from civ5rl.engine.runtime.control import TrainingCounters
+from civ5rl.engine.ppo.adam import optimizer_for
+from civ5rl.engine.ppo.backend import BatchedBackend, RolloutCache
 from civ5rl.engine.ppo.core import (
     encode_episode,
     episode_returns,
@@ -16,38 +20,61 @@ from civ5rl.engine.ppo.core import (
     targets,
     update,
 )
-from civ5rl.engine.ppo.backend import BatchedBackend, RolloutCache
 from civ5rl.engine.ppo.metrics import StepReplay
-from civ5rl.experiments.imitation_helpers import assert_equal
-from civ5rl.experiments.ppo_after_imitation import (
-    optimizer_for,
-    train as ordinary_ppo_train,
-)
-from civ5rl.experiments.ppo_after_target_bc import (
-    behavior_digest,
-    heal_interrupted_update,
-    prepare_critic,
-)
+from civ5rl.engine.runtime.control import TrainingCounters
+from civ5rl.experiments.imitation.helpers import assert_equal
+from civ5rl.experiments.ppo.after_imitation import train as ordinary_ppo_train
+from civ5rl.experiments.ppo.after_target_bc import run
+from civ5rl.experiments.ppo.after_target_bc.boundary import heal_interrupted_update
+from civ5rl.experiments.ppo.critic import behavior_digest, prepare_critic
 from civ5rl.protocols.ppo_after_imitation import KIND as ORDINARY_PPO_KIND
 from civ5rl.protocols.ppo_after_target_bc import (
     KIND,
     check_development_gain,
     compute_time_budget_check,
-    load_config as load_target_bc_config,
     record_collection,
     record_optimization,
+)
+from civ5rl.protocols.ppo_after_target_bc import (
+    load_config as load_target_bc_config,
 )
 from civ5rl.provenance import checkpoint
 from civ5rl.provenance.audit import verify_ppo_ledger
 from civ5rl.provenance.common import configure, write_json
 from civ5sim import Battle
-from test_rl import context, scenario
 
 
 class TargetBCPPOTests(unittest.TestCase):
     def setUp(self):
         configure(17)
         self.config = load_config("configs/rl-ppo-after-target-bc.json")
+
+    def test_report_uses_saved_state_without_training_inputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp) / "run"
+            with self.assertRaisesRegex(ValueError, "prepared run with saved state"):
+                run("report", self.config, out, "cpu")
+            self.assertFalse(out.exists())
+
+            out.mkdir()
+            write_json(out / "run.json", {"config": self.config, "GPU": "saved GPU"})
+            write_json(
+                out / "state.json",
+                {
+                    "stop_reason": None,
+                    "phase": "collect",
+                    "decisions": 10,
+                    "active_seconds": 2.0,
+                    "rollouts": 1,
+                    "updates": 0,
+                    "optimizer_steps": 0,
+                    "rejected_steps": 0,
+                    "evaluated": {},
+                    "best": {},
+                },
+            )
+            run("report", self.config, out, "cpu")
+            self.assertIn("saved GPU", (out / "report.md").read_text(encoding="utf-8"))
 
     def episodes(self, policy):
         initial = scenario()
@@ -332,21 +359,21 @@ class TargetBCPPOTests(unittest.TestCase):
             plan = {"base": {"worlds": {"training": [10055]}, "maps": []}}
             with (
                 patch(
-                    "civ5rl.experiments.ppo_after_imitation.create_policy",
+                    "civ5rl.experiments.ppo.after_imitation.create_policy",
                     return_value=policy,
                 ),
-                patch("civ5rl.experiments.ppo_after_imitation.Collector", FakeCollector),
+                patch("civ5rl.experiments.ppo.after_imitation.Collector", FakeCollector),
                 patch(
-                    "civ5rl.experiments.ppo_after_imitation.update",
+                    "civ5rl.experiments.ppo.after_imitation.update",
                     side_effect=fake_update,
                 ),
-                patch("civ5rl.experiments.ppo_after_imitation_checks.warmup"),
+                patch("civ5rl.experiments.checks.ppo_after_imitation.warmup"),
                 patch(
-                    "civ5rl.experiments.ppo_after_imitation.development",
+                    "civ5rl.experiments.ppo.after_imitation.development",
                     side_effect=lambda cfg, pl, o, st: st.update(pending_evaluation=False),
                 ),
                 patch(
-                    "civ5rl.experiments.ppo_after_imitation.save_rollout",
+                    "civ5rl.experiments.ppo.after_imitation.save_rollout",
                     return_value={"sha256": "abc"},
                 ),
             ):
@@ -549,11 +576,11 @@ class TargetBCPPOTests(unittest.TestCase):
         snapshots_after_step = {}
 
         class SpikeAndLatchBackend(BatchedBackend):
-            def backward(self, minibatch, count, entropy_coefficient):
-                tokens = super().backward(minibatch, count, entropy_coefficient)
+            def read_backward(self, diagnostics, norm=None):
+                norm_value = super().read_backward(diagnostics, norm)
                 self.last_minibatch_approx_kl = scripted_minibatch_kl[step_counter[0]]
                 step_counter[0] += 1
-                return tokens
+                return norm_value
 
             def measure_step_replay(self):
                 real = super().measure_step_replay()

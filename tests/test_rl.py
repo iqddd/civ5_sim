@@ -145,12 +145,7 @@ class RLTests(unittest.TestCase):
             policy.memory.bias_ih_l0.add_(0.1)
             new = prefix_hidden(policy, encoded, 3, "cpu")
             self.assertGreater((old - new).abs().max().item(), 0.01)
-        short = deepcopy(encoded[0])
-        short.sources, short.targets, short.action_features = (
-            short.sources[:1],
-            short.targets[:1],
-            short.action_features[:1],
-        )
+        short = ObservationEncoder(context(s)).encode(obs, actions[:1])
         with torch.no_grad():
             single, _, _ = policy(batch_inputs([short], "cpu"))
             padded, _, _ = policy(batch_inputs([short, encoded[0]], "cpu"))
@@ -224,8 +219,8 @@ class RLTests(unittest.TestCase):
 
     def test_ppo_backend_matches_serial_gradients_and_adam_step(self):
         # A mismatch here would silently change learning despite successful replay.
-        from civ5rl.engine.ppo.core import encode_episode
         from civ5rl.engine.ppo.backend import BatchedBackend
+        from civ5rl.engine.ppo.core import encode_episode
 
         original = Policy("C")
         episodes = self._short_rollout(original)
@@ -313,9 +308,9 @@ class RLTests(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "Pinned replay requires CUDA")
     def test_pinned_cpu_replay_recomputes_after_weight_updates(self):
         # A stale hidden/output cache silently invalidates the KL rollback gate.
-        from civ5rl.engine.ppo.core import encode_episode
         from civ5rl.engine.ppo.backend import RolloutCache, measure_replay
-        from civ5rl.experiments.ppo_artifacts import load_rollout, save_rollout
+        from civ5rl.engine.ppo.core import encode_episode
+        from civ5rl.engine.ppo.storage import load_rollout, save_rollout
 
         policy = Policy("C")
         episodes = self._short_rollout(policy)
@@ -363,10 +358,13 @@ class RLTests(unittest.TestCase):
         batch, _, lengths = cache.batch(spans)
         logits, values, last = policy.forward_sequences(batch, lengths, h)
         offset = 0
+        from civ5rl.engine.ppo.core import encode_episode
+
+        standalone = [encode_episode(episode, "C") for episode in episodes]
         for i, (ep, start, stop) in enumerate(spans):
-            prefix = prefix_hidden(policy, cache.encoded[ep], start, "cpu")
+            prefix = prefix_hidden(policy, standalone[ep], start, "cpu")
             expected_logits, expected_values, expected_h = policy(
-                batch_inputs(cache.encoded[ep][start:stop], "cpu"),
+                batch_inputs(standalone[ep][start:stop], "cpu"),
                 prefix,
                 sequence=True,
             )
@@ -741,10 +739,16 @@ class RLTests(unittest.TestCase):
         self.assertIsNone(unavailable["gpu_power_percent_tdp"])
 
     def test_corpus_disjoint_hashes_and_scenario_repeatability(self):
+        from civ5rl.protocols.corpus import map_path
+
         path = Path("artifacts/rl/corpus/manifest.json")
-        if not path.exists():
-            self.skipTest("Corpus not prepared")
+        if not path.is_file():
+            self.skipTest(f"Frozen corpus check requires {path}")
         manifest = read_json(path)
+        for entry in manifest["maps"]:
+            crop_path = map_path(entry["path"])
+            if not crop_path.is_file():
+                self.skipTest(f"Frozen corpus check requires {crop_path}")
         validate_corpus(manifest)
         factory = ScenarioFactory(self.config, manifest)
         a = factory.make(17, self.config["curriculum"][0])
