@@ -10,7 +10,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from civ5rl.engine.runtime.telemetry import analyze_telemetry, summarize_performance
+from civ5rl.engine.runtime.telemetry_analysis import analyze_telemetry, summarize_performance
 
 
 class PerformanceTests(unittest.TestCase):

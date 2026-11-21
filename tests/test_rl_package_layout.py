@@ -13,7 +13,18 @@ class ImportBoundaryTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "import civ5rl.engine.collection.collector, civ5rl.engine.collection.workers, civ5rl.core.env; import sys; assert 'torch' not in sys.modules",
+                (
+                    "import sys\n"
+                    "import civ5rl.core.env\n"
+                    "import civ5rl.engine.collection.collector\n"
+                    "import civ5rl.engine.collection.diagnostics\n"
+                    "import civ5rl.engine.collection.workers\n"
+                    "import civ5rl.engine.evaluation.connection\n"
+                    "import civ5rl.engine.evaluation.proxy\n"
+                    "import civ5rl.engine.runtime.hardware\n"
+                    "import civ5rl.engine.runtime.shared\n"
+                    "assert 'torch' not in sys.modules\n"
+                ),
             ],
             check=True,
         )

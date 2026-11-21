@@ -193,8 +193,7 @@ def measure_workers(
         scheduler.run()
         # The spawn pool starts children on demand. Small warmups can leave
         # process creation in the timed pass even when CUDA is already warm.
-        worker_pool = executor.pool if service_count else executor._pool
-        warmed_workers = len(worker_pool._processes)
+        warmed_workers = executor.started_workers()
         if cfg.get("warmup_measured_work") and warmed_workers != workers:
             raise RuntimeError(f"Only {warmed_workers}/{workers} workers started during full-work warmup")
         protocol = SavedForkProtocol(source, scratch, matches / "measured", saved_labels)

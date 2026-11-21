@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from civ5rl.engine.evaluation.replay import verify_replay
-from civ5rl.engine.runtime.telemetry import analyze_telemetry
+from civ5rl.engine.runtime.telemetry_analysis import analyze_telemetry
 from civ5rl.provenance.common import ROOT, read_json, write_json
 from civ5rl.reporting.evaluation_audit import collect_summary
 from civ5rl.reporting.markdown import format_wdl

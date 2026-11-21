@@ -1,40 +1,42 @@
 """Verified storage of inactive comparison data trees."""
 
+from __future__ import annotations
+
 import shutil
+import subprocess
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-from civ5rl.deploy.archive import unpack
-from civ5rl.engine.runtime.storage import pack_verified
+from civ5rl.engine.runtime.archive import member_name, read_manifest, seven_zip
+from civ5rl.engine.runtime.storage import ArchivedTree
+from civ5rl.provenance.common import file_sha256
 
 
-def comparison_tree_paths(out, name):
+def _tree(out, name):
     if name not in ("sources", "continuations"):
         raise ValueError("Unknown comparison tree")
-    out = Path(out).resolve()
-    return out, out / name, out / (name + ".storage")
-
-
-def archive_tree(out, name):
-    out, source, packet = comparison_tree_paths(out, name)
-    if not source.exists():
-        return
-    pack_verified(
-        source,
-        packet,
+    return ArchivedTree(
+        out,
+        name,
         token="comparison-" + name,
+        label="Comparison",
         temporary_prefix="verify-comparison-",
         changed_message="Comparison data changed during verification",
     )
-    if source.resolve() != out / name or source.is_symlink():
-        raise ValueError("Unsafe comparison storage path")
-    shutil.rmtree(source)
+
+
+def comparison_tree_paths(out, name):
+    tree = _tree(out, name)
+    return tree.root, tree.source, tree.packet
+
+
+def archive_tree(out, name):
+    _tree(out, name).archive()
 
 
 def restore_tree(out, name):
-    _, source, packet = comparison_tree_paths(out, name)
-    if not source.exists() and packet.exists():
-        unpack(packet, source, token="comparison-" + name, direction="download")
+    _tree(out, name).restore()
 
 
 @contextmanager
@@ -44,22 +46,8 @@ def readable_tree(out, name):
     Caller owns the run lock. Retain modified files on failure, rather than
     silently deleting evidence or rewriting the original PPMd archive.
     """
-    from civ5rl.deploy.archive import _inventory
-    from civ5rl.provenance.common import read_json
-
-    out, source, packet = comparison_tree_paths(out, name)
-    restored = packet.exists()
-    restore_tree(out, name)
-    try:
+    with _tree(out, name).readable(cleanup_existing=True) as source:
         yield source
-    finally:
-        if restored:
-            manifest = read_json(packet / "manifest.json")
-            if _inventory(source) != (manifest["files"], manifest["directories"]):
-                raise RuntimeError("Comparison reader changed files; retaining extracted data")
-            if source.resolve() != out / name or source.is_symlink():
-                raise ValueError("Unsafe comparison tree")
-            shutil.rmtree(source)
 
 
 @contextmanager
@@ -70,15 +58,9 @@ def readable_members(packet, names):
     avoids materializing unrelated multi-gigabyte replay trees. This is a
     disposable read cache, never a resume dependency or a rewritten input packet.
     """
-    import subprocess
-    import tempfile
-
-    from civ5rl.deploy.archive import _name, seven_zip
-    from civ5rl.provenance.common import file_sha256, read_json
-
     packet = Path(packet).resolve()
-    manifest = read_json(packet / "manifest.json")
-    names = sorted(set(_name(n) for n in names))
+    manifest = read_manifest(packet)
+    names = sorted({member_name(name) for name in names})
     if not set(names).issubset(manifest["files"]):
         raise ValueError("Requested comparison input is absent from packet")
     archived = set(manifest["archived"])

@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from civ5rl.engine.runtime.telemetry import analyze_telemetry
+from civ5rl.engine.runtime.telemetry_analysis import analyze_telemetry
 from civ5rl.protocols.imitation_target_scale import C2_KIND, MORE_DATA_KIND
 from civ5rl.provenance.common import read_json, write_json
 from civ5rl.reporting.markdown import Alignment, MarkdownReport, format_wdl

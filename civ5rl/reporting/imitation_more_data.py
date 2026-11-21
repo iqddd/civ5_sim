@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 
 from civ5rl.engine.evaluation.replay import verify_replay
-from civ5rl.engine.runtime.telemetry import analyze_telemetry
+from civ5rl.engine.runtime.telemetry_analysis import analyze_telemetry
 from civ5rl.protocols.imitation import load_episode, validate_case
 from civ5rl.provenance.common import ROOT, file_sha256, read_json, write_json
 from civ5rl.reporting.evaluation_audit import collect_summary, compare_paired_directories

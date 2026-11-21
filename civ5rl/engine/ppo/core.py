@@ -1,24 +1,37 @@
 """Episodic recurrent PPO with exact current-weight prefix reconstruction."""
 
-from collections.abc import Mapping
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Protocol
-
-if TYPE_CHECKING:
-    from civ5rl.core.contracts import Episode
 
 import numpy as np
 import torch
 
-from civ5rl.core.context import context_from_spec
-from civ5rl.core.distributions import policy_logits
-from civ5rl.core.model import batch_inputs, distribution_stats
-from civ5rl.core.observation import ObservationEncoder
+from civ5rl.core.model import batch_inputs
+from civ5rl.engine.ppo.backend import BatchedBackend
 from civ5rl.engine.ppo.metrics import (
     KL_DIAGNOSTIC_KEYS,
     STEP_REPLAY_DIAGNOSTIC_KEYS,
     StepReplay,
+)
+from civ5rl.engine.ppo.objective import (
+    encode_episode as encode_episode,
+)
+from civ5rl.engine.ppo.objective import (
+    episode_returns as episode_returns,
+)
+from civ5rl.engine.ppo.objective import (
+    objective as objective,
+)
+from civ5rl.engine.ppo.objective import (
+    raw_gae_advantages as raw_gae_advantages,
+)
+from civ5rl.engine.ppo.objective import (
+    targets as targets,
 )
 from civ5rl.engine.runtime.budget import deadline_reached
 from civ5rl.engine.runtime.sequence import (
@@ -28,124 +41,8 @@ from civ5rl.engine.runtime.sequence import (
 )
 from civ5rl.engine.runtime.transactions import AdamSnapshot, require_finite_state
 
-
-def encode_episode(episode: "Episode", variant, *, reuse_cached=True):
-    if reuse_cached and "encoded" in episode:
-        if episode.get("encoded_variant") != variant:
-            raise ValueError("Encoded rollout variant differs from requested policy")
-        if len(episode["encoded"]) != len(episode["chosen"]):
-            raise ValueError("Encoded rollout count differs from decisions")
-        return episode["encoded"]
-    s = episode["spec"]
-    encoder = ObservationEncoder(
-        context_from_spec(s),
-        variant,
-    )
-    result = []
-    for obs, actions, chosen in zip(
-        episode["observations"], episode["actions"], episode["chosen"]
-    ):
-        result.append(encoder.encode(obs, actions))
-        encoder.remember_action(actions[chosen], obs)
-    return result
-
-
-def episode_returns(episodes, gamma=1.0):
-    gamma = float(gamma)
-    result = []
-    for e in episodes:
-        t = len(e["chosen"])
-        if t == 0:
-            result.append(np.empty(0, dtype=np.float32))
-            continue
-        reward = float(e["result"]["reward"])
-        if reward == 0.0:
-            result.append(np.zeros(t, dtype=np.float32))
-        elif gamma == 1.0:
-            result.append(np.full(t, reward, dtype=np.float32))
-        else:
-            powers = np.arange(t - 1, -1, -1, dtype=np.float64)
-            result.append((reward * (gamma**powers)).astype(np.float32))
-    return result
-
-
-def raw_gae_advantages(episodes, gamma=1.0, gae_lambda=1.0):
-    gamma = float(gamma)
-    gae_lambda = float(gae_lambda)
-    if gamma == 1.0 and gae_lambda == 1.0:
-        return [
-            np.asarray([e["result"]["reward"]] * len(e["chosen"]), np.float32)
-            - np.asarray(e["old_value"], np.float32)
-            for e in episodes
-        ]
-    discount = gamma * gae_lambda
-    advantages = []
-    for e in episodes:
-        t = len(e["chosen"])
-        if t == 0:
-            advantages.append(np.empty(0, dtype=np.float32))
-            continue
-        reward = float(e["result"]["reward"])
-        values = np.asarray(e["old_value"], dtype=np.float64)
-        adv = np.empty(t, dtype=np.float64)
-        gae = 0.0
-        next_val = 0.0
-        for idx in range(t - 1, -1, -1):
-            r_t = reward if idx == t - 1 else 0.0
-            delta = r_t + gamma * next_val - values[idx]
-            gae = delta + discount * gae
-            adv[idx] = gae
-            next_val = values[idx]
-        advantages.append(adv.astype(np.float32))
-    return advantages
-
-
-def targets(episodes, *, gamma=1.0, gae_lambda=1.0):
-    advantages = raw_gae_advantages(episodes, gamma=gamma, gae_lambda=gae_lambda)
-    all_advantages = (
-        np.concatenate(advantages) if advantages else np.empty(0, np.float32)
-    )
-    if not len(all_advantages):
-        raise ValueError("Empty PPO rollout")
-    mean, std = all_advantages.mean(), all_advantages.std()
-    return [(a - mean) / (std + 1e-8) for a in advantages]
-
-
-def objective(
-    logits,
-    values,
-    indices,
-    old_logp,
-    returns,
-    advantages,
-    entropy_coefficient,
-    *,
-    clip_ratio=0.2,
-    value_coefficient=0.5,
-    temperature=1.0,
-):
-    use_entropy = bool(entropy_coefficient)
-    logp, entropy, normalized_entropy = distribution_stats(
-        policy_logits(logits, temperature),
-        indices,
-        entropy_grad=use_entropy,
-    )
-    ratio = (logp - old_logp).exp()
-    policy = -torch.minimum(
-        ratio * advantages, ratio.clamp(1 - clip_ratio, 1 + clip_ratio) * advantages
-    ).mean()
-    value = (values - returns).square().mean()
-    loss = policy + value_coefficient * value
-    if use_entropy:
-        loss = loss - entropy_coefficient * normalized_entropy.mean()
-    return loss, {
-        "policy_loss": policy.detach(),
-        "value_loss": value.detach(),
-        "entropy": entropy.mean().detach(),
-        "normalized_entropy": normalized_entropy.mean().detach(),
-        "clip_fraction": ((ratio - 1).abs() > clip_ratio).float().mean().detach(),
-        "logp": logp.detach(),
-    }
+if TYPE_CHECKING:
+    from civ5rl.core.contracts import Episode
 
 
 def schedule(spec, decisions):
@@ -254,9 +151,7 @@ class _KLGate:
                 if key in KL_DIAGNOSTIC_KEYS and value is not None
             ]
             if not np.isfinite(diagnostics).all():
-                raise FloatingPointError(
-                    "Non-finite post-step distribution diagnostics"
-                )
+                raise FloatingPointError("Non-finite post-step distribution diagnostics")
         return replay
 
     def rollback(self, snapshot):
@@ -268,12 +163,8 @@ class _KLGate:
         if accepted_kl is None:
             if restored_kl is not None:
                 raise RuntimeError("Rollback changed KL population")
-        elif restored_kl is None or not np.isclose(
-            restored_kl, accepted_kl, rtol=1e-5, atol=1e-7
-        ):
-            raise RuntimeError(
-                f"Rollback replay mismatch: {restored_kl} != {accepted_kl}"
-            )
+        elif restored_kl is None or not np.isclose(restored_kl, accepted_kl, rtol=1e-5, atol=1e-7):
+            raise RuntimeError(f"Rollback replay mismatch: {restored_kl} != {accepted_kl}")
         self.optimizer.zero_grad(set_to_none=True)
 
     def publish(self, pending, replay, accepted, *, final_kl):
@@ -368,9 +259,7 @@ class _SpikeOrEpochKLGate(_KLGate):
     def __init__(self, *args):
         super().__init__(*args)
         self.threshold = float(
-            self.options.get(
-                "minibatch_kl_spike_threshold", self.options.get("target_kl", 0.01)
-            )
+            self.options.get("minibatch_kl_spike_threshold", self.options.get("target_kl", 0.01))
         )
         self.verified = self.snapshot()
         self.pending = []
@@ -401,9 +290,7 @@ class _SpikeOrEpochKLGate(_KLGate):
         if self.yellow_zone or last or timed_out:
             if not self.verify():
                 return "rejected_full_kl", False
-            self.yellow_zone |= (
-                self.metrics.kl is not None and self.metrics.kl > self.threshold
-            )
+            self.yellow_zone |= self.metrics.kl is not None and self.metrics.kl > self.threshold
             if timed_out:
                 return "active_time_limit", last
         return None, False
@@ -414,9 +301,33 @@ class _SpikeOrEpochKLGate(_KLGate):
         return stop_reason
 
 
-def _optimizer_step(
-    policy, optimizer, backend, minibatch, options, metrics, gate, epoch
-):
+def _select_kl_gate(options) -> tuple[Callable[..., _KLGate], bool]:
+    controlled = options.get("step_acceptance") == "full_categorical_kl_rollback"
+    mode = options.get("kl_measurement", "whole_rollout_after_epoch")
+    if mode == "whole_rollout_after_epoch_or_minibatch_spike":
+        return _SpikeOrEpochKLGate, controlled
+    if mode == "whole_rollout_after_optimizer_step":
+        return partial(_PerStepKLGate, controlled=controlled), controlled
+    if controlled:
+        raise ValueError(
+            "full_categorical_kl_rollback requires whole_rollout_after_optimizer_step "
+            "or whole_rollout_after_epoch_or_minibatch_spike"
+        )
+    return _EpochEndKLGate, controlled
+
+
+def _scheduled_hyperparameters(config, decisions):
+    optimizer_options, ppo_options = config["optimizer"], config["ppo"]
+    lr = optimizer_options.get("lr")
+    if lr is None:
+        lr = schedule(optimizer_options["lr_schedule"], decisions)
+    entropy_coefficient = ppo_options.get("entropy_coefficient")
+    if entropy_coefficient is None:
+        entropy_coefficient = schedule(ppo_options["entropy_schedule"], decisions)
+    return lr, entropy_coefficient
+
+
+def _optimizer_step(policy, optimizer, backend, minibatch, options, metrics, gate, epoch):
     started = perf_counter()
     count = sum(stop - start for _, start, stop in minibatch)
     optimizer.zero_grad(set_to_none=True)
@@ -430,13 +341,11 @@ def _optimizer_step(
     metrics.tokens += processed
     tick = perf_counter()
     norm = torch.nn.utils.clip_grad_norm_(
-        policy.parameters(), options["max_gradient_norm"],
+        policy.parameters(),
+        options["max_gradient_norm"],
         error_if_nonfinite=backward_minibatch is None,
     )
-    norm_value = (
-        backend.read_backward(diagnostics, norm)
-        if backward_minibatch is not None else float(norm)
-    )
+    norm_value = backend.read_backward(diagnostics, norm) if backward_minibatch is not None else float(norm)
     backend.record_gradient(norm)
     gate.before_step()
     optimizer.step()
@@ -450,7 +359,7 @@ def _optimizer_step(
 def update(
     policy,
     optimizer,
-    episodes: list["Episode"],
+    episodes: list[Episode],
     config,
     decisions,
     device,
@@ -461,36 +370,22 @@ def update(
     deadline=None,
     on_step=None,
 ):
-    controlled = config["ppo"].get("step_acceptance") == "full_categorical_kl_rollback"
-    kl_mode = config["ppo"].get("kl_measurement", "whole_rollout_after_epoch")
-    per_step_kl = kl_mode == "whole_rollout_after_optimizer_step"
-    epoch_or_spike_kl = kl_mode == "whole_rollout_after_epoch_or_minibatch_spike"
-    if controlled and not (per_step_kl or epoch_or_spike_kl):
-        raise ValueError(
-            "full_categorical_kl_rollback requires whole_rollout_after_optimizer_step "
-            "or whole_rollout_after_epoch_or_minibatch_spike"
-        )
+    options = config["ppo"]
+    gate_factory, controlled = _select_kl_gate(options)
     policy.train()
     start_update = perf_counter()
     if monitor:
         monitor.mark("rollout_preparation")
     if _backend is None:
-        from civ5rl.engine.ppo.backend import BatchedBackend
-
         _backend = BatchedBackend
     backend: RolloutBackend = _backend(policy, episodes, config, device, monitor)
-    length = config["ppo"]["sequence_length"]
+    length = options["sequence_length"]
     chunks = [
         Span(i, start, min(start + length, len(e["chosen"])))
         for i, e in enumerate(episodes)
         for start in range(0, len(e["chosen"]), length)
     ]
-    lr = config["optimizer"].get("lr")
-    if lr is None:
-        lr = schedule(config["optimizer"]["lr_schedule"], decisions)
-    entropy_coefficient = config["ppo"].get("entropy_coefficient")
-    if entropy_coefficient is None:
-        entropy_coefficient = schedule(config["ppo"]["entropy_schedule"], decisions)
+    lr, entropy_coefficient = _scheduled_hyperparameters(config, decisions)
     for group in optimizer.param_groups:
         group["lr"] = lr
     initial_replay = backend.precheck()
@@ -504,18 +399,10 @@ def update(
         start_update=start_update,
         kl=initial_replay.get("full_kl_free") if controlled else pre_kl,
     )
-    batch_chunks = config["ppo"]["sequences_per_minibatch"]
-    token_count = config["ppo"].get("valid_tokens_per_minibatch")
+    batch_chunks = options["sequences_per_minibatch"]
+    token_count = options.get("valid_tokens_per_minibatch")
     stop_reason = "epochs_completed"
-
-    options = config["ppo"]
-    gate_args = (policy, optimizer, backend, options, metrics, on_step)
-    if epoch_or_spike_kl:
-        gate = _SpikeOrEpochKLGate(*gate_args)
-    elif per_step_kl:
-        gate = _PerStepKLGate(*gate_args, controlled=controlled)
-    else:
-        gate = _EpochEndKLGate(*gate_args)
+    gate = gate_factory(policy, optimizer, backend, options, metrics, on_step)
 
     for epoch in range(options["epochs"]):
         order = list(chunks)
@@ -523,22 +410,15 @@ def update(
         batches = (
             list(token_minibatches(order, token_count))
             if token_count
-            else [
-                order[first : first + batch_chunks]
-                for first in range(0, len(order), batch_chunks)
-            ]
+            else [order[first : first + batch_chunks] for first in range(0, len(order), batch_chunks)]
         )
         for index, minibatch in enumerate(batches):
             if deadline_reached(deadline):
                 stop_reason = "active_time_limit"
                 break
             metrics.started_epochs = epoch + 1
-            step = _optimizer_step(
-                policy, optimizer, backend, minibatch, options, metrics, gate, epoch
-            )
-            reason, epoch_completed = gate.after_step(
-                step, index == len(batches) - 1, deadline
-            )
+            step = _optimizer_step(policy, optimizer, backend, minibatch, options, metrics, gate, epoch)
+            reason, epoch_completed = gate.after_step(step, index == len(batches) - 1, deadline)
             if reason is not None:
                 stop_reason = reason
                 metrics.completed_epochs += int(epoch_completed)
@@ -553,20 +433,14 @@ def update(
     del gate
     gamma = float(config.get("ppo", {}).get("gamma", 1.0))
     gae_lambda = float(config.get("ppo", {}).get("gae_lambda", 1.0))
-    summary = _summarize_ppo_update(
-        backend, episodes, metrics, gamma=gamma, gae_lambda=gae_lambda
-    )
+    summary = _summarize_ppo_update(backend, episodes, metrics, gamma=gamma, gae_lambda=gae_lambda)
     summary.update(
         attempted_optimizer_steps=metrics.attempts,
         accepted_optimizer_steps=metrics.steps,
         rejected_optimizer_steps=metrics.rejected,
         final_accepted_kl=metrics.kl if controlled else None,
         max_attempted_kl=max(
-            (
-                r["attempted_kl"]
-                for r in metrics.step_records
-                if r["attempted_kl"] is not None
-            ),
+            (r["attempted_kl"] for r in metrics.step_records if r["attempted_kl"] is not None),
             default=None,
         ),
         transaction_seconds=metrics.transaction_seconds,
@@ -589,15 +463,11 @@ def update(
     return summary
 
 
-def _summarize_ppo_update(
-    backend, episodes, metrics: _UpdateMetrics, *, gamma=1.0, gae_lambda=1.0
-):
+def _summarize_ppo_update(backend, episodes, metrics: _UpdateMetrics, *, gamma=1.0, gae_lambda=1.0):
     stats, gradient_mean, gradient_max = backend.statistics(metrics.tokens)
     critic_predictions = np.concatenate([e["old_value"] for e in episodes])
     returns = np.concatenate(episode_returns(episodes, gamma=gamma))
-    raw_advantages = np.concatenate(
-        raw_gae_advantages(episodes, gamma=gamma, gae_lambda=gae_lambda)
-    )
+    raw_advantages = np.concatenate(raw_gae_advantages(episodes, gamma=gamma, gae_lambda=gae_lambda))
     variance = np.var(returns)
     extras = backend.extras(metrics.optimizer_seconds)
     return {

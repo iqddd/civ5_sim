@@ -1,11 +1,12 @@
 """Verify saved simulator commands, public histories and outcomes."""
 
+from __future__ import annotations
+
 from dataclasses import asdict
 from pathlib import Path
 
 from civ5rl.core.observation import ordered_actions
-from civ5rl.protocols.imitation import load_episode
-from civ5rl.provenance.common import ROOT, read_json
+from civ5rl.provenance.common import ROOT, read_gzip_json, read_json
 from civ5sim import Battle
 
 
@@ -23,7 +24,7 @@ def verify_replay(directory, *, demonstration=False, project_relative=True):
         raise ValueError("Expected a civ5sim.replay with schema 2")
     if not isinstance(replay.get("steps"), list):
         raise TypeError("Replay is missing its command list")
-    ep = load_episode(directory / "demonstration.json.gz") if demonstration else None
+    ep = read_gzip_json(directory / "demonstration.json.gz") if demonstration else None
     case = read_json(directory / "case.json") if demonstration else None
     decision = 0
     available = selected = omitted = 0

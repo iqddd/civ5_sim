@@ -199,11 +199,11 @@ class DualPolicyExecutor:
     def _serve(self):
         import torch
 
-        from civ5rl.engine.evaluation.executor import _ConnectionWaiter
+        from civ5rl.engine.evaluation.connection import ConnectionWaiter
 
         waiter = None
         try:
-            waiter = _ConnectionWaiter()
+            waiter = ConnectionWaiter()
             while not self.stop.is_set():
                 with self.lock:
                     connections = list(self.connections)

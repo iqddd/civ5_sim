@@ -6,7 +6,10 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from civ5rl.engine.ppo.benchmark import assert_update_parity, run_full_cycle_benchmark
+from civ5rl.experiments.benchmarks.ppo import (
+    assert_update_parity,
+    run_full_cycle_benchmark,
+)
 
 
 class BenchmarkTest(unittest.TestCase):
@@ -18,22 +21,38 @@ class BenchmarkTest(unittest.TestCase):
 
         def result(name):
             calls.append(name)
-            return {"model": {"x": torch.tensor([random.random(), np.random.rand(),
-                                                   torch.rand(()).item(), shuffle.random()])},
-                    "optimizer": {}, "gradients": {"x": torch.tensor([1.0])},
-                    "sampled_kl": 0.01, "commands": [{"kind": "end_turn"}]}
+            return {
+                "model": {
+                    "x": torch.tensor(
+                        [
+                            random.random(),
+                            np.random.rand(),
+                            torch.rand(()).item(),
+                            shuffle.random(),
+                        ]
+                    )
+                },
+                "optimizer": {},
+                "gradients": {"x": torch.tensor([1.0])},
+                "sampled_kl": 0.01,
+                "commands": [{"kind": "end_turn"}],
+            }
 
-        assert_update_parity(lambda: result("A"), lambda: result("B"), reset=reset,
-                             shuffle_rng=shuffle)
+        assert_update_parity(
+            lambda: result("A"), lambda: result("B"), reset=reset, shuffle_rng=shuffle
+        )
         self.assertEqual(calls, list("ABBA"))
         self.assertEqual(shuffle.getstate(), shuffle_state)
+
         def changed():
             value = result("B")
             value["commands"] = []
             return value
+
         with self.assertRaisesRegex(AssertionError, "Trajectory"):
-            assert_update_parity(lambda: result("A"), changed, reset=reset,
-                                 shuffle_rng=shuffle)
+            assert_update_parity(
+                lambda: result("A"), changed, reset=reset, shuffle_rng=shuffle
+            )
 
     def test_trials_reset_model_adam_and_shuffle(self):
         model = torch.nn.Linear(1, 1)
@@ -45,7 +64,9 @@ class BenchmarkTest(unittest.TestCase):
 
         class Collector:
             def collect(self, policy, *args, **kwargs):
-                seen.append((policy.weight.item(), len(optimizer.state), shuffle.random()))
+                seen.append(
+                    (policy.weight.item(), len(optimizer.state), shuffle.random())
+                )
                 return [{"chosen": [0], "joint_commands": [], "result": {}}], None, {}
 
         def fake_update(policy, optim, episodes, config, decisions, device, rng):
@@ -54,12 +75,26 @@ class BenchmarkTest(unittest.TestCase):
             optim.zero_grad()
             return {"optimizer_steps": 1}
 
-        with (tempfile.TemporaryDirectory() as tmp,
-              patch("civ5rl.engine.ppo.benchmark.update", fake_update),
-              patch("civ5rl.engine.ppo.benchmark.save_rollout", return_value={"sha256": "fixture"})):
-            result = run_full_cycle_benchmark(policy=model, optimizer=optimizer,
-                shuffle_rng=shuffle, collector=Collector(), config={}, specs=[1],
-                manifest={}, output=tmp, device="cpu", repeats=2)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("civ5rl.experiments.benchmarks.ppo.update", fake_update),
+            patch(
+                "civ5rl.experiments.benchmarks.ppo.save_rollout",
+                return_value={"sha256": "fixture"},
+            ),
+        ):
+            result = run_full_cycle_benchmark(
+                policy=model,
+                optimizer=optimizer,
+                shuffle_rng=shuffle,
+                collector=Collector(),
+                config={},
+                specs=[1],
+                manifest={},
+                output=tmp,
+                device="cpu",
+                repeats=2,
+            )
         self.assertEqual(len(seen), 3)
         self.assertTrue(all(x == seen[0] for x in seen))
         self.assertEqual(shuffle.getstate(), initial_rng)

@@ -1,552 +1,60 @@
-"""Shared evaluation inference; workers run ordinary CPU simulator matches.
+"""Serve evaluation RPC requests from simulator workers.
 
-Workers own public encoding, legal ordering, selection RNG and diagnostics.
-Each match uses a reusable EncodedSlots shared-memory slot; Pipe messages carry
-dimensions and replies, with inline Encoded fallback for oversized legal lists.
-No legal actions are truncated. CUDA policies and per-match GRU states stay in
-the main process. Policies of the same variant share encoded actual histories,
-but retain independent hidden states. Reset/close/failure release slots and
-connections; persistent executor sessions reuse the pool and frozen policies.
-
-Argmax without selection metrics returns only GPU-selected indices. Sampling
-and diagnostics receive logits; an ensemble still combines probabilities before
-selecting its action. Evaluation compilation uses default mode without CUDA
-Graphs; deterministic FP32 evaluation never inherits training AMP/TF32.
+Workers encode public observations into shared slots and own selection RNG and
+diagnostics. The service owns the policies and per-agent recurrent state. A
+reply returns the slot to its worker. Oversized inputs travel in the pipe
+without truncation.
 """
 
-import math
-import os
-import platform
-import selectors
-import sys
+from __future__ import annotations
+
 import traceback
-from collections import OrderedDict
 from concurrent.futures import FIRST_COMPLETED, wait
-from contextlib import contextmanager, nullcontext
-from contextvars import ContextVar
-from dataclasses import asdict, dataclass
+from contextlib import nullcontext
 from multiprocessing import Pipe
-from multiprocessing.connection import wait as wait_connections
-from pathlib import Path
 from threading import Event, Lock, Thread
 from time import perf_counter
 
-import torch
-
-from civ5rl.core.agent import RLAgent
-from civ5rl.core.model import Policy, batch_inputs
-from civ5rl.core.observation import ordered_actions
-from civ5rl.engine.evaluation.proxy import (
-    _remote_task,
+from civ5rl.engine.evaluation.connection import ConnectionWaiter
+from civ5rl.engine.evaluation.inference import AgentMember, AgentSession, BatchedInference
+from civ5rl.engine.evaluation.proxy import _remote_task
+from civ5rl.engine.evaluation.runtime import (
+    EvaluationRuntime,
+    evaluation_options,
+    evaluation_precision,
+    runtime_for,
 )
-from civ5rl.engine.evaluation.state import RecurrentStates
-from civ5rl.engine.runtime import is_int_at_least
-from civ5rl.engine.runtime.hardware import cgroup_limits, effective_cpu_budget
-from civ5rl.engine.runtime.shared import pool
-from civ5rl.provenance.common import ROOT, file_sha256
-from civ5rl.provenance.identity import policy_hash
-from civ5sim import combat_ai
-from civ5sim.engine import digest
+from civ5rl.engine.evaluation.session import (
+    evaluation_key,
+    evaluation_policy_hash,
+    evaluation_session,
+    evaluation_worker_pool,
+    load_evaluation_policy,
+    prepare_evaluation_policy,
+    started_pool_workers,
+)
+from civ5rl.engine.runtime.shared import EncodedSlots, pool
 from civ5sim.telemetry import measure
 
-_options = ContextVar("evaluation_options", default={})
-_session = ContextVar("evaluation_session", default=None)
+_ConnectionWaiter = ConnectionWaiter
 
-
-class _EvaluationSession:
-    def __init__(self):
-        self.policies = OrderedDict()
-        self.checkpoint_hashes = {}
-        self.workers = None
-        self.executor = None
-
-    def close_pool(self):
-        if self.executor is not None:
-            executor, self.executor = self.executor, None
-            executor.shutdown(wait=True, cancel_futures=True)
-
-
-@contextmanager
-def evaluation_session():
-    """Keep compiled checkpoints and simulator processes for one sequential run."""
-    session = _EvaluationSession()
-    token = _session.set(session)
-    try:
-        yield
-    finally:
-        _session.reset(token)
-        session.close_pool()
-
-
-@contextmanager
-def evaluation_worker_pool(workers):
-    session = _session.get()
-    if session is None:
-        with pool(workers) as executor:
-            yield executor
-        return
-    if session.workers != workers:
-        session.close_pool()
-        session.workers = workers
-    if session.executor is None:
-        session.executor = pool(workers)
-    try:
-        yield session.executor
-    except BaseException:
-        session.close_pool()
-        raise
-
-
-class _ConnectionWaiter:
-    """Keep POSIX pipe registrations across batches; retain Windows pipe waits.
-
-    Only the serving thread owns the selector. Synchronize removals before
-    additions using saved integer descriptors: a closed Connection cannot expose
-    its old fd, and that number can already belong to a newly submitted match.
-    Pending workers cannot write another request until their batch reply, so
-    gathering can leave them registered and filter them out of readiness.
-    """
-
-    def __init__(self):
-        self.selector = selectors.DefaultSelector() if os.name == "posix" else None
-        self.registered = {}
-
-    def wait(self, connections, timeout):
-        if self.selector is None:
-            return wait_connections(connections, timeout=timeout)
-        for connection, fd in list(self.registered.items()):
-            if connection.closed:
-                self.selector.unregister(fd)
-                del self.registered[connection]
-        for connection in connections:
-            if connection not in self.registered:
-                fd = connection.fileno()
-                self.selector.register(fd, selectors.EVENT_READ, connection)
-                self.registered[connection] = fd
-        ready = {key.data for key, _ in self.selector.select(timeout)}
-        # A pending peer closing its pipe wakes select too; end this gather
-        # rather than spinning on its EOF until the batching timeout.
-        return [connection for connection in connections if connection in ready]
-
-    def close(self):
-        if self.selector is not None:
-            self.selector.close()
-        self.registered.clear()
-
-
-@contextmanager
-def evaluation_precision():
-    """Evaluate in deterministic FP32, then restore the caller's settings."""
-    matmul = torch.backends.cuda.matmul.allow_tf32
-    cudnn = torch.backends.cudnn.allow_tf32
-    deterministic = torch.are_deterministic_algorithms_enabled()
-    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
-    precision = torch.get_float32_matmul_precision()
-    try:
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-        torch.use_deterministic_algorithms(True)
-        yield
-    finally:
-        torch.backends.cuda.matmul.allow_tf32 = matmul
-        torch.backends.cudnn.allow_tf32 = cudnn
-        torch.set_float32_matmul_precision(precision)
-        torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
-
-
-@contextmanager
-def evaluation_options(**options):
-    values = {key: value for key, value in options.items() if value is not None}
-    if values:
-        EvaluationRuntime(**values).resolve()
-    token = _options.set(values)
-    try:
-        yield
-    finally:
-        _options.reset(token)
-
-
-def runtime_for(directory, config, *, cp_only=False):
-    from civ5rl.provenance.common import read_json, write_json
-
-    path = Path(directory) / "evaluation-runtime.json"
-    required = config.get("evaluation_runtime")
-    if path.exists():
-        defaults = read_json(path)["runtime"]
-    else:
-        record = (
-            read_json(Path(directory) / "run.json")
-            if (Path(directory) / "run.json").exists()
-            else None
-        )
-        historical = (
-            record is not None and record.get("evaluation_runtime_default") != "auto"
-        ) or (record is None and (Path(directory) / "evaluations.json").exists())
-        # The run marker distinguishes a genuinely new experiment from an old
-        # partially unpacked run whose evaluations.json is still archived.
-        default_workers = int(config.get("workers", 4) or 4)
-        if (
-            not required
-            and not historical
-            and "workers" not in _options.get()
-            and config.get("self_play", {}).get("enabled")
-        ):
-            default_workers = _self_play_evaluation_workers()
-        defaults = required or dict(
-            device="cpu" if historical else "auto",
-            workers=default_workers,
-        )
-    values = {**defaults, **_options.get()}
-    if required is not None and values != required:
-        raise ValueError(
-            "Evaluation runtime is fixed by this experiment; backend/batching changes are not allowed"
-        )
-    runtime = EvaluationRuntime(**values).resolve()
-    if not path.exists():
-        write_json(path, {"schema": 1, "runtime": asdict(runtime)})
-    return (
-        EvaluationRuntime(
-            "cpu", runtime.workers, runtime.max_batch, runtime.wait_seconds
-        )
-        if cp_only
-        else runtime
-    )
-
-
-def _self_play_evaluation_workers():
-    import psutil
-
-    process = psutil.Process()
-    affinity = (
-        process.cpu_affinity()
-        if hasattr(process, "cpu_affinity")
-        else range(os.cpu_count() or 1)
-    )
-    available = len(affinity)
-    if sys.platform == "linux":
-        limits = cgroup_limits()
-        available = math.floor(
-            effective_cpu_budget(affinity, limits["cpu_quota"], limits["cpuset"])
-        )
-    return max(1, min(24, available - 1))
-
-
-@dataclass(frozen=True)
-class EvaluationRuntime:
-    device: str = "auto"
-    workers: int = 4
-    max_batch: int = 32
-    wait_seconds: float = 0.001
-
-    def resolve(self):
-        if self.device not in {"auto", "cpu", "cuda"}:
-            raise ValueError("Evaluation device must be auto, cpu or cuda")
-        if not is_int_at_least(self.workers) or not is_int_at_least(self.max_batch):
-            raise ValueError(
-                "Evaluation workers and max_batch must be positive integers"
-            )
-        if not math.isfinite(self.wait_seconds) or self.wait_seconds < 0:
-            raise ValueError("Evaluation wait_seconds must be finite and nonnegative")
-        device = self.device
-        if device == "auto":
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        if device == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError("CUDA evaluation requested but CUDA is unavailable")
-        return EvaluationRuntime(
-            device, self.workers, self.max_batch, self.wait_seconds
-        )
-
-    def identity(self):
-        value = {
-            **asdict(self),
-            "precision": "float32",
-            "evaluator_version": 1,
-            "compiled_spatial_heads": self.device == "cuda",
-            "compile_mode": "default" if self.device == "cuda" else None,
-            "attention_backend": "compact_fp32"
-            if self.device == "cuda"
-            else "dense_fp32",
-            "public_inputs": "worker_encoder_shared_slots_v1",
-            "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
-            "matmul_tf32": torch.backends.cuda.matmul.allow_tf32,
-            "cudnn_tf32": torch.backends.cudnn.allow_tf32,
-        }
-        if self.device == "cuda":
-            value.update(
-                gpu=torch.cuda.get_device_name(),
-                capability=list(torch.cuda.get_device_capability()),
-                cuda=torch.version.cuda,
-            )
-        return value
-
-
-@dataclass
-class AgentMember:
-    hidden: torch.Tensor | None = None
-
-
-@dataclass
-class AgentSession:
-    mode: str
-    temperature: float
-    collect_selection_metrics: bool
-    members: list[AgentMember]
-
-
-class BatchedInference:
-    """Batch public inputs while retaining independent GRU state per policy."""
-
-    def __init__(self, policy, device, *, hidden_capacity=32):
-        self.policies: list[Policy] = [policy]
-        self.device = device
-        self.hidden_capacity = hidden_capacity
-        self.hidden_banks = {}
-        self.batches = self.items = 0
-        self.forward_seconds = self.encoding_seconds = 0.0
-
-    @property
-    def policy(self):
-        return self.policies[0]
-
-    def gather_hidden(self, policy, agents, member=0):
-        if not policy.is_recurrent:
-            return None
-        if torch.device(self.device).type == "cuda":
-            bank = self.hidden_banks.get(member)
-            if bank is None:
-                bank = self.hidden_banks[member] = RecurrentStates(
-                    policy.hidden_size, self.device, self.hidden_capacity
-                )
-            return bank.gather(agents)
-        return torch.cat(
-            [
-                a.hidden
-                if a.hidden is not None
-                else torch.zeros(1, 1, policy.hidden_size, device=self.device)
-                for a in agents
-            ],
-            dim=1,
-        )
-
-    def store_hidden(self, agents, hidden, member=0):
-        if hidden is None:
-            return
-        bank = self.hidden_banks.get(member)
-        if bank is not None:
-            bank.scatter(agents, hidden)
-        else:
-            for agent, row in zip(agents, hidden.split(1, dim=1)):
-                agent.hidden = row.clone()
-
-    def release_agent(self, agent):
-        if agent is not None:
-            for member in getattr(agent, "members", [agent]):
-                RecurrentStates.release(member)
-
-    def combine_encoded_logits(self, logits_all, requests):
-        logits = logits_all[0]
-        choices = logits.argmax(-1).cpu().tolist()
-        detailed = any(
-            command != "observe"
-            and (agent.mode != "argmax" or agent.collect_selection_metrics)
-            for agent, command, _ in requests
-        )
-        host = logits.cpu().numpy() if detailed else None
-        return [
-            None
-            if command == "observe"
-            else dict(index=choices[i])
-            if agent.mode == "argmax" and not agent.collect_selection_metrics
-            else dict(logits=host[i, : len(encoded.sources)].copy())
-            for i, (agent, command, encoded) in enumerate(requests)
-        ]
-
-    def _forward_encoded(self, requests):
-        start = perf_counter()
-        policies = self.policies
-        if any(p.variant != policies[0].variant for p in policies):
-            raise ValueError(
-                "Shared public encoding requires identical policy variants"
-            )
-        encoded = [r[2] for r in requests]
-        batch = batch_inputs(
-            encoded,
-            self.device,
-            non_blocking=True,
-            compact_units=self.policy.attention_backend == "compact_fp32",
-        )
-        self.encoding_seconds += perf_counter() - start
-        start = perf_counter()
-        logits_all = []
-        for member, policy in enumerate(policies):
-            agents = [r[0].members[member] for r in requests]
-            hidden = self.gather_hidden(policy, agents, member)
-            logits, _, last = policy(batch, hidden, compute_value=False)
-            logits_all.append(logits)
-            self.store_hidden(agents, last, member)
-        self.batches += 1
-        self.items += len(requests)
-        return logits_all, start
-
-    @torch.inference_mode()
-    def infer_encoded(self, requests):
-        """One public encoding shared by policies; each policy keeps its own GRU."""
-        logits_all, start = self._forward_encoded(requests)
-        results = (
-            self.combine_encoded_logits(logits_all, requests)
-            if any(r[1] != "observe" for r in requests)
-            else [None] * len(requests)
-        )
-        self.forward_seconds += perf_counter() - start
-        return results
-
-    @torch.inference_mode()
-    def forward_encoded_argmax(self, requests) -> torch.Tensor:
-        """Enqueue public-encoded forward + argmax on device without host synchronization."""
-        logits, start = self._forward_encoded(requests)
-        choices = logits[0].argmax(-1)
-        self.forward_seconds += perf_counter() - start
-        return choices
-
-    @torch.inference_mode()
-    def infer(self, requests):
-        # requests are (agent, command, observation, legal_actions, forced_action).
-        started = perf_counter()
-        actions = [ordered_actions(r[3]) for r in requests]
-        encoded = [r[0].encoder.encode(r[2], a) for r, a in zip(requests, actions)]
-        batch = batch_inputs(
-            encoded,
-            self.device,
-            compact_units=self.policy.attention_backend == "compact_fp32",
-        )
-        agents = [r[0] for r in requests]
-        hidden = self.gather_hidden(self.policy, agents)
-        self.encoding_seconds += perf_counter() - started
-        started = perf_counter()
-        logits, _, next_hidden = self.policy(batch, hidden, compute_value=False)
-        fast = [
-            r[1] != "observe"
-            and r[0].mode == "argmax"
-            and not r[0].collect_selection_metrics
-            for r in requests
-        ]
-        need_logits = any(
-            r[1] != "observe" and not greedy for r, greedy in zip(requests, fast)
-        )
-        choices = logits.argmax(-1).cpu().tolist() if any(fast) else None
-        host_logits = logits.cpu() if need_logits else None
-        self.forward_seconds += perf_counter() - started
-        self.store_hidden(agents, next_hidden)
-        outputs = []
-        for index, (agent, command, observation, _, forced) in enumerate(requests):
-            if command == "observe":
-                if forced not in actions[index]:
-                    raise ValueError("Forced action is not legal")
-                agent.encoder.remember_action(forced, observation)
-                outputs.append(None)
-            else:
-                choice = (
-                    agent.action_from_index(choices[index], observation, actions[index])
-                    if fast[index]
-                    else agent.action_from_logits(
-                        host_logits[index : index + 1, : len(actions[index])],
-                        observation,
-                        actions[index],
-                    )
-                )
-                outputs.append((choice, agent.drain_diagnostics()))
-        self.batches += 1
-        self.items += len(requests)
-        return outputs
-
-    def statistics(self):
-        return dict(
-            inference_batches=self.batches,
-            inference_items=self.items,
-            mean_batch=self.items / max(1, self.batches),
-            forward_seconds=self.forward_seconds,
-            encoding_seconds=self.encoding_seconds,
-        )
-
-
-def prepare_evaluation_policy(policy, device):
-    """FP32 inference with compiled spatial/heads; no training AMP or graph pools."""
-    policy = policy.to(device).eval()
-    if str(device).startswith("cuda"):
-        policy.configure_execution(attention_backend="compact_fp32")
-        policy.enable_compile(dynamic=True, mode="default", spatial_mode="default")
-    return policy
-
-
-def _checkpoint_identity(checkpoint):
-    path = Path(checkpoint).resolve()
-    stat = path.stat()
-    return path, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
-
-
-def evaluation_policy_hash(checkpoint):
-    session = _session.get()
-    key = _checkpoint_identity(checkpoint) if session is not None else None
-    if session is not None and key in session.checkpoint_hashes:
-        return session.checkpoint_hashes[key]
-    fingerprint = policy_hash(torch.load(checkpoint, map_location="cpu", weights_only=False)["model"])
-    if session is not None:
-        session.checkpoint_hashes[key] = fingerprint
-    return fingerprint
-
-
-def evaluation_key(config, plan, out, path, purpose, runtime_identity):
-    """Return the canonical cache key without running matches."""
-    fingerprint = (
-        "cp_mirror_" + digest(config["teacher_search"])[:32]
-        if path == "cp"
-        else evaluation_policy_hash(out / path)
-    )
-
-    # Version behavior explicitly; source formatting and module names are metadata.
-    evaluator = digest(
-        {
-            "version": 1,
-            "platform": platform.system(),
-            "torch": str(torch.__version__),
-            "planner": file_sha256(combat_ai.LIBRARY_PATH),
-            "kernel": file_sha256(
-                ROOT / "build" / ("combat.dll" if sys.platform == "win32" else "libcombat.so")
-            ),
-        }
-    )
-    key = digest(
-        {
-            "purpose": purpose,
-            "policy": fingerprint,
-            "mode": "argmax",
-            "temperature": config.get("policy_temperature", 1.0),
-            "cases": [c["case_hash"] for c in plan[purpose]],
-            "evaluator": evaluator,
-            "runtime": runtime_identity,
-            "search": config["teacher_search"],
-        }
-    )
-    return fingerprint, key
-
-
-def load_evaluation_policy(checkpoint, device) -> Policy:
-    """Reuse the two most recent CUDA checkpoints without changing their weights."""
-    session = _session.get()
-    key = None
-    if session is not None and str(device).startswith("cuda"):
-        key = (str(device), *_checkpoint_identity(checkpoint))
-        cached = session.policies.get(key)
-        if cached is not None:
-            session.policies.move_to_end(key)
-            return cached
-    agent = RLAgent.from_checkpoint(checkpoint, "cpu", "argmax")
-    policy = prepare_evaluation_policy(agent.policy, device)
-    if key is not None:
-        session.policies[key] = policy
-        if len(session.policies) > 2:
-            session.policies.popitem(last=False)
-    return policy
+__all__ = [
+    "AgentMember",
+    "AgentSession",
+    "BatchedInference",
+    "ConnectionWaiter",
+    "EvaluationExecutor",
+    "EvaluationRuntime",
+    "evaluation_key",
+    "evaluation_options",
+    "evaluation_policy_hash",
+    "evaluation_precision",
+    "evaluation_session",
+    "evaluation_worker_pool",
+    "load_evaluation_policy",
+    "prepare_evaluation_policy",
+    "runtime_for",
+]
 
 
 class EvaluationExecutor:
@@ -567,6 +75,7 @@ class EvaluationExecutor:
         self.wait_seconds = 0.0
         self.wait_timeouts = 0
         self._pool = None
+        self._thread = None
 
     def __enter__(self):
         if self._pool is not None:
@@ -579,6 +88,62 @@ class EvaluationExecutor:
             self._pool.shutdown(wait=True, cancel_futures=True)
             self._pool = None
 
+    def start_service(self, *, thread_name="evaluation-inference"):
+        """Start serving pipes without creating or taking ownership of a worker pool."""
+        if self._thread is not None:
+            raise RuntimeError("Evaluation inference service already running")
+        if self.error is not None:
+            raise RuntimeError("Failed evaluation session must be closed")
+        self.stop.clear()
+        thread = Thread(target=self._serve, name=thread_name, daemon=True)
+        thread.start()
+        self._thread = thread
+
+    def stop_service(self, message="Evaluation coordinator stopped"):
+        """Join the serving thread and notify clients before worker shutdown."""
+        if self._thread is not None:
+            self.stop.set()
+            self._thread.join()
+            self._thread = None
+            self._fail_all(message)
+
+    def close_clients(self):
+        """Release server-side pipes, recurrent state, and shared slots after serving."""
+        for connection in list(self.connections):
+            self._close_client(connection)
+
+    def check_service(self, label="Evaluation"):
+        if self.error is not None:
+            raise RuntimeError(f"{label} inference service failed:\n{self.error}")
+
+    def register_client(self, connection, task, **metadata):
+        """Give the service a pipe and its task metadata before the worker sends requests."""
+        with self.lock:
+            self.configure_task(connection, task, **metadata)
+            self.connections[connection] = None
+
+    def submit_task(self, function, task, **metadata):
+        """Submit through the pool owned by this executor's context manager."""
+        if self._pool is None:
+            raise RuntimeError("Evaluation worker pool is closed")
+        return self._submit_task(self._pool, function, task, **metadata)
+
+    def started_workers(self):
+        return started_pool_workers(self._pool)
+
+    def _submit_task(self, executor, function, task, **metadata):
+        server, client = Pipe()
+        try:
+            self.register_client(server, task, **metadata)
+            return executor.submit(_remote_task, function, task, client), client
+        except BaseException:
+            # Closing the client wakes the service to release a registered server.
+            client.close()
+            with self.lock:
+                if server not in self.connections:
+                    server.close()
+            raise
+
     def _receive(self, connection):
         try:
             command, args = connection.recv()
@@ -589,22 +154,27 @@ class EvaluationExecutor:
     def configure_agent(self, connection, agent, info):
         """Allow a specialized executor to install task-local reset state."""
 
-    def configure_task(self, connection, task):
+    def configure_task(self, connection, task, **metadata):
         """Associate task-local metadata before a worker can reset its agent."""
+
+    def release_task(self, connection):
+        """Discard task-local metadata on close, including coordinator shutdown."""
+
+    def _close_client(self, connection):
+        with self.lock:
+            agent = self.connections.pop(connection, None)
+            self.release_task(connection)
+        self.inference.release_agent(agent)
+        shared = self.shared.pop(connection, None)
+        if shared is not None:
+            shared.close()
+        connection.close()
 
     def _receive_message(self, connection, command, args):
         if command == "close":
-            with self.lock:
-                agent = self.connections.pop(connection, None)
-            self.inference.release_agent(agent)
-            shared = self.shared.pop(connection, None)
-            if shared is not None:
-                shared.close()
-            connection.close()
+            self._close_client(connection)
             return None
         if command == "reset":
-            from civ5rl.engine.runtime.shared import EncodedSlots
-
             mode, temperature, metrics = args
             policies = self.inference.policies
             if any(p.variant != policies[0].variant for p in policies):
@@ -615,15 +185,13 @@ class EvaluationExecutor:
                 previous.close()
             shared = EncodedSlots(slots=1)
             self.shared[connection] = shared
-            agent = AgentSession(
-                mode, temperature, metrics, [AgentMember() for _ in policies]
-            )
+            agent = AgentSession(mode, temperature, metrics, [AgentMember() for _ in policies])
             self.connections[connection] = agent
-            info = dict(
-                shared=shared.descriptor,
-                variant=policies[0].variant,
-                attack_preview=policies[0].variant_spec.attack_preview,
-            )
+            info = {
+                "shared": shared.descriptor,
+                "variant": policies[0].variant,
+                "attack_preview": policies[0].variant_spec.attack_preview,
+            }
             self.configure_agent(connection, agent, info)
             connection.send(("ok", info))
             return None
@@ -660,7 +228,7 @@ class EvaluationExecutor:
     def _serve(self):
         waiter = None
         try:
-            waiter = _ConnectionWaiter()
+            waiter = ConnectionWaiter()
             while not self.stop.is_set():
                 with self.lock:
                     connections = list(self.connections)
@@ -723,11 +291,7 @@ class EvaluationExecutor:
 
     def _run(self, executor, function, tasks):
         tasks = iter(tasks)
-        if self.error is not None:
-            raise RuntimeError("Failed evaluation session must be closed")
-        self.stop.clear()
-        thread = Thread(target=self._serve, name="evaluation-inference", daemon=True)
-        thread.start()
+        self.start_service()
         pending = {}
 
         def submit():
@@ -735,11 +299,8 @@ class EvaluationExecutor:
                 task = next(tasks)
             except StopIteration:
                 return False
-            server, client = Pipe()
-            with self.lock:
-                self.connections[server] = None
-                self.configure_task(server, task)
-            pending[executor.submit(_remote_task, function, task, client)] = client
+            future, client = self._submit_task(executor, function, task)
+            pending[future] = client
             return True
 
         try:
@@ -747,28 +308,17 @@ class EvaluationExecutor:
                 if not submit():
                     break
             while pending:
-                if self.error is not None:
-                    raise RuntimeError(
-                        f"Evaluation inference service failed:\n{self.error}"
-                    )
+                self.check_service()
                 done, _ = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
                 for future in done:
                     pending.pop(future).close()
                     yield future.result()
                     submit()
         finally:
-            self.stop.set()
-            thread.join()
-            self._fail_all("Evaluation coordinator stopped")
+            self.stop_service()
             for client in pending.values():
                 client.close()
-            for connection, agent in list(self.connections.items()):
-                self.inference.release_agent(agent)
-                connection.close()
-            self.connections.clear()
-            for shared in self.shared.values():
-                shared.close()
-            self.shared.clear()
+            self.close_clients()
 
     def statistics(self):
         """Return gather overhead, timeout count and the concurrency batch ceiling.

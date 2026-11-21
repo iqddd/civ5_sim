@@ -10,6 +10,7 @@ from torch.nn import functional as F
 from civ5rl.core.schema import (
     ACTION_DIM,
     ACTION_INPUT_DIM,
+    ATTACK_PREVIEW_DIM,
     C2_ATTN_HEADS,
     C2_DISTANCE_BUCKETS,
     CONTEXT_INPUT_DIM,
@@ -87,7 +88,11 @@ def batch_inputs(
         has_previews = [item.attack_preview is not None for item in items]
         if any(has_previews) and not all(has_previews):
             raise ValueError("Mixed recorded/missing attack preview inputs")
-        previews = np.zeros((batch_size, num_actions, 5), np.float32) if all(has_previews) else None
+        previews = (
+            np.zeros((batch_size, num_actions, ATTACK_PREVIEW_DIM), np.float32)
+            if all(has_previews)
+            else None
+        )
         for i, item in enumerate(items):
             action_count = len(item.sources)
             sources[i, :action_count] = item.sources
@@ -602,7 +607,7 @@ class Policy(nn.Module):
         self.coalesced_accumulation = False
         self._initialize()
         if self.variant_spec.attack_preview:
-            self.attack_preview = nn.Linear(5, HEX_DIM, bias=False)
+            self.attack_preview = nn.Linear(ATTACK_PREVIEW_DIM, HEX_DIM, bias=False)
             nn.init.zeros_(self.attack_preview.weight)
 
     @property

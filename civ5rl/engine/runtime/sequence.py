@@ -1,6 +1,9 @@
 """Shared storage and packing of recurrent decision sequences."""
 
+from __future__ import annotations
+
 from contextlib import contextmanager
+from functools import lru_cache
 from typing import NamedTuple, Protocol
 
 import numpy as np
@@ -99,8 +102,6 @@ _ACTION_TRIM_KEYS = (
     "action_mask",
     "attack_preview",
 )
-_COMPILED_GATHER = None
-_COMPILED_RAGGED_GATHER = None
 _PACKED_INDEX_KEYS = ("neighbors", "sources", "targets")
 
 
@@ -131,17 +132,78 @@ def _gather_ragged(data, indices, width, include_behavior):
     return gathered
 
 
-def _compiled_gather(*, ragged_actions=False):
-    global _COMPILED_GATHER, _COMPILED_RAGGED_GATHER
-    if ragged_actions:
-        if _COMPILED_RAGGED_GATHER is None:
-            _COMPILED_RAGGED_GATHER = torch.compile(_gather_ragged, dynamic=True, fullgraph=True)
-        return _COMPILED_RAGGED_GATHER
-    if _COMPILED_GATHER is None:
-        _COMPILED_GATHER = torch.compile(
-            _gather_resident, dynamic=True, fullgraph=True
+@lru_cache(maxsize=2)
+def _compiled_gather(ragged_actions: bool):
+    gather = _gather_ragged if ragged_actions else _gather_resident
+    return torch.compile(gather, dynamic=True, fullgraph=True)
+
+
+def _allocate_resident_inputs(flat, action_counts, action_offsets, device, deadline, reserve_bytes):
+    # Derive shapes and dtypes from canonical batching. Encoded cell indices
+    # fit in int16. Gathers widen only the rows in use by the model.
+    template = batch_inputs(flat[:1], "cpu", index_dtype=np.int16)
+    cell_width = max(len(item.cells) for item in flat)
+    action_width = int(action_counts.max())
+    axes = {field.name: field.axis for field in ENCODED_FIELDS}
+    axes.update(cell_mask="cells", action_mask="actions")
+    if action_offsets is not None:
+        template.pop("action_mask")
+        template["action_spans"] = torch.from_numpy(action_offsets).new_empty((1, 2))
+        axes["action_spans"] = "fixed"
+
+    shapes = {}
+    for key, value in template.items():
+        shape = [len(flat), *value.shape[1:]]
+        if axes[key] == "cells":
+            shape[1] = cell_width
+        elif axes[key] == "actions":
+            if action_offsets is None:
+                shape[1] = action_width
+            else:
+                # All rows share a single padding action at the end.
+                shape = [int(action_offsets[-1]) + 1, *value.shape[2:]]
+        shapes[key] = shape
+    required_bytes = sum(int(np.prod(shapes[key])) * value.element_size() for key, value in template.items())
+    if deadline_reached(deadline):
+        raise TimeoutError("Resident preparation exceeded optimization budget")
+    data = {}
+    try:
+        with allocation_with_reserve(device, reserve_bytes) as admission:
+            for key, value in template.items():
+                data[key] = torch.empty(shapes[key], dtype=value.dtype, device=device)
+    except torch.cuda.OutOfMemoryError:
+        data.clear()
+        raise
+    return data, required_bytes, admission
+
+
+def _copy_resident_inputs(data, flat, action_counts, action_offsets, device, deadline):
+    ragged_actions = action_offsets is not None
+    for first in range(0, len(flat), 256):
+        if deadline_reached(deadline):
+            raise TimeoutError("Resident preparation exceeded optimization budget")
+        items = flat[first : first + 256]
+        part = batch_inputs(
+            items, device, non_blocking=True, index_dtype=np.int16, spatial_only=ragged_actions
         )
-    return _COMPILED_GATHER
+        stop = first + len(items)
+        for key, target in data.items():
+            if ragged_actions and key in _ACTION_TRIM_KEYS:
+                dtype = np.int16 if key in _PACKED_INDEX_KEYS else np.float32
+                values = np.concatenate([getattr(item, key) for item in items], dtype=dtype)
+                target[action_offsets[first] : action_offsets[stop]].copy_(
+                    torch.from_numpy(values), non_blocking=True
+                )
+            elif key != "action_spans":
+                destination = target[first:stop]
+                destination.fill_(INVALID_INDEX if key in _PACKED_INDEX_KEYS else 0)
+                destination[tuple(slice(0, size) for size in part[key].shape)] = part[key]
+    if ragged_actions:
+        action_spans = np.column_stack((action_offsets[:-1], action_counts))
+        data["action_spans"].copy_(torch.from_numpy(action_spans), non_blocking=True)
+        for key in _ACTION_TRIM_KEYS:
+            if key in data:
+                data[key][-1].fill_(INVALID_INDEX if key in _PACKED_INDEX_KEYS else 0)
 
 
 class SequenceBuffer:
@@ -173,10 +235,7 @@ class SequenceBuffer:
         self.encoded = encoded
         self.memory_admission = memory_admission
         self.required_bytes = (
-            sum(
-                tensor.numel() * tensor.element_size()
-                for tensor in (data or {}).values()
-            )
+            sum(tensor.numel() * tensor.element_size() for tensor in (data or {}).values())
             if required_bytes is None
             else required_bytes
         )
@@ -215,80 +274,12 @@ class SequenceBuffer:
         if not resident:
             return packed
 
-        # Derive shapes and dtypes from the canonical batching implementation.
-        # Encoded cell indices fit in int16, including the invalid sentinel.
-        # Widen only the rows in use to satisfy the model's gather operations.
-        template = batch_inputs(flat[:1], "cpu", index_dtype=np.int16)
-        rows = len(flat)
-        cells = max(len(item.cells) for item in flat)
-        actions = int(action_counts.max())
-        shapes = {}
-        axes = {field.name: field.axis for field in ENCODED_FIELDS}
-        axes.update(cell_mask="cells", action_mask="actions")
-        if ragged_actions:
-            action_offsets = np.cumsum(np.r_[0, action_counts])
-            action_spans = np.column_stack((action_offsets[:-1], action_counts))
-            template.pop("action_mask")
-            template["action_spans"] = torch.from_numpy(action_spans[:1])
-            axes["action_spans"] = "fixed"
-        for key, value in template.items():
-            shape = list(value.shape)
-            shape[0] = rows
-            if axes[key] == "cells":
-                shape[1] = cells
-            elif axes[key] == "actions":
-                shape[1] = actions
-                if ragged_actions:
-                    shape = [int(action_offsets[-1]) + 1, *value.shape[2:]]
-            shapes[key] = shape
-        required_bytes = sum(
-            int(np.prod(shapes[key])) * value.element_size()
-            for key, value in template.items()
+        action_offsets = np.cumsum(np.r_[0, action_counts]) if ragged_actions else None
+        data, required_bytes, admission = _allocate_resident_inputs(
+            flat, action_counts, action_offsets, device, deadline, reserve_bytes
         )
-        if deadline_reached(deadline):
-            raise TimeoutError("Resident preparation exceeded optimization budget")
-        data = {}
-        try:
-            with allocation_with_reserve(device, reserve_bytes) as admission:
-                for key, value in template.items():
-                    data[key] = torch.empty(
-                        shapes[key], dtype=value.dtype, device=device
-                    )
-        except torch.cuda.OutOfMemoryError:
-            data.clear()
-            raise
-        for first in range(0, rows, 256):
-            if deadline_reached(deadline):
-                raise TimeoutError("Resident preparation exceeded optimization budget")
-            items = flat[first : first + 256]
-            part = batch_inputs(
-                items, device, non_blocking=True, index_dtype=np.int16, spatial_only=ragged_actions
-            )
-            for key, target in data.items():
-                if ragged_actions and key in _ACTION_TRIM_KEYS:
-                    stop = first + len(items)
-                    dtype = np.int16 if key in _PACKED_INDEX_KEYS else np.float32
-                    values = np.concatenate([getattr(item, key) for item in items], dtype=dtype)
-                    destination = target[action_offsets[first] : action_offsets[stop]]
-                    destination.copy_(torch.from_numpy(values), non_blocking=True)
-                    continue
-                if key == "action_spans":
-                    continue
-                destination = target[first : first + len(part["cells"])]
-                destination.fill_(
-                    INVALID_INDEX if key in _PACKED_INDEX_KEYS else 0
-                )
-                destination[tuple(slice(0, size) for size in part[key].shape)] = part[
-                    key
-                ]
-        if ragged_actions:
-            data["action_spans"].copy_(torch.from_numpy(action_spans), non_blocking=True)
-            for key in _ACTION_TRIM_KEYS:
-                if key in data:
-                    data[key][-1].fill_(INVALID_INDEX if key in _PACKED_INDEX_KEYS else 0)
-        packed.update(
-            data=data, required_bytes=required_bytes, memory_admission=admission
-        )
+        _copy_resident_inputs(data, flat, action_counts, action_offsets, device, deadline)
+        packed.update(data=data, required_bytes=required_bytes, memory_admission=admission)
         return packed
 
     def chunks(self, size=DEFAULT_PREFIX_BLOCK_SIZE):
@@ -367,10 +358,7 @@ class SequenceBuffer:
         width = max(
             int(
                 self.action_counts[
-                    int(self.offsets[episode_index]) + start : int(
-                        self.offsets[episode_index]
-                    )
-                    + stop
+                    int(self.offsets[episode_index]) + start : int(self.offsets[episode_index]) + stop
                 ].max()
             )
             for episode_index, start, stop in spans
@@ -381,11 +369,7 @@ class SequenceBuffer:
         """Recurrent prefixes need neither action tensors nor PPO labels."""
         if self.data is None:
             return batch_inputs(
-                [
-                    item
-                    for episode, start, stop in spans
-                    for item in self.encoded[episode][start:stop]
-                ],
+                [item for episode, start, stop in spans for item in self.encoded[episode][start:stop]],
                 self.device,
                 non_blocking=True,
                 spatial_only=True,
@@ -399,12 +383,38 @@ class SequenceBuffer:
         return _gather_resident({key: self.data[key] for key in keys}, indices, None)
 
     def enable_compiled_gather(self):
-        self._gather_runner = _compiled_gather(
-            ragged_actions=self.data is not None and "action_spans" in self.data
-        )
+        self._gather_runner = _compiled_gather(self.data is not None and "action_spans" in self.data)
 
     def enable_async_transfers(self):
         self.async_transfers = str(self.device).startswith("cuda")
+
+
+@torch.no_grad()
+def prefixes(policy, cache: SequenceCache, spans, block_size=DEFAULT_PREFIX_BLOCK_SIZE, *, forward=None):
+    """Rebuild hidden state from each span's earlier decisions without gradients."""
+    if not policy.is_recurrent:
+        return None
+    forward = forward or policy.forward_sequences
+    hidden = torch.zeros((1, len(spans), policy.hidden_size), device=cache.device)
+    is_cuda = str(cache.device).startswith("cuda")
+    for offset in range(0, max((start for _, start, _ in spans), default=0), block_size):
+        active = [(slot, episode, start) for slot, (episode, start, _) in enumerate(spans) if start > offset]
+        subspans = [Span(episode, offset, min(start, offset + block_size)) for _, episode, start in active]
+        batch = cache.gather_spatial_inputs(subspans)
+        lengths = [span.length for span in subspans]
+        if policy.spatial_cuda_graphs:
+            torch.compiler.cudagraph_mark_step_begin()
+        if len(active) == len(spans):
+            hidden = forward(batch, lengths, hidden, memory_only=True)
+        else:
+            slots = torch.tensor(
+                [slot for slot, _, _ in active],
+                dtype=torch.long,
+                pin_memory=is_cuda,
+            ).to(cache.device, non_blocking=is_cuda)
+            last = forward(batch, lengths, hidden.index_select(1, slots), memory_only=True)
+            hidden.index_copy_(1, slots, last)
+    return hidden
 
 
 def take_counted_span(episode, start, stop, masks, limit):

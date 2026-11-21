@@ -1,16 +1,14 @@
 """Versioned configuration, independent random streams and artifact I/O."""
 
-import builtins
+from __future__ import annotations
+
+import gzip
 import hashlib
-import importlib.util
 import json
-import linecache
 import os
 import random
-import subprocess
-import sys
 from contextlib import contextmanager
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 import numpy as np
@@ -18,88 +16,14 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def load_module_from_git(
-    module_name, rel_path, rev="HEAD", *, fallback_paths=(), from_import_aliases=None
-):
-    """Load one trusted Git source blob in memory under an unused module name.
-
-    Dependencies remain the current installed/workspace modules: this is a
-    single-module baseline, not a historical environment. __file__ is virtual;
-    code requiring resources relative to its source needs a separate checkout.
-    A failed import removes its temporary registration. Existing modules are
-    never replaced, which prevents an ABBA baseline from poisoning live imports.
-    """
-    if not module_name or any(not p.isidentifier() for p in module_name.split(".")):
-        raise ValueError("Expected a valid dotted module name")
-    if module_name in sys.modules:
-        raise ValueError(f"Module already loaded: {module_name}")
-    names = tuple(map(str, (rel_path, *fallback_paths)))
-    for name in names:
-        path = PurePosixPath(name)
-        if (
-            not name
-            or "\\" in name
-            or ":" in name
-            or path.is_absolute()
-            or any(p in ("", ".", "..") for p in name.split("/"))
-            or path.suffix != ".py"
-        ):
-            raise ValueError("Expected a repository-relative Python source path")
-    if not isinstance(rev, str) or not rev or rev.startswith("-"):
-        raise ValueError("Expected a Git revision")
-    commit = subprocess.check_output(
-        ["git", "rev-parse", "--verify", f"{rev}^{{commit}}"], cwd=ROOT, text=True
-    ).strip()
-    for name in names:
-        blob = subprocess.run(
-            ["git", "show", f"{commit}:{name}"], cwd=ROOT, capture_output=True
-        )
-        if blob.returncode == 0:
-            break
-    blob.check_returncode()
-    raw = blob.stdout
-    source = importlib.util.decode_source(raw)
-    filename = f"git:{commit}:{name}"
-    spec = importlib.util.spec_from_loader(module_name, loader=None, origin=filename)
-    module = importlib.util.module_from_spec(spec)
-    if from_import_aliases:
-        # Translate explicit historical from-imports in this module only.
-        def baseline_import(name, globals=None, locals=None, fromlist=(), level=0):
-            if not level and fromlist:
-                name = from_import_aliases.get(name, name)
-            return builtins.__import__(name, globals, locals, fromlist, level)
-
-        module.__dict__["__builtins__"] = {
-            **vars(builtins),
-            "__import__": baseline_import,
-        }
-    module.__file__ = filename
-    module.__git_baseline__ = {
-        "requested_rev": rev,
-        "commit": commit,
-        "path": name,
-        "sha256": hashlib.sha256(raw).hexdigest(),
-        "dependency_scope": "current workspace; selected module only",
-    }
-    # Functions remain inspectable and tracebacks show the actual Git source.
-    linecache.cache[filename] = (
-        len(raw),
-        None,
-        source.splitlines(keepends=True),
-        filename,
-    )
-    sys.modules[module_name] = module
-    try:
-        exec(compile(source, filename, "exec"), module.__dict__)  # noqa: S102 -- explicitly requested trusted Git code
-    except BaseException:
-        sys.modules.pop(module_name, None)
-        linecache.cache.pop(filename, None)
-        raise
-    return module
-
-
 def read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def read_gzip_json(path):
+    """Read a UTF-8 JSON payload from a gzip-compressed file."""
+    with gzip.open(path, "rt", encoding="utf-8") as stream:
+        return json.load(stream)
 
 
 def write_json(path, value):

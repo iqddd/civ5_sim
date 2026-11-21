@@ -13,9 +13,8 @@ import torch
 from civ5rl.engine.imitation.core import label_minibatches
 from civ5rl.engine.imitation.pipeline import backward_minibatch_async
 from civ5rl.engine.imitation.storage import PreparedDemonstrations, prepare_inputs
-from civ5rl.engine.runtime.telemetry import (
-    CompilationClock,
-    ResourceMonitor,
+from civ5rl.engine.runtime.telemetry import CompilationClock, ResourceMonitor
+from civ5rl.engine.runtime.telemetry_analysis import (
     analyze_telemetry,
     integrate_gpu_interval,
 )

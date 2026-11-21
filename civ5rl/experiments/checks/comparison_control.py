@@ -18,8 +18,8 @@ import torch
 
 from civ5rl.deploy.archive import seven_zip
 from civ5rl.engine.comparison.continuation import continuation_seconds, validate_continuation
-from civ5rl.engine.comparison.control import fit_full_corpus
 from civ5rl.engine.comparison.heads import configure_heads
+from civ5rl.engine.comparison.training import fit_full_corpus
 from civ5rl.engine.evaluation.executor import EvaluationRuntime, evaluation_key, evaluation_precision
 from civ5rl.engine.runtime.budget import PhaseBudget
 from civ5rl.provenance.checkpoint import verify_frozen_passport

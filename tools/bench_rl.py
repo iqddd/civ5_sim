@@ -50,10 +50,10 @@ def resolve_inputs(args, parser):
 
 
 def replay(args, parser, config, inputs):
-    import civ5rl.engine.ppo.backend as current
-    from civ5rl.engine.ppo.benchmark import load_replay_baseline, run_replay_benchmark
+    from civ5rl.engine.ppo import backend
     from civ5rl.engine.ppo.storage import load_rollout
     from civ5rl.engine.runtime.telemetry import ResourceMonitor
+    from civ5rl.experiments.benchmarks.ppo import run_replay_benchmark
     from civ5rl.experiments.imitation.helpers import load_policy
     from civ5rl.provenance.common import (
         configure,
@@ -69,29 +69,23 @@ def replay(args, parser, config, inputs):
         parser.error("benchmark output already exists; choose a new result path")
     if output in inputs:
         parser.error("output must not overwrite an input")
-    modules = {}
-    if args.compare_git_rev:
-        modules["git"] = load_replay_baseline(args.compare_git_rev)
-    modules["working"] = current
     configure(args.seed, args.device)
     episodes = load_rollout(inputs[2])
     total = len(episodes)
     if args.episode_limit:
         episodes = episodes[: args.episode_limit]
-    # The baseline is intentionally one module. Record and protect all shared
-    # execution sources to make the comparison's dependency scope explicit.
-    shared = [
-        p
-        for p in {
+    backend_path = Path(backend.__file__).resolve()
+    shared = sorted(
+        {
             Path(module.__file__).resolve()
             for name, module in tuple(sys.modules.items())
             if name.startswith(("civ5rl.", "civ5sim.", "civ5map."))
             and getattr(module, "__file__", None)
             and Path(module.__file__).is_file()
         }
-        if p.resolve() != Path(current.__file__).resolve()
-    ]
-    protected = list(dict.fromkeys([*inputs, Path(current.__file__), *shared]))
+        - {backend_path}
+    )
+    protected = list(dict.fromkeys([*inputs, backend_path, *shared]))
     policy = load_policy(config, inputs[1], args.device)
     telemetry = output.parent / (output.stem + "-telemetry")
     if telemetry.exists():
@@ -101,7 +95,6 @@ def replay(args, parser, config, inputs):
         result = run_replay_benchmark(
             policy=policy,
             episodes=episodes,
-            implementations=modules,
             config=config,
             device=args.device,
             repeats=args.repeats,
@@ -111,9 +104,7 @@ def replay(args, parser, config, inputs):
         )
         monitor.mark("finished")
     result.update(
-        comparison_scope="selected ppo_fast.py module; shared current model/dependencies/native libraries",
-        git_baseline=getattr(modules.get("git"), "__git_baseline__", None),
-        current_source_sha256=file_sha256(current.__file__),
+        current_source_sha256=file_sha256(backend_path),
         shared_source_sha256={
             p.relative_to(ROOT).as_posix(): file_sha256(p) for p in shared
         },
@@ -127,17 +118,11 @@ def replay(args, parser, config, inputs):
         telemetry_directory=str(telemetry),
         scientific_training_extended=False,
     )
-    if "git" in result["results"]:
-        result["working_over_git_time"] = (
-            result["results"]["working"]["mean_seconds"]
-            / result["results"]["git"]["mean_seconds"]
-        )
     write_json(output, result)
     print(
         {
             "output": str(output),
             "order": result["order"],
-            "parity_verified": result["parity_verified"],
             "results": result["results"],
         }
     )
@@ -148,9 +133,9 @@ def full_cycle(args, parser, config, inputs):
 
     from civ5rl.engine.collection.collector import Collector
     from civ5rl.engine.ppo.adam import optimizer_for
-    from civ5rl.engine.ppo.benchmark import run_full_cycle_benchmark
     from civ5rl.engine.ppo.storage import load_rollout
     from civ5rl.engine.runtime.telemetry import ResourceMonitor
+    from civ5rl.experiments.benchmarks.ppo import run_full_cycle_benchmark
     from civ5rl.experiments.imitation.helpers import load_policy
     from civ5rl.provenance import bound_cases, case_manifest
     from civ5rl.provenance.common import configure, write_json
@@ -255,16 +240,13 @@ def main():
         "--repeats",
         type=int,
         default=3,
-        help="Replay ABBA blocks or measured full-cycle/PPO update trials",
+        help="Measured replay passes or full-cycle/PPO update trials",
     )
     parser.add_argument(
         "--warmup",
         type=int,
         default=1,
         help="Replay/PPO update warmup passes (or BC warmup minibatches)",
-    )
-    parser.add_argument(
-        "--compare-git-rev", help="Replay baseline: ppo_fast.py from this Git revision"
     )
     parser.add_argument(
         "--episode-limit",
@@ -440,8 +422,6 @@ def main():
         or (args.episode_limit is not None and args.episode_limit < 1)
     ):
         parser.error("repeats, warmup and episode limit must be positive")
-    if args.compare_git_rev and args.phase != "replay":
-        parser.error("--compare-git-rev applies to replay only")
     if args.episode_limit and args.phase not in ("replay", "ppo-update"):
         parser.error("--episode-limit applies to replay and ppo-update only")
     config, inputs = resolve_inputs(args, parser)

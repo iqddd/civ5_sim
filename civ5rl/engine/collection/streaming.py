@@ -10,33 +10,30 @@ from multiprocessing.connection import wait
 from queue import Empty, Queue
 from threading import Event, Lock, Thread, get_native_id
 from time import perf_counter, perf_counter_ns
-from typing import TYPE_CHECKING
 
 import numpy as np
 
 from civ5rl.core.context import context_from_spec
 from civ5rl.core.observation import ObservationEncoder
+from civ5rl.engine.collection.diagnostics import Diagnostics, merge_workers
+from civ5rl.engine.collection.state import (
+    WORKER_TIMEOUT_SECONDS,
+    CollectionSlot,
+    CollectionWave,
+    EpisodeBuilder,
+)
 from civ5rl.engine.collection.workers import streaming_worker
 from civ5rl.engine.runtime.budget import deadline_reached, resolve_deadline
-
-if TYPE_CHECKING:
-    from civ5rl.engine.collection.collector import EpisodeBuilder
+from civ5rl.provenance.common import write_json
 
 
-@dataclass
-class StreamingSlot:
+@dataclass(kw_only=True)
+class StreamingSlot(CollectionSlot):
     """Own the state and lifecycle rules of a single environment slot in streaming mode."""
 
     slot_index: int
-    builder: EpisodeBuilder | None = None
-    encoder: ObservationEncoder | None = None
-    opp_encoder: ObservationEncoder | None = None
-    rng: random.Random | None = None
-    opp_rng: random.Random | None = None
-    opponent_id: str | None = None
     generation: int = 0
     episode_id: int | None = None
-    state: dict | None = None
     idle_since: float = 0.0
 
     @property
@@ -59,8 +56,6 @@ class StreamingSlot:
         record_hidden=True,
         now: float | None = None,
     ) -> float:
-        from civ5rl.engine.collection.collector import EpisodeBuilder
-
         self.episode_id = episode_id
         self.builder = EpisodeBuilder(
             spec,
@@ -71,19 +66,13 @@ class StreamingSlot:
             record_hidden=record_hidden,
         )
         self.encoder = (
-            None
-            if worker_encoding
-            else ObservationEncoder(context_from_spec(spec), policy.variant)
+            None if worker_encoding else ObservationEncoder(context_from_spec(spec), policy.variant)
         )
-        self.opponent_id = (
-            spec.get("opponent_id") if spec.get("opponent") == "policy" else None
-        )
+        self.opponent_id = spec.get("opponent_id") if spec.get("opponent") == "policy" else None
         self.opp_encoder = (
             None
             if (worker_encoding or self.opponent_id is None)
-            else ObservationEncoder(
-                context_from_spec(spec, side=1 - spec["learner_side"]), policy.variant
-            )
+            else ObservationEncoder(context_from_spec(spec, side=1 - spec["learner_side"]), policy.variant)
         )
         self.rng = random.Random(spec["agent_seeds"][spec["learner_side"]])
         self.opp_rng = (
@@ -97,11 +86,9 @@ class StreamingSlot:
         # Lifetime rule 2 (wave-scoped): self.generation is intentionally NOT reset here and
         # keeps growing monotonically across all episodes until collect_streaming finishes.
         if hidden is not None:
-            hidden[:, self.slot_index::hidden.shape[1] // 2].zero_()
+            hidden[:, self.slot_index :: hidden.shape[1] // 2].zero_()
         current_time = perf_counter() if now is None else now
         return current_time - self.idle_since
-
-    assign_episode = assign
 
     def accept_reply(self, item, *, is_ready: bool = False) -> dict:
         if not self.is_active or is_ready or item.generation != self.generation + 1:
@@ -110,9 +97,7 @@ class StreamingSlot:
         self.state = item.state
         return item.state
 
-    def complete(
-        self, state: dict | None = None, *, now: float | None = None
-    ) -> tuple[int, dict]:
+    def complete(self, state: dict | None = None, *, now: float | None = None) -> tuple[int, dict]:
         if state is None:
             state = self.state
         episode_id = self.episode_id
@@ -128,43 +113,6 @@ class StreamingSlot:
         self.idle_since = perf_counter() if now is None else now
         return episode_id, episode
 
-    finalize_episode = complete
-
-
-class _StreamingWave:
-    """Streaming state with direct access to episode-owned slots."""
-
-    def __init__(self, wave_id: int, slots: list[StreamingSlot], hidden):
-        self.wave_id = wave_id
-        self.slots = slots
-        self.hidden = hidden
-        self.pending = set()
-        self.decisions = 0
-
-    def slot_state(self, i):
-        return self.slots[i].state
-
-    def slot_encoder(self, i):
-        return self.slots[i].encoder
-
-    def slot_opp_encoder(self, i):
-        return self.slots[i].opp_encoder
-
-    def slot_builder(self, i):
-        return self.slots[i].builder
-
-    def slot_rng(self, i):
-        return self.slots[i].rng
-
-    def slot_opp_rng(self, i):
-        return self.slots[i].opp_rng
-
-    def slot_opponent_id(self, i):
-        return self.slots[i].opponent_id
-
-    def slot_generation(self, i):
-        return self.slots[i].generation
-
 
 class _ReplyPump:
     """Drain the duplex Pipes even while the owner sends large assignments."""
@@ -178,8 +126,6 @@ class _ReplyPump:
         self.lock = Lock()
         self.unaccepted = 0
         if diagnostics:
-            from civ5rl.engine.collection.diagnostics import Diagnostics
-
             self.diagnostics = Diagnostics(0)
             self.diagnostics.gauge("received_unaccepted_observations", 0)
 
@@ -188,9 +134,7 @@ class _ReplyPump:
             count = sum(not item.state["done"] for item in payload["items"])
             with self.lock:
                 self.unaccepted -= count
-                self.diagnostics.gauge(
-                    "received_unaccepted_observations", self.unaccepted
-                )
+                self.diagnostics.gauge("received_unaccepted_observations", self.unaccepted)
 
     def __enter__(self):
         self.thread.start()
@@ -220,12 +164,8 @@ class _ReplyPump:
                     count = sum(not item.state["done"] for item in payload["items"])
                     with self.lock:
                         self.unaccepted += count
-                        self.diagnostics.gauge(
-                            "received_unaccepted_observations", self.unaccepted
-                        )
-                self.queue.put(
-                    (worker, kind, payload, perf_counter(), perf_counter() - started)
-                )
+                        self.diagnostics.gauge("received_unaccepted_observations", self.unaccepted)
+                self.queue.put((worker, kind, payload, perf_counter(), perf_counter() - started))
 
 
 class StreamingScheduler:
@@ -250,7 +190,7 @@ class StreamingScheduler:
         export_seconds = 0
         reports = []
         with _ReplyPump(collector.workers, collector.collection_diagnostics) as replies:
-            episodes, following, timing, diag = _collect_streaming(
+            collection = _StreamingCollection(
                 collector,
                 replies,
                 policy,
@@ -262,6 +202,7 @@ class StreamingScheduler:
                 max_decisions,
                 episode_length_hint,
             )
+            episodes, following, timing, diag = collection.collect()
             if diag:
                 if monitor:
                     monitor.mark("diagnostic_export")
@@ -275,358 +216,371 @@ class StreamingScheduler:
                     reports.append(payload)
                 export_seconds = perf_counter() - export_started
         collection_seconds = perf_counter() - started - export_seconds
-        timing["receiver_shutdown_seconds"] = (
-            collection_seconds - timing["collection_seconds"]
-        )
+        timing["receiver_shutdown_seconds"] = collection_seconds - timing["collection_seconds"]
         timing["collection_seconds"] = collection_seconds
         if diag:
-            from civ5rl.engine.collection.diagnostics import merge_workers
-
             export_started = perf_counter()
             timing["diagnostics"] = dict(
                 schema=1,
                 parent=diag.report(ended_ns=diag.stopped_ns),
-                receiver=replies.diagnostics.report(
-                    ended_ns=diag.stopped_ns, include_process_cpu=False
-                ),
+                receiver=replies.diagnostics.report(ended_ns=diag.stopped_ns, include_process_cpu=False),
                 **merge_workers(reports),
             )
-            timing["diagnostic_export_seconds"] = (
-                export_seconds + perf_counter() - export_started
-            )
+            timing["diagnostic_export_seconds"] = export_seconds + perf_counter() - export_started
         return episodes, following, timing
 
 
-def _collect_streaming(
-    collector,
-    replies,
-    policy,
-    stage,
-    next_episode,
-    monitor,
-    fixed_specs,
-    deadline,
-    max_decisions,
-    episode_length_hint,
-):
-    import torch
+class _StreamingCollection:
+    """Own one collection's admission, queues and metrics on the parent thread."""
 
-    from civ5rl.engine.collection.collector import WORKER_TIMEOUT_SECONDS
+    def __init__(
+        self,
+        collector,
+        replies,
+        policy,
+        stage,
+        next_episode,
+        monitor,
+        fixed_specs,
+        deadline,
+        max_decisions,
+        episode_length_hint,
+    ):
+        import torch
 
-    if episode_length_hint is None:
-        episode_length_hint = 128.0
-    if not math.isfinite(episode_length_hint) or episode_length_hint <= 0:
-        raise ValueError("episode_length_hint must be positive and finite")
-    started = perf_counter()
-    policy.eval()
-    capacity = collector.num_envs
-    performance = collector.config.get("performance", {})
-    worker_encoding = performance.get("worker_encoding", False)
-    reuse_encoded = performance.get("reuse_encoded", False)
-    target = collector.config["collection"]["min_learner_decisions_per_update"]
-    if max_decisions is not None:
-        target = (
-            max_decisions if fixed_specs is not None else min(target, max_decisions)
+        self.collector = collector
+        self.replies = replies
+        self.policy = policy
+        self.stage = stage
+        self.next_episode = next_episode
+        self.monitor = monitor
+        self.fixed_specs = fixed_specs
+        self.deadline = deadline
+        self.max_decisions = max_decisions
+        if episode_length_hint is None:
+            episode_length_hint = 128.0
+        if not math.isfinite(episode_length_hint) or episode_length_hint <= 0:
+            raise ValueError("episode_length_hint must be positive and finite")
+        self.episode_length_hint = episode_length_hint
+        self.started = perf_counter()
+        policy.eval()
+        self.capacity = collector.num_envs
+        performance = collector.config.get("performance", {})
+        self.worker_encoding = performance.get("worker_encoding", False)
+        self.reuse_encoded = performance.get("reuse_encoded", False)
+        self.target = collector.config["collection"]["min_learner_decisions_per_update"]
+        if max_decisions is not None:
+            self.target = max_decisions if fixed_specs is not None else min(self.target, max_decisions)
+        wave_id = collector.next_wave_id()
+        self.diag = None
+        if collector.collection_diagnostics:
+            self.diag = Diagnostics(8192, collection=wave_id)
+        self.slots = [StreamingSlot(slot_index=i, idle_since=self.started) for i in range(self.capacity)]
+        hidden = (
+            torch.zeros((1, 2 * self.capacity, policy.hidden_size), device=collector.device)
+            if policy.is_recurrent
+            else None
         )
-    wave_id = collector.next_wave_id()
-    diag = None
-    if collector.collection_diagnostics:
-        from civ5rl.engine.collection.diagnostics import Diagnostics
-
-        diag = Diagnostics(8192, collection=wave_id)
-    slots = [StreamingSlot(slot_index=i, idle_since=started) for i in range(capacity)]
-    hidden = (
-        torch.zeros((1, 2 * capacity, policy.hidden_size), device=collector.device)
-        if policy.is_recurrent
-        else None
-    )
-    wave = _StreamingWave(wave_id, slots, hidden)
-    locations = collector.slot_locations
-    global_slots = {location: i for i, location in enumerate(locations)}
-    for worker, (connection, _) in enumerate(collector.workers):
-        connection.send(
+        self.wave = CollectionWave(wave_id, self.slots, hidden)
+        self.locations = collector.slot_locations
+        self.global_slots = collector._global_slots
+        for worker, (connection, _) in enumerate(collector.workers):
+            connection.send(
+                (
+                    "reset",
+                    {
+                        "wave": self.wave.wave_id,
+                        "variant": policy.variant,
+                        "capacity": collector.worker_capacities[worker],
+                        "reply_size": collector.reply_size,
+                        "collection_diagnostics": collector.collection_diagnostics,
+                    },
+                )
+            )
+        self.times = dict.fromkeys(
             (
-                "reset",
-                {
-                    "wave": wave.wave_id,
-                    "variant": policy.variant,
-                    "capacity": collector.worker_capacities[worker],
-                    "reply_size": collector.reply_size,
-                    "collection_diagnostics": collector.collection_diagnostics,
-                },
-            )
+                "encoding_seconds",
+                "inference_seconds",
+                "worker_wait_seconds",
+                "worker_receive_seconds",
+                "idle_slot_seconds",
+                "worker_encoding_seconds",
+                "inference_batches",
+                "inference_batch_items",
+                "worker_request_seconds",
+                "worker_replies",
+                "worker_publish_delay_seconds",
+                "worker_publish_delay_max_seconds",
+                "ready_to_infer_dispatch_seconds",
+                "readiness_samples",
+                "worker_request_slices",
+                "worker_request_slice_max_seconds",
+            ),
+            0,
         )
-    times = dict.fromkeys(
-        (
-            "encoding_seconds",
-            "inference_seconds",
-            "worker_wait_seconds",
-            "worker_receive_seconds",
-            "idle_slot_seconds",
-            "worker_encoding_seconds",
-            "inference_batches",
-            "inference_batch_items",
-            "worker_request_seconds",
-            "worker_replies",
-            "worker_publish_delay_seconds",
-            "worker_publish_delay_max_seconds",
-            "ready_to_infer_dispatch_seconds",
-            "readiness_samples",
-            "worker_request_slices",
-            "worker_request_slice_max_seconds",
-        ),
-        0,
-    )
-    ready, finished = {}, {}
-    admitted = 0
-    total_lengths = completed_count = 0
-    delays, publish_delays = [], []
-    batch_sizes = Counter()
-    admission_closed = None
-    admission_reason = None
-    buffered = []
+        self.ready = {}
+        self.finished = {}
+        self.admitted = 0
+        self.total_lengths = 0
+        self.completed_count = 0
+        self.delays = []
+        self.publish_delays = []
+        self.batch_sizes = Counter()
+        self.admission_closed = None
+        self.admission_reason = None
+        self.buffered = []
 
-    def queue_counts(inference=0):
-        if diag:
-            active_count = sum(slot.is_active for slot in slots)
-            diag.gauge("active_slots", active_count)
-            diag.gauge("ready_inference_slots", len(ready))
-            diag.gauge("inference_batch_slots", inference)
-            diag.gauge(
-                "worker_side_outstanding_slots", active_count - len(ready) - inference
-            )
-            diag.gauge("idle_slots", capacity - active_count)
-            diag.gauge("completed_episodes", completed_count)
-            if admission_closed is not None:
-                diag.gauge("tail_active_slots", active_count)
+    def collect(self):
+        self._admit()
+        while any(slot.is_active for slot in self.slots):
+            self._accept_available_replies()
+            self._admit()
+            active_count = sum(slot.is_active for slot in self.slots)
+            if not active_count:
+                break
+            now = perf_counter()
+            timeout = self._dispatch_ready(active_count, now)
+            if timeout is not None:
+                self._wait_for_reply(timeout, now)
+        return self._finish()
 
-    def close_admission(reason):
-        nonlocal admission_closed, admission_reason
-        if admission_closed is None:
-            admission_closed = perf_counter()
-            admission_reason = reason
-            if diag:
-                diag.sample(
+    def _queue_counts(self, inference=0):
+        if self.diag:
+            active_count = sum(slot.is_active for slot in self.slots)
+            self.diag.gauge("active_slots", active_count)
+            self.diag.gauge("ready_inference_slots", len(self.ready))
+            self.diag.gauge("inference_batch_slots", inference)
+            self.diag.gauge("worker_side_outstanding_slots", active_count - len(self.ready) - inference)
+            self.diag.gauge("idle_slots", self.capacity - active_count)
+            self.diag.gauge("completed_episodes", self.completed_count)
+            if self.admission_closed is not None:
+                self.diag.gauge("tail_active_slots", active_count)
+
+    def _close_admission(self, reason):
+        if self.admission_closed is None:
+            self.admission_closed = perf_counter()
+            self.admission_reason = reason
+            if self.diag:
+                self.diag.sample(
                     {
                         "kind": "admission_closed",
                         "at_ns": perf_counter_ns(),
-                        "active": sum(slot.is_active for slot in slots),
+                        "active": sum(slot.is_active for slot in self.slots),
                         "reason": reason,
                     }
                 )
 
-    def admit():
-        nonlocal admitted
-        if admission_closed is not None:
+    def _admit(self):
+        if self.admission_closed is not None:
             return
-        if deadline_reached(deadline):
-            close_admission("deadline")
+        if deadline_reached(self.deadline):
+            self._close_admission("deadline")
             return
         if (
-            fixed_specs is None or max_decisions is not None
-        ) and wave.decisions >= target:
-            close_admission("target")
+            self.fixed_specs is None or self.max_decisions is not None
+        ) and self.wave.decisions >= self.target:
+            self._close_admission("target")
             return
-        free = [slot for slot in slots if not slot.is_active]
-        active_slots = [slot for slot in slots if slot.is_active]
-        if fixed_specs is None:
+        free = [slot for slot in self.slots if not slot.is_active]
+        active_slots = [slot for slot in self.slots if slot.is_active]
+        if self.fixed_specs is None:
             length = (
-                total_lengths / completed_count
-                if completed_count
-                else episode_length_hint
+                self.total_lengths / self.completed_count
+                if self.completed_count
+                else self.episode_length_hint
             )
             length = max(1.0, length)
             remaining = sum(slot.remaining_decisions(length) for slot in active_slots)
-            allowance = math.ceil(max(0, target - wave.decisions - remaining) / length)
+            allowance = math.ceil(max(0, self.target - self.wave.decisions - remaining) / length)
         else:
-            allowance = len(fixed_specs) - admitted
-        load = Counter(locations[slot.slot_index][0] for slot in active_slots)
-        assignments = [[] for _ in collector.workers]
+            allowance = len(self.fixed_specs) - self.admitted
+        load = Counter(self.locations[slot.slot_index][0] for slot in active_slots)
+        assignments = [[] for _ in self.collector.workers]
         for _ in range(min(len(free), allowance)):
-            if deadline_reached(deadline):
-                close_admission("deadline")
+            if deadline_reached(self.deadline):
+                self._close_admission("deadline")
                 break
             slot = min(
                 free,
                 key=lambda s: (
-                    load[locations[s.slot_index][0]],
-                    locations[s.slot_index][1],
-                    locations[s.slot_index][0],
+                    load[self.locations[s.slot_index][0]],
+                    self.locations[s.slot_index][1],
+                    self.locations[s.slot_index][0],
                 ),
             )
             free.remove(slot)
-            worker, local_slot = locations[slot.slot_index]
+            worker, local_slot = self.locations[slot.slot_index]
             spec = (
-                fixed_specs[admitted]
-                if fixed_specs is not None
-                else collector.factory.make(next_episode + admitted, stage)
+                self.fixed_specs[self.admitted]
+                if self.fixed_specs is not None
+                else self.collector.factory.make(self.next_episode + self.admitted, self.stage)
             )
-            if fixed_specs is None:
-                collector.factory.validate_specs([spec])
+            if self.fixed_specs is None:
+                self.collector.factory.validate_specs([spec])
             # Admission begins before scenario generation; finish this admitted
             # episode even if generation crosses the deadline.
-            times["idle_slot_seconds"] += slot.assign(
-                admitted,
+            self.times["idle_slot_seconds"] += slot.assign(
+                self.admitted,
                 spec,
-                policy=policy,
-                reuse_encoded=reuse_encoded,
-                worker_encoding=worker_encoding,
-                temperature=collector.temperature,
-                hidden=wave.hidden,
-                record_hidden=collector.record_hidden,
+                policy=self.policy,
+                reuse_encoded=self.reuse_encoded,
+                worker_encoding=self.worker_encoding,
+                temperature=self.collector.temperature,
+                hidden=self.wave.hidden,
+                record_hidden=self.collector.record_hidden,
             )
-            admitted += 1
+            self.admitted += 1
             load[worker] += 1
             assignments[worker].append((local_slot, spec))
         for worker, items in enumerate(assignments):
             if items:
-                collector.workers[worker][0].send(
-                    ("assign", {"wave": wave.wave_id, "items": items})
+                self.collector.workers[worker][0].send(
+                    ("assign", {"wave": self.wave.wave_id, "items": items})
                 )
-        if fixed_specs is not None and admitted == len(fixed_specs):
-            close_admission("cases_exhausted")
-        queue_counts()
+        if self.fixed_specs is not None and self.admitted == len(self.fixed_specs):
+            self._close_admission("cases_exhausted")
+        self._queue_counts()
 
-    admit()
-    while any(slot.is_active for slot in slots):
+    def _accept_available_replies(self):
         while True:
             try:
-                buffered.append(replies.queue.get_nowait())
+                self.buffered.append(self.replies.queue.get_nowait())
             except Empty:
                 break
-        for worker, kind, payload, received_at, receive_seconds in buffered:
-            times["worker_receive_seconds"] += receive_seconds
+        for worker, kind, payload, received_at, receive_seconds in self.buffered:
+            self.times["worker_receive_seconds"] += receive_seconds
             if kind != "ok":
-                from civ5rl.provenance.common import write_json
-
-                write_json(collector.error_dir / "worker-error.json", payload)
+                write_json(self.collector.error_dir / "worker-error.json", payload)
                 raise RuntimeError(payload["traceback"])
-            if payload["wave"] != wave.wave_id:
+            if payload["wave"] != self.wave.wave_id:
                 raise RuntimeError("Stale streaming collection")
-            accepted_ns = perf_counter_ns() if diag else None
-            replies.accepted(payload)
+            accepted_ns = perf_counter_ns() if self.diag else None
+            self.replies.accepted(payload)
             for key in (
                 "worker_encoding_seconds",
                 "worker_request_seconds",
                 "worker_request_slices",
             ):
-                times[key] += payload.get(key, 0)
-            times["worker_request_slice_max_seconds"] = max(
-                times["worker_request_slice_max_seconds"],
+                self.times[key] += payload.get(key, 0)
+            self.times["worker_request_slice_max_seconds"] = max(
+                self.times["worker_request_slice_max_seconds"],
                 payload.get("worker_request_slice_max_seconds", 0),
             )
-            times["worker_replies"] += 1
+            self.times["worker_replies"] += 1
             for item in payload["items"]:
-                slot_index = global_slots[(worker, item.slot)]
-                slot = slots[slot_index]
-                state = slot.accept_reply(item, is_ready=slot_index in ready)
-                if diag:
+                slot_index = self.global_slots[(worker, item.slot)]
+                slot = self.slots[slot_index]
+                state = slot.accept_reply(item, is_ready=slot_index in self.ready)
+                if self.diag:
                     metadata = item.diagnostics
                     received_ns = payload["diagnostic_received_ns"]
-                    diag.add(
+                    self.diag.add(
                         "observation_encode",
                         metadata["encoded_ready_ns"] - metadata["observation_ready_ns"],
                     )
-                    diag.add(
+                    self.diag.add(
                         "encoded_to_publish",
                         payload["diagnostic_publish_ns"] - metadata["encoded_ready_ns"],
                     )
-                    diag.add(
+                    self.diag.add(
                         "publish_to_received",
                         received_ns - payload["diagnostic_publish_ns"],
                     )
-                    diag.add("received_to_accepted", accepted_ns - received_ns)
-                publish_delays.append(payload["published_at"] - item.completed_at)
+                    self.diag.add("received_to_accepted", accepted_ns - received_ns)
+                self.publish_delays.append(payload["published_at"] - item.completed_at)
                 if state["done"]:
                     episode_id, episode = slot.complete(state)
-                    finished[episode_id] = episode
-                    total_lengths += len(episode["chosen"])
-                    completed_count += 1
+                    self.finished[episode_id] = episode
+                    self.total_lengths += len(episode["chosen"])
+                    self.completed_count += 1
                 else:
-                    ready[slot_index] = (received_at, item.completed_at)
-                    if diag:
-                        diag.requests[slot_index] = dict(
+                    self.ready[slot_index] = (received_at, item.completed_at)
+                    if self.diag:
+                        self.diag.requests[slot_index] = dict(
                             **item.diagnostics,
                             received_ns=received_ns,
                             accepted_ns=accepted_ns,
                             publish_ns=payload["diagnostic_publish_ns"],
                         )
-                queue_counts()
-        buffered.clear()
-        admit()
-        active_count = sum(slot.is_active for slot in slots)
-        if not active_count:
-            break
-        now = perf_counter()
-        if ready:
-            flush_at = (
-                min(at[0] for at in ready.values()) + collector.inference_wait_seconds
-            )
+                self._queue_counts()
+        self.buffered.clear()
+
+    def _dispatch_ready(self, active_count, now):
+        if self.ready:
+            flush_at = min(at[0] for at in self.ready.values()) + self.collector.inference_wait_seconds
             if (
-                len(ready) >= collector.inference_min_batch
-                or len(ready) == active_count
+                len(self.ready) >= self.collector.inference_min_batch
+                or len(self.ready) == active_count
                 or now >= flush_at
             ):
-                live = list(ready)
-                delays.extend(now - ready[slot][1] for slot in live)
-                ready.clear()
-                queue_counts(len(live))
-                wave.decisions += collector.infer_and_select(
-                    policy,
+                live = list(self.ready)
+                self.delays.extend(now - self.ready[slot][1] for slot in live)
+                self.ready.clear()
+                self._queue_counts(len(live))
+                self.wave.decisions += self.collector.infer_and_select(
+                    self.policy,
                     live,
-                    wave,
-                    sorted({locations[slot][0] for slot in live}),
-                    worker_encoding,
-                    times,
-                    diagnostics=diag,
+                    self.wave,
+                    sorted({self.locations[slot][0] for slot in live}),
+                    self.worker_encoding,
+                    self.times,
+                    diagnostics=self.diag,
                 )
-                batch_sizes[len(live)] += 1
-                queue_counts()
-                admit()
-                if monitor:
-                    monitor.mark("collection", rollout_decisions=wave.decisions)
-                continue
+                self.batch_sizes[len(live)] += 1
+                self._queue_counts()
+                self._admit()
+                if self.monitor:
+                    self.monitor.mark("collection", rollout_decisions=self.wave.decisions)
+                return None
             timeout = max(0, flush_at - now)
         else:
             timeout = WORKER_TIMEOUT_SECONDS
-        if admission_closed is None and deadline is not None:
-            timeout = min(timeout, max(0, resolve_deadline(deadline) - now))
+        return timeout
+
+    def _wait_for_reply(self, timeout, now):
+        if self.admission_closed is None and self.deadline is not None:
+            timeout = min(timeout, max(0, resolve_deadline(self.deadline) - now))
         tick = perf_counter()
         try:
-            buffered.append(replies.queue.get(timeout=timeout))
+            self.buffered.append(self.replies.queue.get(timeout=timeout))
             available = True
         except Empty:
             available = False
-        times["worker_wait_seconds"] += perf_counter() - tick
+        self.times["worker_wait_seconds"] += perf_counter() - tick
         if not available and timeout == WORKER_TIMEOUT_SECONDS:
             raise TimeoutError("No streaming worker replied within 300 seconds")
-    ended = perf_counter()
-    if diag:
-        diag.stop()
-    for slot in slots:
-        times["idle_slot_seconds"] += ended - slot.idle_since
-    times.update(
-        collection_seconds=ended - started,
-        inference_batch_mean=times["inference_batch_items"]
-        / max(times["inference_batches"], 1),
-        inference_batch_histogram=dict(sorted(batch_sizes.items())),
-        ready_to_infer_dispatch_seconds=sum(delays),
-        ready_to_infer_dispatch_p95_seconds=float(np.percentile(delays, 95))
-        if delays
-        else 0,
-        readiness_samples=len(delays),
-        worker_publish_delay_seconds=sum(publish_delays),
-        worker_publish_delay_max_seconds=max(publish_delays, default=0),
-        drain_seconds=ended - admission_closed if admission_closed is not None else 0,
-        admission_stop_reason=admission_reason,
-        admitted_episodes=admitted,
-        target_decisions=target
-        if fixed_specs is None or max_decisions is not None
-        else None,
-        rollout_overshoot=(
-            max(0, wave.decisions - target)
-            if fixed_specs is None or max_decisions is not None
-            else 0
-        ),
-    )
-    return [finished[i] for i in range(admitted)], next_episode + admitted, times, diag
+
+    def _finish(self):
+        ended = perf_counter()
+        if self.diag:
+            self.diag.stop()
+        for slot in self.slots:
+            self.times["idle_slot_seconds"] += ended - slot.idle_since
+        self.times.update(
+            collection_seconds=ended - self.started,
+            inference_batch_mean=self.times["inference_batch_items"]
+            / max(self.times["inference_batches"], 1),
+            inference_batch_histogram=dict(sorted(self.batch_sizes.items())),
+            ready_to_infer_dispatch_seconds=sum(self.delays),
+            ready_to_infer_dispatch_p95_seconds=float(np.percentile(self.delays, 95)) if self.delays else 0,
+            readiness_samples=len(self.delays),
+            worker_publish_delay_seconds=sum(self.publish_delays),
+            worker_publish_delay_max_seconds=max(self.publish_delays, default=0),
+            drain_seconds=ended - self.admission_closed if self.admission_closed is not None else 0,
+            admission_stop_reason=self.admission_reason,
+            admitted_episodes=self.admitted,
+            target_decisions=self.target
+            if self.fixed_specs is None or self.max_decisions is not None
+            else None,
+            rollout_overshoot=(
+                max(0, self.wave.decisions - self.target)
+                if self.fixed_specs is None or self.max_decisions is not None
+                else 0
+            ),
+        )
+        return (
+            [self.finished[i] for i in range(self.admitted)],
+            self.next_episode + self.admitted,
+            self.times,
+            self.diag,
+        )

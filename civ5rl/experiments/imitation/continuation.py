@@ -17,7 +17,8 @@ from civ5rl.engine.imitation.core import (
     label_minibatches,
     teacher_metrics,
 )
-from civ5rl.engine.runtime.telemetry import CompilationClock, ResourceMonitor, analyze_telemetry
+from civ5rl.engine.runtime.telemetry import CompilationClock, ResourceMonitor
+from civ5rl.engine.runtime.telemetry_analysis import analyze_telemetry
 from civ5rl.engine.runtime.transactions import FrozenParamsCheck, bc_optimizer_step
 from civ5rl.experiments.evaluation.matches import run_validation_cases
 from civ5rl.experiments.imitation.helpers import (

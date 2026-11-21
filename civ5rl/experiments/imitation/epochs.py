@@ -3,27 +3,25 @@
 from __future__ import annotations
 
 import random
-from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 import torch
-from torch.nn import functional as F
 
 from civ5rl.core.model import Policy
-from civ5rl.engine.imitation.core import decision_indices, label_minibatches
+from civ5rl.engine.imitation.core import label_minibatches, teacher_metrics
 from civ5rl.engine.imitation.pipeline import (
     run_bc_minibatch_stream,
 )
 from civ5rl.engine.imitation.storage import PreparedDemonstrations
-from civ5rl.engine.ppo.backend import prefixes
 from civ5rl.engine.runtime.budget import ActiveBudget
 from civ5rl.engine.runtime.control import (
     TrainingCounters,
     pause_due,
 )
-from civ5rl.engine.runtime.telemetry import CompilationClock, ResourceMonitor, analyze_telemetry
+from civ5rl.engine.runtime.telemetry import CompilationClock, ResourceMonitor
+from civ5rl.engine.runtime.telemetry_analysis import analyze_telemetry
 from civ5rl.engine.runtime.transactions import FrozenParamsCheck
 from civ5rl.experiments._shared.lifecycle import (
     ActiveSessionClock,
@@ -54,62 +52,8 @@ from civ5rl.provenance.identity import policy_hash
 def fixed_metrics(policy, cache, micro):
     before = cache.mode
     cache.mode = "diagnostic"
-    counts = Counter()
-    correct = Counter()
-    losses = Counter()
-    unit_counts = Counter()
-    unit_correct = Counter()
     try:
-        with torch.no_grad():
-            for spans, _ in label_minibatches(cache.chunks(), cache.masks):
-                if policy.spatial_cuda_graphs:
-                    torch.compiler.cudagraph_mark_step_begin()
-                hidden = prefixes(policy, cache, spans)
-                for start in range(0, len(spans), micro):
-                    part = spans[start : start + micro]
-                    batch, labels, lengths = cache.batch(part)
-                    logits, _, _ = policy.forward_sequences(
-                        batch,
-                        lengths,
-                        hidden[:, start : start + len(part)].contiguous(),
-                    )
-                    ce = F.cross_entropy(logits, labels["indices"], reduction="none").cpu().tolist()
-                    predicted = logits.argmax(-1).cpu().tolist()
-                    rows = [r for e, a, b in part for r in cache.episodes[e]["decisions"][a:b]]
-                    for i, row in enumerate(rows):
-                        if not row["supervised"]:
-                            continue
-                        target, _ = decision_indices(row)
-                        action = row["actions"][target]
-                        kind = action["kind"]
-                        counts[kind] += 1
-                        correct[kind] += predicted[i] == target
-                        losses[kind] += ce[i]
-                        units = {u["id"]: u["type"] for u in row["observation"]["units"]}
-                        unit = units.get(action.get("unit"), "no_unit")
-                        unit_counts[unit] += 1
-                        unit_correct[unit] += predicted[i] == target
-        n = sum(counts.values())
-        return {
-            "labels": n,
-            "ce": sum(losses.values()) / n,
-            "accuracy": sum(correct.values()) / n,
-            "by_kind": {
-                k: {
-                    "labels": counts[k],
-                    "ce": losses[k] / counts[k],
-                    "accuracy": correct[k] / counts[k],
-                }
-                for k in counts
-            },
-            "by_unit_type": {
-                k: {
-                    "labels": unit_counts[k],
-                    "accuracy": unit_correct[k] / unit_counts[k],
-                }
-                for k in unit_counts
-            },
-        }
+        return teacher_metrics(policy, cache, micro_size=micro, by_unit_type=True)
     finally:
         cache.mode = before
 

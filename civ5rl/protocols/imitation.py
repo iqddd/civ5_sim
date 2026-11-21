@@ -3,6 +3,8 @@
 This module intentionally avoids torch so CP-only workers never initialize CUDA.
 """
 
+from __future__ import annotations
+
 import gzip
 import json
 import os
@@ -17,9 +19,10 @@ from time import perf_counter
 from typing import Any, cast
 
 from civ5rl.core.observation import ordered_actions
+from civ5rl.engine.runtime.shared import worker_setup as worker_setup
 from civ5rl.protocols.common import self_digest
 from civ5rl.protocols.corpus import ScenarioFactory, validate_corpus
-from civ5rl.provenance.common import ROOT, file_sha256, read_json, write_json
+from civ5rl.provenance.common import ROOT, file_sha256, read_gzip_json, read_json, write_json
 from civ5sim import MatchConfig
 from civ5sim.combat_ai import Aggression, SearchConfig
 from civ5sim.cp_agent import CPAgent
@@ -99,9 +102,7 @@ def dump_episode(path, episode):
     os.replace(tmp, path)
 
 
-def load_episode(path):
-    with gzip.open(path, "rt", encoding="utf-8") as stream:
-        return json.load(stream)
+load_episode = read_gzip_json
 
 
 def search_config(config):
@@ -211,11 +212,7 @@ def make_case(config, manifest, split, index):
         world = worlds[index % len(worlds)]
         contact = (index // 2) % 2 == 0
     corpus_split = "validation" if split == "validation" else "train"
-    maps = [
-        m
-        for m in manifest["maps"]
-        if m["parent_seed"] == world and m["split"] == corpus_split
-    ]
+    maps = [m for m in manifest["maps"] if m["parent_seed"] == world and m["split"] == corpus_split]
     generator = imitation_scenario_factory(config, maps)
     stage = imitation_stage(int(contact))
     case = generator.make(
@@ -240,16 +237,10 @@ def prepare_manifest(config):
     source_path = ROOT / config["corpus"]
     original = read_json(source_path)
     # Validate only open maps; closed test data is never loaded for this phase.
-    open_maps = [
-        m
-        for m in original["maps"]
-        if m["split"] in ("train", "validation") and m["size"] == 10
-    ]
+    open_maps = [m for m in original["maps"] if m["split"] in ("train", "validation") and m["size"] == 10]
     validate_corpus({**original, "maps": open_maps})
     train = sorted({m["parent_seed"] for m in open_maps if m["split"] == "train"})
-    validation = sorted(
-        {m["parent_seed"] for m in open_maps if m["split"] == "validation"}
-    )
+    validation = sorted({m["parent_seed"] for m in open_maps if m["split"] == "validation"})
     if len(train) != 64 or len(validation) != 16:
         raise ValueError("Imitation requires 64 train and 16 validation worlds")
     random.Random(17).shuffle(train)
@@ -263,9 +254,7 @@ def prepare_manifest(config):
             for key in ("parent_hash", "crop_hash"):
                 value = (key, entry[key])
                 if value in owners and owners[value] != split:
-                    raise ValueError(
-                        "Physical source map leaked across imitation splits"
-                    )
+                    raise ValueError("Physical source map leaked across imitation splits")
                 owners[value] = split
     result = {
         "schema": 1,
@@ -276,9 +265,7 @@ def prepare_manifest(config):
         "maps": open_maps,
         "case_generation": "make_case v1; seed=17; case ID determines world, side, contact and RNG",
     }
-    result["validation_cases"] = [
-        make_case(config, result, "validation", i) for i in range(32)
-    ]
+    result["validation_cases"] = [make_case(config, result, "validation", i) for i in range(32)]
     result["hash"] = self_digest(result, key="hash")
     return result
 
@@ -295,8 +282,10 @@ def validate_case(case, config, manifest):
 
 def match_task(task):
     """One isolated ordinary match. No policy training or CP in a GPU collector."""
-    if hasattr(task, "config") and hasattr(task, "case") and (
-        hasattr(task, "output_dir") or hasattr(task, "directory")
+    if (
+        hasattr(task, "config")
+        and hasattr(task, "case")
+        and (hasattr(task, "output_dir") or hasattr(task, "directory"))
     ):
         config = task.config
         manifest = task.manifest
@@ -319,12 +308,8 @@ def match_task(task):
         from civ5rl.provenance.common import configure
 
         configure(17, device)
-        checkpoint_path = (
-            contender["checkpoint"] if isinstance(contender, dict) else contender
-        )
-        mode = (
-            contender.get("mode", "sample") if isinstance(contender, dict) else "sample"
-        )
+        checkpoint_path = contender["checkpoint"] if isinstance(contender, dict) else contender
+        mode = contender.get("mode", "sample") if isinstance(contender, dict) else "sample"
         if mode not in ("sample", "argmax"):
             raise ValueError("Unsupported imitation evaluation policy mode")
         agent = RLAgent.from_checkpoint(checkpoint_path, device=device, mode=mode)
@@ -341,8 +326,7 @@ def match_task(task):
         "seconds": seconds,
         "timings": by_kind,
         "agent_act_seconds": [
-            sum(r["ns"] / 1e9 for r in timings if r["kind"] == "act" and r["side"] == s)
-            for s in (0, 1)
+            sum(r["ns"] / 1e9 for r in timings if r["kind"] == "act" and r["side"] == s) for s in (0, 1)
         ],
         "status": outcome.result["status"],
         "winner": outcome.result["winner"],
@@ -374,9 +358,7 @@ def match_task(task):
         result.update(
             labels=sum(d["supervised"] for d in rows),
             forced=sum(not d["supervised"] for d in rows),
-            actions_by_kind=dict(
-                Counter(d["actions"][d["chosen"]]["kind"] for d in rows)
-            ),
+            actions_by_kind=dict(Counter(d["actions"][d["chosen"]]["kind"] for d in rows)),
             demonstration_sha256=file_sha256(directory / "demonstration.json.gz"),
         )
     else:
@@ -414,8 +396,3 @@ def task_for(
         device=device,
     )
     return tuple(task) if as_tuple else task
-
-
-def worker_setup():
-    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
-        os.environ[name] = "1"

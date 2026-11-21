@@ -6,14 +6,17 @@ bytes do not rule out graph-pool growth. These categories overlap and must not b
 added as independent memory volumes. empty_cache cannot release live graph pools.
 """
 
+from __future__ import annotations
+
 import gzip
 import json
 import sys
+from os import PathLike
 
 import torch
 
 
-def sample_cuda_memory(policy):
+def sample_cuda_memory(policy: torch.nn.Module) -> dict[str, object] | None:
     """Read host allocator/graph metadata without changing CUDA execution.
 
     Never add synchronize(), tensor.item(), empty_cache(), CUDA kernels, memory
@@ -32,7 +35,7 @@ def sample_cuda_memory(policy):
         return None
     stats = torch.cuda.memory_stats_as_nested_dict(device)
     pools = stats.get("reserved_bytes_by_private_pools")
-    row = {
+    row: dict[str, object] = {
         "device": str(device),
         "allocator_backend": torch.cuda.get_allocator_backend(),
         "allocator": {
@@ -97,7 +100,7 @@ def sample_cuda_memory(policy):
     return row
 
 
-def dump_oom_snapshot(path):
+def dump_oom_snapshot(path: str | PathLike[str]) -> None:
     """Full allocator layout only after failure; allocation history stays disabled."""
     snapshot = torch.cuda.memory_snapshot()
     with gzip.open(path, "wt", encoding="utf-8") as stream:

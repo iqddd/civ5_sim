@@ -6,6 +6,8 @@ from contextvars import ContextVar
 
 from civ5rl.core.observation import ordered_actions
 from civ5rl.core.selection import ActionSelection
+from civ5rl.engine.runtime.shared import EncodedSlots
+from civ5rl.provenance.common import configure
 from civ5sim.telemetry import measure
 
 _client = ContextVar("evaluation_client", default=None)
@@ -48,8 +50,6 @@ class ProxyAgent(ActionSelection):
         return value
 
     def reset(self, context):
-        from civ5rl.engine.runtime.shared import EncodedSlots
-
         self.close()
         info = self.call("reset", self.mode, self.temperature, self.collect_selection_metrics)
         self.shared = EncodedSlots(descriptor=info["shared"])
@@ -136,8 +136,6 @@ def evaluation_agent(
     from civ5rl.core.agent import RLAgent
 
     if cpu_seed is not None:
-        from civ5rl.provenance.common import configure
-
         configure(cpu_seed, "cpu")
     return RLAgent.from_checkpoint(
         checkpoint,

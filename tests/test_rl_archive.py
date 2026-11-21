@@ -59,7 +59,7 @@ class ArchiveTests(unittest.TestCase):
             )
             (source / "steps.jsonl").write_bytes(b'{"step":1}\n{"step":2}\n')
             (source / "checkpoint.pt").write_bytes(bytes(range(256)))
-            with patch("civ5rl.deploy.archive.JSON_MIN_FILES", 2):
+            with patch("civ5rl.engine.runtime.archive.JSON_MIN_FILES", 2):
                 manifest = pack(
                     source, base / "packet", token="job-1", direction="download"
                 )
@@ -106,7 +106,7 @@ class ArchiveTests(unittest.TestCase):
                     base / "packet", destination, token="current", direction="download"
                 )
             self.assertEqual(_inventory(destination), before)
-            with patch("civ5rl.deploy.archive.JSON_MIN_FILES", 1):
+            with patch("civ5rl.engine.runtime.archive.JSON_MIN_FILES", 1):
                 pack(source, base / "packet", token="current", direction="download")
             with (base / "packet" / "json.7z").open("ab") as stream:
                 stream.write(b"corruption")

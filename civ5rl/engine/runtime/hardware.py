@@ -1,11 +1,18 @@
 """Read effective hardware resources and Linux container limits without PyTorch."""
 
+from __future__ import annotations
+
 import os
 import platform
 import re
 import sys
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+import psutil
+
+if os.name == "nt":
+    import winreg
 
 
 def cpu_set(value):
@@ -24,65 +31,87 @@ def _read(path):
         return None
 
 
-def cgroup_limits(proc=Path("/proc")):
-    """Resolve this process's v1/v2 mounts and all visible ancestor limits."""
+def _cgroup_memberships(proc):
     groups = {}
     for line in (_read(proc / "self/cgroup") or "").splitlines():
         _, controllers, group = line.split(":", 2)
         for controller in controllers.split(","):
-            groups[controller] = group
-    quotas, cpus, memory, sources = [], None, [], []
+            groups[controller] = PurePosixPath(group)
+    return groups
+
+
+def _unescape_mount_path(path):
+    # mountinfo escapes spaces and backslashes using octal codes.
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), path)
+
+
+def _cgroup_ancestors(proc, groups):
     for line in (_read(proc / "self/mountinfo") or "").splitlines():
         before, after = line.split(" - ", 1)
         fields, mount = before.split(), after.split()
         if mount[0] not in ("cgroup", "cgroup2"):
             continue
-        # mountinfo escapes spaces/backslashes using octal codes.
-        unescape = lambda text: re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), text)
-        root, point = Path(unescape(fields[3])), Path(unescape(fields[4]))
-        controllers = [""] if mount[0] == "cgroup2" else mount[2].split(",")
+        root = PurePosixPath(_unescape_mount_path(fields[3]))
+        point = Path(_unescape_mount_path(fields[4]))
+        controllers = ("",) if mount[0] == "cgroup2" else mount[2].split(",")
         for controller in controllers:
-            if controller not in groups:
+            if controller not in groups or controller not in ("", "cpu", "cpuset", "memory"):
                 continue
-            group = Path(groups[controller])
-            try:
+            group = groups[controller]
+            if group.is_relative_to(root):
                 relative = group.relative_to(root)
-            except ValueError:
+            else:
                 # A cgroup namespace can report paths relative to its own root.
                 relative = group.relative_to("/")
-            current = point / relative
+            current = point.joinpath(*relative.parts)
             while current.is_relative_to(point):
-                if controller in ("", "cpu"):
-                    if controller == "":
-                        raw = _read(current / "cpu.max")
-                        values = raw.split() if raw else []
-                    else:
-                        values = [_read(current / name) for name in ("cpu.cfs_quota_us", "cpu.cfs_period_us")]
-                    if len(values) == 2 and values[0] not in (None, "max", "-1"):
-                        quota, period = map(int, values)
-                        if quota > 0 and period > 0:
-                            quotas.append(quota / period)
-                            sources.append(str(current))
-                if controller in ("", "cpuset"):
-                    raw = _read(current / "cpuset.cpus.effective") or _read(current / "cpuset.cpus")
-                    if raw:
-                        parsed = cpu_set(raw)
-                        cpus = parsed if cpus is None else cpus & parsed
-                if controller in ("", "memory"):
-                    limit_name, used_name = (
-                        ("memory.max", "memory.current")
-                        if controller == ""
-                        else ("memory.limit_in_bytes", "memory.usage_in_bytes")
-                    )
-                    limit, used = (
-                        _read(current / limit_name),
-                        _read(current / used_name),
-                    )
-                    if limit not in (None, "max") and used is not None:
-                        memory.append(max(0, int(limit) - int(used)))
+                yield controller, current
                 if current == point:
                     break
                 current = current.parent
+
+
+def _cpu_quota(directory, *, unified):
+    if unified:
+        values = (_read(directory / "cpu.max") or "").split()
+    else:
+        values = [_read(directory / name) for name in ("cpu.cfs_quota_us", "cpu.cfs_period_us")]
+    if len(values) != 2 or values[0] in (None, "max", "-1") or values[1] is None:
+        return None
+    quota, period = map(int, values)
+    return quota / period if quota > 0 and period > 0 else None
+
+
+def _memory_available(directory, *, unified):
+    limit_name, used_name = (
+        ("memory.max", "memory.current") if unified else ("memory.limit_in_bytes", "memory.usage_in_bytes")
+    )
+    limit, used = _read(directory / limit_name), _read(directory / used_name)
+    if limit in (None, "max") or used is None:
+        return None
+    return max(0, int(limit) - int(used))
+
+
+def cgroup_limits(proc=Path("/proc")):
+    """Resolve this process's v1/v2 mounts and all visible ancestor limits."""
+    quotas, memory, sources = [], [], []
+    cpus = None
+    for controller, directory in _cgroup_ancestors(proc, _cgroup_memberships(proc)):
+        unified = controller == ""
+        if unified or controller == "cpu":
+            quota = _cpu_quota(directory, unified=unified)
+            if quota is not None:
+                quotas.append(quota)
+                sources.append(str(directory))
+        if unified or controller == "cpuset":
+            raw_cpus = _read(directory / "cpuset.cpus.effective") or _read(directory / "cpuset.cpus")
+            if raw_cpus:
+                parsed = cpu_set(raw_cpus)
+                cpus = parsed if cpus is None else cpus & parsed
+        if unified or controller == "memory":
+            available = _memory_available(directory, unified=unified)
+            if available is not None:
+                memory.append(available)
     return {
         "cpu_quota": min(quotas, default=None),
         "cpuset": sorted(cpus) if cpus is not None else None,
@@ -101,12 +130,8 @@ def effective_cpu_budget(affinity, quota=None, cpuset=None):
 
 
 def hardware():
-    import psutil
-
     name = platform.processor()
     if os.name == "nt":
-        import winreg
-
         with winreg.OpenKey(
             winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
         ) as key:

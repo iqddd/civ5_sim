@@ -25,8 +25,6 @@ from __future__ import annotations
 import math
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, wait
-from multiprocessing import Pipe
-from threading import Thread
 from time import perf_counter
 
 import torch
@@ -37,7 +35,6 @@ from civ5rl.engine.evaluation.executor import (
     EvaluationExecutor,
     prepare_evaluation_policy,
 )
-from civ5rl.engine.evaluation.proxy import _remote_task
 from civ5rl.experiments.comparison.executor import ProposalInference
 from civ5rl.experiments.comparison.prefix import SourcePrefixes
 
@@ -175,7 +172,14 @@ class CollectionExecutor(EvaluationExecutor):
         self.prefixes = (
             SourcePrefixes(self.inference.policy, checkpoints[0], self.runtime) if prefix_states else None
         )
-        self.thread = None
+
+    def configure_task(self, connection, task, *, kind):
+        self.kinds[connection] = kind
+        self.tasks[connection] = task
+
+    def release_task(self, connection):
+        self.kinds.pop(connection, None)
+        self.tasks.pop(connection, None)
 
     def configure_agent(self, connection, agent, info):
         agent.proposal = self.kinds.get(connection) == "source"
@@ -197,15 +201,7 @@ class CollectionExecutor(EvaluationExecutor):
             self.prefixes.capture(self.tasks[connection][2], self.connections[connection].prefix_frames)
             connection.send(("ok", None))
             return None
-        kind = self.kinds.get(connection)
-        result = super()._receive_message(connection, command, args)
-        agent = self.connections.get(connection)
-        if agent is not None and not hasattr(agent, "proposal"):
-            agent.proposal = kind == "source"
-        if connection not in self.connections:
-            self.kinds.pop(connection, None)
-            self.tasks.pop(connection, None)
-        return result
+        return super()._receive_message(connection, command, args)
 
     def statistics(self):
         return {
@@ -217,42 +213,26 @@ class CollectionExecutor(EvaluationExecutor):
 
     def __enter__(self):
         super().__enter__()
-        self.stop.clear()
-        self.thread = Thread(target=self._serve, name="collection-inference", daemon=True)
-        self.thread.start()
+        try:
+            self.start_service(thread_name="collection-inference")
+        except BaseException:
+            super().__exit__()
+            raise
         return self
 
     def check(self):
-        if self.error is not None:
-            raise RuntimeError(f"Collection inference service failed:\n{self.error}")
+        self.check_service("Collection")
 
     def submit(self, function, task, kind):
         self.check()
-        server, client = Pipe()
-        with self.lock:
-            self.connections[server] = None
-            self.kinds[server] = kind
-            self.tasks[server] = task
-        future = self._pool.submit(_remote_task, function, task, client)
-        return future, client
+        return self.submit_task(function, task, kind=kind)
 
     def __exit__(self, *args):
-        self.stop.set()
-        if self.thread is not None:
-            self.thread.join()
-        self._fail_all("Collection coordinator stopped")
+        self.stop_service("Collection coordinator stopped")
         try:
             super().__exit__(*args)
         finally:
-            for connection, agent in list(self.connections.items()):
-                self.inference.release_agent(agent)
-                connection.close()
-            self.connections.clear()
-            self.kinds.clear()
-            self.tasks.clear()
-            for shared in self.shared.values():
-                shared.close()
-            self.shared.clear()
+            self.close_clients()
 
 
 def p90(values):

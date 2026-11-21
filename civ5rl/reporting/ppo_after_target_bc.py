@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from civ5rl.engine.ppo.adam import expected_counters, uses_grouped_adam
-from civ5rl.engine.runtime.telemetry import performance_markdown, summarize_performance
+from civ5rl.engine.runtime.telemetry_analysis import summarize_performance
 from civ5rl.provenance.common import read_json, write_json
 from civ5rl.provenance.jsonl import read_jsonl
 from civ5rl.reporting.markdown import MarkdownReport, format_wdl
+from civ5rl.reporting.telemetry import performance_markdown
 
 
 def _development_rows(state: dict[str, Any], *, dual: bool) -> Iterator[tuple[object, ...]]:

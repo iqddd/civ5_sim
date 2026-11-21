@@ -10,10 +10,11 @@ from __future__ import annotations
 import multiprocessing as mp
 from dataclasses import replace
 from multiprocessing import Pipe
-from threading import Lock, Thread
+from threading import Lock
 
 from civ5rl.engine.evaluation.executor import evaluation_precision
 from civ5rl.engine.evaluation.proxy import _remote_task
+from civ5rl.engine.evaluation.session import started_pool_workers
 from civ5rl.engine.runtime.shared import pool
 from civ5rl.experiments.comparison.queue import CollectionExecutor
 from civ5rl.provenance.common import configure
@@ -23,14 +24,11 @@ def _service(checkpoints, runtime, control, prefix_states=False):
     configure(17, runtime.device)
     with evaluation_precision():
         executor = CollectionExecutor(checkpoints, runtime, prefix_states=prefix_states)
-        executor.stop.clear()
-        thread = Thread(target=executor._serve, daemon=True)
-        thread.start()
-        control.send(("ready", None))
         try:
+            executor.start_service()
+            control.send(("ready", None))
             while True:
-                if executor.error:
-                    raise RuntimeError(executor.error)
+                executor.check()
                 if not control.poll(0.1):
                     continue
                 command, value = control.recv()
@@ -38,23 +36,14 @@ def _service(checkpoints, runtime, control, prefix_states=False):
                     break
                 if command == "submit":
                     connection, kind, task = value
-                    with executor.lock:
-                        executor.connections[connection] = None
-                        executor.kinds[connection] = kind
-                        executor.tasks[connection] = task
+                    executor.register_client(connection, task, kind=kind)
                 elif command == "statistics":
                     control.send(("statistics", executor.statistics()))
                 else:
                     raise ValueError(command)
         finally:
-            executor.stop.set()
-            thread.join()
-            executor._fail_all("Inference service stopped")
-            for connection, agent in list(executor.connections.items()):
-                executor.inference.release_agent(agent)
-                connection.close()
-            for shared in executor.shared.values():
-                shared.close()
+            executor.stop_service("Inference service stopped")
+            executor.close_clients()
             control.close()
 
 
@@ -139,6 +128,9 @@ class ProcessInferenceExecutor:
         result = {key: sum(row[key] for row in rows) for key in rows[0] if key != "mean_batch"}
         result["mean_batch"] = result["inference_items"] / max(1, result["inference_batches"])
         return result
+
+    def started_workers(self):
+        return started_pool_workers(self.pool)
 
     def __exit__(self, *args):
         for process, control in self.services:

@@ -1,8 +1,10 @@
 """Operational active-time limits, independent of the training algorithm."""
 
+from __future__ import annotations
+
 import math
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -32,17 +34,38 @@ class DeadlineBudget:
         return deadline_reached(self.deadline)
 
 
-def budget_base(record):
-    kind, config = record["kind"], record["config"]
-    if kind == "rl01.ppo_after_target_bc":
-        return float(config["experiment"]["active_seconds"])
-    if kind in {
-        "rl01.cp_imitation_target_scale",
-        "rl01.cp_imitation_target_more_data",
-        "rl01.cp_imitation_target_c2",
-    }:
-        return float(config["training_seconds"])
-    raise ValueError(f"Run kind {kind!r} does not support operational budget extension")
+def budget_base(record) -> float:
+    """Read the base limit, allowing equivalent fields in a saved configuration."""
+    config = record.get("config") if isinstance(record, Mapping) else None
+    if not isinstance(config, Mapping):
+        raise ValueError("Missing or invalid configuration for operational budget")
+    experiment = config.get("experiment", {})
+    if not isinstance(experiment, Mapping):
+        raise ValueError("Invalid experiment configuration for operational budget")
+
+    candidates = {
+        name: section[key]
+        for name, section, key in (
+            ("experiment.active_seconds", experiment, "active_seconds"),
+            ("training_seconds", config, "training_seconds"),
+        )
+        if key in section
+    }
+    if not candidates:
+        kind = record.get("kind")
+        raise ValueError(f"Run kind {kind!r} does not support operational budget extension")
+    limits = set()
+    for name, value in candidates.items():
+        try:
+            valid = type(value) in (int, float) and value > 0 and math.isfinite(value)
+        except OverflowError:
+            valid = False
+        if not valid:
+            raise ValueError(f"{name} must be a positive finite number")
+        limits.add(value)
+    if len(limits) != 1:
+        raise ValueError("Conflicting operational budget: experiment.active_seconds and training_seconds")
+    return float(limits.pop())
 
 
 def read_extension(directory, record):
@@ -65,9 +88,7 @@ class ActiveBudget:
         self.base = budget_base(self.record)
         self.state = state
         started = perf_counter()
-        self.elapsed = (
-            elapsed if elapsed is not None else lambda: perf_counter() - started
-        )
+        self.elapsed = elapsed if elapsed is not None else lambda: perf_counter() - started
         self.revision = -1
         self.effective = self.base
         self.next_check = 0.0
@@ -121,11 +142,7 @@ def resolve_deadline(deadline: ExecutionBudget | float | Callable[[], float] | N
 
 
 def deadline_reached(deadline):
-    if (
-        deadline is not None
-        and not callable(deadline)
-        and not isinstance(deadline, (float, int))
-    ):
+    if deadline is not None and not callable(deadline) and not isinstance(deadline, (float, int)):
         return deadline.expired()
     return perf_counter() >= resolve_deadline(deadline)
 
@@ -135,9 +152,7 @@ class PhaseBudget:
 
     def __init__(self, out, phase, limit, *, initial_seconds=0.0):
         self.path = Path(out) / "phase-budgets" / f"{phase}.json"
-        self.base = (
-            read_json(self.path)["seconds"] if self.path.exists() else initial_seconds
-        )
+        self.base = read_json(self.path)["seconds"] if self.path.exists() else initial_seconds
         self.started = perf_counter()
         self.limit = limit
         self.lock = Lock()
@@ -160,11 +175,11 @@ class PhaseBudget:
                 try:
                     write_json(
                         self.path,
-                        dict(
-                            seconds=self.elapsed(),
-                            limit=self.limit,
-                            crash_accounting_resolution_seconds=1,
-                        ),
+                        {
+                            "seconds": self.elapsed(),
+                            "limit": self.limit,
+                            "crash_accounting_resolution_seconds": 1,
+                        },
                     )
                     return
                 except PermissionError:

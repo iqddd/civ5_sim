@@ -44,7 +44,7 @@ deploy.worker ──► tools/run_*.py                 отдельный про
 |---|---|
 | Показательные матчи | `reporting.showcase` вызывает `engine.evaluation.matches`. [Код](../civ5rl/reporting/showcase.py) |
 | Ветка сохранённого реплея | `reporting.replay_branch` проверяет префикс через `engine.evaluation.replay` и продолжает матч через `civ5sim.match`. [Код](../civ5rl/reporting/replay_branch.py) |
-| Хранение `.storage` | Интерфейсы `reporting.*_storage` переэкспортируют хранилища `engine`. Упаковку обеспечивает `deploy.archive`. [Интерфейс оценок](../civ5rl/reporting/evaluation_storage.py), [упаковка](../civ5rl/deploy/archive.py) |
+| Хранение `.storage` | Интерфейсы `reporting.*_storage` переэкспортируют хранилища `engine`. Общая упаковка находится в `engine.runtime.archive`, транспортный интерфейс — в `deploy.archive`. [Хранилище оценок](../civ5rl/reporting/evaluation_storage.py), [упаковка](../civ5rl/engine/runtime/archive.py) |
 | Удалённое исполнение | `deploy.worker` выбирает скрипт CLI по типу запуска. [Воркер](../civ5rl/deploy/worker.py) |
 
 ### Правила импорта
@@ -53,13 +53,16 @@ deploy.worker ──► tools/run_*.py                 отдельный про
 |---|---|
 | `civ5rl.core`, `civ5rl.provenance`, `civ5rl.protocols`, `civ5rl.engine` | `civ5rl.reporting`, `civ5rl.experiments` |
 | `civ5rl.reporting` | `civ5rl.experiments` |
-| Весь `civ5rl` | `tools`, `tests` |
+| `civ5rl.engine` | `civ5rl.deploy`, `deploy` |
+| `civ5rl.engine.imitation` | `civ5rl.engine.ppo` (включая алиасы `civ5rl.ppo`, `civ5rl.ppo_fast`) |
+| Весь `civ5rl` | `tools`, `civ5rl.tools`, `tests` |
 
 - **Проверка границ.** AST учитывает относительные импорты, импорты внутри
   функций и динамические импорты со строковым литералом. [Тест](../tests/test_civ5rl_dependencies.py)
 - **Прямые зависимости `core`.** За пределами самого `core` пакет импортирует
   из `civ5rl` только `provenance.common.choose`. [Выбор действия](../civ5rl/core/selection.py)
-- **Загрузка.** Collector и CPU-воркеры импортируются без Torch. Старые pickle
+- **Загрузка.** Collector, CPU-воркеры, диагностика collection, evaluation proxy,
+  `runtime.shared` и `runtime.hardware` импортируются без Torch. Старые pickle
   читаются через алиасы прежних путей, например `civ5rl.observation` указывает
   на `civ5rl.core.observation`. [Тесты](../tests/test_rl_package_layout.py)
 
@@ -404,7 +407,8 @@ attack_preview начинается пустой. `origin_Adam_counters` нов�
 
 ## Удалённая передача результатов
 
-`deploy/archive.py` отделяет транспортный пакет от научного каталога: большие
+`engine/runtime/archive.py` упаковывает файлы для хранения и передачи.
+Транспортный интерфейс `deploy/archive.py` отделяет пакет от научного каталога: большие
 наборы JSON/JSONL упаковываются PPMd, остальные файлы передаются без повторного
 сжатия. Manifest фиксирует относительные пути, размеры и SHA-256, token операции
 и направление. Распаковка проверяется во временном каталоге до обновления
@@ -448,10 +452,12 @@ checkpoint/счётчиков не зависят от этой политики
 отдельный опыт с сохранённого checkpoint; новая проверка не объявляет такой
 запуск совместимым автоматически.
 
-`engine/budget.py` отделяет оперативный active budget от научного конфига.
-Адаптер `budget_base` задаёт базу для after-target-BC PPO и target-scale BC
-(включая more-data/C2); остальные kinds явно не поддерживаются. `ActiveBudget`
-читает добавления из `active-budget.json`, привязанные к run_id/базе, с частотой
+`engine/runtime/budget.py` отделяет оперативный active budget от научного конфига.
+`budget_base` читает положительный конечный лимит из
+`config.experiment.active_seconds` или `config.training_seconds`. Если заданы оба
+поля, их значения должны совпадать. Оперативные
+добавления применяют after-target-BC PPO и семейство target-scale BC через
+`ActiveBudget`. Он читает `active-budget.json`, привязанный к run_id/базе, с частотой
 не более 1 Гц. Применённая ревизия и effective limit записываются отдельно в
 `budget-applied.json`. Команда использует отдельный budget lock и идемпотентный
 request ID, не lock обучения. Уже завершённое обучение не возобновляется.

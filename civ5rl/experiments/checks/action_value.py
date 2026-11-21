@@ -11,6 +11,8 @@ import torch
 from torch.profiler import ProfilerActivity, profile
 
 from civ5rl.engine.comparison.action_value import (
+    DEFAULT_WORLD_COUNTS,
+    HEAD_WIDTHS,
     make_head,
     make_optimizer,
     outcome_loss,
@@ -23,7 +25,7 @@ from civ5rl.engine.comparison.inputs import Histories
 from civ5rl.engine.runtime.telemetry import ResourceMonitor
 from civ5rl.engine.runtime.transactions import atomic_torch_save
 from civ5rl.experiments.benchmarks.profiling import top_cuda_operators
-from civ5rl.experiments.comparison.action_value import evaluate, train
+from civ5rl.experiments.comparison.action_value import SHUFFLE_NAMESPACE, evaluate, train
 from civ5rl.provenance.common import ROOT, configure, file_sha256, read_json, write_json
 
 
@@ -34,7 +36,7 @@ def smoke(cfg, out):
         raise ValueError("Use an empty smoke directory")
     head = make_head()
     opt = make_optimizer(head)
-    features = torch.randn(256, 2, 534, device="cuda")
+    features = torch.randn(256, 2, HEAD_WIDTHS[0], device="cuda")
     counts = torch.full((256, 2), 4.0, device="cuda")
     wins = torch.randint(0, 5, (256, 2), device="cuda").float()
 
@@ -89,11 +91,13 @@ def controller_smoke(cfg, out):
     """Discardable synthetic fit: interrupted steps must equal an uninterrupted fit."""
 
     out = Path(out)
-    split = split_worlds(list(range(10000, 10057)))
-    worlds = np.repeat(np.arange(10000, 10057), 2)
-    configure(17, "cuda")
+    seed = cfg["seed"]
+    world_ids = range(10000, 10000 + sum(DEFAULT_WORLD_COUNTS))
+    split = split_worlds(world_ids, seed=seed)
+    worlds = np.repeat(world_ids, 2)
+    configure(seed, "cuda")
     data = {
-        "inputs": torch.randn(len(worlds), 2, 534),
+        "inputs": torch.randn(len(worlds), 2, HEAD_WIDTHS[0]),
         "wins": torch.randint(0, 5, (len(worlds), 2)).float(),
         "counts": torch.full((len(worlds), 2), 4.0),
         "first_wins": np.zeros((len(worlds), 2), dtype=int),
@@ -107,7 +111,7 @@ def controller_smoke(cfg, out):
     for directory in (reference, resumed):
         write_json(directory / "split.json", split)
         write_json(directory / "data.json", {"preparation_seconds": 0})
-    configure(17, "cuda")
+    configure(seed, "cuda")
     train(options, reference, data)
     calls = 0
 
@@ -117,7 +121,7 @@ def controller_smoke(cfg, out):
         if calls == 7:
             raise InterruptedError("Smoke interruption in an uncommitted epoch")
 
-    configure(17, "cuda")
+    configure(seed, "cuda")
     try:
         train(options, resumed, data, after_step=interrupted)
     except InterruptedError:
@@ -134,10 +138,10 @@ def controller_smoke(cfg, out):
             reference_state["model"][name], resumed_state["model"][name], atol=0, rtol=0
         )
 
-    configure(17, "cuda")
+    configure(seed, "cuda")
     legacy = make_head()
     legacy_opt = make_optimizer(legacy)
-    shuffle = random.Random("c2p_action_value_shuffle_v1|17")
+    shuffle = random.Random(f"{SHUFFLE_NAMESPACE}|{seed}")
     training = np.flatnonzero(np.isin(data["worlds"], split["training"])).tolist()
     features, wins, counts = [data[key].cuda() for key in ("inputs", "wins", "counts")]
     for _ in range(2):

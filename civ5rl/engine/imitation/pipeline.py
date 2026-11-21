@@ -1,5 +1,7 @@
 """Optional resident BC inputs and overlapped pinned-memory BC training pipeline."""
 
+from __future__ import annotations
+
 import json
 import math
 import os
@@ -12,12 +14,11 @@ from time import perf_counter
 from typing import NamedTuple
 
 import torch
-from torch.nn import functional as F
 from torch.profiler import record_function
 
-from civ5rl.engine.imitation.core import decision_indices
+from civ5rl.engine.imitation.core import backward_minibatch_async as backward_minibatch_async
+from civ5rl.engine.imitation.core import decision_indices, masked_ce_sum
 from civ5rl.engine.imitation.storage import PreparedDemonstrations
-from civ5rl.engine.ppo.backend import prefixes
 from civ5rl.engine.runtime.pinned import PinnedBufferSlot, PinnedSlotPool
 from civ5rl.engine.runtime.sequence import (
     DEFAULT_BC_MICROBATCH_SIZE,
@@ -44,11 +45,7 @@ class ResidentDemonstrations(SequenceBuffer):
         )
         self.labels = {
             "indices": torch.tensor(
-                [
-                    decision_indices(r)[0]
-                    for ep in self.episodes
-                    for r in ep["decisions"]
-                ],
+                [decision_indices(r)[0] for ep in self.episodes for r in ep["decisions"]],
                 device=self.device,
             ),
             "mask": torch.tensor(
@@ -67,39 +64,7 @@ class ResidentDemonstrations(SequenceBuffer):
         )
 
 
-def backward_minibatch_async(
-    policy, cache, spans, count, micro_size=DEFAULT_BC_MICROBATCH_SIZE
-):
-    """Same accumulation; return GPU loss and check finiteness without host waiting."""
-    if policy.spatial_cuda_graphs:
-        torch.compiler.cudagraph_mark_step_begin()
-    hidden = prefixes(policy, cache, spans)
-    total = torch.zeros((), device=cache.device)
-    accumulator = GradientAccumulator(
-        policy.parameters(), coalesced=policy.coalesced_accumulation
-    )
-    for first in range(0, len(spans), micro_size):
-        part = spans[first : first + micro_size]
-        if not any(any(cache.masks[ep][a:b]) for ep, a, b in part):
-            continue
-        batch, labels, lengths = cache.batch(part)
-        if policy.spatial_cuda_graphs:
-            torch.compiler.cudagraph_mark_step_begin()
-        logits, _, _ = policy.forward_sequences(
-            batch, lengths, hidden[:, first : first + len(part)].contiguous()
-        )
-        losses = F.cross_entropy(logits, labels["indices"], reduction="none")
-        loss = (losses * labels["mask"]).sum()
-        accumulator.backward(loss / count)
-        total.add_(loss.detach())
-    result = total / count
-    torch._assert_async(torch.isfinite(result), "Non-finite BC loss")
-    return result
-
-
-def backward_minibatch_fast(
-    policy, cache, spans, count, micro_size=DEFAULT_BC_MICROBATCH_SIZE
-):
+def backward_minibatch_fast(policy, cache, spans, count, micro_size=DEFAULT_BC_MICROBATCH_SIZE):
     result = float(backward_minibatch_async(policy, cache, spans, count, micro_size))
     if not math.isfinite(result):
         raise FloatingPointError("Non-finite BC loss")
@@ -177,8 +142,7 @@ def _prepare_minibatch_cpu(
                 if int(start) > offset
             ]
             subspans = [
-                Span(episode, offset, min(start, offset + block_size))
-                for _, episode, start in active
+                Span(episode, offset, min(start, offset + block_size)) for _, episode, start in active
             ]
             cpu_spatial, _, lengths = cache.pack_cpu_spans(
                 subspans,
@@ -296,16 +260,12 @@ def _enqueue_gpu_step(
             record_function("bc::prefixes") if annotate else nullcontext(),
             torch.no_grad(),
         ):
-            hidden = torch.zeros(
-                (1, staged.spans_len, policy.hidden_size), device=device
-            )
+            hidden = torch.zeros((1, staged.spans_len, policy.hidden_size), device=device)
             for slots_gpu, gpu_spatial, lengths in staged.prefix_blocks:
                 if policy.spatial_cuda_graphs:
                     torch.compiler.cudagraph_mark_step_begin()
                 if slots_gpu is None:
-                    hidden = policy.forward_sequences(
-                        gpu_spatial, lengths, hidden, memory_only=True
-                    )
+                    hidden = policy.forward_sequences(gpu_spatial, lengths, hidden, memory_only=True)
                 else:
                     last = policy.forward_sequences(
                         gpu_spatial,
@@ -318,26 +278,19 @@ def _enqueue_gpu_step(
         hidden = None
 
     total = torch.zeros((), device=device)
-    accumulator = GradientAccumulator(
-        policy.parameters(), coalesced=policy.coalesced_accumulation
-    )
+    accumulator = GradientAccumulator(policy.parameters(), coalesced=policy.coalesced_accumulation)
     for first, part_len, gpu_batch, gpu_labels, lengths in staged.microbatches:
         if policy.spatial_cuda_graphs:
             torch.compiler.cudagraph_mark_step_begin()
-        h_slice = (
-            None if hidden is None else hidden[:, first : first + part_len].contiguous()
-        )
+        h_slice = None if hidden is None else hidden[:, first : first + part_len].contiguous()
         logits, _, _ = policy.forward_sequences(gpu_batch, lengths, h_slice)
-        losses = F.cross_entropy(logits, gpu_labels["indices"], reduction="none")
-        loss = (losses * gpu_labels["mask"]).sum()
+        loss = masked_ce_sum(logits, gpu_labels)
         accumulator.backward(loss / staged.label_count)
         total.add_(loss.detach())
 
     ce = total / staged.label_count
     torch._assert_async(torch.isfinite(ce), "Non-finite BC loss")
-    norm = torch.nn.utils.clip_grad_norm_(
-        policy.parameters(), max_gradient_norm, error_if_nonfinite=False
-    )
+    norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), max_gradient_norm, error_if_nonfinite=False)
     torch._assert_async(torch.isfinite(norm), "Non-finite gradient")
     optimizer.step()
 
@@ -346,6 +299,305 @@ def _enqueue_gpu_step(
     done_event = torch.cuda.Event()
     done_event.record(compute_stream)
     return done_event
+
+
+class _BCStepJournal:
+    def __init__(self, epoch, initial_steps, compilation, steps_log_path, active_seconds, on_step_completed):
+        self.epoch = epoch
+        self.steps = initial_steps
+        self.compilation = compilation
+        self.steps_log_path = steps_log_path
+        self.active_seconds = active_seconds
+        self.on_step_completed = on_step_completed
+        self.records = []
+
+    def publish(
+        self,
+        labels,
+        ce,
+        norm,
+        started_at,
+        completed_at,
+        prefix_positions,
+        history_positions,
+        *,
+        log_handle=None,
+    ):
+        self.steps += 1
+        record = {
+            "step": self.steps,
+            "epoch": self.epoch,
+            "labels": int(labels),
+            "ce": ce,
+            "gradient_norm": norm,
+            "seconds": completed_at - started_at,
+            "prefix_positions": prefix_positions,
+            "history_positions": history_positions,
+            "compile_seconds": (
+                self.compilation.seconds(started_at, completed_at) if self.compilation is not None else 0.0
+            ),
+        }
+        self.records.append(record)
+        if self.active_seconds is not None:
+            record["active_seconds"] = self.active_seconds()
+        if log_handle is not None:
+            log_handle.write(json.dumps(record) + "\n")
+            log_handle.flush()
+        elif self.steps_log_path is not None:
+            with self.steps_log_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record) + "\n")
+        if self.on_step_completed is not None:
+            self.on_step_completed(record, self.steps)
+
+
+def _stop_before_step(steps, max_steps, should_stop):
+    return (max_steps is not None and steps >= max_steps) or (
+        should_stop is not None and should_stop() is not None
+    )
+
+
+def _require_finite_step(ce, norm):
+    if not math.isfinite(ce) or not math.isfinite(norm):
+        raise FloatingPointError("Non-finite BC loss or gradient norm")
+
+
+def _run_synchronous_minibatches(
+    policy, optimizer, cache, batches, journal, *, micro_size, max_gradient_norm, max_steps, should_stop
+):
+    def backward(policy, cache, spans, count):
+        return backward_minibatch_async(policy, cache, spans, count, micro_size)
+
+    for spans, count in batches:
+        if _stop_before_step(journal.steps, max_steps, should_stop):
+            break
+        started_at = perf_counter()
+        before = dict(cache.counters)
+        ce, norm = bc_optimizer_step(
+            policy,
+            optimizer,
+            backward,
+            cache,
+            spans,
+            count,
+            max_gradient_norm=max_gradient_norm,
+            asynchronous=False,
+        )
+        ce, norm = float(ce), float(norm)
+        _require_finite_step(ce, norm)
+        journal.publish(
+            count,
+            ce,
+            norm,
+            started_at,
+            perf_counter(),
+            cache.counters["prefix_positions"] - before.get("prefix_positions", 0),
+            cache.counters["history_positions"] - before.get("history_positions", 0),
+        )
+
+
+class _PreparedBatchPrefetch:
+    """The producer owns each slot until it publishes the packed minibatch."""
+
+    def __init__(self, cache, batches, *, is_recurrent, micro_size, cell_padding):
+        self.cache = cache
+        self.batches = batches
+        self.is_recurrent = is_recurrent
+        self.micro_size = micro_size
+        self.cell_padding = cell_padding
+        self.queue: queue.Queue = queue.Queue(maxsize=2)
+        self.slot_pool = PinnedSlotPool(5, slot_factory=ImitationPinnedBatchSlot)
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._produce, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self.stop_event.set()
+        self.thread.join(timeout=5.0)
+
+    def _publish(self, item):
+        while not self.stop_event.is_set():
+            try:
+                self.queue.put(item, timeout=0.05)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def get(self):
+        item = self.queue.get()
+        if isinstance(item, _ProducerError):
+            raise item.exception
+        return None if item is _STREAM_END else item
+
+    def _produce(self):
+        upcoming = deque()
+        io_workers = min(4, max(2, (os.cpu_count() or 4) // 2))
+        try:
+            batches = iter(self.batches)
+            with ThreadPoolExecutor(max_workers=io_workers) as io_pool:
+                while not self.stop_event.is_set():
+                    while len(upcoming) < 4:
+                        try:
+                            upcoming.append(next(batches))
+                        except StopIteration:
+                            break
+                    if not upcoming:
+                        break
+                    self.cache.preload_episodes(
+                        (episode for spans, _ in upcoming for episode, _, _ in spans),
+                        io_pool,
+                    )
+                    slot = self.slot_pool.acquire(stop_event=self.stop_event)
+                    if slot is None:
+                        return
+                    spans, count = upcoming.popleft()
+                    prepared = _prepare_minibatch_cpu(
+                        self.cache,
+                        spans,
+                        count,
+                        is_recurrent=self.is_recurrent,
+                        micro_size=self.micro_size,
+                        cell_padding=self.cell_padding,
+                        slot=slot,
+                    )
+                    if not self._publish(prepared):
+                        return
+                self._publish(_STREAM_END)
+        except BaseException as error:  # noqa: BLE001 -- propagate failure to the consumer thread
+            self._publish(_ProducerError(error))
+        finally:
+            self.cache._inflight.clear()
+
+
+class _CudaBCPipeline:
+    """Enqueue transfers and optimizer work, then drain one pending metrics readback."""
+
+    def __init__(
+        self,
+        policy,
+        optimizer,
+        cache,
+        device,
+        journal,
+        prefetch,
+        *,
+        max_gradient_norm,
+        check_counter_steps,
+        annotate,
+        log_handle,
+    ):
+        self.policy = policy
+        self.optimizer = optimizer
+        self.cache = cache
+        self.device = device
+        self.journal = journal
+        self.prefetch = prefetch
+        self.max_gradient_norm = max_gradient_norm
+        self.check_steps = set(check_counter_steps)
+        self.annotate = annotate
+        self.log_handle = log_handle
+
+        self.compute_stream = torch.cuda.current_stream(device)
+        self.h2d_stream = torch.cuda.Stream(device=device)
+        self.metric_buffers = [torch.empty(2, dtype=torch.float64, pin_memory=True) for _ in range(2)]
+        self.metric_index = 0
+        self.pending: PendingBCStep | None = None
+        self.last_wall_anchor = perf_counter()
+        self.queued_steps = journal.steps
+
+    def _verify_adam_steps(self, expected_steps):
+        counters = {int(state["step"]) for state in self.optimizer.state.values()}
+        if counters != {expected_steps}:
+            raise ValueError("BC Adam counters differ from completed steps")
+
+    def _complete(self, step, *, verify_counter):
+        if step is None:
+            return
+        with record_function("bc::sync_and_bookkeeping") if self.annotate else nullcontext():
+            step.done_event.synchronize()
+        self.prefetch.slot_pool.release(step.pinned_slot)
+        completed_at = perf_counter()
+        ce, norm = self.metric_buffers[step.metrics_buffer_index].tolist()
+        _require_finite_step(ce, norm)
+        if verify_counter:
+            self._verify_adam_steps(self.journal.steps + 1)
+        self.cache.counters["prefix_positions"] += step.prefix_positions
+        self.cache.counters["history_positions"] += step.history_positions
+        self.last_wall_anchor = completed_at
+        self.journal.publish(
+            step.label_count,
+            ce,
+            norm,
+            step.started_at,
+            completed_at,
+            step.prefix_positions,
+            step.history_positions,
+            log_handle=self.log_handle,
+        )
+
+    def _enqueue(self, item):
+        with record_function("bc::h2d_stage") if self.annotate else nullcontext():
+            staged = _stage_minibatch_to_gpu(item, self.device, self.h2d_stream, self.compute_stream)
+
+        # A boundary callback must read this Adam clock before the next update.
+        previous = self.pending
+        if previous is not None and self.journal.steps + 1 in self.check_steps:
+            self.pending = None
+            self._complete(previous, verify_counter=True)
+            previous = None
+
+        metric_index = self.metric_index
+        self.metric_index = 1 - metric_index
+        with (
+            record_function("bc::step_total") if self.annotate else nullcontext(),
+            record_function("bc::optimizer_step") if self.annotate else nullcontext(),
+        ):
+            done_event = _enqueue_gpu_step(
+                policy=self.policy,
+                optimizer=self.optimizer,
+                staged=staged,
+                device=self.device,
+                max_gradient_norm=self.max_gradient_norm,
+                compute_stream=self.compute_stream,
+                metrics_cpu_buf=self.metric_buffers[metric_index],
+                annotate=self.annotate,
+            )
+        del staged
+        # Keep the new pinned slot alive if the previous step's callback fails.
+        self.pending = PendingBCStep(
+            metrics_buffer_index=metric_index,
+            pinned_slot=item.slot,
+            done_event=done_event,
+            label_count=item.label_count,
+            prefix_positions=item.prefix_positions,
+            history_positions=item.history_positions,
+            started_at=self.last_wall_anchor,
+        )
+        if previous is not None:
+            self._complete(previous, verify_counter=False)
+            self.pending = self.pending._replace(started_at=self.last_wall_anchor)
+
+    def run(self, max_steps, should_stop):
+        initial_steps = self.journal.steps
+        while True:
+            if _stop_before_step(self.queued_steps, max_steps, should_stop):
+                self.prefetch.stop_event.set()
+                break
+            item = self.prefetch.get()
+            if item is None:
+                break
+            self.queued_steps += 1
+            self._enqueue(item)
+            del item
+
+        self._complete(self.pending, verify_counter=self.journal.steps + 1 in self.check_steps)
+        self.pending = None
+        torch.cuda.synchronize(self.device)
+        if self.journal.steps > initial_steps:
+            self._verify_adam_steps(self.journal.steps)
 
 
 def run_bc_minibatch_stream(
@@ -367,273 +619,53 @@ def run_bc_minibatch_stream(
     check_counter_steps=(),
     active_seconds=None,
 ):
-    """Execute BC minibatches with background .npz decompression, pinned H2D stream, and CPU/GPU overlap.
+    """Execute minibatches, overlapping prepared CPU input work with CUDA updates.
 
-    In the overlapped CUDA path, step N+1 is enqueued onto ``compute_stream`` before
-    ``on_step_completed`` runs for step N (except for steps in ``check_counter_steps``).
-    The callback therefore receives finalized step-N metrics, but must not save a model or
-    optimizer checkpoint without an explicit synchronous boundary.
+    Step N+1 is enqueued before step N's callback, except at the synchronous
+    boundaries in ``check_counter_steps``. Only boundary callbacks can safely
+    inspect or save the model or optimizer state for a specific step.
     """
+    journal = _BCStepJournal(
+        epoch, initial_steps, compilation, steps_log_path, active_seconds, on_step_completed
+    )
     device = torch.device(cache.device)
     if device.type != "cuda" or not isinstance(cache, PreparedDemonstrations):
-
-        def backward(p, c, s, n):
-            return backward_minibatch_async(p, c, s, n, micro_size)
-
-        records = []
-        steps = initial_steps
-        for spans, n in batches:
-            if max_steps is not None and steps >= max_steps:
-                break
-            if should_stop is not None and should_stop() is not None:
-                break
-            start = perf_counter()
-            before = dict(cache.counters)
-            ce, norm = bc_optimizer_step(
-                policy,
-                optimizer,
-                backward,
-                cache,
-                spans,
-                n,
-                max_gradient_norm=max_gradient_norm,
-                asynchronous=False,
-            )
-            ce = float(ce)
-            norm = float(norm)
-            if not math.isfinite(ce) or not math.isfinite(norm):
-                raise FloatingPointError("Non-finite BC loss or gradient norm")
-            steps += 1
-            record = {
-                "step": steps,
-                "epoch": epoch,
-                "labels": int(n),
-                "ce": ce,
-                "gradient_norm": norm,
-                "seconds": perf_counter() - start,
-                "prefix_positions": cache.counters["prefix_positions"]
-                - before.get("prefix_positions", 0),
-                "history_positions": cache.counters["history_positions"]
-                - before.get("history_positions", 0),
-                "compile_seconds": compilation.seconds(start, perf_counter())
-                if compilation is not None
-                else 0.0,
-            }
-            records.append(record)
-            if active_seconds is not None:
-                record["active_seconds"] = active_seconds()
-            if steps_log_path is not None:
-                with steps_log_path.open("a", encoding="utf-8") as stream:
-                    stream.write(json.dumps(record) + "\n")
-            if on_step_completed is not None:
-                on_step_completed(record, steps)
-        return records
-
+        _run_synchronous_minibatches(
+            policy,
+            optimizer,
+            cache,
+            batches,
+            journal,
+            micro_size=micro_size,
+            max_gradient_norm=max_gradient_norm,
+            max_steps=max_steps,
+            should_stop=should_stop,
+        )
+        return journal.records
     if device.index is None:
         device = torch.device("cuda", torch.cuda.current_device())
 
-    cell_padding = int(getattr(policy, "spatial_cell_padding", 0) or 0)
-    is_recurrent = bool(policy.is_recurrent)
-    check_set = set(check_counter_steps)
-
-    prefetch_q: queue.Queue = queue.Queue(maxsize=2)
-    slot_pool = PinnedSlotPool(5, slot_factory=ImitationPinnedBatchSlot)
-    stop_event = threading.Event()
-    io_workers = min(4, max(2, (os.cpu_count() or 4) // 2))
-
-    def _put_safe(obj):
-        while not stop_event.is_set():
-            try:
-                prefetch_q.put(obj, timeout=0.05)
-                return True
-            except queue.Full:
-                continue
-        return False
-
-    def _producer():
-        batch_iter = iter(batches)
-        upcoming = deque()
-        lookahead = 4
-        try:
-            with ThreadPoolExecutor(max_workers=io_workers) as io_pool:
-                while not stop_event.is_set():
-                    while len(upcoming) < lookahead:
-                        try:
-                            upcoming.append(next(batch_iter))
-                        except StopIteration:
-                            break
-                    if not upcoming:
-                        break
-                    cache.preload_episodes(
-                        (ep for s_list, _ in upcoming for ep, _, _ in s_list),
-                        io_pool,
-                    )
-                    slot = slot_pool.acquire(stop_event=stop_event)
-                    if slot is None:
-                        return
-                    spans, count = upcoming.popleft()
-                    prepared = _prepare_minibatch_cpu(
-                        cache,
-                        spans,
-                        count,
-                        is_recurrent=is_recurrent,
-                        micro_size=micro_size,
-                        cell_padding=cell_padding,
-                        slot=slot,
-                    )
-                    if not _put_safe(prepared):
-                        return
-                _put_safe(_STREAM_END)
-        except BaseException as exc:
-            _put_safe(_ProducerError(exc))
-        finally:
-            cache._inflight.clear()
-
-    producer_thread = threading.Thread(target=_producer, daemon=True)
-    producer_thread.start()
-
-    compute_stream = torch.cuda.current_stream(device)
-    h2d_stream = torch.cuda.Stream(device=device)
-    metrics_bufs = [
-        torch.empty(2, dtype=torch.float64, pin_memory=True) for _ in range(2)
-    ]
-
-    records = []
-    completed_steps = initial_steps
-    pending_step: PendingBCStep | None = None
-    last_wall_anchor = perf_counter()
-    log_handle = (
-        steps_log_path.open("a", encoding="utf-8")
-        if steps_log_path is not None
-        else None
+    prefetch = _PreparedBatchPrefetch(
+        cache,
+        batches,
+        is_recurrent=bool(policy.is_recurrent),
+        micro_size=micro_size,
+        cell_padding=int(getattr(policy, "spatial_cell_padding", 0) or 0),
     )
-
-    def _complete_pending_step(verify_counter: bool = False):
-        nonlocal pending_step, completed_steps, last_wall_anchor
-        if pending_step is None:
-            return
-        step_info = pending_step
-        pending_step = None
-        with record_function("bc::sync_and_bookkeeping") if annotate else nullcontext():
-            step_info.done_event.synchronize()
-        slot_pool.release(step_info.pinned_slot)
-        now = perf_counter()
-        buf = metrics_bufs[step_info.metrics_buffer_index]
-        ce_val = float(buf[0].item())
-        norm_val = float(buf[1].item())
-        if not math.isfinite(ce_val) or not math.isfinite(norm_val):
-            raise FloatingPointError("Non-finite BC loss or gradient norm")
-        completed_steps += 1
-        if verify_counter:
-            counters = {int(s["step"]) for s in optimizer.state.values()}
-            if counters != {completed_steps}:
-                raise ValueError("BC Adam counters differ from completed steps")
-        cache.counters["prefix_positions"] += step_info.prefix_positions
-        cache.counters["history_positions"] += step_info.history_positions
-        record = {
-            "step": completed_steps,
-            "epoch": epoch,
-            "labels": step_info.label_count,
-            "ce": ce_val,
-            "gradient_norm": norm_val,
-            "seconds": now - step_info.started_at,
-            "prefix_positions": step_info.prefix_positions,
-            "history_positions": step_info.history_positions,
-            "compile_seconds": compilation.seconds(step_info.started_at, now)
-            if compilation is not None
-            else 0.0,
-        }
-        last_wall_anchor = now
-        records.append(record)
-        if active_seconds is not None:
-            record["active_seconds"] = active_seconds()
-        if log_handle is not None:
-            log_handle.write(json.dumps(record) + "\n")
-            log_handle.flush()
-        if on_step_completed is not None:
-            on_step_completed(record, completed_steps)
-
-    slot_cursor = 0
-    queued_steps = initial_steps
-    try:
-        while True:
-            if max_steps is not None and queued_steps >= max_steps:
-                stop_event.set()
-                break
-            if should_stop is not None and should_stop() is not None:
-                stop_event.set()
-                break
-            item = prefetch_q.get()
-            if item is _STREAM_END:
-                break
-            if isinstance(item, _ProducerError):
-                raise item.exception
-            queued_steps += 1
-
-            with record_function("bc::h2d_stage") if annotate else nullcontext():
-                staged = _stage_minibatch_to_gpu(
-                    item, device, h2d_stream, compute_stream
-                )
-            label_count = item.label_count
-            prefix_positions = item.prefix_positions
-            history_positions = item.history_positions
-            pinned_slot = item.slot
-            del item
-
-            # If the in-flight step requires an exact synchronous Adam counter check
-            # (e.g. step 1), finalize it before mutating optimizer state with the next step.
-            if pending_step is not None and (completed_steps + 1) in check_set:
-                _complete_pending_step(verify_counter=True)
-
-            cur_slot = slot_cursor
-            slot_cursor = 1 - slot_cursor
-            started_at = last_wall_anchor if pending_step is None else perf_counter()
-
-            with (
-                record_function("bc::step_total") if annotate else nullcontext(),
-                record_function("bc::optimizer_step") if annotate else nullcontext(),
-            ):
-                done_ev = _enqueue_gpu_step(
-                    policy=policy,
-                    optimizer=optimizer,
-                    staged=staged,
-                    device=device,
-                    max_gradient_norm=max_gradient_norm,
-                    compute_stream=compute_stream,
-                    metrics_cpu_buf=metrics_bufs[cur_slot],
-                    annotate=annotate,
-                )
-            del staged
-
-            if pending_step is not None:
-                _complete_pending_step(verify_counter=False)
-                # Update start time of the newly-running step to the completion time of the previous step.
-                started_at = last_wall_anchor
-
-            pending_step = PendingBCStep(
-                metrics_buffer_index=cur_slot,
-                pinned_slot=pinned_slot,
-                done_event=done_ev,
-                label_count=label_count,
-                prefix_positions=prefix_positions,
-                history_positions=history_positions,
-                started_at=started_at,
-            )
-
-        _complete_pending_step(
-            verify_counter=(
-                pending_step is not None and (completed_steps + 1) in check_set
-            )
+    log = nullcontext() if steps_log_path is None else steps_log_path.open("a", encoding="utf-8")
+    with log as log_handle:
+        pipeline = _CudaBCPipeline(
+            policy,
+            optimizer,
+            cache,
+            device,
+            journal,
+            prefetch,
+            max_gradient_norm=max_gradient_norm,
+            check_counter_steps=check_counter_steps,
+            annotate=annotate,
+            log_handle=log_handle,
         )
-        torch.cuda.synchronize(device)
-        if completed_steps > initial_steps:
-            counters = {int(s["step"]) for s in optimizer.state.values()}
-            if counters != {completed_steps}:
-                raise ValueError("BC Adam counters differ from completed steps")
-    finally:
-        stop_event.set()
-        producer_thread.join(timeout=5.0)
-        if log_handle is not None:
-            log_handle.close()
-
-    return records
+        with prefetch:
+            pipeline.run(max_steps, should_stop)
+    return journal.records

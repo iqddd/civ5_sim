@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from civ5rl.collector import Collector
 from civ5rl.common import configure, read_json, write_json
-from civ5rl.control import TrainingControl
+from tools.archive._training_control import TrainingControl
 from civ5rl.evaluation import save_training_replay
 from civ5rl.model import Policy, batch_inputs
 from civ5rl.observation import ObservationEncoder

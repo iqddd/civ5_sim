@@ -241,7 +241,9 @@ python tools/run_comparison.py resume --config CONFIG
 Для CONFIG с `fit_continuation` используйте `precheck`, затем `resume`:
 продолжение записывается в отдельный output, сохраняя Adam, RNG, счётчики,
 диагностику и использованную часть общего бюджета. `precheck` проверяет исходное
-состояние и совместимость оценки родителя без учебного обновления.
+состояние, совместимость сохранённого корпуса и ключ оценки родителя.
+Можно задать другой лимит `training_seconds` и больше принятых шагов при
+тех же настройках шага, KL и повторных попыток.
 `fit-lineage.json` закрепляет происхождение, `reused-parent.json` подтверждает
 переиспользование родительского Development. Итоговая оценка выполняется для
 последнего принятого кандидата. При несовместимом evaluation cache команда
@@ -253,8 +255,11 @@ python tools/run_comparison.py resume --config CONFIG
 отбрасываемый smoke; `train` обучает голову, `evaluate` подтверждает закреплённого
 кандидата, `resume` выполняет незавершённые фазы. Бои не запускаются.
 
-`split.json` содержит разбиение миров; `training.json` — эпохи, время и лучший
-selection G; `selected.json` закрепляет кандидата. `result.json` и `report.md`
+`split.json` содержит разбиение миров. `protocol.world_counts` задаёт размеры
+training, selection и confirmation и должен покрывать все уникальные миры
+корпуса. `seed` задаёт порядок миров и перемешивание при обучении.
+`training.json` содержит эпохи, время и лучший selection G.
+`selected.json` закрепляет кандидата. `result.json` и `report.md`
 показывают confirmation G, CI95 и выполнение критерия перехода к проверке
 политики. `confirmation-predictions.pt` содержит logits, вероятности `probs`,
 разность `delta_prob = p_alternative - p_parent` и фактический выбор для каждой
@@ -412,7 +417,7 @@ OOM-тренд смотрите в `telemetry/cuda-memory.jsonl` на одина
 ## Replay, полный цикл и диагностика
 
 ```powershell
-python tools/bench_rl.py replay --run RUN --compare-git-rev HEAD --out OUT
+python tools/bench_rl.py replay --run RUN --warmup 1 --repeats 3 --out OUT
 python tools/bench_rl.py ppo-update --config CONFIG --checkpoint CHECKPOINT --rollout ROLLOUT --minibatch-tokens 128 --out BASE
 python tools/bench_rl.py ppo-update --config CONFIG --checkpoint CHECKPOINT --rollout ROLLOUT --minibatch-tokens 128 --baseline-result BASE/benchmark.json --out OUT
 python tools/bench_rl.py full-cycle --config CONFIG --checkpoint CHECKPOINT --rollout ROLLOUT --out OUT --repeats 3 --device cuda
@@ -423,7 +428,7 @@ python tools/diagnose_cp_replay.py --rollout ROLLOUT --episode EPISODE --trace-f
 
 | Режим | Что измеряет |
 |---|---|
-| `replay` | Сохранённый rollout; `--compare-git-rev` сравнивает PPO backend выбранного commit |
+| `replay` | Время повторного прогона сохранённого rollout с фиксированными весами и сверкой метрик между повторами |
 | `ppo-update` | Одна отбрасываемая эпоха PPO на сохранённом rollout с переиспользуемым эталоном паритета и времени |
 | `full-cycle` | Сбор и отбрасываемый PPO update; нужен PPO checkpoint с Adam |
 | `bc` | Прогретые учебные шаги; `--verify-parity` добавляет сверку с baseline |
@@ -431,9 +436,9 @@ python tools/diagnose_cp_replay.py --rollout ROLLOUT --episode EPISODE --trace-f
 | `diagnose_cp_replay.py` | Повтор решений CP; `--trace-from` требует trace-enabled native library |
 
 `--warmup` исключается из замера, `--steps` ограничивает число учебных шагов,
-`--trace-steps` сохраняет короткую Kineto-трассу и сводку ядер. Исходный RUN
-не изменяется. `--compare-git-rev` поддержан только для replay и не переключает
-целиком окружение, модель и native-библиотеки на указанный commit.
+`--trace-steps` сохраняет короткую Kineto-трассу и сводку ядер. Для replay
+`--episode-limit N` выбирает первые N эпизодов, а `--repeats` задаёт число
+замеров. Результаты записываются в OUT.
 
 `ppo-update` запускайте до и после правки на той же машине с checkpoint,
 содержащим Adam, и rollout, проходящим behavior precheck. Для короткого

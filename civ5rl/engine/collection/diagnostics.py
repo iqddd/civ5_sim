@@ -5,6 +5,8 @@ calling thread's clock; neither wall minus CPU nor local queue time identifies
 OS preemption. Nested scopes and concurrently running processes overlap.
 """
 
+from __future__ import annotations
+
 import math
 import os
 import random
@@ -43,9 +45,7 @@ class Distribution:
             return
         self.count += other.count
         self.total += other.total
-        self.minimum = (
-            other.minimum if self.minimum is None else min(self.minimum, other.minimum)
-        )
+        self.minimum = other.minimum if self.minimum is None else min(self.minimum, other.minimum)
         self.maximum = max(self.maximum, other.maximum)
         self.bins = [a + b for a, b in zip(self.bins, other.bins, strict=True)]
 
@@ -63,9 +63,7 @@ class Distribution:
             for index, count in enumerate(self.bins):
                 accumulated += count
                 if accumulated >= target:
-                    estimate = (
-                        min(self.maximum, math.ceil(2 ** (index / 8))) if index else 0
-                    )
+                    estimate = min(self.maximum, math.ceil(2 ** (index / 8))) if index else 0
                     if index == self.SIZE - 1:
                         estimate = self.maximum
                     break
@@ -148,9 +146,7 @@ class Diagnostics:
     def stop(self, at=None, *, cpu_checkpoint=None):
         self.stopped_ns = perf_counter_ns() if at is None else at
         self.cpu_sampled_at_ns, self.stopped_cpu_ns = (
-            cpu_checkpoint
-            if cpu_checkpoint is not None
-            else (perf_counter_ns(), process_time_ns())
+            cpu_checkpoint if cpu_checkpoint is not None else (perf_counter_ns(), process_time_ns())
         )
 
     def report(self, *, ended_ns=None, compact=False, include_process_cpu=True):
@@ -168,8 +164,7 @@ class Diagnostics:
         metrics = {name: value.report() for name, value in self.metrics.items()}
         if compact:
             metrics = {
-                name: {k: v for k, v in row.items() if k != "histogram"}
-                for name, row in metrics.items()
+                name: {k: v for k, v in row.items() if k != "histogram"} for name, row in metrics.items()
             }
         report = {
             "schema": 1,
@@ -180,8 +175,7 @@ class Diagnostics:
             "started_ns": self.started_ns,
             "ended_ns": ended_ns,
             "clock_anchor": self.clock_anchor,
-            "thread_clock_resolution_ns": get_clock_info("thread_time").resolution
-            * 1e9,
+            "thread_clock_resolution_ns": get_clock_info("thread_time").resolution * 1e9,
             "metrics": metrics,
             "gauges": gauges,
             "events": self.samples,
@@ -190,12 +184,9 @@ class Diagnostics:
         }
         if include_process_cpu:
             report["process_cpu_ns"] = (
-                getattr(self, "stopped_cpu_ns", process_time_ns())
-                - self.process_started_ns
+                getattr(self, "stopped_cpu_ns", process_time_ns()) - self.process_started_ns
             )
-            report["process_cpu_sampled_at_ns"] = getattr(
-                self, "cpu_sampled_at_ns", ended_ns
-            )
+            report["process_cpu_sampled_at_ns"] = getattr(self, "cpu_sampled_at_ns", ended_ns)
         return report
 
 

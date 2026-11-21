@@ -1,8 +1,12 @@
 """CPU-only operations shared by the collection workers."""
 
+from __future__ import annotations
+
+import cProfile
 import os
 import traceback
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass
 from time import perf_counter, perf_counter_ns
 
@@ -15,6 +19,8 @@ from civ5rl.core.contracts import (
 )
 from civ5rl.core.env import DecisionEnv
 from civ5rl.core.observation import ObservationEncoder
+from civ5rl.engine.collection.diagnostics import Diagnostics
+from civ5rl.engine.runtime.shared import EncodedSlots
 from civ5sim.engine import step_batch
 
 
@@ -30,6 +36,8 @@ class WorkerSlotState:
 
 
 class BaseWorker:
+    """Own CPU simulators and optional shared input slots."""
+
     def __init__(self, connection, profile_path=None, shared_descriptor=None):
         for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
             os.environ[name] = "1"
@@ -39,12 +47,8 @@ class BaseWorker:
         self.profiler = None
         self.profile_path = profile_path
         if shared_descriptor is not None:
-            from civ5rl.engine.runtime.shared import EncodedSlots
-
             self.shared = EncodedSlots(descriptor=shared_descriptor)
         if profile_path is not None:
-            import cProfile
-
             self.profiler = cProfile.Profile()
             self.profiler.enable()
 
@@ -53,29 +57,12 @@ class BaseWorker:
             if slot.env is not None:
                 slot.env.close()
         self.slots = []
-        for spec in specs:
-            env = DecisionEnv(spec)
-            env.attack_preview = variant == "C2P"
-            encoder = (
-                ObservationEncoder(context_from_spec(spec), variant)
-                if self.shared is not None
-                else None
-            )
-            opp_encoder = (
-                ObservationEncoder(
-                    context_from_spec(spec, side=1 - spec["learner_side"]), variant
-                )
-                if self.shared is not None and spec.get("opponent") == "policy"
-                else None
-            )
-            self.slots.append(
-                WorkerSlotState(env=env, encoder=encoder, opp_encoder=opp_encoder)
-            )
+        for index, spec in enumerate(specs):
+            self.slots.append(WorkerSlotState())
+            self.assign(index, spec, variant)
 
     def warmup(self, spec: ScenarioSpec):
         """Exercise CP once in an owned temporary episode, outside collection."""
-        from copy import deepcopy
-
         spec = deepcopy(spec)
         spec["learner_side"] = 1  # Initial side zero belongs to CP in this episode.
         spec["opponent"] = "cp"
@@ -106,14 +93,10 @@ class BaseWorker:
         state.env = DecisionEnv(spec)
         state.env.attack_preview = variant == "C2P"
         state.encoder = (
-            ObservationEncoder(context_from_spec(spec), variant)
-            if self.shared is not None
-            else None
+            ObservationEncoder(context_from_spec(spec), variant) if self.shared is not None else None
         )
         state.opp_encoder = (
-            ObservationEncoder(
-                context_from_spec(spec, side=1 - spec["learner_side"]), variant
-            )
+            ObservationEncoder(context_from_spec(spec, side=1 - spec["learner_side"]), variant)
             if self.shared is not None and spec.get("opponent") == "policy"
             else None
         )
@@ -153,11 +136,7 @@ class BaseWorker:
     def remember(self, command: WorkerCommand):
         if self.shared is not None:
             slot = self.slots[command.slot]
-            encoder = (
-                slot.opp_encoder
-                if slot.previous and slot.previous.get("is_opponent")
-                else slot.encoder
-            )
+            encoder = slot.opp_encoder if slot.previous and slot.previous.get("is_opponent") else slot.encoder
             encoder.remember_action(command.action, slot.previous["observation"])
 
     def encode(self, slot: int, state: WorkerState) -> float:
@@ -201,11 +180,7 @@ class BaseWorker:
                 "error",
                 {
                     "traceback": traceback.format_exc(),
-                    "episodes": [
-                        slot.env.reproduction()
-                        for slot in self.slots
-                        if slot.env is not None
-                    ],
+                    "episodes": [slot.env.reproduction() for slot in self.slots if slot.env is not None],
                 },
             )
         )
@@ -215,22 +190,10 @@ class BaseWorker:
             self.run_loop()
         except EOFError:
             pass
-        except BaseException:
+        except BaseException:  # noqa: BLE001 -- report worker failure before closing IPC
             self.send_error()
         finally:
             self.close()
-
-    def receive(self):
-        return self.command(*self.connection.recv())
-
-    def poll_commands(self):
-        """Block only when no slot already has pending work."""
-        if not self.pending and not self.receive():
-            return False
-        while self.connection.poll():
-            if not self.receive():
-                return False
-        return True
 
     def close(self):
         if self.profiler is not None:
@@ -245,6 +208,8 @@ class BaseWorker:
 
 
 class SyncWaveWorker(BaseWorker):
+    """Process one complete synchronous reply for each wave command."""
+
     def run_loop(self):
         runtime = self
         connection = self.connection
@@ -284,21 +249,74 @@ def sync_worker(connection, profile_path=None, shared_descriptor=None):
     SyncWaveWorker(connection, profile_path, shared_descriptor).run()
 
 
-class ReadyWaveWorker(BaseWorker):
+class QueuedWorker(BaseWorker):
+    """Share ownership and action handling for workers with partial replies."""
+
+    streaming_actions = False
+    duplicate_action_error = "Duplicate slot in learner commands"
+
+    def receive(self):
+        return self.command(*self.connection.recv())
+
+    def poll_commands(self):
+        """Block only when no slot already has pending work."""
+        if not self.pending and not self.receive():
+            return False
+        while self.connection.poll():
+            if not self.receive():
+                return False
+        return True
+
+    def is_busy(self):
+        return bool(self.pending) or any(slot.offered for slot in self.slots)
+
+    def handle_control(self, kind, payload):
+        """Handle close and warmup commands common to both queued workers."""
+        if kind == "close":
+            return False
+        if kind == "warmup":
+            if self.is_busy():
+                raise RuntimeError("Warmup requires an idle worker")
+            self.connection.send(("warmup", self.warmup(payload)))
+            return True
+        return None
+
+    def require_distinct_slots(self, commands):
+        if len({item.slot for item in commands}) != len(commands):
+            raise RuntimeError(self.duplicate_action_error)
+
+    def apply_commands(self, commands):
+        self.step(
+            commands,
+            interleave_history=True,
+            validate=self._validate_action,
+            applied=self.applied,
+        )
+
+    def _validate_action(self, item):
+        self.validate_command(item, streaming=self.streaming_actions)
+
+    def offer(self, index, state):
+        slot = self.slots[index]
+        slot.offered = not state["done"]
+        slot.generation += 1
+        slot.previous = state
+        return slot.generation
+
+
+class ReadyWaveWorker(QueuedWorker):
+    """Advance fixed wave slots to their next complete observation."""
+
     def applied(self, item):
         self.slots[item.slot].offered = False
         self.pending.append(item.slot)
 
     def command(self, kind, payload):
-        if kind == "close":
-            return False
-        if kind == "warmup":
-            if self.pending or any(slot.offered for slot in self.slots):
-                raise RuntimeError("Warmup requires an idle worker")
-            self.connection.send(("warmup", self.warmup(payload)))
-            return True
+        control = self.handle_control(kind, payload)
+        if control is not None:
+            return control
         if kind == "reset":
-            if self.pending or any(slot.offered for slot in self.slots):
+            if self.is_busy():
                 raise RuntimeError("Reset before all episode replies completed")
             self.wave_id, self.reply_size = payload["wave"], payload["reply_size"]
             self.reset(payload["specs"], payload["variant"])
@@ -307,16 +325,8 @@ class ReadyWaveWorker(BaseWorker):
             if payload["wave"] != self.wave_id:
                 raise RuntimeError("Stale episode wave")
             commands = payload["commands"]
-            indices = [i for i, _, _ in commands]
-            if len(set(indices)) != len(indices):
-                raise RuntimeError("Duplicate slot in learner commands")
-
-            self.step(
-                commands,
-                interleave_history=True,
-                validate=self.validate_command,
-                applied=self.applied,
-            )
+            self.require_distinct_slots(commands)
+            self.apply_commands(commands)
         else:
             raise ValueError(f"Unknown worker command: {kind!r}")
         return True
@@ -340,12 +350,8 @@ class ReadyWaveWorker(BaseWorker):
                 request_seconds += perf_counter() - start
                 self.slots[i].done = state["done"]
                 encoding_seconds += self.encode(i, state)
-                self.slots[i].offered = not state["done"]
-                self.slots[i].generation += 1
-                self.slots[i].previous = state
-                items.append(
-                    WorkerStepItem(i, self.slots[i].generation, state, perf_counter())
-                )
+                generation = self.offer(i, state)
+                items.append(WorkerStepItem(i, generation, state, perf_counter()))
             if items:
                 self.connection.send(
                     (
@@ -365,9 +371,11 @@ def ready_worker(connection, profile_path=None, shared_descriptor=None):
     ReadyWaveWorker(connection, profile_path, shared_descriptor).run()
 
 
-class StreamingWorker(BaseWorker):
-    def validate_stream_command(self, item):
-        self.validate_command(item, streaming=True)
+class StreamingWorker(QueuedWorker):
+    """Advance a slot by one CPU slice and requeue unfinished requests."""
+
+    streaming_actions = True
+    duplicate_action_error = "Duplicate streaming command"
 
     def applied(self, item):
         self.slots[item.slot].offered = False
@@ -413,15 +421,11 @@ class StreamingWorker(BaseWorker):
         return self.command(kind, payload)
 
     def command(self, kind, payload):
-        if kind == "close":
-            return False
-        if kind == "warmup":
-            if self.pending or any(slot.offered for slot in self.slots):
-                raise RuntimeError("Warmup requires an idle worker")
-            self.connection.send(("warmup", self.warmup(payload)))
-            return True
+        control = self.handle_control(kind, payload)
+        if control is not None:
+            return control
         if kind == "reset":
-            if self.pending or any(slot.offered for slot in self.slots):
+            if self.is_busy():
                 raise RuntimeError("Reset before streaming episodes drained")
             self.reset([], payload["variant"])
             capacity = payload["capacity"]
@@ -430,8 +434,6 @@ class StreamingWorker(BaseWorker):
             self.variant = payload["variant"]
             self.reply_size = payload["reply_size"]
             if payload.get("collection_diagnostics"):
-                from civ5rl.engine.collection.diagnostics import Diagnostics
-
                 self.diag = Diagnostics(128, collection=self.collection_id)
                 self.diag.gauge("cpu_pending_slots", 0)
             else:
@@ -439,21 +441,15 @@ class StreamingWorker(BaseWorker):
             self.queued_at.clear()
             self.ready_at.clear()
         elif kind == "diagnostics":
-            if self.pending or any(slot.offered for slot in self.slots):
+            if self.is_busy():
                 raise RuntimeError("Diagnostics requested before collection drained")
-            self.diag.stop(
-                payload["ended_ns"], cpu_checkpoint=self.diag.last_work_checkpoint
-            )
+            self.diag.stop(payload["ended_ns"], cpu_checkpoint=self.diag.last_work_checkpoint)
             self.connection.send(("diagnostics", self.diag))
         elif kind == "assign":
             if payload["wave"] != self.collection_id:
                 raise RuntimeError("Stale streaming assignment")
             for slot, spec in payload["items"]:
-                if (
-                    not self.slots[slot].done
-                    or self.slots[slot].offered
-                    or slot in self.pending
-                ):
+                if not self.slots[slot].done or self.slots[slot].offered or slot in self.pending:
                     raise RuntimeError("Assignment overwrites an active episode")
                 self.assign(slot, spec, self.variant)
                 self.slots[slot].env.collection_diagnostics = self.diag
@@ -466,25 +462,17 @@ class StreamingWorker(BaseWorker):
             received_ns = perf_counter_ns() if self.diag else None
             if self.diag:
                 for item in commands:
-                    self.diag.add(
-                        "action_transport", received_ns - payload["diagnostic_sent_ns"]
-                    )
+                    self.diag.add("action_transport", received_ns - payload["diagnostic_sent_ns"])
                     self.diag.add(
                         "observation_to_action_received",
                         received_ns - self.ready_at[item.slot],
                     )
-            if len({item.slot for item in commands}) != len(commands):
-                raise RuntimeError("Duplicate streaming command")
+            self.require_distinct_slots(commands)
 
             self.action_sent_ns = payload.get("diagnostic_sent_ns")
             self.action_received_ns = received_ns
             clock = self.diag.begin() if self.diag else None
-            self.step(
-                commands,
-                interleave_history=True,
-                validate=self.validate_stream_command,
-                applied=self.applied,
-            )
+            self.apply_commands(commands)
             if self.diag:
                 self.diag.end("action_apply", clock)
         else:
@@ -525,9 +513,7 @@ class StreamingWorker(BaseWorker):
                     clock = self.diag.begin()
                 started = perf_counter()
                 state = self.slots[slot].env.request_slice()
-                state_ready_ns = (
-                    self.diag.end("request_slice", clock) if self.diag else None
-                )
+                state_ready_ns = self.diag.end("request_slice", clock) if self.diag else None
                 if self.diag:
                     self.diag.gauge("cpu_running_slots", 0)
                 elapsed = perf_counter() - started
@@ -543,13 +529,11 @@ class StreamingWorker(BaseWorker):
                 if self.diag:
                     encoded_ns = self.diag.end("worker_encode", clock)
                     self.ready_at[slot] = state_ready_ns
-                self.slots[slot].offered = not state["done"]
-                self.slots[slot].generation += 1
-                self.slots[slot].previous = state
+                generation = self.offer(slot, state)
                 items.append(
                     WorkerStepItem(
                         slot,
-                        self.slots[slot].generation,
+                        generation,
                         state,
                         perf_counter(),
                         {
@@ -583,12 +567,7 @@ class StreamingWorker(BaseWorker):
                 request_seconds = encoding_seconds = 0.0
                 slices = 0
                 max_slice_seconds = 0.0
-            if (
-                self.diag
-                and not self.pending
-                and not any(slot.offered for slot in self.slots)
-                and not hasattr(self.diag, "stopped_ns")
-            ):
+            if self.diag and not self.is_busy() and not hasattr(self.diag, "stopped_ns"):
                 # A later refill will replace this checkpoint. At final drain
                 # it freezes CPU before receiving/serializing diagnostic RPCs.
                 self.diag.checkpoint()

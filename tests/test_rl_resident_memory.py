@@ -1,5 +1,7 @@
 """Regressions for allocator admission and safe optional replay fallback."""
 
+from __future__ import annotations
+
 import unittest
 import weakref
 from types import SimpleNamespace
@@ -8,8 +10,9 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
+from civ5rl.engine.ppo.cache import RolloutCache
+from civ5rl.engine.ppo.replay import ReplayPart
 from civ5rl.engine.runtime.sequence import SequenceBuffer, allocation_with_reserve
-from civ5rl.engine.ppo.backend import ReplayPart, RolloutCache
 
 
 MEMORY = {"driver_free_bytes": 0, "allocated_bytes": 20, "reserved_bytes": 70}
@@ -90,8 +93,8 @@ class ResidentMemoryTests(unittest.TestCase):
             yield ReplayPart({"cells": tensor}, {}, [1], None, 1)
             raise torch.cuda.OutOfMemoryError("next replay part does not fit")
         with (
-            patch("civ5rl.engine.ppo.backend._replay_group_specs", return_value=[(1, [])]),
-            patch("civ5rl.engine.ppo.backend._replay_parts", side_effect=parts),
+            patch("civ5rl.engine.ppo.replay.replay_group_specs", return_value=[(1, [])]),
+            patch("civ5rl.engine.ppo.replay.replay_parts", side_effect=parts),
             patch("civ5rl.engine.runtime.sequence.cuda_memory_snapshot", return_value=MEMORY),
         ):
             plan = cache.prepare_replay_plan(prefer_device=True)
@@ -102,8 +105,8 @@ class ResidentMemoryTests(unittest.TestCase):
     def test_optional_replay_does_not_hide_non_memory_errors(self):
         cache = self.cache()
         with (
-            patch("civ5rl.engine.ppo.backend._replay_group_specs", return_value=[(1, [])]),
-            patch("civ5rl.engine.ppo.backend._replay_parts", side_effect=RuntimeError("invalid data")),
+            patch("civ5rl.engine.ppo.replay.replay_group_specs", return_value=[(1, [])]),
+            patch("civ5rl.engine.ppo.replay.replay_parts", side_effect=RuntimeError("invalid data")),
             patch("civ5rl.engine.runtime.sequence.cuda_memory_snapshot", return_value=MEMORY),
         ):
             with self.assertRaisesRegex(RuntimeError, "invalid data"):

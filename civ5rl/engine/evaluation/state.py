@@ -1,5 +1,7 @@
 """Resident per-battle GRU states and reusable inference batch storage."""
 
+from __future__ import annotations
+
 import torch
 
 
@@ -89,9 +91,7 @@ class RecurrentStates:
 
     def scatter(self, agents, hidden):
         """Update only participating battles; other states retain their values."""
-        torch._foreach_copy_(
-            [agent.hidden for agent in agents], list(hidden.split(1, dim=1))
-        )
+        torch._foreach_copy_([agent.hidden for agent in agents], list(hidden.split(1, dim=1)))
 
     @staticmethod
     def release(agent):

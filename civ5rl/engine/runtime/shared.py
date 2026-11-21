@@ -5,7 +5,10 @@ inputs. Evaluation may borrow a view until replying: the worker cannot overwrite
 it while blocked on that reply. No torch or CUDA context is needed in workers.
 """
 
+from __future__ import annotations
+
 import multiprocessing as mp
+import os
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing.shared_memory import SharedMemory
 
@@ -14,7 +17,6 @@ import numpy as np
 from civ5rl.core.encoded_layout import ENCODED_FIELDS
 from civ5rl.core.observation import Encoded
 from civ5rl.core.schema import MAX_MAP_CELLS
-from civ5rl.protocols.imitation import worker_setup
 
 
 class EncodedSlots:
@@ -35,23 +37,16 @@ class EncodedSlots:
             for field in ENCODED_FIELDS
         }
         self.axis_kind = {key: axis for key, (_, _, axis) in layout.items()}
-        size = sum(
-            int(np.prod(shape)) * np.dtype(dtype).itemsize
-            for shape, dtype, _ in layout.values()
-        )
+        size = sum(int(np.prod(shape)) * np.dtype(dtype).itemsize for shape, dtype, _ in layout.values())
         self.memory = (
-            SharedMemory(create=True, size=size)
-            if self.owner
-            else SharedMemory(name=descriptor["name"])
+            SharedMemory(create=True, size=size) if self.owner else SharedMemory(name=descriptor["name"])
         )
         self.arrays = {}
         try:
             self.descriptor = {**descriptor, "name": self.memory.name}
             offset = 0
             for key, (shape, dtype, _) in layout.items():
-                self.arrays[key] = np.ndarray(
-                    shape, dtype, buffer=self.memory.buf, offset=offset
-                )
+                self.arrays[key] = np.ndarray(shape, dtype, buffer=self.memory.buf, offset=offset)
                 offset += self.arrays[key].nbytes
         except BaseException:
             self.arrays.clear()
@@ -62,10 +57,7 @@ class EncodedSlots:
 
     def write(self, slot, encoded):
         num_cells, num_actions = len(encoded.cells), len(encoded.sources)
-        if (
-            num_cells > MAX_MAP_CELLS
-            or num_actions > self.descriptor["action_capacity"]
-        ):
+        if num_cells > MAX_MAP_CELLS or num_actions > self.descriptor["action_capacity"]:
             # Unusually large legal lists remain supported without truncation.
             return {"encoded_inline": encoded}
         for key, array in self.arrays.items():
@@ -102,6 +94,12 @@ class EncodedSlots:
         self.memory.close()
         if self.owner:
             self.memory.unlink()
+
+
+def worker_setup():
+    """Limit native thread pools for work launched in a spawned process."""
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        os.environ[name] = "1"
 
 
 def pool(workers):

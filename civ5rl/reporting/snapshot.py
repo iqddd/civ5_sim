@@ -6,15 +6,12 @@ import json
 import statistics
 from pathlib import Path
 
-from civ5rl.engine.runtime.telemetry import (
-    _lines,
-    performance_markdown,
-    summarize_performance,
-)
+from civ5rl.engine.runtime.telemetry_analysis import read_live_jsonl, summarize_performance
 from civ5rl.provenance.common import write_json
 from civ5rl.reporting.markdown import format_wdl
 from civ5rl.reporting.output_paths import derived_output
 from civ5rl.reporting.plot import pyplot
+from civ5rl.reporting.telemetry import performance_markdown
 
 
 def _read(path, default):
@@ -40,7 +37,7 @@ def build_snapshot(directory, *, block_size=10, last=None):
     record = _read(directory / "run.json", {})
     config = _read(directory / "resolved-config.json", record.get("config", {}))
     path = directory / "updates.jsonl"
-    rows = _lines(path)
+    rows = read_live_jsonl(path)
     if last:
         rows = rows[-last:]
     blocks = []

@@ -1,5 +1,7 @@
 """Bounded episode storage for BC; the existing sequence/loss math is unchanged."""
 
+from __future__ import annotations
+
 import os
 import sys
 from collections import Counter, OrderedDict
@@ -31,8 +33,7 @@ from civ5rl.engine.runtime.sequence import (
     Span,
 )
 from civ5rl.engine.runtime.shared import pool
-from civ5rl.protocols.imitation import load_episode
-from civ5rl.provenance.common import ROOT, atomic_save_npz, read_json, write_json
+from civ5rl.provenance.common import ROOT, atomic_save_npz, read_gzip_json, read_json, write_json
 
 
 def _resolve_episode_path(root, path):
@@ -76,15 +77,11 @@ def memory_bytes(value, seen=None):
     if isinstance(value, np.ndarray):
         return size + (value.nbytes if value.base is not None else 0)
     if isinstance(value, dict):
-        return size + sum(
-            memory_bytes(k, seen) + memory_bytes(v, seen) for k, v in value.items()
-        )
+        return size + sum(memory_bytes(k, seen) + memory_bytes(v, seen) for k, v in value.items())
     if isinstance(value, (list, tuple)):
         return size + sum(memory_bytes(v, seen) for v in value)
     if is_dataclass(value):
-        return size + sum(
-            memory_bytes(getattr(value, f.name), seen) for f in fields(value)
-        )
+        return size + sum(memory_bytes(getattr(value, f.name), seen) for f in fields(value))
     return size
 
 
@@ -175,9 +172,7 @@ class FileDemonstrations:
         if cached is not None:
             return cached.payload, cached.encoded
         started = perf_counter()
-        episode = load_episode(
-            _resolve_episode_path(self.root, self.entries[index]["path"])
-        )
+        episode = read_gzip_json(_resolve_episode_path(self.root, self.entries[index]["path"]))
         self.counters["read_seconds"] += perf_counter() - started
         if len(episode["decisions"]) != len(self.masks[index]):
             raise ValueError("Episode length differs from collection index")
@@ -199,23 +194,22 @@ class FileDemonstrations:
             for start in range(0, len(entry["supervised"]), size)
         ]
 
+    def _record_positions(self, count: int) -> None:
+        field = "history_positions" if torch.is_grad_enabled() else "prefix_positions"
+        if self.mode != "training":
+            field = "diagnostic_positions"
+        self.counters[field] += count
+
     def batch(self, spans):
         inputs, rows = [], []
         for episode_index, start, stop in spans:
             episode, encoded = self.get(episode_index)
             inputs.extend(encoded[start:stop])
             rows.extend(episode["decisions"][start:stop])
-        field = "history_positions" if torch.is_grad_enabled() else "prefix_positions"
-        if self.mode != "training":
-            field = "diagnostic_positions"
-        self.counters[field] += len(rows)
+        self._record_positions(len(rows))
         labels = {
-            "indices": torch.tensor(
-                [decision_indices(r)[0] for r in rows], device=self.device
-            ),
-            "mask": torch.tensor(
-                [r["supervised"] for r in rows], device=self.device, dtype=torch.bool
-            ),
+            "indices": torch.tensor([decision_indices(r)[0] for r in rows], device=self.device),
+            "mask": torch.tensor([r["supervised"] for r in rows], device=self.device, dtype=torch.bool),
         }
         return (
             batch_inputs(inputs, self.device, non_blocking=True),
@@ -228,10 +222,7 @@ class FileDemonstrations:
         for episode_index, start, stop in spans:
             _, encoded = self.get(episode_index)
             inputs.extend(encoded[start:stop])
-        field = "history_positions" if torch.is_grad_enabled() else "prefix_positions"
-        if self.mode != "training":
-            field = "diagnostic_positions"
-        self.counters[field] += len(inputs)
+        self._record_positions(len(inputs))
         return batch_inputs(inputs, self.device, non_blocking=True, spatial_only=True)
 
     def clear(self):
@@ -251,7 +242,7 @@ def prepare_episode(task):
     root, entry, destination = task
     root, destination = Path(root), Path(destination)
     started = perf_counter()
-    episode = load_episode(_resolve_episode_path(root, entry["path"]))
+    episode = read_gzip_json(_resolve_episode_path(root, entry["path"]))
     if "match_id" in entry and episode.get("match_id") != entry["match_id"]:
         raise ValueError("Prepared episode match_id differs from collection entry")
     if "side" in entry and episode.get("side") != entry["side"]:
@@ -264,11 +255,7 @@ def prepare_episode(task):
     offsets = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(counts)))
     arrays = {
         name: np.stack([getattr(x, name) for x in encoded])
-        for name in (
-            field.name
-            for field in ENCODED_FIELDS
-            if field.name in ("cells", "globals", "previous")
-        )
+        for name in (field.name for field in ENCODED_FIELDS if field.name in ("cells", "globals", "previous"))
     }
     # Geometry is invariant within an episode. All other features remain per decision.
     if not all(np.array_equal(x.neighbors, encoded[0].neighbors) for x in encoded):
@@ -277,16 +264,12 @@ def prepare_episode(task):
     arrays.update(
         {
             name: np.concatenate([getattr(x, name) for x in encoded])
-            for name in (
-                field.name for field in ENCODED_FIELDS if field.axis == "actions"
-            )
+            for name in (field.name for field in ENCODED_FIELDS if field.axis == "actions")
         }
     )
     arrays.update(
         offsets=offsets,
-        indices=np.asarray(
-            [decision_indices(r)[0] for r in episode["decisions"]], dtype=np.int64
-        ),
+        indices=np.asarray([decision_indices(r)[0] for r in episode["decisions"]], dtype=np.int64),
         mask=masks,
     )
     atomic_save_npz(destination, **arrays)
@@ -297,9 +280,7 @@ def prepare_episode(task):
         + PREPARED_FIXED_OVERHEAD_BYTES
     )
     prepared_rel = (
-        destination.relative_to(root).as_posix()
-        if destination.is_relative_to(root)
-        else destination.name
+        destination.relative_to(root).as_posix() if destination.is_relative_to(root) else destination.name
     )
     return {
         **entry,
@@ -333,17 +314,12 @@ def prepare_inputs(root, entries, workers=4, *, scratch_dir=None):
     started = perf_counter()
     prepared = []
     with pool(workers) as executor:
-        tasks = [
-            (str(root), e, str(directory / _prepared_filename(i, e)))
-            for i, e in enumerate(entries)
-        ]
+        tasks = [(str(root), e, str(directory / _prepared_filename(i, e))) for i, e in enumerate(entries)]
         # map's iterator is consumed as workers finish; only a few episodes are materialized per worker.
         for i, result in enumerate(executor.map(prepare_episode, tasks)):
             prepared.append(result)
             if (i + 1) % 100 == 0:
-                print(
-                    f"Prepared immutable BC inputs {i + 1}/{len(entries)}", flush=True
-                )
+                print(f"Prepared immutable BC inputs {i + 1}/{len(entries)}", flush=True)
     result = {
         "schema": 2,
         "entries": prepared,
@@ -366,10 +342,8 @@ class RawEpisodeView:
 
     def __getitem__(self, index):
         if self.owner.raw_index != index:
-            self.owner.raw_episode = load_episode(
-                _resolve_episode_path(
-                    self.owner.root, self.owner.entries[index]["path"]
-                )
+            self.owner.raw_episode = read_gzip_json(
+                _resolve_episode_path(self.owner.root, self.owner.entries[index]["path"])
             )
             self.owner.raw_index = index
         return self.owner.raw_episode
@@ -397,6 +371,86 @@ def _build_encoded_list(arrays):
                 values[field.name] = arrays[field.name][i]
         encoded.append(Encoded(**values))
     return encoded
+
+
+def _pack_spatial_rows(fragments, total_rows, cell_padding, allocate):
+    num_cells = max(cell_padding, max(int(arrays["cells"].shape[1]) for arrays, _, _ in fragments))
+    values = {
+        "cells": allocate((total_rows, num_cells, TILE_DIM), torch.float32),
+        "cell_mask": allocate((total_rows, num_cells), torch.bool),
+        "neighbors": allocate((total_rows, num_cells, HEX_DIRECTIONS), torch.int64),
+        "globals": allocate((total_rows, GLOBAL_DIM), torch.float32),
+        "previous": allocate((total_rows, PREV_ACTION_DIM), torch.float32),
+    }
+    cells, cell_mask, neighbors, global_features, previous = (value.numpy() for value in values.values())
+
+    offset = 0
+    for arrays, start, stop in fragments:
+        cell_count = arrays["cells"].shape[1]
+        end = offset + stop - start
+        cells[offset:end, :cell_count] = arrays["cells"][start:stop]
+        neighbors[offset:end, :cell_count] = arrays["neighbors"]
+        cell_mask[offset:end, :cell_count] = True
+        if cell_count < num_cells:
+            cells[offset:end, cell_count:] = 0.0
+            neighbors[offset:end, cell_count:] = -1
+            cell_mask[offset:end, cell_count:] = False
+        global_features[offset:end] = arrays["globals"][start:stop]
+        previous[offset:end] = arrays["previous"][start:stop]
+        offset = end
+    return values
+
+
+def _pack_action_rows(fragments, total_rows, allocate):
+    num_actions = max(
+        int((arrays["offsets"][start + 1 : stop + 1] - arrays["offsets"][start:stop]).max())
+        for arrays, start, stop in fragments
+    )
+    sources = allocate((total_rows, num_actions), torch.int64)
+    targets = allocate((total_rows, num_actions), torch.int64)
+    action_mask = allocate((total_rows, num_actions), torch.bool)
+    features = allocate((total_rows, num_actions, ACTION_DIM), torch.float32)
+    indices = allocate((total_rows,), torch.int64)
+    supervision = allocate((total_rows,), torch.bool)
+
+    sources_view = sources.numpy()
+    targets_view = targets.numpy()
+    action_mask_view = action_mask.numpy()
+    features_view = features.numpy()
+    indices_view = indices.numpy()
+    supervision_view = supervision.numpy()
+
+    sources_view.fill(-1)
+    targets_view.fill(-1)
+    action_mask_view.fill(False)
+    features_view.fill(0.0)
+
+    offset = 0
+    for arrays, start, stop in fragments:
+        end = offset + stop - start
+        indices_view[offset:end] = arrays["indices"][start:stop]
+        supervision_view[offset:end] = arrays["mask"][start:stop]
+        action_offsets = arrays["offsets"]
+        episode_sources = arrays["sources"]
+        episode_targets = arrays["targets"]
+        episode_features = arrays["action_features"]
+        for row, position in enumerate(range(start, stop), start=offset):
+            action_start, action_stop = int(action_offsets[position]), int(action_offsets[position + 1])
+            count = action_stop - action_start
+            if count:
+                sources_view[row, :count] = episode_sources[action_start:action_stop]
+                targets_view[row, :count] = episode_targets[action_start:action_stop]
+                action_mask_view[row, :count] = True
+                features_view[row, :count] = episode_features[action_start:action_stop]
+        offset = end
+
+    values = {
+        "sources": sources,
+        "targets": targets,
+        "action_features": features,
+        "action_mask": action_mask,
+    }
+    return values, {"indices": indices, "mask": supervision}
 
 
 class PreparedDemonstrations(FileDemonstrations):
@@ -430,9 +484,7 @@ class PreparedDemonstrations(FileDemonstrations):
     def preload_episodes(self, indices, executor):
         for idx in dict.fromkeys(int(i) for i in indices):
             if idx not in self.lru and idx not in self._inflight:
-                self._inflight[idx] = executor.submit(
-                    _read_npz_arrays, self._npz_path(idx)
-                )
+                self._inflight[idx] = executor.submit(_read_npz_arrays, self._npz_path(idx))
 
     def get_arrays(self, index):
         cached = self._lookup(index)
@@ -460,9 +512,7 @@ class PreparedDemonstrations(FileDemonstrations):
         cached = self._lookup(index)
         if cached is not None:
             if cached.encoded is None:
-                built = CacheRecord(
-                    cached.payload, _build_encoded_list(cached.payload), cached.size
-                )
+                built = CacheRecord(cached.payload, _build_encoded_list(cached.payload), cached.size)
                 self.lru.store(index, built, built.size)
                 return built.payload, built.encoded
             return cached.payload, cached.encoded
@@ -484,127 +534,22 @@ class PreparedDemonstrations(FileDemonstrations):
     ):
         if not spans:
             raise ValueError("Each batch item must contain at least one cell")
-        ep_arrays = [self.get_arrays(int(ep)) for ep, _, _ in spans]
-        lengths = [int(stop - start) for _, start, stop in spans]
+        fragments = [(self.get_arrays(int(episode)), int(start), int(stop)) for episode, start, stop in spans]
+        lengths = [stop - start for _, start, stop in fragments]
         total_rows = sum(lengths)
-        if total_rows <= 0 or any(a["cells"].shape[1] == 0 for a in ep_arrays):
+        if total_rows <= 0 or any(arrays["cells"].shape[1] == 0 for arrays, _, _ in fragments):
             raise ValueError("Each batch item must contain at least one cell")
-        num_cells = max(
-            max(int(a["cells"].shape[1]) for a in ep_arrays), int(cell_padding)
-        )
 
-        def _empty(shape, dtype):
+        def allocate(shape, dtype):
             if alloc is not None:
                 return alloc(shape, dtype)
             return torch.empty(shape, dtype=dtype, pin_memory=pin)
 
-        cells_t = _empty((total_rows, num_cells, TILE_DIM), torch.float32)
-        cell_mask_t = _empty((total_rows, num_cells), torch.bool)
-        neighbors_t = _empty((total_rows, num_cells, HEX_DIRECTIONS), torch.int64)
-        globals_t = _empty((total_rows, GLOBAL_DIM), torch.float32)
-        previous_t = _empty((total_rows, PREV_ACTION_DIM), torch.float32)
-
-        cells_np = cells_t.numpy()
-        cell_mask_np = cell_mask_t.numpy()
-        neighbors_np = neighbors_t.numpy()
-        globals_np = globals_t.numpy()
-        previous_np = previous_t.numpy()
-
-        row = 0
-        for a, (_, start, stop) in zip(ep_arrays, spans):
-            start, stop = int(start), int(stop)
-            length = stop - start
-            c = int(a["cells"].shape[1])
-            end_row = row + length
-            cells_np[row:end_row, :c] = a["cells"][start:stop]
-            if c < num_cells:
-                cells_np[row:end_row, c:] = 0.0
-            neighbors_np[row:end_row, :c] = a["neighbors"]
-            if c < num_cells:
-                neighbors_np[row:end_row, c:] = -1
-            cell_mask_np[row:end_row, :c] = True
-            if c < num_cells:
-                cell_mask_np[row:end_row, c:] = False
-            globals_np[row:end_row] = a["globals"][start:stop]
-            previous_np[row:end_row] = a["previous"][start:stop]
-            row = end_row
-
-        values = {
-            "cells": cells_t,
-            "cell_mask": cell_mask_t,
-            "neighbors": neighbors_t,
-            "globals": globals_t,
-            "previous": previous_t,
-        }
+        values = _pack_spatial_rows(fragments, total_rows, int(cell_padding), allocate)
         if spatial_only:
             return values, None, lengths
-
-        num_actions = max(
-            int(
-                (
-                    a["offsets"][int(start) + 1 : int(stop) + 1]
-                    - a["offsets"][int(start) : int(stop)]
-                ).max()
-            )
-            for a, (_, start, stop) in zip(ep_arrays, spans)
-        )
-        sources_t = _empty((total_rows, num_actions), torch.int64)
-        targets_t = _empty((total_rows, num_actions), torch.int64)
-        action_mask_t = _empty((total_rows, num_actions), torch.bool)
-        features_t = _empty((total_rows, num_actions, ACTION_DIM), torch.float32)
-        indices_t = _empty((total_rows,), torch.int64)
-        mask_t = _empty((total_rows,), torch.bool)
-
-        sources_np = sources_t.numpy()
-        targets_np = targets_t.numpy()
-        action_mask_np = action_mask_t.numpy()
-        features_np = features_t.numpy()
-        indices_np = indices_t.numpy()
-        mask_np = mask_t.numpy()
-
-        sources_np.fill(-1)
-        targets_np.fill(-1)
-        action_mask_np.fill(False)
-        features_np.fill(0.0)
-
-        row = 0
-        for a, (_, start, stop) in zip(ep_arrays, spans):
-            start, stop = int(start), int(stop)
-            length = stop - start
-            end_row = row + length
-            indices_np[row:end_row] = a["indices"][start:stop]
-            mask_np[row:end_row] = a["mask"][start:stop]
-            offs = a["offsets"]
-            src_ep = a["sources"]
-            tgt_ep = a["targets"]
-            feat_ep = a["action_features"]
-            r = row
-            for t in range(start, stop):
-                a0 = int(offs[t])
-                a1 = int(offs[t + 1])
-                cnt = a1 - a0
-                if cnt:
-                    sources_np[r, :cnt] = src_ep[a0:a1]
-                    targets_np[r, :cnt] = tgt_ep[a0:a1]
-                    action_mask_np[r, :cnt] = True
-                    features_np[r, :cnt] = feat_ep[a0:a1]
-                r += 1
-            row = end_row
-
-        values.update(
-            sources=sources_t,
-            targets=targets_t,
-            action_features=features_t,
-            action_mask=action_mask_t,
-        )
-        labels = {"indices": indices_t, "mask": mask_t}
-        return values, labels, lengths
-
-    def _record_positions(self, count: int) -> None:
-        field = "history_positions" if torch.is_grad_enabled() else "prefix_positions"
-        if self.mode != "training":
-            field = "diagnostic_positions"
-        self.counters[field] += count
+        actions, labels = _pack_action_rows(fragments, total_rows, allocate)
+        return {**values, **actions}, labels, lengths
 
     def gather_spatial_inputs(self, spans):
         is_cuda = str(self.device).startswith("cuda")
@@ -615,9 +560,7 @@ class PreparedDemonstrations(FileDemonstrations):
             cell_padding=self.spatial_cell_padding,
         )
         self._record_positions(sum(lengths))
-        return {
-            k: v.to(self.device, non_blocking=is_cuda) for k, v in cpu_values.items()
-        }
+        return {k: v.to(self.device, non_blocking=is_cuda) for k, v in cpu_values.items()}
 
     def batch(self, spans):
         is_cuda = str(self.device).startswith("cuda")

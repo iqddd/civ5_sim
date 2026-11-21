@@ -1,5 +1,7 @@
 """Reusable page-locked (pinned) host tensor buffers for async CPU-to-GPU pipelines."""
 
+from __future__ import annotations
+
 import math
 import queue
 import threading
@@ -65,9 +67,7 @@ class PinnedBufferSlot:
         """Allocate or expand ``pin_memory=True`` storage on the main CUDA thread."""
         if not self.grow_requests:
             return
-        for (channel, dtype, idx), min_numel in sorted(
-            self.grow_requests.items(), key=lambda kv: kv[0][2]
-        ):
+        for (channel, dtype, idx), min_numel in sorted(self.grow_requests.items(), key=lambda kv: kv[0][2]):
             lst = self.buffers.setdefault((channel, dtype), [])
             alloc_numel = max(min_numel, int(min_numel * self.growth_factor))
             while len(lst) <= idx:
@@ -79,11 +79,7 @@ class PinnedBufferSlot:
 
     def pinned_bytes(self) -> int:
         """Total bytes currently held in page-locked host storage for this slot."""
-        return sum(
-            tensor.numel() * tensor.element_size()
-            for lst in self.buffers.values()
-            for tensor in lst
-        )
+        return sum(tensor.numel() * tensor.element_size() for lst in self.buffers.values() for tensor in lst)
 
 
 SlotT = TypeVar("SlotT", bound=PinnedBufferSlot)

@@ -124,7 +124,8 @@ class OneDecisionTests(unittest.TestCase):
         import random
 
         from civ5rl.collector import Collector
-        from civ5rl.ppo_fast import RolloutCache, update_fast
+        from civ5rl.engine.ppo.cache import RolloutCache
+        from civ5rl.engine.ppo.core import update
 
         config = deepcopy(self.config)
         config["collection"].update(
@@ -134,6 +135,7 @@ class OneDecisionTests(unittest.TestCase):
             min_learner_decisions_per_update=16,
         )
         config["ppo"].update(epochs=1)
+        config.setdefault("performance", {})["batched_ppo"] = True
         policy = Policy().eval()
         load_initial_weights(policy, config)
         factory = DiagnosticFactory(self.dataset, 17)
@@ -161,7 +163,7 @@ class OneDecisionTests(unittest.TestCase):
             cache.labels["returns"].numpy(), [ep["result"]["reward"] for ep in episodes]
         )
         optimizer = torch.optim.Adam(policy.parameters(), lr=0.0003)
-        stats = update_fast(policy, optimizer, episodes, config, 0, "cpu", random.Random(18))
+        stats = update(policy, optimizer, episodes, config, 0, "cpu", random.Random(18))
         self.assertEqual(stats["optimizer_steps"], 2)
         self.assertEqual(stats["objective_valid_tokens"], 16)
         self.assertTrue(all(int(x["step"]) == 2 for x in optimizer.state.values()))

@@ -11,6 +11,8 @@ and changes only cache placement, never the mathematical path. Unit-index
 padding is derived from public batch inputs and never truncates legal keys.
 """
 
+from __future__ import annotations
+
 import os
 from collections import Counter
 from collections.abc import Sequence
@@ -54,9 +56,7 @@ class History(Sequence):
             start, stop, step = index.indices(len(self))
             if step != 1:
                 return [self[i] for i in range(start, stop, step)]
-            return History(
-                self.owner, self.episode, self.start + start, self.start + stop
-            )
+            return History(self.owner, self.episode, self.start + start, self.start + stop)
         if index < 0:
             index += len(self)
         if not 0 <= index < len(self):
@@ -83,11 +83,7 @@ class Histories:
             if scratch
             else ROOT / ".tmp" / "comparison-inputs" / digest(str(self.out.resolve()))
         )
-        self.directory = (
-            Path(cache_dir)
-            if cache_dir is not None
-            else cache_root / "prepared-histories"
-        )
+        self.directory = Path(cache_dir) if cache_dir is not None else cache_root / "prepared-histories"
         self.source_hashes, self.limits = source_hashes, limits or {}
         self.device, self.gpu_limit, self.pinned_limit = (
             str(device),
@@ -97,27 +93,21 @@ class Histories:
         self.records, self.sources, self.buffers = {}, {}, {}
         self.counters = Counter()
         # Bump encoding_version when tensor semantics change, not for file moves.
-        self.encoder_identity = dict(
-            encoding_version=1,
-            torch_version=str(torch.__version__),
-            numpy_version=np.__version__,
-        )
+        self.encoder_identity = {
+            "encoding_version": 1,
+            "torch_version": str(torch.__version__),
+            "numpy_version": np.__version__,
+        }
         self._gpu_closed = self._pinned_closed = False
 
     def source_folder(self, episode):
-        return self.out / 'sources' / str(episode)
+        return self.out / "sources" / str(episode)
 
     def source_identity(self, episode):
         if episode not in self.sources:
             folder = self.source_folder(episode)
-            hashes = {
-                name: file_sha256(folder / name)
-                for name in ("case.json", "history.json")
-            }
-            if (
-                self.source_hashes is not None
-                and hashes != self.source_hashes[str(episode)]
-            ):
+            hashes = {name: file_sha256(folder / name) for name in ("case.json", "history.json")}
+            if self.source_hashes is not None and hashes != self.source_hashes[str(episode)]:
                 raise ValueError("Recorded public history changed")
             self.sources[episode] = hashes
             self.counters["source_verifications"] += 1
@@ -160,31 +150,29 @@ class Histories:
         units = (spatial["unit_indices"] >= 0).sum(-1)
         with atomic_output(path) as temp, temp.open("wb") as stream:
             torch.save(
-                dict(
-                    identity=identity,
-                    spatial=spatial,
-                    actions=actions,
-                    counts=counts,
-                    offsets=offsets,
-                    units=units,
-                ),
+                {
+                    "identity": identity,
+                    "spatial": spatial,
+                    "actions": actions,
+                    "counts": counts,
+                    "offsets": offsets,
+                    "units": units,
+                },
                 stream,
             )
-        write_json(
-            path.with_suffix(".json"), dict(identity=identity, sha256=file_sha256(path))
-        )
+        write_json(path.with_suffix(".json"), {"identity": identity, "sha256": file_sha256(path)})
         self.counters["encoded_episodes"] += 1
         self.counters["encoded_decisions"] += len(encoded)
         self.counters["preparation_seconds"] += perf_counter() - started
 
     def get(self, episode):
         if episode not in self.records:
-            identity = dict(
-                schema=1,
-                sources=self.source_identity(episode),
-                encoder=self.encoder_identity,
-                limit=self.limits.get(episode),
-            )
+            identity = {
+                "schema": 1,
+                "sources": self.source_identity(episode),
+                "encoder": self.encoder_identity,
+                "limit": self.limits.get(episode),
+            }
             path = self.directory / f"{episode}-{digest(identity)}.pt"
             receipt = path.with_suffix(".json")
             if not path.exists() or not receipt.exists():
@@ -209,9 +197,7 @@ class Histories:
             for key, value in record["spatial"].items()
             if key in ("cells", "neighbors", "globals", "previous")
         }
-        fields.update(
-            {key: value[start:stop].numpy() for key, value in record["actions"].items()}
-        )
+        fields.update({key: value[start:stop].numpy() for key, value in record["actions"].items()})
         return Encoded(**fields)
 
     def action_count(self, episode, index):
@@ -231,11 +217,7 @@ class Histories:
         existing = self.buffers.get(episode)
         if existing is not None:
             tensor = existing.data["cells"]
-            if (
-                tensor.device.type == "cuda"
-                or tensor.is_pinned()
-                or not self.device.startswith("cuda")
-            ):
+            if tensor.device.type == "cuda" or tensor.is_pinned() or not self.device.startswith("cuda"):
                 return
         spatial = self.records[episode]["spatial"]
         size = sum(t.numel() * t.element_size() for t in spatial.values())
@@ -272,9 +254,7 @@ class Histories:
                 copied.clear()
                 self._pinned_closed = True
                 self.counters["pinned_admission_fallbacks"] += 1
-        self.buffers[episode] = SequenceBuffer.from_spatial_tensors(
-            data, str(data["cells"].device)
-        )
+        self.buffers[episode] = SequenceBuffer.from_spatial_tensors(data, str(data["cells"].device))
 
     def spatial_inputs(self, sequences, device):
         parts = []
@@ -290,10 +270,7 @@ class Histories:
         capacity = 1 << (maximum - 1).bit_length()
         output = {}
         for key in parts[0]:
-            values = [
-                (p[key][:, :capacity] if key == "unit_indices" else p[key])
-                for p in parts
-            ]
+            values = [(p[key][:, :capacity] if key == "unit_indices" else p[key]) for p in parts]
             if key == "unit_indices":
                 values = [
                     torch.nn.functional.pad(v, (0, capacity - v.shape[1]), value=-1)

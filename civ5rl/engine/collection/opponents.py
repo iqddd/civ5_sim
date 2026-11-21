@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 from civ5rl.core.model import Policy
+from civ5rl.core.preview import extends_parent, load_parent_model
 from civ5rl.core.spatial import StaticSpatialGraph
 from civ5rl.provenance.common import seed_for
 
@@ -64,9 +65,7 @@ def select_opponent(
     if settings is None:
         return "cp", None
     seed = int(config.get("seed", 17))
-    rng = random.Random(
-        seed_for(seed, int(episode_id), "opponent_pool", namespace=settings["namespace"])
-    )
+    rng = random.Random(seed_for(seed, int(episode_id), "opponent_pool", namespace=settings["namespace"]))
     u = rng.random()
     if u < settings["cp_share"]:
         return "cp", None
@@ -131,8 +130,6 @@ def _build_collection_policy(
     live_policy: Policy | None = None,
 ) -> Policy:
     """Load a frozen inference-only opponent policy with one bounded 4-row spatial graph."""
-    from civ5rl.core.preview import extends_parent, load_parent_model
-
     device_str = str(device)
     if live_policy is None:
         saved = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
@@ -152,11 +149,7 @@ def _build_collection_policy(
     amp = device_str.startswith("cuda") and config.get("numerics", {}).get("amp", False)
     # Opponent moves never enter behavior_replay/precheck: block size 4 eliminates
     # 32-row padding waste while giving StaticSpatialGraph one fixed padded shape.
-    use_static_graph = (
-        amp
-        and perf.get("compile", False)
-        and policy.spatial_cell_padding > 0
-    )
+    use_static_graph = amp and perf.get("compile", False) and policy.spatial_cell_padding > 0
     policy.enable_amp(
         amp,
         spatial_batch_size=4 if use_static_graph else 0,

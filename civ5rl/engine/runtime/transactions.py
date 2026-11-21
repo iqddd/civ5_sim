@@ -1,11 +1,15 @@
 """Optimizer transactions, independent checkpoint snapshots and gradient accumulation."""
 
+from __future__ import annotations
+
 import shutil
 from collections import defaultdict
+from collections.abc import Iterable
 from copy import deepcopy
 from os import PathLike
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import NamedTuple
 
 import torch
 
@@ -49,8 +53,7 @@ class AdamSnapshot:
         self.optimizer = optimizer
         model_tensors = list(model.state_dict().values())
         tensors = model_tensors + [
-            value for state in optimizer.state.values() for value in state.values()
-            if torch.is_tensor(value)
+            value for state in optimizer.state.values() for value in state.values() if torch.is_tensor(value)
         ]
         backups = {}
         self._foreach = []
@@ -79,15 +82,11 @@ class AdamSnapshot:
             backups.update((id(v), backup) for v, backup in zip(group, saved))
         self.model = [(v, backups[id(v)]) for v in model_tensors]
         self.states = {
-            p: {
-                k: (v, backups[id(v)]) if torch.is_tensor(v) else deepcopy(v)
-                for k, v in state.items()
-            }
+            p: {k: (v, backups[id(v)]) if torch.is_tensor(v) else deepcopy(v) for k, v in state.items()}
             for p, state in optimizer.state.items()
         }
         self.groups = [
-            {k: deepcopy(v) for k, v in g.items() if k != "params"}
-            for g in optimizer.param_groups
+            {k: deepcopy(v) for k, v in g.items() if k != "params"} for g in optimizer.param_groups
         ]
         self.rng = capture_rng()
 
@@ -122,10 +121,7 @@ class AdamSnapshot:
 def finite_state_flags(model, optimizer):
     """Device-resident results let callers combine checks with their metric readback."""
     tensors = list(model.state_dict().values()) + [
-        v
-        for state in optimizer.state.values()
-        for v in state.values()
-        if torch.is_tensor(v)
+        v for state in optimizer.state.values() for v in state.values() if torch.is_tensor(v)
     ]
     # Infinity norm detects NaN/Inf without overflowing on finite entries.
     # Optimizer counters may be on the CPU and empty tensors are always finite.
@@ -145,6 +141,48 @@ def require_finite_state(model, optimizer):
     for flag in finite_state_flags(model, optimizer).values():
         if not flag.item():
             raise FloatingPointError("Non-finite model/Adam state after attempt")
+
+
+class CheckedOptimizerStep(NamedTuple):
+    gradient_norm: torch.Tensor
+    finite_flags: dict[torch.device, torch.Tensor]
+    metrics: tuple[torch.Tensor, ...]
+
+
+def _clip_and_step(parameters, optimizer, max_grad_norm, *, asynchronous, gradient_error):
+    norm = torch.nn.utils.clip_grad_norm_(parameters, max_grad_norm, error_if_nonfinite=not asynchronous)
+    if asynchronous:
+        torch._assert_async(torch.isfinite(norm), gradient_error)
+    optimizer.step()
+    return norm
+
+
+def clip_and_step_checked(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    parameters: Iterable[torch.Tensor] | None = None,
+    *,
+    max_grad_norm: float = 0.5,
+    extra_metrics: Iterable[torch.Tensor] = (),
+    asynchronous: bool = False,
+    gradient_error: str = "Non-finite gradient",
+) -> CheckedOptimizerStep:
+    """Step after gradient clipping and produce device-local model/optimizer flags.
+
+    The metrics end with the pre-clipping gradient norm. Callers can combine
+    their readback with the flags, and own any rollback after a failed check.
+    Asynchronous gradient checks preserve the CUDA stream's execution order.
+    """
+    if parameters is None:
+        parameters = model.parameters()
+    norm = _clip_and_step(
+        parameters,
+        optimizer,
+        max_grad_norm,
+        asynchronous=asynchronous,
+        gradient_error=gradient_error,
+    )
+    return CheckedOptimizerStep(norm, finite_state_flags(model, optimizer), (*extra_metrics, norm))
 
 
 def cpu_snapshot(value):
@@ -202,15 +240,10 @@ def cpu_snapshot(value):
 class FrozenParamsCheck:
     def __init__(self, module):
         self.module = module
-        self.before = {
-            name: value.detach().clone() for name, value in module.state_dict().items()
-        }
+        self.before = {name: value.detach().clone() for name, value in module.state_dict().items()}
 
     def verify(self):
-        if any(
-            not torch.equal(self.before[name], value)
-            for name, value in self.module.state_dict().items()
-        ):
+        if any(not torch.equal(self.before[name], value) for name, value in self.module.state_dict().items()):
             raise RuntimeError("Frozen value head parameters changed")
 
 
@@ -227,12 +260,13 @@ def bc_optimizer_step(
 ):
     optimizer.zero_grad(set_to_none=True)
     ce = backward(policy, cache, spans, count)
-    norm = torch.nn.utils.clip_grad_norm_(
-        policy.parameters(), max_gradient_norm, error_if_nonfinite=not asynchronous
+    norm = _clip_and_step(
+        policy.parameters(),
+        optimizer,
+        max_gradient_norm,
+        asynchronous=asynchronous,
+        gradient_error="Non-finite gradient",
     )
-    if asynchronous:
-        torch._assert_async(torch.isfinite(norm), "Non-finite gradient")
-    optimizer.step()
     return ce, norm
 
 
@@ -240,9 +274,7 @@ class GradientAccumulator:
     """Accumulate scaled losses for one minibatch."""
 
     def __init__(self, parameters, *, coalesced: bool):
-        self.parameters = (
-            tuple(p for p in parameters if p.requires_grad) if coalesced else None
-        )
+        self.parameters = tuple(p for p in parameters if p.requires_grad) if coalesced else None
         self.accumulated = None
 
     def backward(self, scaled_loss):

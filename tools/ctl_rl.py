@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from civ5rl.engine.runtime.control import close_run, request_pause
-from civ5rl.engine.runtime.telemetry import performance_markdown, summarize_performance
+from civ5rl.engine.runtime.telemetry_analysis import summarize_performance
 from civ5rl.provenance.common import write_json
 from civ5rl.reporting.operations import (
     audit_run,
@@ -19,6 +19,7 @@ from civ5rl.reporting.operations import (
     wait_and_finalize,
 )
 from civ5rl.reporting.snapshot import write_snapshot
+from civ5rl.reporting.telemetry import performance_markdown
 
 
 def main(argv=None):

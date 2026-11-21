@@ -103,7 +103,7 @@ def run_seed(base_config, dataset, directory, seed, device="cuda", resume=False)
     import torch
     from civ5rl.collector import Collector
     from civ5rl.common import configure, read_json, write_json
-    from civ5rl.control import TrainingControl
+    from tools.archive._training_control import TrainingControl
     from civ5rl.diagnostic import (
         DiagnosticFactory,
         gate,

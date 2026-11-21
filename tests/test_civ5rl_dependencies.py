@@ -1,4 +1,4 @@
-"""Keep command-line tools and test fixtures out of package dependencies."""
+"""Enforce layer boundaries and keep CLI tools out of package dependencies."""
 
 import ast
 from importlib.util import resolve_name
@@ -41,11 +41,15 @@ def test_civ5rl_dependency_direction():
         relative = path.relative_to(ROOT)
         layer = relative.parts[0]
         package = ".".join((ROOT.name, *relative.parent.parts))
-        forbidden = ["tests", "civ5rl.tests", "tools"]
+        forbidden = ["tests", "civ5rl.tests", "tools", "civ5rl.tools"]
         if layer in LOWER_LAYERS | {"reporting"}:
             forbidden.append("civ5rl.experiments")
         if layer in LOWER_LAYERS:
             forbidden.append("civ5rl.reporting")
+        if layer == "engine":
+            forbidden.extend(("deploy", "civ5rl.deploy"))
+        if relative.parts[:2] == ("engine", "imitation"):
+            forbidden.extend(("civ5rl.engine.ppo", "civ5rl.ppo", "civ5rl.ppo_fast"))
         for line, module in imported_modules(ast.parse(path.read_bytes()), package):
             if any(
                 module == name or module.startswith(name + ".") for name in forbidden

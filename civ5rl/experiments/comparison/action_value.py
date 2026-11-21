@@ -16,6 +16,9 @@ import numpy as np
 import torch
 
 from civ5rl.engine.comparison.action_value import (
+    DEFAULT_WORLD_COUNTS,
+    HEAD_WIDTHS,
+    SPLIT_NAMESPACE,
     bootstrap,
     fork_targets,
     make_head,
@@ -24,6 +27,7 @@ from civ5rl.engine.comparison.action_value import (
     public_action_vector,
     split_worlds,
     summarize,
+    validate_world_counts,
     world_scores,
 )
 from civ5rl.engine.comparison.action_value_features import FrozenActionFeatures
@@ -38,8 +42,9 @@ from civ5rl.provenance.rng import capture_rng, restore_rng
 from civ5rl.reporting.action_value import report
 
 KIND = "rl01.action_value"
+SHUFFLE_NAMESPACE = "c2p_action_value_shuffle_v1"
 PROTOCOL = {
-    "head": [534, 128, 1],
+    "head": list(HEAD_WIDTHS),
     "activation": "gelu",
     "precision": "cuda_deterministic_fp32_no_amp_no_tf32",
     "optimizer": {
@@ -51,9 +56,9 @@ PROTOCOL = {
         "weight_decay_bias": 0.0,
         "clip_norm": 1.0,
     },
-    "shuffle_namespace": "c2p_action_value_shuffle_v1",
-    "split_namespace": "c2p_action_value_split_v1",
-    "world_counts": [33, 12, 12],
+    "shuffle_namespace": SHUFFLE_NAMESPACE,
+    "split_namespace": SPLIT_NAMESPACE,
+    "world_counts": list(DEFAULT_WORLD_COUNTS),
     "evaluation_repetitions": [0, 1, 2, 3],
     "bootstrap": {"samples": 10000, "seed": 20261103},
     "minimum_gain": 0.01,
@@ -62,12 +67,16 @@ PROTOCOL = {
 
 def load_config(path):
     cfg = read_json(path)
-    if cfg["kind"] != KIND or cfg["seed"] != 17:
+    if cfg["kind"] != KIND or not is_int_at_least(cfg.get("seed"), 0):
         raise ValueError("Unknown action-value protocol")
     for key in ("epochs", "batch_forks", "training_seconds"):
         if not is_int_at_least(cfg.get(key)):
             raise ValueError(f"{key} must be a positive integer")
-    if cfg["protocol"] != PROTOCOL:
+    protocol = cfg["protocol"]
+    if not isinstance(protocol, dict):
+        raise ValueError("Expected an action-value protocol object")
+    validate_world_counts(protocol.get("world_counts"))
+    if {**protocol, "world_counts": PROTOCOL["world_counts"]} != PROTOCOL:
         raise ValueError("Unexpected action-value scientific conditions")
     return cfg
 
@@ -84,7 +93,11 @@ def prepare(cfg, out):
     if file_sha256(ROOT / cfg["parent"]) != cfg["parent_sha256"]:
         raise ValueError("Frozen parent changed")
     plan = read_json(source / "manifest.json")
-    split = split_worlds(plan["base"]["worlds"]["training"])
+    split = split_worlds(
+        plan["base"]["worlds"]["training"],
+        seed=cfg["seed"],
+        world_counts=cfg["protocol"]["world_counts"],
+    )
     if (out / "passport.json").exists():
         identity = checkpoint.verify_execution_passport(out, cfg, split)
     else:
@@ -216,7 +229,7 @@ def train(cfg, out, data, *, after_step=None):
     """
     head = make_head()
     optimizer = make_optimizer(head)
-    shuffle = random.Random("c2p_action_value_shuffle_v1|17")
+    shuffle = random.Random(f"{SHUFFLE_NAMESPACE}|{cfg['seed']}")
     path = out / "training.pt"
     if path.exists():
         state = torch.load(path, map_location="cpu", weights_only=False)

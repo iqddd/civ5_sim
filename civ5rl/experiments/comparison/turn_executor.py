@@ -38,8 +38,5 @@ class TurnExecutor(EvaluationExecutor):
             agent.members[0].hidden = hidden
             info["prefix_skip"] = count
 
-    def _receive_message(self, connection, command, args):
-        result = super()._receive_message(connection, command, args)
-        if command == "close":
-            self.tasks.pop(connection, None)
-        return result
+    def release_task(self, connection):
+        self.tasks.pop(connection, None)
