@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from time import perf_counter
 
+from civ5rl.engine.collection.opponents import u0_checkpoint
 from civ5rl.engine.runtime.control import target_bc_evaluation_due
 from civ5rl.experiments.evaluation.h2h import evaluate_h2h
 from civ5rl.experiments.evaluation.matches import evaluate_target_scale as evaluate
 from civ5rl.experiments.imitation.helpers import isolated_rng
-from civ5rl.experiments.ppo.after_target_bc.initialization import u0_checkpoint
 from civ5rl.protocols.ppo_after_target_bc import check_development_gain
 from civ5rl.provenance.common import (
     read_json,

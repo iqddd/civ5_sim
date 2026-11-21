@@ -8,7 +8,7 @@ def policy_hash(model):
     """Fingerprint actor tensors in sorted key order for evaluation and lineage."""
     hasher = hashlib.sha256()
     for key, value in sorted(model.items()):
-        if not key.startswith("value."):
+        if not key.startswith(("value.", "value_actions.")):
             hasher.update(key.encode())
             hasher.update(value.detach().cpu().contiguous().numpy().tobytes())
     return hasher.hexdigest()

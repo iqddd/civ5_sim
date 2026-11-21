@@ -13,6 +13,7 @@ import torch
 
 from civ5rl.core.model import Policy
 from civ5rl.core.preview import ModelExtension, inherited_model, model_extension
+from civ5rl.engine.collection.opponents import U0_CHECKPOINT, u0_checkpoint
 from civ5rl.engine.evaluation.executor import runtime_for
 from civ5rl.engine.ppo.adam import adapts_value
 from civ5rl.engine.runtime.control import TrainingCounters
@@ -37,15 +38,6 @@ from civ5rl.provenance.common import (
 )
 from civ5rl.provenance.identity import policy_hash
 from civ5sim.engine import digest
-
-U0_CHECKPOINT = "checkpoints/reference-u0.pt"
-
-
-def u0_checkpoint(config):
-    """C2PA competes with the native C2P parent, including at the initial milestone."""
-    extension = model_extension(config)
-    return U0_CHECKPOINT if extension and extension.child == "C2PA" else "checkpoints/initial.pt"
-
 
 def make_policy(config, device):
     policy = load_policy(config, ROOT / config["experiment"]["parent"], device)

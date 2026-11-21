@@ -128,6 +128,8 @@ def load_initial_optimizer(policy: Policy, saved: dict[str, Any], config: dict[s
         extra = optimizer.state_dict()["param_groups"][-1]
         if extra["name"] != extension.adam_group or set(extra["parameter_names"]) != extension.new_parameters:
             raise ValueError("Unexpected parameters in new Adam group")
+        if extension.child == "C2PA":
+            extra["fused"] = config["performance"].get("fused_adam", False)
         source["param_groups"].append(extra)
     optimizer.load_state_dict(source)
     assert_equal(optimizer.state_dict(), source)

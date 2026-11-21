@@ -304,8 +304,7 @@ def main():
 
                     if float(config["self_play"].get("archive_share", 0.0)) > 0:
                         synthetic_archive = [
-                            {"id": "archive:10", "path": str(args.checkpoint.resolve())},
-                            {"id": "archive:20", "path": str(args.checkpoint.resolve())},
+                            {"id": "archive:10"}, {"id": "archive:20"},
                         ]
                 for episode in episodes:
                     scenario = episode["spec"]["scenario"]
@@ -316,10 +315,13 @@ def main():
                         opp, opp_id = select_opponent(
                             episode["spec"]["episode_id"], config, synthetic_archive
                         )
+                        episode["spec"]["opponent"] = opp
                         if opp == "policy":
-                            episode["spec"]["opponent"] = "policy"
                             episode["spec"]["opponent_id"] = opp_id
                             episode["spec"].pop("opponent_search", None)
+                        else:
+                            episode["spec"].pop("opponent_id", None)
+                            episode["spec"]["opponent_search"] = config["teacher_search"]
                 result["turn_reset_mode"] = selected_mode
                 result["self_play"] = self_play
                 policy = load_collection_policy(config, args.checkpoint)
@@ -335,7 +337,8 @@ def main():
                     else None
                 )
                 if opponent_pool is not None and synthetic_archive:
-                    opponent_pool.sync_archive(synthetic_archive)
+                    for entry in synthetic_archive:
+                        opponent_pool.add_archive_snapshot(entry, policy)
                 manifest = case_manifest(
                     [ep["spec"] for ep in episodes],
                     source="runtime_profile",

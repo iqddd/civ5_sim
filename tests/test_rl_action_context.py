@@ -5,6 +5,7 @@ import torch
 from civ5rl.core.model import Policy
 from civ5rl.core.preview import load_parent_model
 from civ5rl.core.schema import ACTION_DIM, ATTACK_PREVIEW_DIM, HEX_DIM, HIDDEN_SIZE
+from civ5rl.provenance.identity import policy_hash
 
 
 class ActionContextTests(unittest.TestCase):
@@ -43,7 +44,9 @@ class ActionContextTests(unittest.TestCase):
 
         with torch.no_grad():
             policy.action_attention.out_proj.weight.normal_(std=0.02)
+            actor_hash = policy_hash(policy.state_dict())
             policy.value_actions.weight.normal_(std=0.02)
+            self.assertEqual(policy_hash(policy.state_dict()), actor_hash)
             baseline_logits, baseline_values = policy.heads(batch, cells, hidden)
             for key in ("action_features", "attack_preview"):
                 batch[key][~mask] = 100

@@ -12,7 +12,17 @@ import torch
 from civ5rl.core.model import Policy
 from civ5rl.core.preview import load_parent_model, model_extension
 from civ5rl.core.spatial import StaticSpatialGraph
-from civ5rl.provenance.common import seed_for
+from civ5rl.provenance.common import file_sha256, seed_for
+from civ5rl.provenance.identity import policy_hash
+
+
+U0_CHECKPOINT = "checkpoints/reference-u0.pt"
+
+
+def u0_checkpoint(config):
+    """C2PA uses its native C2P parent as the frozen match reference."""
+    extension = model_extension(config)
+    return U0_CHECKPOINT if extension and extension.child == "C2PA" else "checkpoints/initial.pt"
 
 
 def self_play_config(config: dict[str, Any]) -> dict[str, Any] | None:
@@ -123,7 +133,7 @@ def maybe_archive_snapshot(
 
 
 def _build_collection_policy(
-    checkpoint_path: Path | str | None,
+    checkpoint: Path | str | dict[str, Any] | None,
     config: dict[str, Any],
     device: str | torch.device,
     *,
@@ -133,7 +143,7 @@ def _build_collection_policy(
     """Load a frozen inference-only opponent policy with one bounded 4-row spatial graph."""
     device_str = str(device)
     if live_policy is None:
-        saved = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
+        saved = checkpoint if isinstance(checkpoint, dict) else torch.load(checkpoint, weights_only=False, map_location="cpu")
         extension = model_extension(config)
         variant = saved.get("variant") or config.get("model", {}).get("variant", "C")
         if extension:
@@ -141,11 +151,13 @@ def _build_collection_policy(
                 raise ValueError("Frozen u0 must use the native parent architecture")
             if not native_parent:
                 variant = extension.child
-        policy = Policy(variant)
+        with torch.random.fork_rng(devices=[]):
+            policy = Policy(variant)
         load_parent_model(policy, saved, config)
         policy = policy.to(device_str)
     else:
-        policy = Policy(live_policy.variant).to(device_str)
+        with torch.random.fork_rng(devices=[]):
+            policy = Policy(live_policy.variant).to(device_str)
         policy.load_state_dict(live_policy.state_dict())
     perf = config.get("performance", {})
     policy.spatial_cell_padding = perf.get("spatial_cell_padding", 0)
@@ -204,14 +216,17 @@ class OpponentPool:
             if settings is not None
             else float(config.get("policy_temperature", 0.5))
         )
+        reference_path = u0_checkpoint(config)
         u0_path = (
             Path(parent_checkpoint)
             if parent_checkpoint is not None
-            else self.run_dir / "checkpoints/initial.pt"
+            else self.run_dir / reference_path
         )
-        extension = model_extension(config)
+        self.native_parent = reference_path == U0_CHECKPOINT
+        if self.native_parent and file_sha256(u0_path) != config["experiment"]["parent_sha256"]:
+            raise ValueError("Frozen u0 hash differs from the native parent checkpoint")
         self.u0_policy = _build_collection_policy(
-            u0_path, config, self.device, native_parent=bool(extension and extension.child == "C2PA"),
+            u0_path, config, self.device, native_parent=self.native_parent,
         )
         self._archive_runner: Policy | None = None
         self._archive_runner_params: list[torch.Tensor] = []
@@ -248,11 +263,16 @@ class OpponentPool:
             path = Path(entry["path"])
             if not path.is_absolute():
                 path = self.run_dir / path
+            saved = torch.load(path, map_location="cpu", weights_only=False)
+            state_dict = saved["model"]
+            if self.native_parent and (
+                saved["variant"] != self.config["model"]["variant"]
+                or policy_hash(state_dict) != entry.get("policy_hash")
+            ):
+                raise ValueError(f"Archive {snap_id} differs from the recorded C2PA snapshot")
             if self._archive_runner is None:
-                self._set_archive_runner(snap_id, _build_collection_policy(path, self.config, self.device))
+                self._set_archive_runner(snap_id, _build_collection_policy(saved, self.config, self.device))
             else:
-                saved = torch.load(path, map_location="cpu", weights_only=False)
-                state_dict = saved["model"]
                 weights = [
                     state_dict[name].to(device=self.device, dtype=param.dtype)
                     for name, param in self._archive_runner.named_parameters()
