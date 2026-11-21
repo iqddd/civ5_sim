@@ -416,6 +416,12 @@
       "single_thread": 4225,
       "source": "https://www.cpubenchmark.net/cpu.php?id=5027",
       "provenance": "PassMark Single Thread rating checked 2026-11-22"
+    },
+    {
+      "name": "Intel Core i5-14500",
+      "single_thread": 3924,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i5-14500",
+      "provenance": "PassMark Single Thread rating checked 2026-11-22"
     }
   ]
 }
