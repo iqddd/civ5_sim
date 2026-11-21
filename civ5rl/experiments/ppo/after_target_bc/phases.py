@@ -32,10 +32,10 @@ from civ5rl.engine.runtime.telemetry import (
     CompilationClock,
     ResourceMonitor,
 )
-from civ5rl.experiments.ppo.after_imitation import summarize_rollout
 from civ5rl.experiments.ppo.after_target_bc.boundary import ActiveClock, Phase, RolloutBoundary, save_boundary
 from civ5rl.experiments.ppo.after_target_bc.evaluation import development
 from civ5rl.experiments.ppo.critic import adapt_critic, prepare_critic
+from civ5rl.experiments.ppo.rollout_summary import summarize_rollout
 from civ5rl.protocols.ppo_after_target_bc import (
     record_collection,
     record_optimization,

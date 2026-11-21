@@ -31,10 +31,8 @@ from civ5rl.experiments.imitation.helpers import (
     load_policy,
     pool,
 )
-from civ5rl.experiments.ppo.after_imitation import (
-    summarize_rollout,
-)
 from civ5rl.experiments.ppo.checkpoints import prune_checkpoints
+from civ5rl.experiments.ppo.rollout_summary import summarize_rollout
 from civ5rl.protocols.corpus import validate_corpus
 from civ5rl.protocols.ppo_scale_up import KIND, ScaleUpFactory
 from civ5rl.provenance import checkpoint
