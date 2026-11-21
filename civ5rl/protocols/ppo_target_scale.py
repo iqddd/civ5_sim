@@ -26,11 +26,12 @@ BINS = ((5, 7), (8, 10), (11, 13))
 SEPARATED_VERSION = "native_visibility_regions_v2"
 
 
-def separated_candidates(m, group, n, rng, conflicts):
+def separated_candidates(m, group, n, rng, get_conflicts):
     """Preferred zones first, then new compact shapes throughout the component.
 
     None is a bounded candidate rejected by capacity. All returned positions
-    still require the final full-army Battle observation check.
+    still require the final full-army Battle observation check. The visibility
+    table is only needed if the preferred zones do not produce a valid case.
     """
     width = m["width"]
     zones = [[y * width + x for x, y in zone] for zone in m["spawn_candidates"]]
@@ -39,6 +40,7 @@ def separated_candidates(m, group, n, rng, conflicts):
         for _ in range(64):
             used += 1
             yield [rng.sample(z, n) for z in zones], "preferred"
+    conflicts = get_conflicts()
     anchors = [sorted(group, key=lambda t: (t not in zones[s], t)) for s in (0, 1)]
     for attempt in range(10000 - used):
         first_side = attempt % 2
@@ -115,19 +117,22 @@ class TargetFactory:
 
     def _get_visibility_conflicts(self, key, m, group, battle_seed):
         if key not in self.visibility_conflicts:
-            visibility = {}
-            for tile in group:
-                with Battle(
-                    {
-                        "schema": 1,
-                        "kind": "civ5sim.scenario",
-                        "map": m,
-                        "fog": True,
-                        "random_damage": True,
-                        "seed": battle_seed,
-                        "units": [{"type": "warrior", "side": 0, "tile": tile, "hp": 100}],
-                    }
-                ) as battle:
+            first, *remaining = group
+            unit = {"type": "warrior", "side": 0, "tile": first, "hp": 100}
+            probe = {
+                "schema": 1,
+                "kind": "civ5sim.scenario",
+                "map": m,
+                "fog": True,
+                "random_damage": True,
+                "seed": battle_seed,
+                "units": [unit],
+            }
+            with Battle(probe) as battle:
+                visibility = {first: battle.observe(0)["visibility"]}
+                for tile in remaining:
+                    unit["tile"] = tile
+                    battle.reset(probe)
                     visibility[tile] = battle.observe(0)["visibility"]
             self.visibility_conflicts[key] = {
                 a: {b for b in group if a == b or visibility[a][b] or visibility[b][a]} for a in group
@@ -178,9 +183,10 @@ class TargetFactory:
         n = len(roster)
         rng = random.Random(streams["placement"])
         if not contact:
-            key = entry["path"]
-            conflicts = self._get_visibility_conflicts(key, m, group, streams["battle"])
-            separated = separated_candidates(m, group, n, rng, conflicts)
+            separated = separated_candidates(
+                m, group, n, rng,
+                lambda: self._get_visibility_conflicts(entry["path"], m, group, streams["battle"]),
+            )
         reasons = Counter()
         scenario = None
         for attempt in range(10000):
