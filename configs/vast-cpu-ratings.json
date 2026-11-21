@@ -386,6 +386,36 @@
       "single_thread": 4175,
       "source": "https://www.cpubenchmark.net/single-thread/desktop/",
       "provenance": "PassMark Single Thread rating checked 2026-11-22"
+    },
+    {
+      "name": "AMD Ryzen Threadripper PRO 3975WX",
+      "single_thread": 2649,
+      "source": "https://www.cpubenchmark.net/cpu.php?id=3851",
+      "provenance": "PassMark Single Thread rating checked 2026-11-22"
+    },
+    {
+      "name": "AMD Ryzen Threadripper PRO 3945WX",
+      "single_thread": 2690,
+      "source": "https://www.cpubenchmark.net/cpu.php?id=3845",
+      "provenance": "PassMark Single Thread rating checked 2026-11-22"
+    },
+    {
+      "name": "AMD EPYC 7502",
+      "single_thread": 2050,
+      "source": "https://www.cpubenchmark.net/cpu.php?id=3880",
+      "provenance": "PassMark Single Thread rating checked 2026-11-22"
+    },
+    {
+      "name": "Intel Xeon Gold 6314U",
+      "single_thread": 2287,
+      "source": "https://www.cpubenchmark.net/cpu.php?id=4950",
+      "provenance": "PassMark Single Thread rating checked 2026-11-22"
+    },
+    {
+      "name": "AMD Ryzen 9 7900X",
+      "single_thread": 4225,
+      "source": "https://www.cpubenchmark.net/cpu.php?id=5027",
+      "provenance": "PassMark Single Thread rating checked 2026-11-22"
     }
   ]
 }
