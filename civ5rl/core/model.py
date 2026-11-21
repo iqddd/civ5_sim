@@ -1,6 +1,5 @@
 """Hex message passing, army memory, and scores over public legal commands."""
 
-from math import prod
 from numbers import Integral
 
 import numpy as np
@@ -33,47 +32,6 @@ from civ5rl.core.variants import PolicyVariant, variant_spec
 GRU_GATES = 3
 
 
-class PinnedBatchInputs:
-    """One typed, aligned staging allocation for a CUDA inference subbatch.
-
-    The caller must fence the transfer before reusing this slab. Device views
-    own a separate allocation, so they do not alias inputs to later forwards.
-    """
-
-    def __init__(self):
-        self.storage = None
-
-    def allocate(self, layout):
-        offset = 0
-        fields = {}
-        for name, (shape, dtype, _) in layout.items():
-            offset = (offset + 255) & ~255
-            dtype = np.dtype(dtype)
-            size = prod(shape) * dtype.itemsize
-            fields[name] = (offset, size, shape, dtype)
-            offset += size
-        if self.storage is None or offset > self.storage.numel():
-            self.storage = torch.empty(offset, dtype=torch.uint8, pin_memory=True)
-        host = self.storage[:offset]
-        buffer = host.numpy()
-        arrays = {
-            name: np.ndarray(shape, dtype=dtype, buffer=buffer, offset=start)
-            for name, (start, _, shape, dtype) in fields.items()
-        }
-        for name, (_, _, fill) in layout.items():
-            if fill is not None:
-                arrays[name].fill(fill)
-        return arrays, host, fields
-
-    @staticmethod
-    def transfer(arrays, host, fields, device):
-        storage = host.to(device, non_blocking=True)
-        return {
-            name: storage.narrow(0, start, size).view(torch.from_numpy(arrays[name]).dtype).reshape(shape)
-            for name, (start, size, shape, _) in fields.items()
-        }
-
-
 def batch_inputs(
     items,
     device,
@@ -84,53 +42,18 @@ def batch_inputs(
     compact_units=False,
     actions_only=False,
     index_dtype=np.int64,
-    staging=None,
 ):
     if not items or any(len(item.cells) == 0 for item in items):
         raise ValueError("Each batch item must contain at least one cell")
     batch_size = len(items)
     if actions_only and (spatial_only or compact_units):
         raise ValueError('Action-only batching cannot request spatial inputs')
-    if staging is not None and (compact_units or not str(device).startswith("cuda")):
-        raise ValueError("Pinned input staging requires dense CUDA inputs")
-    layout = {}
-    if not actions_only:
-        num_cells = max(min_cells, max(len(item.cells) for item in items))
-        layout.update(
-            cells=((batch_size, num_cells, TILE_DIM), np.float32, 0),
-            cell_mask=((batch_size, num_cells), bool, 0),
-            neighbors=((batch_size, num_cells, HEX_DIRECTIONS), index_dtype, -1),
-        )
-        if staging is not None:
-            for name in ("globals", "previous"):
-                source = getattr(items[0], name)
-                layout[name] = ((batch_size, *source.shape), source.dtype, None)
-    if not spatial_only:
-        num_actions = max(len(item.sources) for item in items)
-        shape = (batch_size, num_actions)
-        has_previews = [item.attack_preview is not None for item in items]
-        if any(has_previews) and not all(has_previews):
-            raise ValueError("Mixed recorded/missing attack preview inputs")
-        layout.update(
-            sources=(shape, index_dtype, -1),
-            targets=(shape, index_dtype, -1),
-            action_features=((*shape, ACTION_DIM), np.float32, 0),
-            action_mask=(shape, bool, 0),
-        )
-        if all(has_previews):
-            layout["attack_preview"] = ((*shape, ATTACK_PREVIEW_DIM), np.float32, 0)
-
-    if staging is None:
-        arrays = {
-            name: np.zeros(shape, dtype) if fill == 0 else np.full(shape, fill, dtype)
-            for name, (shape, dtype, fill) in layout.items()
-        }
-    else:
-        arrays, host, fields = staging.allocate(layout)
-
     values = {}
     if not actions_only:
-        cells, masks, neighbors = (arrays[name] for name in ("cells", "cell_mask", "neighbors"))
+        num_cells = max(min_cells, max(len(item.cells) for item in items))
+        cells = np.zeros((batch_size, num_cells, TILE_DIM), np.float32)
+        masks = np.zeros((batch_size, num_cells), bool)
+        neighbors = np.full((batch_size, num_cells, HEX_DIRECTIONS), -1, index_dtype)
         for i, x in enumerate(items):
             cell_count = len(x.cells)
             cells[i, :cell_count] = x.cells
@@ -140,8 +63,8 @@ def batch_inputs(
             "cells": cells,
             "cell_mask": masks,
             "neighbors": neighbors,
-            "globals": np.stack([x.globals for x in items], out=arrays.get("globals")),
-            "previous": np.stack([x.previous for x in items], out=arrays.get("previous")),
+            "globals": np.stack([x.globals for x in items]),
+            "previous": np.stack([x.previous for x in items]),
         }
     if compact_units:
         # Only public features determine keys. Shape is chosen on the host,
@@ -157,10 +80,19 @@ def batch_inputs(
             indices[i, :len(selected)] = selected
         values["unit_indices"] = indices
     if not spatial_only:
-        sources, targets, features, action_mask = (
-            arrays[name] for name in ("sources", "targets", "action_features", "action_mask")
+        num_actions = max(len(item.sources) for item in items)
+        sources = np.full((batch_size, num_actions), -1, index_dtype)
+        targets = sources.copy()
+        action_mask = np.zeros((batch_size, num_actions), bool)
+        features = np.zeros((batch_size, num_actions, ACTION_DIM), np.float32)
+        has_previews = [item.attack_preview is not None for item in items]
+        if any(has_previews) and not all(has_previews):
+            raise ValueError("Mixed recorded/missing attack preview inputs")
+        previews = (
+            np.zeros((batch_size, num_actions, ATTACK_PREVIEW_DIM), np.float32)
+            if all(has_previews)
+            else None
         )
-        previews = arrays.get("attack_preview")
         for i, item in enumerate(items):
             action_count = len(item.sources)
             sources[i, :action_count] = item.sources
@@ -177,8 +109,6 @@ def batch_inputs(
         )
         if previews is not None:
             values["attack_preview"] = previews
-    if staging is not None:
-        return staging.transfer(arrays, host, fields, device)
     return {k: torch.from_numpy(v).to(device, non_blocking=non_blocking) for k, v in values.items()}
 
 

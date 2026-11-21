@@ -299,10 +299,6 @@ class Collector:
         self.opponent_pool = opponent_pool
         self.record_hidden = record_hidden
         self._slot_staging = None
-        self._input_staging = (
-            [] if str(device).startswith("cuda") and config.get("performance", {}).get("collection_pinned_inputs")
-            else None
-        )
         self.opponent_temperature = (
             validate_temperature(opponent_pool.temperature) if opponent_pool is not None else self.temperature
         )
@@ -513,24 +509,19 @@ class Collector:
             start,
         )
 
-    def _pack_inputs(self, encoded, non_blocking, staging_slot=0):
-        from civ5rl.core.model import PinnedBatchInputs, batch_inputs
-
-        staging = None
-        if self._input_staging is not None:
-            # Each subgroup gets its own buffer until this wave's blocking D2H.
-            if staging_slot == len(self._input_staging):
-                self._input_staging.append(PinnedBatchInputs())
-            staging = self._input_staging[staging_slot]
-        return batch_inputs(encoded, self.device, non_blocking=non_blocking, staging=staging)
-
     def _infer_learner_batch(
         self, policy, live, encoded, hidden, record_hidden, non_blocking, times, diag, clock, start
     ):
         """Keep the homogeneous forward and its single contiguous result copy."""
         import torch
 
-        batch = self._pack_inputs(encoded, non_blocking)
+        from civ5rl.core.model import batch_inputs
+
+        batch = batch_inputs(
+            encoded,
+            self.device,
+            non_blocking=non_blocking,
+        )
         times["encoding_seconds"] += perf_counter() - start
         if diag:
             diag.end("inference_prepare_h2d", clock)
@@ -580,6 +571,8 @@ class Collector:
     ):
         import torch
 
+        from civ5rl.core.model import batch_inputs
+
         # Mixed learner + neural opponent batching:
         # Learner turns and 'current' opponent turns share one forward on `policy`
         # while keeping their recurrent states in separate halves of one bank.
@@ -596,13 +589,13 @@ class Collector:
                     opp_groups.setdefault(opp_id, []).append(j)
 
         main_batch = (
-            self._pack_inputs([encoded[j] for j in main_pos], non_blocking)
+            batch_inputs([encoded[j] for j in main_pos], self.device, non_blocking=non_blocking)
             if main_pos
             else None
         )
         opp_batches = {
-            opp_id: self._pack_inputs([encoded[j] for j in pos_list], non_blocking, staging_slot)
-            for staging_slot, (opp_id, pos_list) in enumerate(opp_groups.items(), start=int(bool(main_pos)))
+            opp_id: batch_inputs([encoded[j] for j in pos_list], self.device, non_blocking=non_blocking)
+            for opp_id, pos_list in opp_groups.items()
         }
         main_opponents = [bool(states[j].get("is_opponent")) for j in main_pos]
         mixed_temperature = self.opponent_temperature != self.temperature and any(main_opponents)
