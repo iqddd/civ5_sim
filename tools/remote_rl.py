@@ -35,7 +35,7 @@ def main(argv=None):
             cmd.add_argument("--request-id")
         if name == "launch":
             cmd.add_argument("--host-resume-reason")
-            cmd.add_argument("--mode", choices=("tune", "run", "resume"), required=True)
+            cmd.add_argument("--mode", choices=("tune", "run", "resume", "profile"), required=True)
             cmd.add_argument("--instance")
             cmd.add_argument("--evaluation-device", choices=("auto", "cpu", "cuda"))
             cmd.add_argument("--evaluation-workers", type=int)

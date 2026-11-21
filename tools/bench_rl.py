@@ -208,6 +208,7 @@ def main():
             "full-cycle",
             "replay",
             "ppo-update",
+            "selfplay-profile",
             "bc",
             "evaluation",
             "comparison",
@@ -313,8 +314,10 @@ def main():
         "--cases", type=int, help="Evaluation and rollout-comparison saved case count"
     )
     parser.add_argument(
-        "--workers", type=int, help="Evaluation and rollout-comparison workers"
+        "--workers", type=int, help="Evaluation, comparison, or self-play workers"
     )
+    parser.add_argument("--envs", type=int, default=80, help="Self-play profile environments")
+    parser.add_argument("--reply-size", type=int, default=1, help="Self-play profile reply size")
     parser.add_argument(
         "--max-batch",
         type=int,
@@ -422,8 +425,8 @@ def main():
         or (args.episode_limit is not None and args.episode_limit < 1)
     ):
         parser.error("repeats, warmup and episode limit must be positive")
-    if args.episode_limit and args.phase not in ("replay", "ppo-update"):
-        parser.error("--episode-limit applies to replay and ppo-update only")
+    if args.episode_limit and args.phase not in ("replay", "ppo-update", "selfplay-profile"):
+        parser.error("--episode-limit applies to replay, ppo-update and selfplay-profile only")
     config, inputs = resolve_inputs(args, parser)
     if args.phase == "replay":
         replay(args, parser, config, inputs)
@@ -432,6 +435,13 @@ def main():
 
         if not run_benchmark(args, parser, config, inputs):
             raise SystemExit(1)
+    elif args.phase == "selfplay-profile":
+        from civ5rl.experiments.benchmarks.selfplay import profile_selfplay
+        from civ5rl.engine.runtime.hardware import hardware
+
+        if args.workers is None:
+            args.workers = min(args.envs, max(1, int(hardware()["effective_cpu_budget"])))
+        profile_selfplay(args, parser, config, inputs)
     else:
         full_cycle(args, parser, config, inputs)
 

@@ -40,7 +40,7 @@ def ensure_native_libraries(root=ROOT):
 
 def main(argv=None, *, root=ROOT):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("tune", "run", "resume"), required=True)
+    parser.add_argument("--mode", choices=("tune", "run", "resume", "profile"), required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--tuning-rollout")
     parser.add_argument("--tuning-source")
@@ -85,7 +85,15 @@ def main(argv=None, *, root=ROOT):
         revision = record_host_resume(output, args.host_resume_id, args.host_resume_reason)
         print(json.dumps({"host_resume": revision}), flush=True)
 
-    if args.mode == "tune":
+    if args.mode == "profile":
+        if kind != "rl01.ppo_after_target_bc" or not args.tuning_dir or not args.tuning_rollout:
+            raise ValueError("Self-play profiling requires the PPO config, output directory and case carrier")
+        command = [
+            sys.executable, "tools/bench_rl.py", "selfplay-profile", "--config", args.config,
+            "--checkpoint", cfg["experiment"]["parent"], "--rollout", args.tuning_rollout,
+            "--out", args.tuning_dir, "--episode-limit", "150", "--repeats", "2",
+        ]
+    elif args.mode == "tune":
         if has_progress:
             raise ValueError("Cannot retune an existing scientific run")
         if not (args.tuning_rollout or args.tuning_source) or not args.tuning_dir:

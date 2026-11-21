@@ -28,7 +28,7 @@ CAPABILITIES = {
     "rl01.rollout_comparison_collection": {"run", "tune", "resume"},
     "rl01.rollout_comparison": {"run", "resume"},
     "rl01.turn_comparison_fit": {"run", "resume"},
-    "rl01.ppo_after_target_bc": {"run", "tune", "resume"},
+    "rl01.ppo_after_target_bc": {"run", "tune", "resume", "profile"},
     "rl01.ppo_target_scale": {"run", "resume"},
     "rl01.ppo_scale_up": {"run"},
     "rl01.cp_imitation_target_more_data": {"run", "resume"},
@@ -409,8 +409,8 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
             raise ValueError("The bound instance has been deleted")
         if mode not in CAPABILITIES.get(deployment["kind"], set()):
             raise ValueError(f"Unsupported {mode} for {deployment['kind']}")
-        if evaluation_runtime and mode == "tune":
-            raise ValueError("Evaluation runtime options do not apply to collection tuning")
+        if evaluation_runtime and mode in ("tune", "profile"):
+            raise ValueError("Evaluation runtime options do not apply to tuning or profiling")
         if evaluation_runtime and deployment["kind"] not in {
             "rl01.ppo_after_target_bc", "rl01.ppo_target_scale", "rl01.cp_imitation_target_scale",
             "rl01.cp_imitation_target_more_data", "rl01.cp_imitation_target_c2",
@@ -450,6 +450,8 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
             raise ValueError(
                 "Tune requires exactly one explicit case-carrier .pt via --extra-input"
             )
+        if mode == "profile" and not deployment.get("tuning_rollout"):
+            raise ValueError("Profiling requires one explicit case carrier PT via --extra-input")
         local_output_path = Path(deployment["local_output"])
         local_has_progress = any(
             (local_output_path / name).exists()
@@ -504,6 +506,14 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
                 worker_args += ["--tuning-source", deployment["tuning_source"]]
             else:
                 worker_args += ["--tuning-rollout", deployment["tuning_rollout"]]
+        elif mode == "profile":
+            local_sync_dir = directory / "profiles" / f"profile-{sequence}"
+            local_sync_dir.mkdir(parents=True, exist_ok=True)
+            remote_sync_dir = deployment["remote_root"] + f"/profiles/profile-{sequence}"
+            worker_args = [
+                "--mode", "profile", "--config", deployment["config"],
+                "--tuning-rollout", deployment["tuning_rollout"], "--tuning-dir", remote_sync_dir,
+            ]
         else:
             local_sync_dir = Path(deployment["local_output"])
             local_sync_dir.mkdir(parents=True, exist_ok=True)
@@ -705,6 +715,16 @@ def pull(directory, *, delete_instance=False, transport=None):
                 else None
             )
             audit = None
+        elif mode == "profile":
+            destination = directory / "profiles" / f"profile-{deployment['job']['operation']}"
+            summary = _read(destination / "summary.json") if (destination / "summary.json").exists() else {}
+            profile_verified = (
+                exit_code == 0 and summary.get("protected_inputs_unchanged") is True
+                and all((destination / name).is_file() for name in (
+                    "collection.kineto.json.gz", "ppo-epoch.kineto.json.gz", "ppo-step.kineto.json.gz",
+                ))
+            )
+            audit = None
         else:
             from civ5rl.reporting.operations import audit_run
 
@@ -734,6 +754,8 @@ def pull(directory, *, delete_instance=False, transport=None):
             receipt["copied_files"] = None  # SCP packet counts differ from scientific file counts.
         if audit is not None:
             receipt["scientific_audit"] = audit["status"]
+        if mode == "profile":
+            receipt["profile_verified"] = profile_verified
         _receipt(deployment, "pull", **receipt)
         _write(directory / "deployment.json", deployment)
 
@@ -742,6 +764,8 @@ def pull(directory, *, delete_instance=False, transport=None):
                 return {**receipt, "instance_deleted": True}
             if mode == "tune":
                 mandatory_ok = deployment["tune"]["confirmed"]
+            elif mode == "profile":
+                mandatory_ok = profile_verified
             else:
                 mandatory_ok = (
                     exit_code == 0

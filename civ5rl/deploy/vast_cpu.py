@@ -49,6 +49,7 @@ def offer_cpu_score(offer, ratings):
 def rent(argv):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--cpu-score-min", type=float)
+    parser.add_argument("--min-vram-gib", type=float)
     parser.add_argument("--sort-by", choices=("price", "cpu-score"), default="price")
     parser.add_argument("--manager-script", type=Path,
                         default=Path.home() / ".codex/skills/vastai-instance-manager/scripts/vastai_instance.py")
@@ -57,17 +58,23 @@ def rent(argv):
         parser.error("--sort-by cpu-score requires --cpu-score-min")
     if args.cpu_score_min is not None and (not math.isfinite(args.cpu_score_min) or args.cpu_score_min <= 0):
         parser.error("--cpu-score-min must be finite and positive")
+    if args.min_vram_gib is not None and (not math.isfinite(args.min_vram_gib) or args.min_vram_gib <= 0):
+        parser.error("--min-vram-gib must be finite and positive")
     spec = importlib.util.spec_from_file_location("civ5rl_vast_manager", args.manager_script)
     manager = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = manager
     spec.loader.exec_module(manager)
-    if args.cpu_score_min is not None:
+    if args.cpu_score_min is not None or args.min_vram_gib is not None:
         config = manager.config_from_args(manager.parser().parse_args(["create", *stock_args]))
         select = manager.select_candidates
         document = Path(__file__).resolve().parents[2] / "configs/vast-cpu-ratings.json"
 
         def filtered(offers, banned):
             affordable = [o for o in select(offers, banned) if manager.price_allowed(o.get("dph_total"), config)]
+            if args.min_vram_gib is not None:
+                affordable = [o for o in affordable if float(o.get("gpu_ram") or 0) >= args.min_vram_gib * 1024]
+            if args.cpu_score_min is None:
+                return affordable
             try:
                 ratings = cpu_ratings(document)
                 admitted = admit_offers(affordable, ratings, args.cpu_score_min)

@@ -420,6 +420,7 @@ OOM-тренд смотрите в `telemetry/cuda-memory.jsonl` на одина
 python tools/bench_rl.py replay --run RUN --warmup 1 --repeats 3 --out OUT
 python tools/bench_rl.py ppo-update --config CONFIG --checkpoint CHECKPOINT --rollout ROLLOUT --minibatch-tokens 128 --out BASE
 python tools/bench_rl.py ppo-update --config CONFIG --checkpoint CHECKPOINT --rollout ROLLOUT --minibatch-tokens 128 --baseline-result BASE/benchmark.json --out OUT
+python tools/bench_rl.py selfplay-profile --config CONFIG --checkpoint PARENT --rollout ROLLOUT --episode-limit 150 --out OUT
 python tools/bench_rl.py full-cycle --config CONFIG --checkpoint CHECKPOINT --rollout ROLLOUT --out OUT --repeats 3 --device cuda
 python tools/bench_rl.py bc --config CONFIG --checkpoint CHECKPOINT --run CORPUS_RUN --scratch-dir .tmp/bc-bench --warmup 3 --steps 5 --trace-steps 3 --verify-parity --parity-steps 3 --out OUT
 python tools/bench_rl.py evaluation --run RUN --checkpoint CHECKPOINT --out OUT --cases 2 --workers 4 --warmup 3 --steps 5 --trace-steps 3
@@ -430,6 +431,7 @@ python tools/diagnose_cp_replay.py --rollout ROLLOUT --episode EPISODE --trace-f
 |---|---|
 | `replay` | Время повторного прогона сохранённого rollout с фиксированными весами и сверкой метрик между повторами |
 | `ppo-update` | Одна отбрасываемая эпоха PPO на сохранённом rollout с переиспользуемым эталоном паритета и времени |
+| `selfplay-profile` | Смешанный сбор фиксированных боёв и отбрасываемый PPO с двумя частотами полного KL, NVML и три короткие трассы Kineto |
 | `full-cycle` | Сбор и отбрасываемый PPO update; нужен PPO checkpoint с Adam |
 | `bc` | Прогретые учебные шаги; `--verify-parity` добавляет сверку с baseline |
 | `evaluation` | Матчи и inference выбранного checkpoint на сохранённых случаях |
@@ -510,6 +512,7 @@ python tools/remote_rl.py rent --profile 5090 --parallel 2 --cpu-score-min 1250
 
 `--sort-by cpu-score` выбирает кандидатов по убыванию CPU-балла, при равенстве —
 по возрастанию цены. По умолчанию используется `--sort-by price`.
+`--min-vram-gib` задаёт минимальную VRAM по данным оффера.
 
 ### Подготовка, tuning и запуск
 
@@ -528,6 +531,11 @@ python tools/ctl_rl.py progress --deployment DEPLOYMENT --watch --interval 900
 `package` собирает входы и описание запуска в DEPLOYMENT. `launch` готовит
 окружение и запускает процесс; при поддержке протокола `tune` подбирает runtime.
 Результаты хранятся на сервере до `pull`.
+
+Для отдельного профилирования смешанного PPO используйте `launch --mode profile`
+с тем же `--extra-input CARRIER` на этапе `package`. После `pull --keep-instance`
+в `DEPLOYMENT/profiles/` доступны результаты и исходные сжатые Kineto-трассы.
+Профилирование не создаёт состояние обучения и не заменяет tuning для `run`.
 
 Для отдельного сравнительного сбора при `package` задайте
 `--tuning-source SAVED_COLLECTION`: каталог завершённого сравнительного опыта.
