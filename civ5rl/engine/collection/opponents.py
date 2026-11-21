@@ -10,7 +10,7 @@ from typing import Any
 import torch
 
 from civ5rl.core.model import Policy
-from civ5rl.core.preview import extends_parent, load_parent_model
+from civ5rl.core.preview import load_parent_model, model_extension
 from civ5rl.core.spatial import StaticSpatialGraph
 from civ5rl.provenance.common import seed_for
 
@@ -128,16 +128,19 @@ def _build_collection_policy(
     device: str | torch.device,
     *,
     live_policy: Policy | None = None,
+    native_parent: bool = False,
 ) -> Policy:
     """Load a frozen inference-only opponent policy with one bounded 4-row spatial graph."""
     device_str = str(device)
     if live_policy is None:
         saved = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
-        variant = (
-            config["model"]["variant"]
-            if extends_parent(config)
-            else saved.get("variant") or config.get("model", {}).get("variant", "C")
-        )
+        extension = model_extension(config)
+        variant = saved.get("variant") or config.get("model", {}).get("variant", "C")
+        if extension:
+            if native_parent and variant != extension.parent:
+                raise ValueError("Frozen u0 must use the native parent architecture")
+            if not native_parent:
+                variant = extension.child
         policy = Policy(variant)
         load_parent_model(policy, saved, config)
         policy = policy.to(device_str)
@@ -206,7 +209,10 @@ class OpponentPool:
             if parent_checkpoint is not None
             else self.run_dir / "checkpoints/initial.pt"
         )
-        self.u0_policy = _build_collection_policy(u0_path, config, self.device)
+        extension = model_extension(config)
+        self.u0_policy = _build_collection_policy(
+            u0_path, config, self.device, native_parent=bool(extension and extension.child == "C2PA"),
+        )
         self._archive_runner: Policy | None = None
         self._archive_runner_params: list[torch.Tensor] = []
         self._archive_weights: dict[str, list[torch.Tensor]] = {}

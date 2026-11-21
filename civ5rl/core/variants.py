@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from civ5rl.core.schema import C2_HEX_BLOCKS, HEX_BLOCKS
@@ -10,9 +10,7 @@ class PolicyVariant(StrEnum):
     CONTACTS_GRU = "C"
     CONTACTS_GRU_C2 = "C2"
     CONTACTS_GRU_C2_PREVIEW = "C2P"
-
-
-RECURRENT_VARIANTS = (PolicyVariant.CONTACTS_GRU, PolicyVariant.CONTACTS_GRU_C2, PolicyVariant.CONTACTS_GRU_C2_PREVIEW)
+    CONTACTS_GRU_C2_PREVIEW_ACTIONS = "C2PA"
 
 
 @dataclass(frozen=True)
@@ -24,6 +22,7 @@ class VariantSpec:
     uses_unit_attention: bool
     bounded_time_features: bool
     attack_preview: bool = False
+    action_context: bool = False
 
 
 VARIANT_SPECS: dict[PolicyVariant, VariantSpec] = {
@@ -65,6 +64,13 @@ VARIANT_SPECS: dict[PolicyVariant, VariantSpec] = {
         bounded_time_features=True,
     ),
 }
+
+VARIANT_SPECS[PolicyVariant.CONTACTS_GRU_C2_PREVIEW_ACTIONS] = replace(
+    VARIANT_SPECS[PolicyVariant.CONTACTS_GRU_C2_PREVIEW],
+    variant=PolicyVariant.CONTACTS_GRU_C2_PREVIEW_ACTIONS,
+    action_context=True,
+)
+RECURRENT_VARIANTS = tuple(variant for variant in PolicyVariant if VARIANT_SPECS[variant].is_recurrent)
 
 
 def variant_spec(variant: PolicyVariant | str) -> VariantSpec:

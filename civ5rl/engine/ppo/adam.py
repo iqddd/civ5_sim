@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import torch
 
+GROUP_ORDER = ("shared_actor", "value", "attack_preview", "action_context")
+
 
 def adapts_value(config):
     return config.get("experiment", {}).get("initial_value") == "adapt_parent_first_rollout"
@@ -14,6 +16,8 @@ def uses_grouped_adam(config):
 
 
 def parameter_group(name):
+    if name.startswith(("action_attention.", "value_actions.")):
+        return "action_context"
     return (
         "attack_preview"
         if name.startswith("attack_preview.")
@@ -21,6 +25,15 @@ def parameter_group(name):
         if name.startswith("value.")
         else "shared_actor"
     )
+
+
+def group_names(variant_spec):
+    names = ["shared_actor", "value"]
+    if variant_spec.attack_preview:
+        names.append("attack_preview")
+    if variant_spec.action_context:
+        names.append("action_context")
+    return names
 
 
 def optimizer_for(policy, config, device):
@@ -39,8 +52,7 @@ def grouped_optimizer(policy, config, device):
     settings = config["optimizer"]
     named = list(policy.named_parameters())
     groups = []
-    names = ["shared_actor", "value"] + (["attack_preview"] if policy.variant_spec.attack_preview else [])
-    for name in names:
+    for name in group_names(policy.variant_spec):
         members = [(n, p) for n, p in named if parameter_group(n) == name]
         groups.append(
             {
@@ -79,7 +91,9 @@ def expected_counters(state, extra_ppo_steps=0):
 
 def check_counters(optimizer, state, extra_ppo_steps=0):
     expected = expected_counters(state, extra_ppo_steps)
-    names = ["shared_actor", "value"] + (["attack_preview"] if "attack_preview" in expected else [])
+    names = [name for name in GROUP_ORDER if name in expected]
+    if set(names) != set(expected):
+        raise ValueError("Unknown Adam group in recorded origins")
     if [g.get("name") for g in optimizer.param_groups] != names:
         raise ValueError("Adam groups differ from recorded origins")
     for group in optimizer.param_groups:

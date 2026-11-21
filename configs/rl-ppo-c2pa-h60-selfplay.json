@@ -1,0 +1,56 @@
+{
+  "base_config": "configs/rl-ppo-c2p-h60-selfplay.json",
+  "output": "artifacts/rl/ppo-c2pa-h60-selfplay",
+  "model": {
+    "variant": "C2PA",
+    "expected_parameter_count": 2266434
+  },
+  "critic": {
+    "active_seconds": 0
+  },
+  "self_play": {
+    "namespace": "ppo_c2pa_selfplay_v1_opponent"
+  },
+  "experiment": {
+    "model_extension": "action_context_v1",
+    "parent": "artifacts/rl/ppo-c2p-h60-selfplay/checkpoints/update-0084.pt",
+    "parent_label": "C2P self-play update 84",
+    "parent_sha256": "259e44d365c5117c5523f5df4d95ed1f7f67bb9da99ea8166c907b4c7012901d",
+    "parent_policy_hash": "f78a72d692a26763964aac46c5ccf133282b8cff40a2b2f26705d5694ee32449",
+    "parent_run": "artifacts/rl/ppo-c2p-h60-selfplay",
+    "parent_run_sha256": "9589384243e7672574805e5c2e217ccd0af693ae40181b4dd3c7fd87fd82a926",
+    "parent_manifest": "artifacts/rl/ppo-c2p-h60-selfplay/manifest.json",
+    "parent_manifest_sha256": "aaec0e1e444ae63e279276e6e14d87e01437873e0fed8c12620603126fc230b4",
+    "parent_final_state": "artifacts/rl/ppo-c2p-h60-selfplay/state.json",
+    "parent_final_state_sha256": "9d0c6ceff70abfd7aec71de479d5c231c4712be5dbecaae29f3fd062d056e0aa",
+    "parent_optimizer_counters": {
+      "shared_actor": 46637,
+      "value": 4907,
+      "attack_preview": 17247
+    },
+    "parent_optimizer_lr": 5e-6,
+    "initial_value": "preserve_parent",
+    "value_optimizer": "preserve",
+    "start_episode": 133443,
+    "episode_id_source": {
+      "state": "artifacts/rl/ppo-c2p-h60-selfplay/state.json",
+      "state_sha256": "9d0c6ceff70abfd7aec71de479d5c231c4712be5dbecaae29f3fd062d056e0aa",
+      "run": "artifacts/rl/ppo-c2p-h60-selfplay/run.json",
+      "run_sha256": "9589384243e7672574805e5c2e217ccd0af693ae40181b4dd3c7fd87fd82a926"
+    },
+    "training_namespace": "ppo_c2pa_selfplay_v1_training",
+    "shuffle_namespace": "ppo_c2pa_selfplay_v1_shuffle",
+    "torch_namespace": "ppo_c2pa_selfplay_v1_torch",
+    "critic_namespace": "ppo_c2pa_selfplay_v1_critic",
+    "time_budget_check": {
+      "local_precheck_gpu": null,
+      "local_measured_step_seconds_mean": null,
+      "local_measured_step_seconds_median": null,
+      "local_measured_replay_32k_seconds": null,
+      "target_gpu_step_seconds": 0.35,
+      "target_gpu_kl_check_seconds": 1.25,
+      "target_collection_decisions_per_second": 1100,
+      "expected_kl_checks_per_rollout": 17.78
+    }
+  }
+}

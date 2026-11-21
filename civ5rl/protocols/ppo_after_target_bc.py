@@ -3,6 +3,7 @@
 import math
 
 from civ5rl.config import load_config as resolve_config
+from civ5rl.core.preview import model_extension
 from civ5rl.engine.runtime.control import TrainingCounters
 from civ5rl.protocols.ppo_validation import validate_bounded_training
 
@@ -18,6 +19,13 @@ def validate_profile(config):
         not inherited and (mode != "fit_first_rollout" or experiment["parent_optimizer_steps"] != 0)
     ):
         raise ValueError("Initial value handling is incompatible with the parent optimizer")
+    extension = model_extension(config)
+    if extension and extension.child == "C2PA" and (
+        config["model"]["variant"] != extension.child or not inherited
+        or not experiment.get("parent_optimizer_counters")
+        or mode != "preserve_parent" or experiment.get("value_optimizer") != "preserve"
+    ):
+        raise ValueError("C2PA extension must preserve the PPO parent's value and named Adam groups")
     if experiment.get("time_budget_check"):
         compute_time_budget_check(config)
 

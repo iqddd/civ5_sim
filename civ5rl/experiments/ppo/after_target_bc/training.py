@@ -37,7 +37,7 @@ from civ5rl.experiments.ppo.after_target_bc.boundary import (
     heal_interrupted_update,
 )
 from civ5rl.experiments.ppo.after_target_bc.evaluation import development
-from civ5rl.experiments.ppo.after_target_bc.initialization import make_policy
+from civ5rl.experiments.ppo.after_target_bc.initialization import make_policy, u0_checkpoint
 from civ5rl.experiments.ppo.after_target_bc.phases import (
     _commit_ppo_rollout,
     _PpoTrainingSession,
@@ -253,7 +253,7 @@ def train(
         )
         opponent_pool = None
         if config.get("self_play", {}).get("enabled"):
-            opponent_pool = OpponentPool(config, device, out)
+            opponent_pool = OpponentPool(config, device, out, parent_checkpoint=out / u0_checkpoint(config))
             opponent_pool.sync_archive(state.get("self_play_archive", []))
         runtime = _load_validated_collection_runtime(config, out, runtime_path)
         with (

@@ -8,7 +8,7 @@ from typing import Any
 import torch
 
 from civ5rl.core.model import Policy
-from civ5rl.core.preview import extends_parent
+from civ5rl.core.preview import ModelExtension, model_extension
 from civ5rl.engine.ppo.adam import (
     adapts_value,
     grouped_optimizer,
@@ -24,11 +24,11 @@ def _validate_inherited_groups(
     origins: dict[str, int],
     saved_state: dict[str, Any],
     *,
-    extension: bool,
+    extension: ModelExtension | None,
 ) -> None:
     expected_names = {group["name"] for group in optimizer.param_groups}
     if extension:
-        expected_names.remove("attack_preview")
+        expected_names.remove(extension.adam_group)
     if set(origins) != expected_names or any(
         type(counter) is not int or counter < 0 for counter in origins.values()
     ):
@@ -37,7 +37,7 @@ def _validate_inherited_groups(
         raise ValueError("Parent ledger and inherited Adam group counters differ")
     expected_groups = optimizer.state_dict()["param_groups"]
     if extension:
-        expected_groups = expected_groups[:2]
+        expected_groups = [g for g in expected_groups if g["name"] != extension.adam_group]
     if len(source["param_groups"]) != len(expected_groups):
         raise ValueError("Parent Adam group count differs")
     for actual, expected in zip(source["param_groups"], expected_groups, strict=True):
@@ -51,9 +51,13 @@ def _validate_adam_state_tensors(
     origins: dict[str, int] | None,
     expected: int,
     *,
-    extension: bool,
+    extension: ModelExtension | None,
 ) -> None:
-    if len(optimizer.state) != len(list(policy.parameters())) - int(extension):
+    inherited = {
+        p for name, p in policy.named_parameters()
+        if extension is None or name not in extension.new_parameters
+    }
+    if set(optimizer.state) != inherited:
         raise ValueError("Parent Adam must contain all model and critic parameters")
     expected_by_parameter = {
         parameter: origins.get(group["name"], 0) if origins else expected
@@ -97,7 +101,7 @@ def load_initial_optimizer(policy: Policy, saved: dict[str, Any], config: dict[s
     """Preserve a PPO parent's complete Adam, or start the original BC handoff."""
     experiment = config["experiment"]
     origins = experiment.get("parent_optimizer_counters")
-    extension = extends_parent(config)
+    extension = model_extension(config)
     optimizer: torch.optim.Adam = (
         grouped_optimizer(policy, config, "cpu") if origins else optimizer_for(policy, config, "cpu")
     )
@@ -108,7 +112,7 @@ def load_initial_optimizer(policy: Policy, saved: dict[str, Any], config: dict[s
     if (
         (
             saved.get("variant") != policy.variant
-            and not (extension and saved.get("variant") == "C2" and policy.variant == "C2P")
+            and not (extension and (saved.get("variant"), policy.variant) == (extension.parent, extension.child))
         )
         or policy.variant != config["model"]["variant"]
         or not saved.get("state", {}).get("critic_complete")
@@ -121,7 +125,10 @@ def load_initial_optimizer(policy: Policy, saved: dict[str, Any], config: dict[s
         _validate_inherited_groups(optimizer, source, origins, saved["state"], extension=extension)
     if extension:
         source = deepcopy(source)
-        source["param_groups"].append(optimizer.state_dict()["param_groups"][2])
+        extra = optimizer.state_dict()["param_groups"][-1]
+        if extra["name"] != extension.adam_group or set(extra["parameter_names"]) != extension.new_parameters:
+            raise ValueError("Unexpected parameters in new Adam group")
+        source["param_groups"].append(extra)
     optimizer.load_state_dict(source)
     assert_equal(optimizer.state_dict(), source)
     expected = int(experiment["parent_optimizer_steps"])
@@ -130,7 +137,7 @@ def load_initial_optimizer(policy: Policy, saved: dict[str, Any], config: dict[s
     _validate_adam_state_tensors(policy, optimizer, origins, expected, extension=extension)
     parent_lr = experiment.get("parent_optimizer_lr", config["optimizer"]["lr"])
     for group in optimizer.param_groups:
-        if group["lr"] != parent_lr:
+        if (extension is None or group["name"] != extension.adam_group) and group["lr"] != parent_lr:
             raise ValueError("Parent Adam lr differs from experiment")
         for name in ("eps", "weight_decay"):
             if group[name] != config["optimizer"][name]:

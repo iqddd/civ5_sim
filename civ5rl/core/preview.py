@@ -1,27 +1,66 @@
-"""Explicit, zero-initialized C2 -> C2P model inheritance."""
+"""Explicit, function-preserving policy extensions for branching from a checkpoint."""
+
+from dataclasses import dataclass
 
 import torch
 
 
+@dataclass(frozen=True)
+class ModelExtension:
+    parent: str
+    child: str
+    adam_group: str
+    new_parameters: frozenset[str]
+    zero_parameters: tuple[str, ...]
+
+
+_EXTENSIONS = {
+    "attack_preview_v1": ModelExtension(
+        "C2", "C2P", "attack_preview", frozenset({"attack_preview.weight"}), ("attack_preview.weight",),
+    ),
+    "action_context_v1": ModelExtension(
+        "C2P", "C2PA", "action_context",
+        frozenset(
+            f"action_attention.{layer}.{field}"
+            for layer in ("norm", "q_proj", "k_proj", "v_proj", "out_proj")
+            for field in ("weight", "bias")
+        ) | {"value_actions.weight"},
+        ("action_attention.out_proj.weight", "action_attention.out_proj.bias", "value_actions.weight"),
+    ),
+}
+
+
+def model_extension(config):
+    name = config.get("experiment", {}).get("model_extension")
+    if name is None:
+        return None
+    if name not in _EXTENSIONS:
+        raise ValueError(f"Unknown model extension {name!r}")
+    return _EXTENSIONS[name]
+
+
 def extends_parent(config):
-    return config.get("experiment", {}).get("model_extension") == "attack_preview_v1"
+    return model_extension(config) is not None
 
 
-def inherited_model(model, parent):
-    if set(model) != {*parent, "attack_preview.weight"}:
-        raise ValueError("C2P inheritance changed existing parameter names")
-    if any(not torch.equal(model[name], value) for name, value in parent.items()):
-        raise ValueError("C2P inherited weights differ")
-    if model["attack_preview.weight"].shape != (128, 5) or torch.count_nonzero(model["attack_preview.weight"]):
-        raise ValueError("C2P preview projection must start at zero")
+def inherited_model(model, parent, extension=_EXTENSIONS["attack_preview_v1"]):
+    if set(model) != set(parent) | extension.new_parameters or set(parent) & extension.new_parameters:
+        raise ValueError(f"{extension.child} inheritance changed existing parameter names")
+    if any(model[name].dtype != value.dtype or not torch.equal(model[name], value)
+           for name, value in parent.items()):
+        raise ValueError(f"{extension.child} inherited weights differ")
+    if any(torch.count_nonzero(model[name]) for name in extension.zero_parameters):
+        raise ValueError(f"{extension.child} residual projections must start at zero")
 
 
 def load_parent_model(policy, saved, config):
-    if extends_parent(config) and saved["variant"] != policy.variant:
-        if saved["variant"] != "C2" or policy.variant != "C2P":
-            raise ValueError("attack_preview_v1 only supports C2 -> C2P")
-        model = {**saved["model"], "attack_preview.weight": torch.zeros_like(policy.attack_preview.weight)}
+    extension = model_extension(config)
+    if extension and saved["variant"] != policy.variant:
+        if (saved["variant"], policy.variant) != (extension.parent, extension.child):
+            raise ValueError(f"Model extension only supports {extension.parent} -> {extension.child}")
+        initialized = policy.state_dict()
+        model = {**saved["model"], **{name: initialized[name] for name in extension.new_parameters}}
         policy.load_state_dict(model, strict=True)
-        inherited_model(policy.state_dict(), saved["model"])
+        inherited_model(policy.state_dict(), saved["model"], extension)
     else:
         policy.load_state_dict(saved["model"], strict=True)

@@ -8,6 +8,7 @@ from civ5rl.engine.runtime.control import target_bc_evaluation_due
 from civ5rl.experiments.evaluation.h2h import evaluate_h2h
 from civ5rl.experiments.evaluation.matches import evaluate_target_scale as evaluate
 from civ5rl.experiments.imitation.helpers import isolated_rng
+from civ5rl.experiments.ppo.after_target_bc.initialization import u0_checkpoint
 from civ5rl.protocols.ppo_after_target_bc import check_development_gain
 from civ5rl.provenance.common import (
     read_json,
@@ -38,7 +39,7 @@ def development(config, plan, out, state, shuffle, clock=None):
                     plan,
                     out,
                     state["latest"],
-                    "checkpoints/initial.pt",
+                    u0_checkpoint(config),
                     purpose,
                 )
         state["evaluation_seconds"] += perf_counter() - started
@@ -161,7 +162,7 @@ def finish(config, plan, out):
             plan,
             out,
             state["best"]["path"],
-            "checkpoints/initial.pt",
+            u0_checkpoint(config),
             "confirmation",
         )
         payload["h2h_confirmation"] = h2h_confirmation

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ from typing import Any
 import torch
 
 from civ5rl.core.model import Policy
-from civ5rl.core.preview import extends_parent, inherited_model
+from civ5rl.core.preview import ModelExtension, inherited_model, model_extension
 from civ5rl.engine.evaluation.executor import runtime_for
 from civ5rl.engine.ppo.adam import adapts_value
 from civ5rl.engine.runtime.control import TrainingCounters
@@ -27,6 +28,7 @@ from civ5rl.protocols.turn_reset import evaluation_plan
 from civ5rl.provenance import checkpoint
 from civ5rl.provenance.common import (
     ROOT,
+    atomic_output,
     configure,
     file_sha256,
     read_json,
@@ -35,6 +37,14 @@ from civ5rl.provenance.common import (
 )
 from civ5rl.provenance.identity import policy_hash
 from civ5sim.engine import digest
+
+U0_CHECKPOINT = "checkpoints/reference-u0.pt"
+
+
+def u0_checkpoint(config):
+    """C2PA competes with the native C2P parent, including at the initial milestone."""
+    extension = model_extension(config)
+    return U0_CHECKPOINT if extension and extension.child == "C2PA" else "checkpoints/initial.pt"
 
 
 def make_policy(config, device):
@@ -55,7 +65,11 @@ def validate_episode_origin(experiment, parent_final):
         record = read_json(ROOT / source["run"])
         frontier = read_json(ROOT / source["state"])
         origin = record.get("config", {}).get("experiment", {})
-        if (
+        same_parent_run = (
+            source["state_sha256"] == experiment["parent_final_state_sha256"]
+            and source["run_sha256"] == experiment["parent_run_sha256"]
+        )
+        if not same_parent_run and (
             origin.get("parent_sha256") != experiment["parent_sha256"]
             or origin.get("start_episode", -1) < parent_final["next_episode"]
         ):
@@ -125,9 +139,11 @@ def initialize(config: dict[str, Any], out: Path) -> dict[str, Any]:
     saved = torch.load(parent, map_location="cpu", weights_only=False)
     if inherited and saved["identity"].get("run_id") != parent_record["run_id"]:
         raise ValueError("Parent checkpoint and final run lineage differ")
-    extension = extends_parent(config)
+    extension = model_extension(config)
     if extension:
-        inherited_model(policy.state_dict(), saved["model"])
+        if (saved["variant"], policy.variant) != (extension.parent, extension.child):
+            raise ValueError("Model extension requires its declared parent architecture")
+        inherited_model(policy.state_dict(), saved["model"], extension)
     elif not all(torch.equal(value, saved["model"][name]) for name, value in policy.state_dict().items()):
         raise ValueError("Initial model differs from parent")
     if policy_hash(saved["model"]) != experiment["parent_policy_hash"]:
@@ -145,6 +161,11 @@ def initialize(config: dict[str, Any], out: Path) -> dict[str, Any]:
         torch_seed=torch_seed,
     )
     state = _initial_training_state(config, inherited=inherited, extension=extension)
+    if u0_checkpoint(config) == U0_CHECKPOINT:
+        anchor = out / U0_CHECKPOINT
+        anchor.parent.mkdir(parents=True, exist_ok=True)
+        with atomic_output(anchor) as temporary:
+            shutil.copyfile(parent, temporary)
     write_json(out / "run.json", record)
     save_boundary(
         out,
@@ -232,7 +253,7 @@ def _initial_run_record(
     return record, identity
 
 
-def _initial_training_state(config: dict[str, Any], *, inherited: bool, extension: bool) -> dict[str, Any]:
+def _initial_training_state(config: dict[str, Any], *, inherited: bool, extension: ModelExtension | None) -> dict[str, Any]:
     experiment = config["experiment"]
     counters = TrainingCounters()
     state: dict[str, Any] = {
@@ -259,7 +280,9 @@ def _initial_training_state(config: dict[str, Any], *, inherited: bool, extensio
         "best": {"path": "checkpoints/initial.pt", "wins": -1, "update": 0},
     }
     if extension:
-        state["origin_Adam_counters"]["attack_preview"] = 0
+        state["origin_Adam_counters"][extension.adam_group] = 0
+    if "value_optimizer" in experiment:
+        state["value_optimizer"] = experiment["value_optimizer"]
     if adapts_value(config) and "origin_Adam_counters" in state:
         state["value_optimizer"] = "reset_then_preserve"
         state["origin_Adam_counters"]["value"] = 0

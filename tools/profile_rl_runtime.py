@@ -84,14 +84,11 @@ def load_collection_policy(config, checkpoint):
     import torch
 
     from civ5rl.core.model import Policy
-    from civ5rl.core.preview import extends_parent, load_parent_model
+    from civ5rl.core.preview import load_parent_model, model_extension
 
     saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    variant = (
-        config["model"]["variant"]
-        if extends_parent(config) and saved["variant"] == "C2"
-        else saved["variant"]
-    )
+    extension = model_extension(config)
+    variant = extension.child if extension and saved["variant"] == extension.parent else saved["variant"]
     policy = Policy(variant)
     if variant != saved["variant"]:
         load_parent_model(policy, saved, config)
@@ -327,7 +324,13 @@ def main():
                 result["self_play"] = self_play
                 policy = load_collection_policy(config, args.checkpoint)
                 opponent_pool = (
-                    OpponentPool(config, "cuda", args.out, parent_checkpoint=args.checkpoint)
+                    OpponentPool(
+                        config, "cuda", args.out,
+                        parent_checkpoint=(
+                            ROOT / config["experiment"]["parent"]
+                            if config["model"]["variant"] == "C2PA" else args.checkpoint
+                        ),
+                    )
                     if self_play
                     else None
                 )

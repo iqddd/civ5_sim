@@ -179,6 +179,7 @@ def format_progress(result):
     adam = (
         f" | Adam shared/actor {groups['shared_actor']}, value {groups['value']}"
         + (f", preview {groups['attack_preview']}" if "attack_preview" in groups else "")
+        + (f", action context {groups['action_context']}" if "action_context" in groups else "")
         if groups
         else f" | Adam {details['adam_total']} total ({details['adam_inherited']} inherited + {details['adam_new_accepted']} new)"
         if details.get("adam_inherited") and "adam_total" in details

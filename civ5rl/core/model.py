@@ -566,6 +566,36 @@ class _PolicyExecutor:
         return valid, last
 
 
+class ActionAttention(nn.Module):
+    """Residual attention across the legal commands of one decision."""
+
+    num_heads = 4
+
+    def __init__(self):
+        super().__init__()
+        self.norm = nn.LayerNorm(HEX_DIM)
+        self.q_proj = nn.Linear(HEX_DIM, HEX_DIM)
+        self.k_proj = nn.Linear(HEX_DIM, HEX_DIM)
+        self.v_proj = nn.Linear(HEX_DIM, HEX_DIM)
+        self.out_proj = nn.Linear(HEX_DIM, HEX_DIM)
+        nn.init.zeros_(self.out_proj.weight)
+        nn.init.zeros_(self.out_proj.bias)
+
+    def forward(self, actions, mask):
+        batch_size, count, _ = actions.shape
+        normalized = self.norm(actions)
+        shape = (batch_size, count, self.num_heads, HEX_DIM // self.num_heads)
+        q, k, v = (
+            project(normalized).reshape(shape).transpose(1, 2)
+            for project in (self.q_proj, self.k_proj, self.v_proj)
+        )
+        # Give all-padding rows a defined softmax. Their result is discarded.
+        keys = (mask | ~mask.any(dim=1, keepdim=True))[:, None, None, :]
+        attended = F.scaled_dot_product_attention(q, k, v, attn_mask=keys)
+        update = self.out_proj(attended.transpose(1, 2).reshape(batch_size, count, HEX_DIM))
+        return actions + update.masked_fill(~mask[..., None], 0)
+
+
 class Policy(nn.Module):
     def __init__(self, variant: PolicyVariant | str = PolicyVariant.CONTACTS_GRU):
         super().__init__()
@@ -609,6 +639,10 @@ class Policy(nn.Module):
         if self.variant_spec.attack_preview:
             self.attack_preview = nn.Linear(ATTACK_PREVIEW_DIM, HEX_DIM, bias=False)
             nn.init.zeros_(self.attack_preview.weight)
+        if self.variant_spec.action_context:
+            self.action_attention = ActionAttention()
+            self.value_actions = nn.Linear(2 * HEX_DIM, HEX_DIM, bias=False)
+            nn.init.zeros_(self.value_actions.weight)
 
     @property
     def is_recurrent(self) -> bool:
@@ -855,13 +889,26 @@ class Policy(nn.Module):
         )
         # Preserve action probabilities across different rollout/replay batches.
         with torch.autocast(h.device.type, enabled=False):
+            mask = batch["action_mask"]
             if self.variant_spec.attack_preview:
                 first = self.action[0](action_input.float()) + self.attack_preview(batch["attack_preview"].float())
-                scores = self.action[2](self.action[1](first))
+                actions = self.action[1](first)
+                if self.variant_spec.action_context:
+                    actions = self.action_attention(actions, mask)
+                scores = self.action[2](actions)
             else:
                 scores = self.action(action_input.float())
-            logits = scores.squeeze(-1).masked_fill(~batch["action_mask"], -torch.inf)
-            value = self.value(h.float()).squeeze(-1) if compute_value else None
+            logits = scores.squeeze(-1).masked_fill(~mask, -torch.inf)
+            value = None
+            if compute_value and self.variant_spec.action_context:
+                detached = actions.detach()
+                mean = detached.masked_fill(~mask[..., None], 0).sum(1) / mask.sum(1, keepdim=True).clamp_min(1)
+                maximum = detached.masked_fill(~mask[..., None], -torch.inf).amax(1)
+                maximum = maximum.masked_fill(~mask.any(1, keepdim=True), 0)
+                summary = self.value_actions(torch.cat((mean, maximum), dim=-1))
+                value = self.value[2](self.value[1](self.value[0](h.float()) + summary)).squeeze(-1)
+            elif compute_value:
+                value = self.value(h.float()).squeeze(-1)
         return logits, value
 
     def _check_hidden(self, hidden: torch.Tensor | None, batch_size: int) -> None:

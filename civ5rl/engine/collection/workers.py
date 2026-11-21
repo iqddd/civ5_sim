@@ -19,6 +19,7 @@ from civ5rl.core.contracts import (
 )
 from civ5rl.core.env import DecisionEnv
 from civ5rl.core.observation import ObservationEncoder
+from civ5rl.core.variants import variant_spec
 from civ5rl.engine.collection.diagnostics import Diagnostics
 from civ5rl.engine.runtime.shared import EncodedSlots
 from civ5sim.engine import step_batch
@@ -91,7 +92,7 @@ class BaseWorker:
         if state.env is not None:
             state.env.close()
         state.env = DecisionEnv(spec)
-        state.env.attack_preview = variant == "C2P"
+        state.env.attack_preview = variant_spec(variant).attack_preview
         state.encoder = (
             ObservationEncoder(context_from_spec(spec), variant) if self.shared is not None else None
         )
