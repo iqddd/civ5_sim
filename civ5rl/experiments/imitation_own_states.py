@@ -1,5 +1,7 @@
 """Two bounded rounds of CP advice on policy trajectories; no PPO or tuning."""
 
+from __future__ import annotations
+
 import gc
 import hashlib
 import json
@@ -11,14 +13,14 @@ from time import perf_counter
 
 import torch
 
-from civ5rl.engine.runtime.control import TrainingCounters
 from civ5rl.engine.imitation.core import DemonstrationCache, teacher_metrics
 from civ5rl.engine.imitation.pipeline import (
     ResidentDemonstrations,
     backward_minibatch_async,
 )
-from civ5rl.engine.runtime.telemetry import ResourceMonitor
+from civ5rl.engine.runtime.control import TrainingCounters
 from civ5rl.engine.runtime.sequence import take_counted_span
+from civ5rl.engine.runtime.telemetry import ResourceMonitor
 from civ5rl.engine.runtime.transactions import FrozenParamsCheck, bc_optimizer_step
 from civ5rl.experiments.evaluation import (
     compare_paired_directories,
@@ -131,9 +133,7 @@ def initialize(config, out):
         "config_hash": digest(config),
         "old_inputs": parent_manifest["inputs"],
     }
-    current, changes = current_parent_lineage(
-        parent, config, plan, same_corpus=False
-    )
+    current, changes = current_parent_lineage(parent, config, plan, same_corpus=False)
     if (out / "passport.json").exists():
         verify_existing_run(out, config, current)
         if read_json(out / "manifest.json") != plan:
@@ -177,9 +177,19 @@ def eta_decision(waves, target, elapsed, settings, previous_streak, *, budget=No
     matches = sum(w["matches"] for w in waves)
     effective_budget = budget if budget is not None else settings["collection_seconds"]
     if labels >= target:
-        return {"stop": False, "streak": 0, "quota_met": True, "budget": effective_budget}
+        return {
+            "stop": False,
+            "streak": 0,
+            "quota_met": True,
+            "budget": effective_budget,
+        }
     if matches < settings["eta_min_matches"] or elapsed < settings["eta_min_seconds"]:
-        return {"stop": False, "streak": 0, "eligible": False, "budget": effective_budget}
+        return {
+            "stop": False,
+            "streak": 0,
+            "eligible": False,
+            "budget": effective_budget,
+        }
     recent, count = [], 0
     for wave in reversed(waves):
         recent.append(wave)
@@ -204,7 +214,6 @@ def eta_decision(waves, target, elapsed, settings, previous_streak, *, budget=No
         "remaining_eta_seconds": eta,
         "predicted_finish_seconds": elapsed + eta if eta is not None else None,
     }
-
 
 
 def collection_summary(rows, seconds, status, target, waves):
@@ -233,10 +242,7 @@ def collection_summary(rows, seconds, status, target, waves):
         "advice_seconds": sum(r["advice_seconds"] for r in rows),
         "policy_seconds": sum(r["policy_seconds"] for r in rows),
         "outcomes": dict(
-            Counter(
-                "D" if r["winner"] is None else "W" if r["winner"] == r["side"] else "L"
-                for r in rows
-            )
+            Counter("D" if r["winner"] is None else "W" if r["winner"] == r["side"] else "L" for r in rows)
         ),
     }
 
@@ -248,14 +254,8 @@ def collect_split(config, plan, out, split, behavior):
     if (directory / "collection.json").exists():
         raise ValueError(f"Collection already recorded: {split}")
     settings = config["own_states"]
-    target = (
-        settings["dev_labels"] if split == "dev" else settings["new_labels_per_cycle"]
-    )
-    budget = (
-        settings["dev_collection_seconds"]
-        if split == "dev"
-        else settings["collection_seconds"]
-    )
+    target = settings["dev_labels"] if split == "dev" else settings["new_labels_per_cycle"]
+    budget = settings["dev_collection_seconds"] if split == "dev" else settings["collection_seconds"]
     seen = set()
     for files in plan["old_inputs"].values():
         for name in files:
@@ -273,16 +273,12 @@ def collect_split(config, plan, out, split, behavior):
             jobs = []
             for case_id in range(index, index + 4):
                 for attempt in range(100):
-                    case = own.make_case(
-                        config, plan["base"], split, case_id, attempt=attempt
-                    )
+                    case = own.make_case(config, plan["base"], split, case_id, attempt=attempt)
                     if case["physical_hash"] not in seen:
                         seen.add(case["physical_hash"])
                         break
                 else:
-                    raise RuntimeError(
-                        "invalid_dataset: 100 duplicate placement attempts"
-                    )
+                    raise RuntimeError("invalid_dataset: 100 duplicate placement attempts")
                 cases.append(case)
                 jobs.append(
                     (
@@ -296,9 +292,7 @@ def collect_split(config, plan, out, split, behavior):
             write_json(directory / "planned-cases.json", cases)
             completed = list(executor.map(own.match_task, jobs))
             for row in completed:
-                path = (
-                    directory / f"match-{row['case_id']:06}" / "demonstration.json.gz"
-                )
+                path = directory / f"match-{row['case_id']:06}" / "demonstration.json.gz"
                 files[relative(path)] = row["demonstration_sha256"]
             rows.extend(completed)
             wave = {
@@ -309,16 +303,12 @@ def collect_split(config, plan, out, split, behavior):
             waves.append(wave)
             labels += wave["labels"]
             index += 4
-            eta = eta_decision(
-                waves, target, perf_counter() - started, settings, streak, budget=budget
-            )
+            eta = eta_decision(waves, target, perf_counter() - started, settings, streak, budget=budget)
             streak = eta["streak"]
             wave["eta"] = eta
             write_json(
                 directory / "progress.json",
-                collection_summary(
-                    rows, perf_counter() - started, "collecting", target, waves
-                ),
+                collection_summary(rows, perf_counter() - started, "collecting", target, waves),
             )
             print(
                 json.dumps(
@@ -374,9 +364,7 @@ class LabelStream:
                 self.passes += 1
             episode, start, stop = self.order[self.position]
             start = start if self.offset is None else self.offset
-            end, piece_labels = take_counted_span(
-                episode, start, stop, self.masks, count - labels
-            )
+            end, piece_labels = take_counted_span(episode, start, stop, self.masks, count - labels)
             labels += piece_labels
             if piece_labels:
                 result.append((episode, start, end))
@@ -479,12 +467,8 @@ def train_cycle(config, plan, identity, out, cycle):
     chunks = cache.chunks()
     old_rng = random.Random(seed_for(17, 0, "old_mixture", namespace="own_states"))
     new_rng = random.Random(seed_for(17, 0, "new_mixture", namespace="own_states"))
-    old_stream = LabelStream(
-        [c for c in chunks if c[0] < len(old)], cache.masks, old_rng
-    )
-    new_stream = LabelStream(
-        [c for c in chunks if c[0] >= len(old)], cache.masks, new_rng
-    )
+    old_stream = LabelStream([c for c in chunks if c[0] < len(old)], cache.masks, old_rng)
+    new_stream = LabelStream([c for c in chunks if c[0] >= len(old)], cache.masks, new_rng)
     sampler_mode = config["own_states"].get(
         "sampler_continuation_boundary",
         config["own_states"].get("sampler_mode", SAMPLER_AFTER_LAST_STEP),
@@ -495,15 +479,10 @@ def train_cycle(config, plan, identity, out, cycle):
     prev_cycle_str = str(cycle - 1)
     prev_cycle_steps = state.get("cycles", {}).get(prev_cycle_str, {}).get("steps")
     chosen_step = state["best"]["step"] if state.get("best") else 0
-    is_intermediate = bool(
-        prev_cycle_steps is not None and chosen_step < prev_cycle_steps
-    )
+    is_intermediate = bool(prev_cycle_steps is not None and chosen_step < prev_cycle_steps)
 
     if cycle > 1:
-        if (
-            sampler_mode == SAMPLER_FROM_CHOSEN_CHECKPOINT
-            and "sampler" in saved.get("state", {})
-        ):
+        if sampler_mode == SAMPLER_FROM_CHOSEN_CHECKPOINT and "sampler" in saved.get("state", {}):
             checkpoint_sampler = saved["state"]["sampler"]
             old_stream.restore(checkpoint_sampler["old"])
             new_rng.setstate(checkpoint_sampler["new"]["rng"])
@@ -515,9 +494,7 @@ def train_cycle(config, plan, identity, out, cycle):
             sampler_path = out / "sampler_after_last_step.pt"
             if not sampler_path.exists():
                 sampler_path = out / "sampler.pt"
-            previous_streams = torch.load(
-                sampler_path, weights_only=False, map_location="cpu"
-            )
+            previous_streams = torch.load(sampler_path, weights_only=False, map_location="cpu")
             old_stream.restore(previous_streams["old"])
             new_rng.setstate(previous_streams["new"]["rng"])
             sampler_source = "after_last_step"
@@ -549,9 +526,7 @@ def train_cycle(config, plan, identity, out, cycle):
             "base_Adam_counter": base_counter,
             "source": relative(base_path),
             "old_free_labels": old_count,
-            "new_free_labels": sum(
-                r["supervised"] for ep in new for r in ep["decisions"]
-            ),
+            "new_free_labels": sum(r["supervised"] for ep in new for r in ep["decisions"]),
             "sampler_mode": sampler_mode,
             "sampler_source": sampler_source,
             "sampler_file": str(sampler_file) if sampler_file else None,
@@ -629,9 +604,7 @@ def train_cycle(config, plan, identity, out, cycle):
         def save_candidate():
             nonlocal offline_seconds
             torch.cuda.synchronize()
-            if {int(s["step"]) for s in optimizer.state.values()} != {
-                base_counter + local_steps
-            }:
+            if {int(s["step"]) for s in optimizer.state.values()} != {base_counter + local_steps}:
                 raise RuntimeError("Saved Adam counters differ from performed updates")
             monitor.mark("checkpoint_and_metrics")
             point = directory / f"checkpoints/step-{local_steps:04}.pt"
@@ -732,9 +705,7 @@ def train_cycle(config, plan, identity, out, cycle):
             )
             state.update(step_counters.to_state_dict(protocol=protocol))
             if local_steps == 1:
-                if {int(s["step"]) for s in optimizer.state.values()} != {
-                    base_counter + 1
-                }:
+                if {int(s["step"]) for s in optimizer.state.values()} != {base_counter + 1}:
                     raise RuntimeError("First Adam step counter differs")
                 write_json(
                     directory / "first-step-check.json",
@@ -759,9 +730,7 @@ def train_cycle(config, plan, identity, out, cycle):
                 "spans_hash": digest(spans),
             }
             records.append(row)
-            with (directory / "optimizer-steps.jsonl").open(
-                "a", encoding="utf-8"
-            ) as stream:
+            with (directory / "optimizer-steps.jsonl").open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(row) + "\n")
             if local_steps % settings["measure_every"] == 0:
                 save_candidate()
@@ -780,9 +749,7 @@ def train_cycle(config, plan, identity, out, cycle):
         if local_steps and measurements[-1]["cycle_step"] != local_steps:
             save_candidate()
         frozen_value.verify()
-        is_intermediate_final, chosen_step_final = check_intermediate_step(
-            state, cycle, local_steps
-        )
+        is_intermediate_final, chosen_step_final = check_intermediate_step(state, cycle, local_steps)
         state["cycles"][str(cycle)] = {
             "steps": local_steps,
             "selected": dict(state["best"]),
@@ -833,19 +800,13 @@ def evaluate_cycle(config, plan, out, parent, cycle):
     training = read_json(directory / "training.json")
     candidate = training["selected"]
     if (
-        fingerprint(
-            torch.load(
-                ROOT / candidate["path"], weights_only=False, map_location="cpu"
-            )["model"]
-        )
+        fingerprint(torch.load(ROOT / candidate["path"], weights_only=False, map_location="cpu")["model"])
         != candidate["weights_sha256"]
     ):
         raise ValueError("Selected policy changed before evaluation")
     cache_path = out / "evaluations.json"
     recorded = read_json(cache_path) if cache_path.exists() else {"runs": {}}
-    parent_saved = torch.load(
-        parent / "checkpoints/best.pt", weights_only=False, map_location="cpu"
-    )
+    parent_saved = torch.load(parent / "checkpoints/best.pt", weights_only=False, map_location="cpu")
     parent_hash = fingerprint(parent_saved["model"])
     result = {"candidate": candidate, "runs": {}}
     for mode in ("sample", "argmax"):
@@ -856,10 +817,7 @@ def evaluate_cycle(config, plan, out, parent, cycle):
             inherited = read_json(parent / "evaluations.json")["runs"][mode]
             run = {**inherited, "new_matches": 0, "reused": True}
         else:
-            directories = {
-                enemy: directory / "evaluation" / mode / enemy
-                for enemy in ("cp", "greedy")
-            }
+            directories = {enemy: directory / "evaluation" / mode / enemy for enemy in ("cp", "greedy")}
             started = perf_counter()
 
             def progress(matches, *, mode=mode, started=started):
@@ -886,15 +844,11 @@ def evaluate_cycle(config, plan, out, parent, cycle):
                 progress=progress,
             )
             run = {
-                "directories": {
-                    enemy: relative(path) for enemy, path in directories.items()
-                },
+                "directories": {enemy: relative(path) for enemy, path in directories.items()},
                 "new_matches": new_matches,
                 "reused": False,
                 "seconds": perf_counter() - started,
-                "opponents": {
-                    enemy: collect_summary(path) for enemy, path in directories.items()
-                },
+                "opponents": {enemy: collect_summary(path) for enemy, path in directories.items()},
             }
         for enemy, path in run["directories"].items():
             if collect_summary(ROOT / path) != run["opponents"][enemy]:
@@ -931,8 +885,7 @@ def compare_battles(config, before_path, after_path):
         **result,
         "slices": {
             name.replace("side0", "side-0").replace("side1", "side-1"): {
-                key: value[key]
-                for key in ("matches", "baseline_wins", "candidate_wins")
+                key: value[key] for key in ("matches", "baseline_wins", "candidate_wins")
             }
             for name, value in slices.items()
         },
@@ -955,9 +908,7 @@ def report(config, out, parent):
         path = out / split / "collection.json"
         if path.exists():
             r = read_json(path)
-            lines.append(
-                f"| {split} | {r['status']} | {r['labels']} | {r['matches']} | {r['seconds']:.1f} |"
-            )
+            lines.append(f"| {split} | {r['status']} | {r['labels']} | {r['matches']} | {r['seconds']:.1f} |")
     lines += [
         "",
         "## Обучение и выбор",
@@ -982,11 +933,7 @@ def report(config, out, parent):
         chosen = (
             initial
             if state["best"]["cycle"] == 0
-            else next(
-                m
-                for _, m in all_measurements
-                if m.get("checkpoint") == state["best"]["path"]
-            )
+            else next(m for _, m in all_measurements if m.get("checkpoint") == state["best"]["path"])
         )
         lines += [
             "",
@@ -997,17 +944,13 @@ def report(config, out, parent):
         ]
         for dataset in ("old_holdout", "own_state_dev"):
             a, b = initial[dataset], chosen[dataset]
-            lines.append(
-                f"| {dataset} | all | {100 * a['accuracy']:.2f}% | {100 * b['accuracy']:.2f}% |"
-            )
+            lines.append(f"| {dataset} | all | {100 * a['accuracy']:.2f}% | {100 * b['accuracy']:.2f}% |")
             for kind in sorted(a["by_kind"].keys() | b["by_kind"].keys()):
                 aa, bb = (
                     a["by_kind"].get(kind, {}).get("accuracy"),
                     b["by_kind"].get(kind, {}).get("accuracy"),
                 )
-                lines.append(
-                    f"| {dataset} | {kind} | {100 * aa:.2f}% | {100 * bb:.2f}% |"
-                )
+                lines.append(f"| {dataset} | {kind} | {100 * aa:.2f}% | {100 * bb:.2f}% |")
             for detail in ("type", "type_unit", "exact"):
                 lines.append(
                     f"| {dataset} | move {detail} | {100 * a['move'][detail]:.2f}% | {100 * b['move'][detail]:.2f}% |"
@@ -1062,9 +1005,7 @@ def report(config, out, parent):
         for mode, run in evaluated["runs"].items():
             for enemy, directory in run["directories"].items():
                 previous = baseline[mode]
-                comparison = compare_battles(
-                    config, previous["directories"][enemy], directory
-                )
+                comparison = compare_battles(config, previous["directories"][enemy], directory)
                 comparisons[f"cycle-{cycle}-{mode}-{enemy}"] = comparison
                 a, b = previous["opponents"][enemy], run["opponents"][enemy]
                 low, high = comparison["CI95"]
@@ -1072,22 +1013,13 @@ def report(config, out, parent):
                     f"| {cycle} | {mode} | {enemy} | {a['W']}/{a['D']}/{a['L']} | {b['W']}/{b['D']}/{b['L']} | {100 * comparison['delta']:.2f} | [{100 * low:.2f}; {100 * high:.2f}] |"
                 )
                 if not run.get("reused"):
-                    metrics = [
-                        (p, read_json(p))
-                        for p in sorted((ROOT / directory).glob("*/metrics.json"))
-                    ]
+                    metrics = [(p, read_json(p)) for p in sorted((ROOT / directory).glob("*/metrics.json"))]
                     for outcome in ("W", "D", "L"):
                         item = next(
                             (
                                 (p, r)
                                 for p, r in metrics
-                                if (
-                                    "D"
-                                    if r["winner"] is None
-                                    else "W"
-                                    if r["winner"] == r["side"]
-                                    else "L"
-                                )
+                                if ("D" if r["winner"] is None else "W" if r["winner"] == r["side"] else "L")
                                 == outcome
                             ),
                             None,
@@ -1099,9 +1031,7 @@ def report(config, out, parent):
         choices = sorted((out / split).glob("match-*/metrics.json"))
         if choices:
             selected_replays.append(choices[0].parent)
-            disagreement = next(
-                (p.parent for p in choices if read_json(p)["disagreements"]), None
-            )
+            disagreement = next((p.parent for p in choices if read_json(p)["disagreements"]), None)
             if disagreement:
                 selected_replays.append(disagreement)
     checks = [
@@ -1133,13 +1063,7 @@ def report(config, out, parent):
                 actions.append(f"{a['kind']}({a['unit']},{a['target']})")
             if a["kind"] == "end_turn":
                 active = 1 - active
-        outcome = (
-            "draw"
-            if result["winner"] is None
-            else "win"
-            if result["winner"] == side
-            else "loss"
-        )
+        outcome = "draw" if result["winner"] is None else "win" if result["winner"] == side else "loss"
         lines.append(
             f"- `{relative(path)}`: {outcome}, {result['completed_rounds']} раундов, HP {result['remaining_hp']}. Первые команды learner: {' → '.join(actions[:10])}."
         )
@@ -1164,9 +1088,9 @@ def report(config, out, parent):
         if state["best"]
         else None
     )
-    if final_best and {
-        int(s["step"]) for s in final_best["optimizer"]["state"].values()
-    } != {state["best"]["Adam_counter"]}:
+    if final_best and {int(s["step"]) for s in final_best["optimizer"]["state"].values()} != {
+        state["best"]["Adam_counter"]
+    }:
         raise ValueError("Selected Adam counters differ from recorded selection")
     write_json(
         out / "verification.json",
@@ -1181,9 +1105,7 @@ def report(config, out, parent):
     hashes = {
         relative(p): file_sha256(p)
         for p in sorted(out.rglob("*"))
-        if p.is_file()
-        and p.name != "artifact-hashes.json"
-        and not p.name.endswith(".tmp")
+        if p.is_file() and p.name != "artifact-hashes.json" and not p.name.endswith(".tmp")
     }
     write_json(out / "artifact-hashes.json", hashes)
 
@@ -1192,9 +1114,7 @@ def run(phase, config, out, workers, device, cycle=None):
     if workers != 4:
         raise ValueError("Own-state protocol requires four workers")
     if phase == "report" and (out / "passport.json").exists():
-        checkpoint.verify_frozen_passport(
-            out, config=config, manifest=read_json(out / "manifest.json")
-        )
+        checkpoint.verify_frozen_passport(out, config=config, manifest=read_json(out / "manifest.json"))
         return report(config, out, ROOT / config["own_states"]["parent_run"])
     parent, plan, identity = initialize(config, out)
     if phase in ("collect", "train", "evaluate") and cycle not in (1, 2):
@@ -1228,10 +1148,7 @@ def run(phase, config, out, workers, device, cycle=None):
             )
             if marker.exists():
                 if phase == "run":
-                    if (
-                        current_phase == "collect"
-                        and read_json(marker)["status"] != "complete"
-                    ):
+                    if current_phase == "collect" and read_json(marker)["status"] != "complete":
                         break
                     continue
                 raise ValueError(f"Phase already recorded: {marker}")
@@ -1239,10 +1156,7 @@ def run(phase, config, out, workers, device, cycle=None):
                 raise ValueError("Cycle 1 must finish before cycle 2")
             state = read_json(out / "state.json")
             if current_phase == "collect":
-                if (
-                    state["training_seconds"]
-                    >= config["own_states"]["training_seconds"]
-                ):
+                if state["training_seconds"] >= config["own_states"]["training_seconds"]:
                     write_json(
                         out / "status.json",
                         {"status": "optimizer_time_limit", "cycle": c},
@@ -1270,9 +1184,7 @@ def run(phase, config, out, workers, device, cycle=None):
                 )
                 result = collect_split(config, plan, out, f"cycle-{c:02}", behavior)
                 if result["status"] != "complete":
-                    write_json(
-                        out / "status.json", {"status": result["status"], "cycle": c}
-                    )
+                    write_json(out / "status.json", {"status": result["status"], "cycle": c})
                     break
             elif current_phase == "train":
                 result = train_cycle(config, plan, identity, out, c)
@@ -1306,7 +1218,5 @@ def run(phase, config, out, workers, device, cycle=None):
         try:
             report(config, out, parent)
         except Exception:  # noqa: BLE001 -- record report failure before propagating
-            (out / "report-error.txt").write_text(
-                traceback.format_exc(), encoding="utf-8"
-            )
+            (out / "report-error.txt").write_text(traceback.format_exc(), encoding="utf-8")
         raise

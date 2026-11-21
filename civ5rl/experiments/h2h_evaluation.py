@@ -19,18 +19,23 @@ from civ5rl.engine.evaluation.proxy import ProxyAgent
 from civ5rl.engine.runtime.shared import EncodedSlots
 from civ5rl.provenance.common import ROOT, configure, file_sha256, read_json, write_json
 from civ5rl.reporting.evaluation_audit import (
-    dual_promotion_decision,
+    dual_promotion_decision as dual_promotion_decision,  # noqa: PLC0414 -- historical re-export
+)
+from civ5rl.reporting.evaluation_audit import (
     h2h_world_bootstrap,
-    select_dual_milestone,
+)
+from civ5rl.reporting.evaluation_audit import (
+    select_dual_milestone as select_dual_milestone,  # noqa: PLC0414 -- historical re-export
 )
 from civ5sim.engine import digest
 from civ5sim.match import MatchConfig, run_match
 
 
 def _validate_h2h_case(case):
-    if case["split"] != "validation" or digest(
-        {k: v for k, v in case.items() if k != "case_hash"}
-    ) != case["case_hash"]:
+    if (
+        case["split"] != "validation"
+        or digest({k: v for k, v in case.items() if k != "case_hash"}) != case["case_hash"]
+    ):
         raise ValueError("Invalid validation case")
 
 
@@ -104,9 +109,7 @@ def _h2h_worker_task(task, cand_conn, ref_conn):
             "army_bin": case.get("army_bin", -1),
             "placement": case["placement"],
             "damage_dealt": damage,
-            "units_lost": [
-                sum(u["side"] == s and u["hp"] <= 0 for u in final["units"]) for s in (0, 1)
-            ],
+            "units_lost": [sum(u["side"] == s and u["hp"] <= 0 for u in final["units"]) for s in (0, 1)],
         }
         write_json(directory / "metrics.json", metrics)
         return metrics
@@ -130,7 +133,10 @@ class DualPolicyExecutor:
     """Serve two frozen FP32 policies concurrently with strictly isolated GRU states."""
 
     def __init__(self, candidate_checkpoint, reference_checkpoint, runtime, *, identical=False):
-        from civ5rl.engine.evaluation.executor import BatchedInference, load_evaluation_policy
+        from civ5rl.engine.evaluation.executor import (
+            BatchedInference,
+            load_evaluation_policy,
+        )
 
         self.runtime = runtime.resolve()
         self.identical = identical
@@ -189,16 +195,14 @@ class DualPolicyExecutor:
             shared = self.shared.get(connection)
             if shared is None:
                 shared = self.shared[connection] = EncodedSlots(slots=1)
-            new_agent = AgentSession(
-                mode, temperature, metrics, [AgentMember() for _ in inference.policies]
-            )
+            new_agent = AgentSession(mode, temperature, metrics, [AgentMember() for _ in inference.policies])
             with self.lock:
                 self.connections[connection] = (role, new_agent)
-            info = dict(
-                shared=shared.descriptor,
-                variant=inference.policies[0].variant,
-                attack_preview=inference.policies[0].variant_spec.attack_preview,
-            )
+            info = {
+                "shared": shared.descriptor,
+                "variant": inference.policies[0].variant,
+                "attack_preview": inference.policies[0].variant_spec.attack_preview,
+            }
             connection.send(("ok", info))
             return None
         if agent is None:
@@ -223,6 +227,7 @@ class DualPolicyExecutor:
 
     def _serve(self):
         import torch
+
         from civ5rl.engine.evaluation.executor import _ConnectionWaiter
 
         waiter = None
@@ -268,10 +273,7 @@ class DualPolicyExecutor:
                 if self.identical or len({r[1] for r in pending}) == 1:
                     groups = [pending]
                 else:
-                    groups = [
-                        [r for r in pending if r[1] == role]
-                        for role in ("candidate", "reference")
-                    ]
+                    groups = [[r for r in pending if r[1] == role] for role in ("candidate", "reference")]
                 choices = [
                     self._inference_for(group[0][1]).forward_encoded_argmax(
                         [request for _, _, request in group]
@@ -285,10 +287,8 @@ class DualPolicyExecutor:
                 for group in groups:
                     for connection, _, (_, command, _) in group:
                         choice = next(host_choices)
-                        connection.send(
-                            ("ok", None if command == "observe" else {"index": choice})
-                        )
-        except BaseException as exc:
+                        connection.send(("ok", None if command == "observe" else {"index": choice}))
+        except BaseException as exc:  # noqa: BLE001 -- relay terminal failures from the inference thread
             self.error = traceback.format_exc()
             self._fail_all(f"{type(exc).__name__}: {exc}")
         finally:
@@ -368,9 +368,7 @@ class DualPolicyExecutor:
                 + ref_stats.get("forward_seconds", 0.0)
                 + self.result_transfer_seconds
             ),
-            "encoding_seconds": (
-                cand_stats["encoding_seconds"] + ref_stats.get("encoding_seconds", 0.0)
-            ),
+            "encoding_seconds": (cand_stats["encoding_seconds"] + ref_stats.get("encoding_seconds", 0.0)),
             "batch_wait_seconds": self.wait_seconds,
             "batch_wait_timeouts": self.wait_timeouts,
         }
@@ -378,6 +376,7 @@ class DualPolicyExecutor:
 
 def h2h_evaluation_key(config, plan, out, candidate_path, reference_path, purpose, runtime_identity):
     import torch
+
     from civ5rl.engine.evaluation.executor import evaluation_policy_hash
 
     cand_hash = evaluation_policy_hash(out / candidate_path)
@@ -388,7 +387,9 @@ def h2h_evaluation_key(config, plan, out, candidate_path, reference_path, purpos
             "kind": "h2h_argmax_fp32",
             "platform": platform.system(),
             "torch": str(torch.__version__),
-            "kernel": file_sha256(ROOT / "build" / ("combat.dll" if sys.platform == "win32" else "libcombat.so")),
+            "kernel": file_sha256(
+                ROOT / "build" / ("combat.dll" if sys.platform == "win32" else "libcombat.so")
+            ),
         }
     )
     key = digest(
@@ -484,7 +485,8 @@ def _evaluate_h2h_impl(config, plan, out, candidate_path, reference_path, purpos
         for case in cases
     ]
     tasks, mirrors = _h2h_execution_plan(
-        tasks, same_checkpoint=(out / candidate_path).resolve() == (out / reference_path).resolve()
+        tasks,
+        same_checkpoint=(out / candidate_path).resolve() == (out / reference_path).resolve(),
     )
     inference_stats = None
     if runtime.device == "cuda" and tasks:
@@ -520,8 +522,7 @@ def _evaluate_h2h_impl(config, plan, out, candidate_path, reference_path, purpos
         for value in sorted({r[field] for r in rows}, key=str):
             selected = [r for r in rows if r[field] == value]
             wdl = Counter(
-                "D" if r["winner"] is None else "W" if r["winner"] == r["side"] else "L"
-                for r in selected
+                "D" if r["winner"] is None else "W" if r["winner"] == r["side"] else "L" for r in selected
             )
             slices[field][str(value)] = {
                 "matches": len(selected),
@@ -531,7 +532,17 @@ def _evaluate_h2h_impl(config, plan, out, candidate_path, reference_path, purpos
             }
     summary = {
         k: bootstrap[k]
-        for k in ("matches", "W", "D", "L", "delta_wins", "delta", "win_rate", "draw_rate", "loss_rate")
+        for k in (
+            "matches",
+            "W",
+            "D",
+            "L",
+            "delta_wins",
+            "delta",
+            "win_rate",
+            "draw_rate",
+            "loss_rate",
+        )
     }
     result = {
         "checkpoint": candidate_path,
@@ -551,8 +562,8 @@ def _evaluate_h2h_impl(config, plan, out, candidate_path, reference_path, purpos
     write_json(cache_path, cache)
     print(
         f"H2H {purpose}: W/D/L={summary['W']}/{summary['D']}/{summary['L']} "
-        f"(delta_wins={summary['delta_wins']:+d}, delta={summary['delta']*100:+.2f}pp, "
-        f"CI95=[{bootstrap['CI95'][0]*100:+.2f}; {bootstrap['CI95'][1]*100:+.2f}]pp); wall={result['seconds']:.1f}s",
+        f"(delta_wins={summary['delta_wins']:+d}, delta={summary['delta'] * 100:+.2f}pp, "
+        f"CI95=[{bootstrap['CI95'][0] * 100:+.2f}; {bootstrap['CI95'][1] * 100:+.2f}]pp); wall={result['seconds']:.1f}s",
         flush=True,
     )
     return result

@@ -1,5 +1,7 @@
 """Bounded, explicitly parented continuation of the fixed CP imitation experiment."""
 
+from __future__ import annotations
+
 import json
 import random
 import shutil
@@ -47,17 +49,12 @@ def initialize(config, out):
     path = parent / settings["parent_checkpoint"]
     if file_sha256(path) != settings["parent_checkpoint_sha256"]:
         raise ValueError("Parent checkpoint hash mismatch")
-    if (
-        file_sha256(parent / "training-inputs.json")
-        != settings["parent_training_inputs_sha256"]
-    ):
+    if file_sha256(parent / "training-inputs.json") != settings["parent_training_inputs_sha256"]:
         raise ValueError("Parent training-inputs hash mismatch")
     manifest = prepare_manifest(config)
     if manifest != read_json(parent / "manifest.json"):
         raise ValueError("Continuation corpus differs from parent")
-    current, changes = current_parent_lineage(
-        parent, config, manifest, same_corpus=True
-    )
+    current, changes = current_parent_lineage(parent, config, manifest, same_corpus=True)
     if (out / "passport.json").exists():
         identity = verify_existing_run(out, config, current)
     else:
@@ -68,9 +65,7 @@ def initialize(config, out):
             {
                 "parent_checkpoint": str(path.relative_to(ROOT)),
                 "parent_checkpoint_sha256": file_sha256(path),
-                "parent_training_inputs_sha256": file_sha256(
-                    parent / "training-inputs.json"
-                ),
+                "parent_training_inputs_sha256": file_sha256(parent / "training-inputs.json"),
                 "parent_passport_sha256": file_sha256(parent / "passport.json"),
                 "changed_execution_sources": changes,
                 "parent_epochs": 3,
@@ -96,17 +91,12 @@ def evaluate_candidate(config, manifest, out, parent, candidate, workers, mode, 
         return recorded["runs"][key]
     started = perf_counter()
     if candidate["epoch"] == 3 and mode == "sample":
-        directories = {
-            enemy: parent / "evaluation" / ("final-" + enemy)
-            for enemy in ("cp", "greedy")
-        }
+        directories = {enemy: parent / "evaluation" / ("final-" + enemy) for enemy in ("cp", "greedy")}
         new_matches = 0
     else:
         base = out / "evaluation" / mode / f"epoch-{candidate['epoch']:03}"
         directories = {enemy: base / enemy for enemy in ("cp", "greedy")}
-        new_matches = run_validation_cases(
-            config, manifest, path.resolve(), mode, directories, workers
-        )
+        new_matches = run_validation_cases(config, manifest, path.resolve(), mode, directories, workers)
     result = {
         "epoch": candidate["epoch"],
         "checkpoint_sha256": file_sha256(path),
@@ -114,10 +104,7 @@ def evaluate_candidate(config, manifest, out, parent, candidate, workers, mode, 
         "new_matches": new_matches,
         "wall_seconds": perf_counter() - started,
         "directories": {k: str(v.relative_to(ROOT)) for k, v in directories.items()},
-        "opponents": {
-            enemy: collect_summary(directory)
-            for enemy, directory in directories.items()
-        },
+        "opponents": {enemy: collect_summary(directory) for enemy, directory in directories.items()},
     }
     recorded["runs"][key], recorded["labels"][label] = result, key
     write_json(out / "evaluations.json", recorded)
@@ -130,9 +117,7 @@ def train(config, out, parent, manifest, identity, workers, device):
     from civ5rl.provenance.common import configure
 
     if (out / "training.json").exists():
-        raise ValueError(
-            "Continuation training already recorded; do not repeat optimization"
-        )
+        raise ValueError("Continuation training already recorded; do not repeat optimization")
     if device != "cuda":
         raise ValueError("This continuation protocol requires CUDA/BF16")
     configure(17, device)
@@ -165,9 +150,7 @@ def train(config, out, parent, manifest, identity, workers, device):
     saved = torch.load(source, weights_only=False, map_location="cpu")
     if saved["config"] != read_json(
         parent / "resolved-config.json"
-    ) or not checkpoint.same_execution_identity(
-        saved["identity"], read_json(parent / "passport.json")
-    ):
+    ) or not checkpoint.same_execution_identity(saved["identity"], read_json(parent / "passport.json")):
         raise ValueError("Parent checkpoint does not match parent experiment identity")
     if saved["state"]["epoch"] != 3 or saved["state"]["Adam_steps"] != 60:
         raise ValueError("Unexpected parent optimization boundary")
@@ -175,9 +158,7 @@ def train(config, out, parent, manifest, identity, workers, device):
     optimizer = adam(policy, config, device)
     optimizer.load_state_dict(saved["optimizer"])
     shuffle = random.Random()
-    cache, dev_cache, fixed_cache = [
-        DemonstrationCache(data, device) for data in (episodes, holdout, subset)
-    ]
+    cache, dev_cache, fixed_cache = [DemonstrationCache(data, device) for data in (episodes, holdout, subset)]
     frozen_value = FrozenParamsCheck(policy.value)
     clock = CompilationClock()
 
@@ -217,9 +198,7 @@ def train(config, out, parent, manifest, identity, workers, device):
                 "parent_metrics": parent_metrics,
             },
         )
-        historical_ce = read_json(parent / "training.json")["epochs"][-1]["holdout"][
-            "ce"
-        ]
+        historical_ce = read_json(parent / "training.json")["epochs"][-1]["holdout"]["ce"]
         state = {
             "best_epoch": 3,
             "best_ce": historical_ce,
@@ -313,23 +292,17 @@ def train(config, out, parent, manifest, identity, workers, device):
                 elapsed += stop - start - compile_seconds
                 steps += 1
                 if elapsed >= 600 and utilization_justification is None:
-                    recent_windows = analyze_telemetry(
-                        out / "telemetry/resources.jsonl"
-                    )["windows"]
+                    recent_windows = analyze_telemetry(out / "telemetry/resources.jsonl")["windows"]
                     utilization_justification = {
                         "reason": "Fixed-condition continuation: CPU batch assembly, synchronous host/device checks and small spatial blocks constrain throughput; do not change minibatch or numerics mid-experiment.",
                         "investigation": "Inspected DemonstrationCache.batch, backward_minibatch and fixed spatial 32; candidate optimizations are resident inputs and fewer host synchronizations, deferred to preserve this experiment.",
                         "optimizer_seconds_at_review": elapsed,
-                        "last_60_seconds_core_average": recent_windows[-1][
-                            "core_average"
-                        ]
+                        "last_60_seconds_core_average": recent_windows[-1]["core_average"]
                         if recent_windows
                         else None,
                     }
                     print(
-                        json.dumps(
-                            {"GPU_utilization_review": utilization_justification}
-                        ),
+                        json.dumps({"GPU_utilization_review": utilization_justification}),
                         flush=True,
                     )
                 if steps == 61:
@@ -460,22 +433,16 @@ def evaluate(config, out, parent, manifest, workers):
     best = training["best"]
     if file_sha256(best["path"]) != best["checkpoint_sha256"]:
         raise ValueError("Selected checkpoint changed after selection")
-    evaluate_candidate(
-        config, manifest, out, parent, best, workers, "sample", "final_sample"
-    )
+    evaluate_candidate(config, manifest, out, parent, best, workers, "sample", "final_sample")
     if config["continuation"]["final_argmax"]:
-        evaluate_candidate(
-            config, manifest, out, parent, best, workers, "argmax", "final_argmax"
-        )
+        evaluate_candidate(config, manifest, out, parent, best, workers, "argmax", "final_argmax")
 
 
 def run(phase, config, out, workers, device):
     if phase not in ("prepare", "train", "evaluate", "report"):
         raise ValueError("Continuation does not allow collection or benchmark")
     if phase == "report" and (out / "passport.json").exists():
-        checkpoint.verify_frozen_passport(
-            out, config=config, manifest=read_json(out / "manifest.json")
-        )
+        checkpoint.verify_frozen_passport(out, config=config, manifest=read_json(out / "manifest.json"))
         return report(config, out, ROOT / config["continuation"]["parent_run"])
     parent, manifest, identity = initialize(config, out)
     started = perf_counter()
@@ -505,17 +472,10 @@ def run(phase, config, out, workers, device):
 def report(config, out, parent):
     training = read_json(out / "training.json")
     evaluation = read_json(out / "evaluations.json")
-    if (
-        "final_sample" not in evaluation["labels"]
-        or "final_argmax" not in evaluation["labels"]
-    ):
+    if "final_sample" not in evaluation["labels"] or "final_argmax" not in evaluation["labels"]:
         raise ValueError("Missing final evaluation")
     initial_metrics = training["offline_metrics"][0]
-    chosen = next(
-        m
-        for m in training["offline_metrics"]
-        if m["epoch"] == training["best"]["epoch"]
-    )
+    chosen = next(m for m in training["offline_metrics"] if m["epoch"] == training["best"]["epoch"])
     lines = [
         "# CP imitation: продолжение обучения",
         "",
@@ -557,9 +517,7 @@ def report(config, out, parent):
             (chosen, "holdout"),
         ]:
             entry = record[split]["by_kind"].get(kind)
-            values.append(
-                f"{entry['ce']:.4f} / {100 * entry['accuracy']:.2f}%" if entry else "—"
-            )
+            values.append(f"{entry['ce']:.4f} / {100 * entry['accuracy']:.2f}%" if entry else "—")
         lines.append("| " + kind + " | " + " | ".join(values) + " |")
     lines += [
         "",
@@ -573,16 +531,13 @@ def report(config, out, parent):
         "|---|---|---:|---:|---:|---:|",
     ]
     baselines = {
-        enemy: collect_summary(parent / "evaluation" / ("final-" + enemy))
-        for enemy in ("cp", "greedy")
+        enemy: collect_summary(parent / "evaluation" / ("final-" + enemy)) for enemy in ("cp", "greedy")
     }
     for enemy, row in baselines.items():
         kinds = row["actions"]
         lines.append(
             f"| epoch-03 / sample | {enemy} | {row['W']}/{row['D']}/{row['L']} | {100 * row['win_rate']:.3f}% | — | "
-            + " / ".join(
-                str(kinds.get(k, 0)) for k in ("move", "ranged", "melee", "skip")
-            )
+            + " / ".join(str(kinds.get(k, 0)) for k in ("move", "ranged", "melee", "skip"))
             + " |"
         )
     for label, key in evaluation["labels"].items():
@@ -591,9 +546,7 @@ def report(config, out, parent):
             kinds = row["actions"]
             lines.append(
                 f"| {label}: epoch-{result['epoch']:02} / {result['mode']} | {enemy} | {row['W']}/{row['D']}/{row['L']} | {100 * row['win_rate']:.3f}% | {100 * (row['win_rate'] - baselines[enemy]['win_rate']):+.3f} п.п. | "
-                + " / ".join(
-                    str(kinds.get(k, 0)) for k in ("move", "ranged", "melee", "skip")
-                )
+                + " / ".join(str(kinds.get(k, 0)) for k in ("move", "ranged", "melee", "skip"))
                 + " |"
             )
     lines += [
@@ -638,9 +591,7 @@ def report(config, out, parent):
                     continue
                 m = read_json(chosen_path)
                 verification = verify_replay(chosen_path.parent)
-                verification.update(
-                    label=label, enemy=enemy, outcome=desired, rounds=m["rounds"]
-                )
+                verification.update(label=label, enemy=enemy, outcome=desired, rounds=m["rounds"])
                 available = verification["attack_available_decisions"]
                 selected = verification["attacks_chosen"]
                 omitted = verification["non_attack_when_available"]
@@ -649,9 +600,7 @@ def report(config, out, parent):
                     f"- {label} / {enemy}, {chosen_path.parent.name}: {desired}, {m['rounds']} раундов; {verification['commands']} команд, все результаты и state hashes совпали; атак выбрано {selected}, решений с атакой {available}, иных команд при доступной атаке {omitted}."
                 )
     write_json(out / "replay-verification.json", verified)
-    saved = torch.load(
-        out / "checkpoints/best.pt", weights_only=False, map_location="cpu"
-    )
+    saved = torch.load(out / "checkpoints/best.pt", weights_only=False, map_location="cpu")
     parent_saved = torch.load(
         parent / config["continuation"]["parent_checkpoint"],
         weights_only=False,
@@ -670,9 +619,7 @@ def report(config, out, parent):
         "",
     ]
     for field, stats in telemetry_analysis["metrics"].items():
-        lines.append(
-            f"- {field}: mean={stats['mean']:.3f}, max={stats['max']:.3f} {stats['unit']}"
-        )
+        lines.append(f"- {field}: mean={stats['mean']:.3f}, max={stats['max']:.3f} {stats['unit']}")
     if training["new_optimizer_seconds"] < 600:
         lines.append(
             "Итеративное обучение суммарно короче 10 минут: требование Core Load ≥80% не применяется."
@@ -705,9 +652,7 @@ def report(config, out, parent):
             "last_completed_epoch": training["last_completed_epoch"],
             "best_epoch": training["best"]["epoch"],
             "new_Adam_steps": training["new_Adam_steps"],
-            "new_evaluation_matches": sum(
-                r["new_matches"] for r in evaluation["runs"].values()
-            ),
+            "new_evaluation_matches": sum(r["new_matches"] for r in evaluation["runs"].values()),
             "closed_test_evaluated": False,
         },
     )

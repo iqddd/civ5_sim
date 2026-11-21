@@ -28,15 +28,12 @@ from civ5rl.provenance.common import (
 from civ5sim.engine import digest
 
 
-def _entry_lookup_key(entry: dict[str, Any]) -> str:
+def entry_lookup_key(entry: dict[str, Any]) -> str:
     """Return unique lookup key for a corpus demonstration entry."""
     return str(entry.get("entry_id", entry["path"]))
 
 
-entry_lookup_key = _entry_lookup_key
-
-
-def _format_corpus_entry(
+def format_corpus_entry(
     entry: dict[str, Any],
     corpus_source: str,
     path: str,
@@ -64,60 +61,73 @@ def _format_corpus_entry(
     return formatted
 
 
-format_corpus_entry = _format_corpus_entry
-
-
-def _load_old_corpus(config: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
-    """Load and validate the initial 200,483 free label target BC demonstration corpus."""
-    old_root = ROOT / config["old_corpus_run"]
-    old_collection_path = old_root / "collection.json"
-    if not old_collection_path.is_file():
-        raise ValueError("Missing old BC collection.json")
-    old_data = read_json(old_collection_path)
-    if old_data.get("status") != "complete" or old_data.get("labels") != 200483:
-        raise ValueError("Unexpected old BC collection status or label count")
-    old_matches = old_data.get("matches", [])
-    if len(old_matches) != 748:
-        raise ValueError("Unexpected old BC match count")
+def _load_validated_corpus_manifest(
+    corpus_root: Path,
+    plan: dict[str, Any],
+    *,
+    source: str,
+    source_name: str,
+    labels_key: str,
+    matches_key: str,
+    expected_labels: int,
+    expected_matches: int,
+    expected_entries: int,
+    verify_entry_sha: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    manifest_path = corpus_root / "collection.json"
+    source_label = source_name.lower()
+    if not manifest_path.is_file():
+        raise ValueError(f"Missing {source_label} BC collection.json")
+    manifest: dict[str, Any] = read_json(manifest_path)
+    if manifest.get("status") != "complete" or manifest.get(labels_key) != expected_labels:
+        raise ValueError(f"Unexpected {source_label} BC collection status or label count")
+    manifest_matches = manifest.get(matches_key, [])
+    if len(manifest_matches) != expected_matches:
+        raise ValueError(f"Unexpected {source_label} BC match count")
     entries = []
     matches = []
-    for row in old_matches:
+    for row in manifest_matches:
         match_id = int(row["match_id"])
-        match_dir = old_root / f"data/match-{match_id:06d}"
+        match_dir = corpus_root / f"data/match-{match_id:06d}"
         case_path = match_dir / "case.json"
         if not case_path.is_file():
-            raise ValueError(f"Missing old BC case.json: {case_path}")
+            raise ValueError(f"Missing {source_label} BC case.json: {case_path}")
         case = read_json(case_path)
-        if (
-            case.get("split") != "train"
-            or case.get("parent_world") not in plan["base"]["worlds"]["training"]
-        ):
-            raise ValueError("Old BC match world/split mismatch")
+        if case.get("split") != "train" or case.get("parent_world") not in plan["base"]["worlds"]["training"]:
+            raise ValueError(f"{source_name} BC match world/split mismatch")
         row_entries = []
         for entry in row["entries"]:
-            rel_in_old = Path(entry["path"]).as_posix()
-            if Path(rel_in_old).is_absolute():
-                full_path = Path(rel_in_old)
-            else:
-                full_path = old_root / rel_in_old
+            entry_path = Path(Path(entry["path"]).as_posix())
+            full_path = entry_path if entry_path.is_absolute() else corpus_root / entry_path
             if not full_path.is_file():
-                raise ValueError(f"Missing old demonstration file: {full_path}")
+                raise ValueError(f"Missing {source_label} demonstration file: {full_path}")
             workspace_rel = full_path.resolve().relative_to(ROOT.resolve()).as_posix()
-            formatted = _format_corpus_entry(
+            sha = None
+            if verify_entry_sha:
+                sha = entry.get("sha256") or file_sha256(full_path)
+                if file_sha256(full_path) != sha:
+                    raise ValueError(f"Demonstration SHA256 mismatch: {full_path}")
+            formatted = format_corpus_entry(
                 entry,
-                "old",
+                source,
                 workspace_rel,
                 row["map_size"],
                 row["army_size"],
-                sha256=file_sha256(full_path),
+                sha256=sha if verify_entry_sha else file_sha256(full_path),
             )
             row_entries.append(formatted)
             entries.append(formatted)
-        matches.append({**row, "corpus_source": "old", "entries": row_entries})
-    if sum(e["labels"] for e in entries) != 200483 or len(entries) != 1496:
-        raise ValueError("Old BC entries label total or count mismatch")
+        matches.append({**row, "corpus_source": source, "entries": row_entries})
+    if sum(e["labels"] for e in entries) != expected_labels or len(entries) != expected_entries:
+        raise ValueError(f"{source_name} BC entries label total or count mismatch")
+    return entries, matches, manifest
+
+
+def _corpus_summary(
+    labels: int, entries: list[dict[str, Any]], matches: list[dict[str, Any]]
+) -> dict[str, Any]:
     return {
-        "labels": 200483,
+        "labels": labels,
         "positions": sum(e["positions"] for e in entries),
         "matches_count": len(matches),
         "entries": entries,
@@ -125,83 +135,54 @@ def _load_old_corpus(config: dict[str, Any], plan: dict[str, Any]) -> dict[str, 
     }
 
 
-load_old_corpus = _load_old_corpus
+def load_old_corpus(config: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    """Load and validate the initial 200,483 free label target BC demonstration corpus."""
+    labels = 200483
+    entries, matches, _manifest = _load_validated_corpus_manifest(
+        ROOT / config["old_corpus_run"],
+        plan,
+        source="old",
+        source_name="Old",
+        labels_key="labels",
+        matches_key="matches",
+        expected_labels=labels,
+        expected_matches=748,
+        expected_entries=1496,
+        verify_entry_sha=False,
+    )
+    return _corpus_summary(labels, entries, matches)
 
 
-def _load_more_data_corpus(config: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+def load_more_data_corpus(config: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     """Load and validate the 800,333 free label target more-data demonstration corpus."""
-    more_root = ROOT / config["more_data_corpus_run"]
-    more_collection_path = more_root / "collection.json"
-    if not more_collection_path.is_file():
-        raise ValueError("Missing more-data BC collection.json")
-    more_data = read_json(more_collection_path)
-    if more_data.get("status") != "complete" or more_data.get("new_labels") != 800333:
-        raise ValueError("Unexpected more-data BC collection status or label count")
-    new_matches = more_data.get("new_matches", [])
-    if len(new_matches) != 3020:
-        raise ValueError("Unexpected more-data BC match count")
-    entries = []
-    matches = []
-    for row in new_matches:
-        match_id = int(row["match_id"])
-        match_dir = more_root / f"data/match-{match_id:06d}"
-        case_path = match_dir / "case.json"
-        if not case_path.is_file():
-            raise ValueError(f"Missing more-data BC case.json: {case_path}")
-        case = read_json(case_path)
-        if (
-            case.get("split") != "train"
-            or case.get("parent_world") not in plan["base"]["worlds"]["training"]
-        ):
-            raise ValueError("More-data BC match world/split mismatch")
-        row_entries = []
-        for entry in row["entries"]:
-            rel_in_more = Path(entry["path"]).as_posix()
-            if Path(rel_in_more).is_absolute():
-                full_path = Path(rel_in_more)
-            else:
-                full_path = more_root / rel_in_more
-            if not full_path.is_file():
-                raise ValueError(f"Missing more-data demonstration file: {full_path}")
-            workspace_rel = full_path.resolve().relative_to(ROOT.resolve()).as_posix()
-            sha = entry.get("sha256") or file_sha256(full_path)
-            if file_sha256(full_path) != sha:
-                raise ValueError(f"Demonstration SHA256 mismatch: {full_path}")
-            formatted = _format_corpus_entry(
-                entry,
-                "new",
-                workspace_rel,
-                row["map_size"],
-                row["army_size"],
-                sha256=sha,
-            )
-            row_entries.append(formatted)
-            entries.append(formatted)
-        matches.append({**row, "corpus_source": "new", "entries": row_entries})
-    if sum(e["labels"] for e in entries) != 800333 or len(entries) != 6040:
-        raise ValueError("More-data BC entries label total or count mismatch")
-    fixed_keys = {_entry_lookup_key(e) for e in more_data.get("fixed_training", [])}
-    fixed_training = [e for e in entries if _entry_lookup_key(e) in fixed_keys]
+    labels = 800333
+    entries, matches, manifest = _load_validated_corpus_manifest(
+        ROOT / config["more_data_corpus_run"],
+        plan,
+        source="new",
+        source_name="More-data",
+        labels_key="new_labels",
+        matches_key="new_matches",
+        expected_labels=labels,
+        expected_matches=3020,
+        expected_entries=6040,
+        verify_entry_sha=True,
+    )
+    fixed_keys = {entry_lookup_key(e) for e in manifest.get("fixed_training", [])}
+    fixed_training = [e for e in entries if entry_lookup_key(e) in fixed_keys]
     if sum(e["labels"] for e in fixed_training) < config["fixed_training_labels"]:
         raise ValueError("Fixed training subset from more-data corpus is incomplete")
     return {
-        "labels": 800333,
-        "positions": sum(e["positions"] for e in entries),
-        "matches_count": len(matches),
-        "entries": entries,
-        "matches": matches,
+        **_corpus_summary(labels, entries, matches),
         "fixed_training": fixed_training,
         "fixed_labels": sum(e["labels"] for e in fixed_training),
-        "coverage": more_data.get("coverage", {}),
+        "coverage": manifest.get("coverage", {}),
     }
 
 
-load_more_data_corpus = _load_more_data_corpus
-
-
-def _restore_collection_progress(
+def restore_collection_progress(
     config: dict[str, Any], factory: TargetFactory, out: Path
-) -> tuple[list[dict[str, Any]], int | None, float | None, int | None]:
+) -> tuple[list[dict[str, Any]], int, float, int] | tuple[dict[str, Any], None, None, None]:
     """Resume partial collection wave for more-data target BC."""
     if not (out / "collection.json").exists():
         return [], 0, 0.0, 0
@@ -242,19 +223,14 @@ def _restore_collection_progress(
     return rows, labels, elapsed_offset, len(rows)
 
 
-restore_collection_progress = _restore_collection_progress
-
-
-def _collect_c2(
-    config: dict[str, Any], plan: dict[str, Any], out: Path
-) -> dict[str, Any]:
+def collect_c2(config: dict[str, Any], plan: dict[str, Any], out: Path) -> dict[str, Any]:
     """Assemble combined 1M BC corpus and generate Holdout-126 matches for C2."""
     if (out / "collection.json").exists():
         saved = read_json(out / "collection.json")
         if saved.get("status") == "complete":
             return saved
-    old_corpus = _load_old_corpus(config, plan)
-    more_corpus = _load_more_data_corpus(config, plan)
+    old_corpus = load_old_corpus(config, plan)
+    more_corpus = load_more_data_corpus(config, plan)
     holdout_cases = plan["holdout_126"]
     holdout_rows = []
     started = perf_counter()
@@ -300,9 +276,7 @@ def _collect_c2(
                 full_path = out / full_path
             if not full_path.is_file():
                 full_path = (
-                    out
-                    / f"holdout-data/match-{idx:06d}"
-                    / f"demonstration-side-{entry['side']}.json.gz"
+                    out / f"holdout-data/match-{idx:06d}" / f"demonstration-side-{entry['side']}.json.gz"
                 )
             rel_path = full_path.resolve().relative_to(out.resolve()).as_posix()
             formatted = {
@@ -400,22 +374,18 @@ def _collect_c2(
     return result
 
 
-collect_c2 = _collect_c2
-
-
 def collect(config: dict[str, Any], plan: dict[str, Any], out: Path) -> dict[str, Any]:
     """Execute corpus collection phase for target BC experiments."""
     kind = config["kind"]
     if kind == C2_KIND:
-        return _collect_c2(config, plan, out)
+        return collect_c2(config, plan, out)
     factory = TargetFactory(config, plan["base"])
-    restored, labels, elapsed_offset, index = _restore_collection_progress(
-        config, factory, out
-    )
-    if index is None:
-        return restored
+    restored_progress = restore_collection_progress(config, factory, out)
+    if restored_progress[3] is None:
+        return restored_progress[0]
+    restored, labels, elapsed_offset, index = restored_progress
     rows = list(restored)
-    old_corpus = _load_old_corpus(config, plan) if kind == MORE_DATA_KIND else None
+    old_corpus = load_old_corpus(config, plan) if kind == MORE_DATA_KIND else None
     max_matches = config.get("max_collection_matches")
     started = perf_counter()
     with (
@@ -425,8 +395,7 @@ def collect(config: dict[str, Any], plan: dict[str, Any], out: Path) -> dict[str
         monitor.mark("CP_generation")
         while (
             labels < config["training_labels"]
-            and elapsed_offset + (perf_counter() - started)
-            < config["collection_seconds"]
+            and elapsed_offset + (perf_counter() - started) < config["collection_seconds"]
             and (max_matches is None or len(rows) < max_matches)
         ):
             wave_size = config["workers"]
@@ -449,7 +418,7 @@ def collect(config: dict[str, Any], plan: dict[str, Any], out: Path) -> dict[str
                     rel_path = full_path.relative_to(out).as_posix()
                     if kind == MORE_DATA_KIND:
                         formatted_entries.append(
-                            _format_corpus_entry(
+                            format_corpus_entry(
                                 entry,
                                 "new",
                                 rel_path,
@@ -481,8 +450,7 @@ def collect(config: dict[str, Any], plan: dict[str, Any], out: Path) -> dict[str
             write_json(out / "collection.json", progress)
             print(
                 f"CP--CP collection: {len(rows)} new matches, {labels} new free labels, "
-                f"{elapsed:.1f}s; {rate:.1f} labels/s"
-                + (f", ETA {eta:.0f}s" if eta is not None else ""),
+                f"{elapsed:.1f}s; {rate:.1f} labels/s" + (f", ETA {eta:.0f}s" if eta is not None else ""),
                 flush=True,
             )
     elapsed = elapsed_offset + (perf_counter() - started)
@@ -505,13 +473,11 @@ def collect(config: dict[str, Any], plan: dict[str, Any], out: Path) -> dict[str
         count += rows[i]["labels"]
         if count >= config["fixed_training_labels"]:
             break
-    if kind == MORE_DATA_KIND:
+    if old_corpus is not None:
         combined_entries = [*old_corpus["entries"], *new_entries]
         combined_matches = [*old_corpus["matches"], *rows]
         total_labels = old_corpus["labels"] + labels
-        total_positions = old_corpus["positions"] + sum(
-            e["positions"] for e in new_entries
-        )
+        total_positions = old_corpus["positions"] + sum(e["positions"] for e in new_entries)
         result = {
             "status": "complete",
             "stop_reason": stop_reason,
@@ -587,6 +553,14 @@ def collect(config: dict[str, Any], plan: dict[str, Any], out: Path) -> dict[str
         }
     write_json(out / "collection.json", result)
     return result
+
+
+_collect_c2 = collect_c2
+_entry_lookup_key = entry_lookup_key
+_format_corpus_entry = format_corpus_entry
+_load_more_data_corpus = load_more_data_corpus
+_load_old_corpus = load_old_corpus
+_restore_collection_progress = restore_collection_progress
 
 
 __all__ = [

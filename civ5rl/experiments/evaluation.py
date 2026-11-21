@@ -1,10 +1,29 @@
 """Validation execution and replay verification; saved-result analysis is re-exported."""
 
+from __future__ import annotations
+
 import traceback
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, cast
+
+from civ5rl.core.observation import ordered_actions
+from civ5rl.engine.evaluation.proxy import evaluation_agent
+from civ5rl.engine.runtime.shared import pool
+from civ5rl.protocols.imitation import load_episode, match_task, search_config
+from civ5rl.provenance.common import ROOT, read_json, write_json
+from civ5rl.reporting.evaluation_audit import (
+    clustered_paired_bootstrap,
+    compare_paired_directories,
+    load_eval_rows,
+    outcome,
+    paired_world_bootstrap,
+)
+from civ5sim import Battle, MatchConfig
+from civ5sim.cp_agent import CPAgent
+from civ5sim.engine import digest
+from civ5sim.match import run_match
 
 
 @dataclass(frozen=True)
@@ -45,7 +64,7 @@ class MatchTask:
         return 7
 
     @classmethod
-    def from_task(cls, task: Any) -> "MatchTask":
+    def from_task(cls, task: Any) -> MatchTask:
         if isinstance(task, cls):
             return task
         if isinstance(task, (tuple, list)) and len(task) == 7:
@@ -59,8 +78,10 @@ class MatchTask:
                 config=task.config,
                 manifest=task.manifest,
                 case=task.case,
-                output_dir=getattr(task, "output_dir", None)
-                or getattr(task, "directory", None),
+                output_dir=cast(
+                    str,
+                    getattr(task, "output_dir", None) or getattr(task, "directory", None),
+                ),
                 contender=task.contender,
                 opponent=task.opponent,
                 device=getattr(task, "device", "cpu"),
@@ -68,22 +89,7 @@ class MatchTask:
         raise TypeError(f"Cannot coerce {type(task)} to MatchTask")
 
 
-from civ5rl.engine.evaluation.proxy import evaluation_agent
-from civ5rl.protocols.imitation import load_episode, search_config
-from civ5rl.provenance.common import ROOT, read_json, write_json
-from civ5rl.reporting.evaluation_audit import (
-    clustered_paired_bootstrap,
-    compare_paired_directories,
-    load_eval_rows,
-    outcome,
-    paired_world_bootstrap,
-)
-from civ5sim import Battle, MatchConfig
-from civ5sim.cp_agent import CPAgent
-from civ5sim.engine import digest
-from civ5sim.match import run_match
-
-__all__ = [
+__all__ = [  # noqa: RUF022 -- preserve the declared export order
     "MatchTask",
     "clustered_paired_bootstrap",
     "compare_paired_directories",
@@ -96,6 +102,8 @@ __all__ = [
 ]
 
 
+# Target-scale evaluation keys include the exact source of play_case.
+# fmt: off
 def play_case(
     config, case, checkpoint_path, mode, enemy, directory, *,
     temperature=1.0, collect_selection_metrics=False,
@@ -160,13 +168,15 @@ def play_case(
         write_json(directory / "selection-metrics.json", agent.selection_metrics)
     write_json(directory / "metrics.json", result)
     return result
+# fmt: on
 
 
 def target_scale_evaluation_task(task):
     config, case, path, directory = task
-    if case["split"] != "validation" or digest(
-        {k: v for k, v in case.items() if k != "case_hash"}
-    ) != case["case_hash"]:
+    if (
+        case["split"] != "validation"
+        or digest({k: v for k, v in case.items() if k != "case_hash"}) != case["case_hash"]
+    ):
         raise ValueError("Invalid validation case")
     result = play_case(config, case, path, "argmax", "cp", directory)
     replay = read_json(Path(directory) / "replay.json")
@@ -186,9 +196,7 @@ def target_scale_evaluation_task(task):
         army_bin=case.get("army_bin", -1),
         placement=case["placement"],
         damage_dealt=damage,
-        units_lost=[
-            sum(u["side"] == s and u["hp"] <= 0 for u in final["units"]) for s in (0, 1)
-        ],
+        units_lost=[sum(u["side"] == s and u["hp"] <= 0 for u in final["units"]) for s in (0, 1)],
     )
     write_json(Path(directory) / "metrics.json", result)
     return result
@@ -206,16 +214,14 @@ def run_validation_cases(
     progress=None,
 ):
     """Run validation cases in their recorded world, side, opponent order."""
-    from civ5rl.experiments.imitation_helpers import pool
-    from civ5rl.protocols.imitation import match_task
+    # Workers also import MatchTask. Load the Torch evaluator only in the coordinator.
+    from civ5rl.experiments._shared.evaluation_runner import run_chunked_pool
 
     jobs = []
     for original in manifest["validation_cases"]:
         for side in (0, 1):
             case = {**original, "learner_side": side}
-            case["case_hash"] = digest(
-                {k: v for k, v in case.items() if k != "case_hash"}
-            )
+            case["case_hash"] = digest({k: v for k, v in case.items() if k != "case_hash"})
             for enemy, directory in directories.items():
                 jobs.append(
                     MatchTask(
@@ -232,11 +238,7 @@ def run_validation_cases(
         if batch_size is None:
             list(executor.map(match_task, jobs))
         else:
-            for first in range(0, len(jobs), batch_size):
-                part = jobs[first : first + batch_size]
-                list(executor.map(match_task, part))
-                if progress is not None:
-                    progress(first + len(part))
+            run_chunked_pool(executor, match_task, jobs, batch_size, on_chunk=progress)
     return len(jobs)
 
 
@@ -244,22 +246,14 @@ def verify_replay(directory, *, demonstration=False):
     replay = read_json(directory / "replay.json")
     ep = load_episode(directory / "demonstration.json.gz") if demonstration else None
     case = read_json(directory / "case.json")
-    from civ5rl.core.observation import ordered_actions
-
     decision = 0
     available = selected = omitted = 0
-    metrics = (
-        read_json(directory / "metrics.json")
-        if (directory / "metrics.json").exists()
-        else None
-    )
+    metrics = read_json(directory / "metrics.json") if (directory / "metrics.json").exists() else None
     with Battle(replay["initial"]) as battle:
         for step in replay["steps"]:
             side = battle._info().side if metrics or ep else None
             if metrics and side == metrics.get("side"):
-                has_attack = any(
-                    a.kind in ("melee", "ranged") for a in battle.available_actions()
-                )
+                has_attack = any(a.kind in ("melee", "ranged") for a in battle.available_actions())
                 is_attack = step["action"]["kind"] in ("melee", "ranged")
                 available += has_attack
                 selected += is_attack
@@ -268,14 +262,10 @@ def verify_replay(directory, *, demonstration=False):
                 row = ep["decisions"][decision]
                 if row["observation"] != battle.observe(case["learner_side"]):
                     raise ValueError("Saved learner observation differs from replay")
-                if row["actions"] != [
-                    asdict(a) for a in ordered_actions(battle.available_actions())
-                ]:
+                if row["actions"] != [asdict(a) for a in ordered_actions(battle.available_actions())]:
                     raise ValueError("Saved learner legal list differs from replay")
                 if row["actions"][row["executed_action"]] != step["action"]:
-                    raise ValueError(
-                        "Replay executed the teacher command instead of the policy command"
-                    )
+                    raise ValueError("Replay executed the teacher command instead of the policy command")
                 decision += 1
             if (
                 asdict(battle.step(step["action"])) != step["result"]

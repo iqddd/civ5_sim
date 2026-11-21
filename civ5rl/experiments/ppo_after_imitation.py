@@ -1,26 +1,44 @@
 """Bounded on-policy P(win) fine-tuning from the frozen own-state BC policy."""
 
+from __future__ import annotations
+
 import ast
 import gc
 import hashlib
-import json
 import random
 import tempfile
-import traceback
 import zipfile
 from collections import Counter
+from collections.abc import Iterable, Mapping
+from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
+from typing import TYPE_CHECKING, Any
 
 import torch
 
-from civ5rl.core.agent import RLAgent
 from civ5rl.engine.collection.collector import Collector
-from civ5rl.engine.runtime.control import RunLock
-from civ5rl.engine.runtime.control import TrainingCounters
 from civ5rl.engine.ppo.core import update
+from civ5rl.engine.runtime.control import TrainingCounters
 from civ5rl.engine.runtime.telemetry import ResourceMonitor, analyze_telemetry
-from civ5rl.experiments.evaluation import paired_world_bootstrap, play_case, verify_replay
+from civ5rl.experiments._shared.evaluation_runner import run_chunked_pool
+from civ5rl.experiments._shared.io import append_jsonl, read_jsonl
+from civ5rl.experiments._shared.lifecycle import experiment_run_guard
+from civ5rl.experiments._shared.markdown import MarkdownReport, format_wdl
+from civ5rl.experiments._shared.outcomes import (
+    WDLSummary,
+    collect_paired_outcomes,
+    select_outcome_representatives,
+    summarize_wdl,
+    verify_match_artifacts,
+)
+from civ5rl.experiments._shared.provenance_checks import verify_manifest_digest
+from civ5rl.experiments.evaluation import (
+    paired_world_bootstrap,
+    play_case,
+    verify_replay,
+)
 from civ5rl.experiments.imitation_helpers import (
     CompilationClock,
     isolated_rng,
@@ -28,6 +46,7 @@ from civ5rl.experiments.imitation_helpers import (
     pool,
 )
 from civ5rl.experiments.ppo_artifacts import prune_checkpoints, save_rollout
+from civ5rl.protocols.corpus import validate_corpus
 from civ5rl.protocols.ppo_after_imitation import (
     CONTROLLED_KIND,
     KIND,
@@ -42,32 +61,35 @@ from civ5rl.provenance.common import file_sha256 as file_hash
 from civ5rl.provenance.validation import validate_config
 from civ5sim.engine import digest
 
+if TYPE_CHECKING:
+    from civ5rl.core.model import Policy
+
 
 def policy_hash(model):
-    h = hashlib.sha256()
+    hasher = hashlib.sha256()
     for key, value in sorted(model.items()):
         if not key.startswith("value."):
-            h.update(key.encode())
-            h.update(value.detach().cpu().contiguous().numpy().tobytes())
-    return h.hexdigest()
+            hasher.update(key.encode())
+            hasher.update(value.detach().cpu().contiguous().numpy().tobytes())
+    return hasher.hexdigest()
 
 
 def optimizer_for(policy, config, device):
-    o = config["optimizer"]
+    optimizer_config = config["optimizer"]
     return torch.optim.Adam(
         policy.parameters(),
-        lr=o["lr"],
-        betas=tuple(o["betas"]),
-        eps=o["eps"],
-        weight_decay=o["weight_decay"],
+        lr=optimizer_config["lr"],
+        betas=tuple(optimizer_config["betas"]),
+        eps=optimizer_config["eps"],
+        weight_decay=optimizer_config["weight_decay"],
         fused=str(device).startswith("cuda"),
     )
 
 
 def create_policy(config, device):
     policy = load_policy(config, ROOT / config["experiment"]["parent"], device)
-    for p in policy.value.parameters():
-        p.requires_grad_(True)
+    for parameter in policy.value.parameters():
+        parameter.requires_grad_(True)
     with torch.no_grad():
         policy.value[-1].weight.zero_()
         policy.value[-1].bias.zero_()
@@ -83,21 +105,15 @@ def check_identity(config, out, *, for_execution=False):
     """Validate frozen artifacts for analysis; opt in to live-code checks to run."""
     out = Path(out)
     plan = read_json(out / "manifest.json")
-    if digest({k: v for k, v in plan.items() if k != "hash"}) != plan["hash"]:
-        raise ValueError("Manifest changed")
+    verify_manifest_digest(plan)
     if not for_execution:
         checkpoint.verify_frozen_passport(out, config=config, manifest=plan)
         return plan
     validate_config(config)
     checkpoint.verify_execution_passport(out, config, plan)
-    if (
-        file_hash(ROOT / config["experiment"]["parent"])
-        != config["experiment"]["parent_sha256"]
-    ):
+    if file_hash(ROOT / config["experiment"]["parent"]) != config["experiment"]["parent_sha256"]:
         raise ValueError("Parent changed")
     # Validate only open terrain named by the frozen plan, without loading closed maps.
-    from civ5rl.protocols.corpus import validate_corpus
-
     validate_corpus({"maps": plan["base"]["maps"]})
     if controlled(config):
         parent = ROOT / config["experiment"]["parent_run"]
@@ -114,20 +130,15 @@ def prepare(config, out):
         return check_identity(config, out, for_execution=True)
     configure(17, "cuda" if torch.cuda.is_available() else "cpu")
     out.mkdir(parents=True, exist_ok=True)
-    if (
-        file_hash(ROOT / config["experiment"]["parent"])
-        != config["experiment"]["parent_sha256"]
-    ):
+    if file_hash(ROOT / config["experiment"]["parent"]) != config["experiment"]["parent_sha256"]:
         raise ValueError("Parent checkpoint differs")
     parent = ROOT / config["experiment"]["parent_run"]
-    previous=checkpoint.verify_frozen_passport(parent,sources=False)
-    plan=prepare_cases(config)
-    current=execution_identity(config,plan)
+    previous = checkpoint.verify_frozen_passport(parent, sources=False)
+    plan = prepare_cases(config)
+    current = execution_identity(config, plan)
     write_json(out / "manifest.json", plan)
     checkpoint.passport(out, config, plan)
-    saved = torch.load(
-        ROOT / config["experiment"]["parent"], map_location="cpu", weights_only=False
-    )
+    saved = torch.load(ROOT / config["experiment"]["parent"], map_location="cpu", weights_only=False)
     policy = create_policy(config, "cpu")
     for name, value in saved["model"].items():
         if (controlled(config) or name not in ("value.2.weight", "value.2.bias")) and not torch.equal(
@@ -153,9 +164,7 @@ def prepare(config, out):
         "stop_reason": None,
     }
     rng = random.Random(17)
-    checkpoint.save(
-        out / state["latest"], policy, optimizer, state, rng, config, current
-    )
+    checkpoint.save(out / state["latest"], policy, optimizer, state, rng, config, current)
     write_json(out / "state.json", state)
     changes = {
         name: {
@@ -185,96 +194,113 @@ def prepare(config, out):
 
 
 def evaluation_task(task):
-    config, manifest_path, purpose, index, checkpoint_path, mode, enemy, directory = (
-        task
-    )
+    config, manifest_path, purpose, index, checkpoint_path, mode, enemy, directory = task
     plan = read_json(manifest_path)
-    if plan["kind"] != config["kind"] or plan["kind"] not in (KIND, CONTROLLED_KIND) or purpose not in ("development", "confirmation"):
+    if (
+        plan["kind"] != config["kind"]
+        or plan["kind"] not in (KIND, CONTROLLED_KIND)
+        or purpose not in ("development", "confirmation")
+    ):
         raise ValueError("Closed or untrusted evaluation")
     if digest({k: v for k, v in plan.items() if k != "hash"}) != plan["hash"]:
         raise ValueError("Evaluation manifest hash changed")
     case = plan[purpose][index]
-    if (
-        case["split"] != "validation"
-        or case["parent_world"] not in plan["base"]["worlds"]["validation"]
-    ):
+    if case["split"] != "validation" or case["parent_world"] not in plan["base"]["worlds"]["validation"]:
         raise ValueError("Closed evaluation case")
     if digest({k: v for k, v in case.items() if k != "case_hash"}) != case["case_hash"]:
         raise ValueError("Evaluation case changed")
     return play_case(config, case, checkpoint_path, mode, enemy, directory)
 
 
-def match_summary(directory, expected):
+def match_summary(directory: str | Path, expected: int) -> WDLSummary:
     rows = [read_json(p) for p in sorted(Path(directory).glob("*/metrics.json"))]
     if len(rows) != expected or any(r["status"] != "completed" for r in rows):
         raise ValueError("Incomplete evaluation")
-    counts = Counter(
-        "D" if r["winner"] is None else "W" if r["winner"] == r["side"] else "L"
-        for r in rows
-    )
-    return {
-        "matches": len(rows),
-        **{k: counts[k] for k in ("W", "D", "L")},
-        "win_rate": counts["W"] / len(rows),
-    }
+    return summarize_wdl(rows)
 
 
-def reusable_baseline(config, plan, out):
-    parent = ROOT / config["experiment"]["parent_run"]
-    old = read_json(parent / "passport.json")
-    closure = [
-        "civ5rl/core/agent.py",
-        "civ5rl/core/model.py",
-        "civ5rl/core/observation.py",
-        "civ5rl/core/schema.py",
-        "civ5rl/protocols/imitation.py",
-        "civ5sim/match.py",
-        "civ5sim/engine.py",
-        "civ5sim/cp_agent.py",
-        "civ5sim/greedy_agent.py",
-        "civ5sim/combat_ai.py",
-        "civ5sim/_native.py",
-        "build/combat.dll",
-    ]
-    mismatched = [
-        p for p in closure if old["source_hashes"].get(p) != file_hash(ROOT / p)
-    ]
-    # Old passports do not pin the planner DLL; do not claim reusable identity without that proof.
-    if old["source_hashes"].get("build/combat_ai.dll") != file_hash(
-        ROOT / "build/combat_ai.dll"
-    ):
-        mismatched.append("unverified_parent_planner_DLL")
-    old_config = read_json(parent / "resolved-config.json")
-    if old_config["teacher_search"] != config["teacher_search"]:
-        mismatched.append("teacher_search")
+_BASELINE_EVALUATOR_DEPENDENCIES = (
+    "civ5rl/core/agent.py",
+    "civ5rl/core/model.py",
+    "civ5rl/core/observation.py",
+    "civ5rl/core/schema.py",
+    "civ5rl/protocols/imitation.py",
+    "civ5sim/match.py",
+    "civ5sim/engine.py",
+    "civ5sim/cp_agent.py",
+    "civ5sim/greedy_agent.py",
+    "civ5sim/combat_ai.py",
+    "civ5sim/_native.py",
+    "build/combat.dll",
+)
+
+
+def _verify_parent_evaluator_closure(
+    previous_hashes: Mapping[str, str],
+    current_hashes: Iterable[tuple[str, str]],
+) -> Iterable[str]:
+    for dependency, current_sha256 in current_hashes:
+        if previous_hashes.get(dependency) != current_sha256:
+            yield dependency
+
+
+def _verify_saved_evaluation_cases(
+    directory: Path,
+    cases: Iterable[Mapping[str, Any]],
+    *,
+    case_error: str,
+    replay_error: str,
+) -> None:
+    for case in cases:
+        case_dir = directory / f"case-{case['case_id']:03}-side-{case['learner_side']}"
+        if read_json(case_dir / "case.json") != case:
+            raise ValueError(case_error)
+        if not verify_match_artifacts(case_dir, ("replay.json", "final.json", "result.json")):
+            raise ValueError(replay_error)
+
+
+def _parent_baseline_directories(parent, cases, mismatched):
     dirs = {}
     try:
         for mode in ("argmax", "sample"):
             dirs[mode] = {}
             for enemy in ("cp", "greedy"):
                 directory = parent / f"cycle-02/evaluation/{mode}/{enemy}"
-                for case in plan["development"]:
-                    d = (
-                        directory
-                        / f"case-{case['case_id']:03}-side-{case['learner_side']}"
-                    )
-                    if read_json(d / "case.json") != case:
-                        raise ValueError("Baseline case differs")
-                    if any(
-                        not (d / name).is_file()
-                        for name in ("replay.json", "final.json", "result.json")
-                    ):
-                        raise ValueError("Missing baseline replay")
+                _verify_saved_evaluation_cases(
+                    directory,
+                    cases,
+                    case_error="Baseline case differs",
+                    replay_error="Missing baseline replay",
+                )
                 dirs[mode][enemy] = {
                     "directory": str(directory),
                     "summary": match_summary(directory, 64),
                 }
     except (OSError, ValueError) as exc:
         mismatched.append(str(exc))
+    return dirs
+
+
+def reusable_baseline(config, plan, out):
+    parent = ROOT / config["experiment"]["parent_run"]
+    old = read_json(parent / "passport.json")
+    previous_hashes = old["source_hashes"]
+    closure = _BASELINE_EVALUATOR_DEPENDENCIES
+    mismatched = list(
+        _verify_parent_evaluator_closure(
+            previous_hashes, ((name, file_hash(ROOT / name)) for name in closure)
+        )
+    )
+    if previous_hashes.get("build/combat_ai.dll") != file_hash(ROOT / "build/combat_ai.dll"):
+        mismatched.append("unverified_parent_planner_DLL")
+    old_config = read_json(parent / "resolved-config.json")
+    if old_config["teacher_search"] != config["teacher_search"]:
+        mismatched.append("teacher_search")
+    dirs = _parent_baseline_directories(parent, plan["development"], mismatched)
     write_json(
         out / "baseline-reuse-check.json",
         {
-            "dependency_hashes": {p: file_hash(ROOT / p) for p in closure},
+            "dependency_hashes": {name: file_hash(ROOT / name) for name in closure},
             "mismatched": mismatched,
             "reused": not mismatched,
         },
@@ -320,23 +346,15 @@ def match_execution(source: str) -> str:
                 isinstance(t, ast.Name) and t.id == "directory" for t in n.targets
             ):
                 return i
-            if (
-                isinstance(n, ast.AnnAssign)
-                and isinstance(n.target, ast.Name)
-                and n.target.id == "directory"
-            ):
+            if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.target.id == "directory":
                 return i
         for i, n in enumerate(body):
             if isinstance(n, ast.Assign):
                 for t in n.targets:
-                    if any(
-                        isinstance(node, ast.Name) and node.id == "directory"
-                        for node in ast.walk(t)
-                    ):
+                    if any(isinstance(node, ast.Name) and node.id == "directory" for node in ast.walk(t)):
                         return i
             if isinstance(n, ast.AnnAssign) and any(
-                isinstance(node, ast.Name) and node.id == "directory"
-                for node in ast.walk(n.target)
+                isinstance(node, ast.Name) and node.id == "directory" for node in ast.walk(n.target)
             ):
                 return i
         return None
@@ -348,9 +366,7 @@ def match_execution(source: str) -> str:
     if play_case is not None:
         start = find_directory_start(play_case.body)
         body = play_case.body[start:] if start is not None else play_case.body
-        return ast.dump(
-            ast.Module(body=body, type_ignores=[]), include_attributes=False
-        )
+        return ast.dump(ast.Module(body=body, type_ignores=[]), include_attributes=False)
 
     eval_task = next(
         (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "evaluation_task"),
@@ -359,43 +375,45 @@ def match_execution(source: str) -> str:
     if eval_task is not None:
         start = find_directory_start(eval_task.body)
         body = eval_task.body[start:] if start is not None else eval_task.body
-        return ast.dump(
-            ast.Module(body=body, type_ignores=[]), include_attributes=False
-        )
+        return ast.dump(ast.Module(body=body, type_ignores=[]), include_attributes=False)
 
     raise ValueError("Neither play_case nor evaluation_task found in evaluator source")
 
 
-
-def reusable_controlled_evaluation(config, plan, out, fingerprint, purpose):
-    parent = ROOT / config["experiment"]["parent_run"]
-    dep_hashes = evaluator_dependency_hashes()
-    dependencies = list(dep_hashes.keys())
-    mismatched = []
-
-    try:
-        recorded = read_json(parent / "passport.json")
-        for p in dependencies:
-            if recorded.get("source_hashes", {}).get(p) != dep_hashes[p]:
-                mismatched.append(p)
-    except Exception as exc:  # noqa: BLE001 -- record unreadable passport as mismatch
-        mismatched.append(f"unrecognized_parent_passport: {exc}")
-
-    # The new kind adds a manifest guard; actual match execution must be unchanged.
+def _verify_archived_match_execution(parent: Path, mismatched: list[str]) -> None:
+    # The controlled kind adds a manifest guard before the ordinary match code.
     try:
         archive_path = parent / "sources.zip"
         if not archive_path.exists():
             raise FileNotFoundError(f"Missing archive: {archive_path}")
         with zipfile.ZipFile(archive_path) as archive:
-            namelist = archive.namelist()
-            if "civ5rl/experiments/ppo_after_imitation.py" not in namelist:
-                raise KeyError("civ5rl/experiments/ppo_after_imitation.py not found in archive")
-            old_source = archive.read("civ5rl/experiments/ppo_after_imitation.py").decode("utf-8")
+            source_path = "civ5rl/experiments/ppo_after_imitation.py"
+            if source_path not in archive.namelist():
+                raise KeyError(f"{source_path} not found in archive")
+            old_source = archive.read(source_path).decode("utf-8")
         current_source = Path(__file__).read_text(encoding="utf-8")
         if match_execution(old_source) != match_execution(current_source):
             mismatched.append("evaluator_match_execution")
     except Exception as exc:  # noqa: BLE001 -- record unreadable or altered archive format as mismatch
         mismatched.append(f"unrecognized_archive_format: {exc}")
+
+
+def _controlled_reuse_mismatches(
+    parent: Path,
+    config: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    purpose: str,
+    dependency_hashes: Mapping[str, str],
+) -> list[str]:
+    mismatched: list[str] = []
+    try:
+        recorded = read_json(parent / "passport.json")
+        mismatched.extend(
+            _verify_parent_evaluator_closure(recorded.get("source_hashes", {}), dependency_hashes.items())
+        )
+    except Exception as exc:  # noqa: BLE001 -- record unreadable passport as mismatch
+        mismatched.append(f"unrecognized_parent_passport: {exc}")
+    _verify_archived_match_execution(parent, mismatched)
 
     try:
         resolved = read_json(parent / "resolved-config.json")
@@ -410,7 +428,30 @@ def reusable_controlled_evaluation(config, plan, out, fingerprint, purpose):
             mismatched.append("cases")
     except Exception as exc:  # noqa: BLE001 -- record unreadable manifest as mismatch
         mismatched.append(f"unrecognized_manifest: {exc}")
+    return mismatched
 
+
+def _verify_saved_controlled_evaluation(result, cases, fingerprint):
+    model = torch.load(result["checkpoint"], map_location="cpu", weights_only=False)["model"]
+    if policy_hash(model) != fingerprint:
+        raise ValueError("Evaluation policy weights changed")
+    for enemies in result["runs"].values():
+        for record in enemies.values():
+            directory = Path(record["directory"])
+            if match_summary(directory, len(cases)) != record["summary"]:
+                raise ValueError("Evaluation results changed")
+            _verify_saved_evaluation_cases(
+                directory,
+                cases,
+                case_error="Evaluation provenance/replay missing",
+                replay_error="Evaluation provenance/replay missing",
+            )
+
+
+def reusable_controlled_evaluation(config, plan, out, fingerprint, purpose):
+    parent = ROOT / config["experiment"]["parent_run"]
+    dep_hashes = evaluator_dependency_hashes()
+    mismatched = _controlled_reuse_mismatches(parent, config, plan, purpose, dep_hashes)
     result = None
     try:
         old_cache = read_json(parent / "evaluations.json")
@@ -422,20 +463,7 @@ def reusable_controlled_evaluation(config, plan, out, fingerprint, purpose):
 
     if not mismatched and result is not None:
         try:
-            model = torch.load(result["checkpoint"], map_location="cpu", weights_only=False)["model"]
-            if policy_hash(model) != fingerprint:
-                raise ValueError("Evaluation policy weights changed")
-            for enemies in result["runs"].values():
-                for record in enemies.values():
-                    directory = Path(record["directory"])
-                    if match_summary(directory, len(plan[purpose])) != record["summary"]:
-                        raise ValueError("Evaluation results changed")
-                    for case in plan[purpose]:
-                        d = directory / f"case-{case['case_id']:03}-side-{case['learner_side']}"
-                        if read_json(d / "case.json") != case or any(
-                            not (d / n).is_file() for n in ("replay.json", "final.json", "result.json")
-                        ):
-                            raise ValueError("Evaluation provenance/replay missing")
+            _verify_saved_controlled_evaluation(result, plan[purpose], fingerprint)
         except (OSError, ValueError) as exc:
             mismatched.append(str(exc))
 
@@ -495,15 +523,10 @@ def evaluate_checkpoint(config, plan, out, path, purpose="development"):
             for mode in modes:
                 runs[mode] = {}
                 for enemy in enemies:
-                    directory = (
-                        out / f"evaluation/{purpose}/{fingerprint[:16]}/{mode}/{enemy}"
-                    )
+                    directory = out / f"evaluation/{purpose}/{fingerprint[:16]}/{mode}/{enemy}"
                     tasks = []
                     for i, case in enumerate(plan[purpose]):
-                        d = (
-                            directory
-                            / f"case-{case['case_id']:03}-side-{case['learner_side']}"
-                        )
+                        d = directory / f"case-{case['case_id']:03}-side-{case['learner_side']}"
                         if not (d / "metrics.json").exists():
                             tasks.append(
                                 (
@@ -517,12 +540,16 @@ def evaluate_checkpoint(config, plan, out, path, purpose="development"):
                                     str(d),
                                 )
                             )
-                    for first in range(0, len(tasks), 4):
-                        list(executor.map(evaluation_task, tasks[first : first + 4]))
-                        print(
-                            f"evaluate {purpose}/{mode}/{enemy}: {min(first + 4, len(tasks))}/{len(tasks)}",
-                            flush=True,
-                        )
+                    total = len(tasks)
+                    run_chunked_pool(
+                        executor,
+                        evaluation_task,
+                        tasks,
+                        4,
+                        lambda count, label=f"evaluate {purpose}/{mode}/{enemy}", total=total: print(
+                            f"{label}: {count}/{total}", flush=True
+                        ),
+                    )
                     runs[mode][enemy] = {
                         "directory": str(directory),
                         "summary": match_summary(directory, len(plan[purpose])),
@@ -552,9 +579,7 @@ def save_boundary(config, out, policy, optimizer, state, rng, identity):
     if not controlled(config) and has_updates:
         state["updates"] = saved_updates
     start = perf_counter()
-    checkpoint.save(
-        out / state["latest"], policy, optimizer, state, rng, config, identity
-    )
+    checkpoint.save(out / state["latest"], policy, optimizer, state, rng, config, identity)
     state["save_seconds"] += perf_counter() - start
     write_json(out / "state.json", state)
     prune_checkpoints(out, state)
@@ -633,10 +658,24 @@ def summarize_rollout(episodes):
     return summary
 
 
-def train(config, plan, out, device):
-    state = read_json(out / "state.json")
-    if state["stop_reason"]:
-        return state
+@dataclass
+class _PpoTraining:
+    state: dict[str, Any]
+    protocol: str
+    policy: Policy
+    optimizer: torch.optim.Optimizer
+    rng: random.Random
+    identity: dict[str, Any]
+
+
+def _restore_ppo_training(
+    config: dict[str, Any],
+    plan: dict[str, Any],
+    out: Path,
+    device: str | torch.device,
+    state: dict[str, Any],
+) -> _PpoTraining:
+    """Restore accepted model and optimizer state before opening collection workers."""
     protocol = config["kind"]
     has_updates = "updates" in state
     saved_updates = state.get("updates")
@@ -645,6 +684,7 @@ def train(config, plan, out, device):
     if not controlled(config) and has_updates:
         state["updates"] = saved_updates
     if not (out / "preflight.json").exists():
+        # Both diagnostic modules import the policy and optimizer factories above.
         if controlled(config):
             from civ5rl.experiments.ppo_controlled_checks import preflight
         else:
@@ -657,226 +697,274 @@ def train(config, plan, out, device):
     optimizer = optimizer_for(policy, config, device)
     rng = random.Random(17)
     identity = read_json(out / "passport.json")
-    restored = checkpoint.restore(
-        out / state["latest"], policy, optimizer, rng, config, identity
-    )
+    restored = checkpoint.restore(out / state["latest"], policy, optimizer, rng, config, identity)
     # state.json can include a completed evaluation after the model checkpoint was saved.
     assert (
         restored["decisions"] == state["decisions"]
         and restored["optimizer_steps"] == state["optimizer_steps"]
     )
     if not (out / "baseline-policy.json").exists():
-        write_json(
-            out / "baseline-policy.json", {"hash": policy_hash(policy.state_dict())}
-        )
+        write_json(out / "baseline-policy.json", {"hash": policy_hash(policy.state_dict())})
     if state["pending_evaluation"]:
         development(config, plan, out, state)
+    return _PpoTraining(state, protocol, policy, optimizer, rng, identity)
+
+
+def _warmup_ppo_training(
+    training: _PpoTraining, monitor: ResourceMonitor, device: str | torch.device
+) -> None:
+    # One no-update warmup uses saved public inputs; RNG is restored before collection.
+    monitor.mark("initial_warmup")
+    prep = perf_counter()
+    # The warmup module also imports this runner's factories.
+    from civ5rl.experiments.ppo_after_imitation_checks import warmup
+
+    with isolated_rng(training.rng):
+        warmup(training.policy, device)
+    training.state["preparation_seconds"] += perf_counter() - prep
+
+
+def _active_time_limit_reached(config: dict[str, Any], state: dict[str, Any]) -> bool:
+    return state["active_seconds"] >= config["experiment"]["active_seconds"]
+
+
+def _decision_limit_reached(config: dict[str, Any], state: dict[str, Any]) -> bool:
+    return state["decisions"] >= config["experiment"]["decisions"]
+
+
+def _no_accepted_updates_limit_reached(config: dict[str, Any], state: dict[str, Any]) -> bool:
+    return (
+        controlled(config)
+        and state["zero_accepted_streak"] >= config["experiment"]["max_zero_accepted_rollouts"]
+    )
+
+
+def _advance_ppo_state(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    protocol: str,
+    metrics: dict[str, Any],
+    *,
+    number: int,
+    before_decisions: int,
+) -> bool:
+    """Commit counters and stop/evaluation flags for a completed collection attempt."""
+    counters = TrainingCounters.from_dict(state, protocol=protocol)
+    accepted_steps = int(metrics["optimizer_steps"])
+    attempted_steps = int(metrics.get("attempted_optimizer_steps", accepted_steps))
+    counters = counters.replace(
+        rollouts_collected=number,
+        rollouts_with_accepted_steps=counters.rollouts_with_accepted_steps + (1 if accepted_steps > 0 else 0),
+        adam_steps_attempted=counters.adam_steps_attempted + attempted_steps,
+        adam_steps_accepted=counters.adam_steps_accepted + accepted_steps,
+    )
+    first_accepted = False
+    if controlled(config):
+        first_accepted = advance_controlled_rollout(state, metrics, number)
+        state.update(counters.to_state_dict(protocol=protocol))
+        state["updates"] = number
+        state["latest"] = f"checkpoints/update-{number:04}.pt"
+    else:
+        has_updates = "updates" in state
+        saved_updates = state.get("updates")
+        state.update(counters.to_state_dict(protocol=protocol))
+        if accepted_steps > 0:
+            state["updates"] = number
+            state["latest"] = f"checkpoints/update-{number:04}.pt"
+        elif has_updates:
+            state["updates"] = saved_updates
+    timed = _active_time_limit_reached(config, state) or metrics["stop_reason"] == "active_time_limit"
+    if timed:
+        state["stop_reason"] = "active_time_limit"
+    elif _decision_limit_reached(config, state):
+        state["stop_reason"] = "decision_limit"
+    elif _no_accepted_updates_limit_reached(config, state):
+        state["stop_reason"] = "no_accepted_updates"
+    due = any(before_decisions < m <= state["decisions"] for m in config["experiment"]["milestones"])
+    state["pending_evaluation"] = bool(
+        (due or first_accepted or state["stop_reason"])
+        if controlled(config)
+        else metrics["optimizer_steps"] and (due or state["stop_reason"])
+    )
+    return first_accepted
+
+
+def _run_ppo_rollout_cycle(
+    config: dict[str, Any],
+    plan: dict[str, Any],
+    out: Path,
+    device: str | torch.device,
+    training: _PpoTraining,
+    collector: Collector,
+    monitor: ResourceMonitor,
+    records_path: Path,
+) -> None:
+    """Collect, update, publish evidence, and evaluate at one rollout boundary."""
+    state = training.state
+    policy, optimizer = training.policy, training.optimizer
+    rng, identity = training.rng, training.identity
+    tick = perf_counter()
+    deadline = tick + config["experiment"]["active_seconds"] - state["active_seconds"]
+    number = state["rollouts_collected"] + 1
+    monitor.mark("collection", update=number)
+    episodes, next_episode, timings = collector.collect(
+        policy,
+        None,
+        state["next_episode"],
+        monitor,
+        deadline=deadline,
+        max_decisions=config["experiment"]["decisions"] - state["decisions"],
+    )
+    if not episodes:
+        state["stop_reason"] = "active_time_limit"
+        return
+    summary = summarize_rollout(episodes)
+    before_decisions = state["decisions"]
+    state["decisions"] += summary["decisions"]
+    state["next_episode"] = next_episode
+    monitor.mark("rollout_save")
+    rollout_record = save_rollout(episodes, out / "rollouts", number)
+    metrics: dict[str, Any] = {
+        "optimizer_steps": 0,
+        "attempted_optimizer_steps": 0,
+        "rejected_optimizer_steps": 0,
+        "stop_reason": "active_time_limit",
+        "update_complete": False,
+    }
+    delta = 0.0
+    if perf_counter() < deadline:
+        monitor.mark("ppo", update=number)
+        before = {k: v.detach().clone() for k, v in policy.state_dict().items()}
+        with CompilationClock() as compiler:
+            compiler.monitor = monitor
+            metrics = update(
+                policy,
+                optimizer,
+                episodes,
+                config,
+                before_decisions,
+                device,
+                rng,
+                deadline=deadline,
+            )
+        if str(device).startswith("cuda"):
+            torch.cuda.synchronize()
+        metrics["runtime_compilation_seconds"] = sum(max(0, b - a) for a, b in compiler.intervals)
+        delta = float(
+            torch.sqrt(sum((v - before[k]).float().square().sum() for k, v in policy.state_dict().items()))
+        )
+        del before
+    rollout_hash = rollout_record["sha256"]
+    if controlled(config):
+        # Buffer cleanup services this update, so charge it before evaluation.
+        del episodes
+        gc.collect()
+    state["active_seconds"] += perf_counter() - tick
+    first_accepted = _advance_ppo_state(
+        config,
+        state,
+        training.protocol,
+        metrics,
+        number=number,
+        before_decisions=before_decisions,
+    )
+    row: dict[str, Any] = {
+        "update": number,
+        **(
+            {
+                "total_attempted_steps": state["attempted_steps"],
+                "total_rejected_steps": state["rejected_steps"],
+                "accepted_updates": state["accepted_updates"],
+                "zero_accepted_streak": state["zero_accepted_streak"],
+            }
+            if controlled(config)
+            else {}
+        ),
+        "trained": bool(metrics["optimizer_steps"]),
+        **summary,
+        "total_decisions": state["decisions"],
+        "total_Adam_steps": state["optimizer_steps"],
+        "active_seconds": state["active_seconds"],
+        "active_time_overshoot_seconds": max(
+            0, state["active_seconds"] - config["experiment"]["active_seconds"]
+        ),
+        "decision_overshoot": max(0, state["decisions"] - config["experiment"]["decisions"]),
+        "rollout_sha256": rollout_hash,
+        "rollout_artifact": rollout_record,
+        "weight_delta_l2": delta,
+        "collection": timings,
+        "ppo": metrics,
+    }
+    servicing_started = perf_counter()
+    monitor.mark("checkpoint")
+    if metrics["optimizer_steps"] or controlled(config):
+        save_boundary(config, out, policy, optimizer, state, rng, identity)
+    else:
+        write_json(out / "state.json", state)
+    if controlled(config):
+        servicing_seconds = perf_counter() - servicing_started
+        state["active_seconds"] += servicing_seconds
+        row["checkpoint_servicing_seconds"] = servicing_seconds
+        row["active_seconds"] = state["active_seconds"]
+        row["active_time_overshoot_seconds"] = max(
+            0, state["active_seconds"] - config["experiment"]["active_seconds"]
+        )
+        if _active_time_limit_reached(config, state):
+            state["stop_reason"] = "active_time_limit"
+            state["pending_evaluation"] = True
+        write_json(out / "state.json", state)
+    append_jsonl(records_path, row)
+    print(
+        f"update {number}: {summary['W']}/{summary['D']}/{summary['L']}; decisions={state['decisions']}; Adam={state['optimizer_steps']}; active={state['active_seconds']:.1f}s; {metrics['stop_reason']}",
+        flush=True,
+    )
+    if number == 3:
+        write_json(
+            out / "early-eta.json",
+            {
+                "decisions": state["decisions"],
+                "active_seconds": state["active_seconds"],
+                "estimated_total_active_seconds": config["experiment"]["decisions"]
+                * state["active_seconds"]
+                / state["decisions"],
+            },
+        )
+    if state["pending_evaluation"]:
+        monitor.mark("evaluation")
+        development(config, plan, out, state)
+        if first_accepted:
+            state["first_accepted_evaluated"] = True
+            write_json(out / "state.json", state)
+    # Heavy public input buffers are local; the current rollout is never reused by another update.
+    if not controlled(config):
+        del episodes
+        gc.collect()
+
+
+def train(
+    config: dict[str, Any], plan: dict[str, Any], out: Path, device: str | torch.device
+) -> dict[str, Any]:
+    state = read_json(out / "state.json")
+    if state["stop_reason"]:
+        return state
+    training = _restore_ppo_training(config, plan, out, device, state)
     with (
         ResourceMonitor(out / "telemetry") as monitor,
-        Collector(
-            config, TrainingFactory(config, plan["base"]), device, out / "errors"
-        ) as collector,
+        Collector(config, TrainingFactory(config, plan["base"]), device, out / "errors") as collector,
     ):
-        # One no-update warmup uses saved public inputs; RNG is restored before collection.
-        monitor.mark("initial_warmup")
-        prep = perf_counter()
-        from civ5rl.experiments.ppo_after_imitation_checks import warmup
-
-        with isolated_rng(rng):
-            warmup(policy, device)
-        state["preparation_seconds"] += perf_counter() - prep
+        _warmup_ppo_training(training, monitor, device)
         records_path = out / "updates.jsonl"
         while not state["stop_reason"]:
-            if state["active_seconds"] >= config["experiment"]["active_seconds"]:
+            if _active_time_limit_reached(config, state):
                 state["stop_reason"] = "active_time_limit"
                 break
-            if state["decisions"] >= config["experiment"]["decisions"]:
+            if _decision_limit_reached(config, state):
                 state["stop_reason"] = "decision_limit"
                 break
-            tick = perf_counter()
-            deadline = (
-                tick + config["experiment"]["active_seconds"] - state["active_seconds"]
-            )
-            number = state["rollouts_collected"] + 1
-            monitor.mark("collection", update=number)
-            episodes, next_episode, timings = collector.collect(
-                policy,
-                None,
-                state["next_episode"],
-                monitor,
-                deadline=deadline,
-                max_decisions=config["experiment"]["decisions"] - state["decisions"],
-            )
-            if not episodes:
-                state["stop_reason"] = "active_time_limit"
-                break
-            summary = summarize_rollout(episodes)
-            before_decisions = state["decisions"]
-            state["decisions"] += summary["decisions"]
-            state["next_episode"] = next_episode
-            monitor.mark("rollout_save")
-            rollout_record = save_rollout(episodes, out / "rollouts", number)
-            metrics = {
-                "optimizer_steps": 0,
-                "attempted_optimizer_steps": 0,
-                "rejected_optimizer_steps": 0,
-                "stop_reason": "active_time_limit",
-                "update_complete": False,
-            }
-            delta = 0.0
-            if perf_counter() < deadline:
-                monitor.mark("ppo", update=number)
-                before = {k: v.detach().clone() for k, v in policy.state_dict().items()}
-                with CompilationClock() as compiler:
-                    compiler.monitor = monitor
-                    metrics = update(
-                        policy,
-                        optimizer,
-                        episodes,
-                        config,
-                        before_decisions,
-                        device,
-                        rng,
-                        deadline=deadline,
-                    )
-                if str(device).startswith("cuda"):
-                    torch.cuda.synchronize()
-                metrics["runtime_compilation_seconds"] = sum(
-                    max(0, b - a) for a, b in compiler.intervals
-                )
-                delta = float(
-                    torch.sqrt(
-                        sum(
-                            (v - before[k]).float().square().sum()
-                            for k, v in policy.state_dict().items()
-                        )
-                    )
-                )
-                del before
-            rollout_hash = rollout_record["sha256"]
-            if controlled(config):
-                # Buffer cleanup services this update, so charge it before evaluation.
-                del episodes
-                gc.collect()
-            state["active_seconds"] += perf_counter() - tick
-            counters = TrainingCounters.from_dict(state, protocol=protocol)
-            accepted_steps = int(metrics["optimizer_steps"])
-            attempted_steps = int(
-                metrics.get("attempted_optimizer_steps", accepted_steps)
-            )
-            counters = counters.replace(
-                rollouts_collected=number,
-                rollouts_with_accepted_steps=counters.rollouts_with_accepted_steps
-                + (1 if accepted_steps > 0 else 0),
-                adam_steps_attempted=counters.adam_steps_attempted + attempted_steps,
-                adam_steps_accepted=counters.adam_steps_accepted + accepted_steps,
-            )
-            first_accepted = False
-            if controlled(config):
-                first_accepted = advance_controlled_rollout(state, metrics, number)
-                state.update(counters.to_state_dict(protocol=protocol))
-                state["updates"] = number
-                state["latest"] = f"checkpoints/update-{number:04}.pt"
-            else:
-                has_updates = "updates" in state
-                saved_updates = state.get("updates")
-                state.update(counters.to_state_dict(protocol=protocol))
-                if accepted_steps > 0:
-                    state["updates"] = number
-                    state["latest"] = f"checkpoints/update-{number:04}.pt"
-                elif has_updates:
-                    state["updates"] = saved_updates
-            timed = (
-                state["active_seconds"] >= config["experiment"]["active_seconds"]
-                or metrics["stop_reason"] == "active_time_limit"
-            )
-            if timed:
-                state["stop_reason"] = "active_time_limit"
-            elif state["decisions"] >= config["experiment"]["decisions"]:
-                state["stop_reason"] = "decision_limit"
-            elif controlled(config) and state["zero_accepted_streak"] >= config["experiment"]["max_zero_accepted_rollouts"]:
-                state["stop_reason"] = "no_accepted_updates"
-            due = any(
-                before_decisions < m <= state["decisions"]
-                for m in config["experiment"]["milestones"]
-            )
-            state["pending_evaluation"] = bool(
-                (due or first_accepted or state["stop_reason"]) if controlled(config)
-                else metrics["optimizer_steps"] and (due or state["stop_reason"])
-            )
-            row = {
-                "update": number,
-                **({"total_attempted_steps": state["attempted_steps"],
-                    "total_rejected_steps": state["rejected_steps"],
-                    "accepted_updates": state["accepted_updates"],
-                    "zero_accepted_streak": state["zero_accepted_streak"]} if controlled(config) else {}),
-                "trained": bool(metrics["optimizer_steps"]),
-                **summary,
-                "total_decisions": state["decisions"],
-                "total_Adam_steps": state["optimizer_steps"],
-                "active_seconds": state["active_seconds"],
-                "active_time_overshoot_seconds": max(
-                    0, state["active_seconds"] - config["experiment"]["active_seconds"]
-                ),
-                "decision_overshoot": max(
-                    0, state["decisions"] - config["experiment"]["decisions"]
-                ),
-                "rollout_sha256": rollout_hash,
-                "rollout_artifact": rollout_record,
-                "weight_delta_l2": delta,
-                "collection": timings,
-                "ppo": metrics,
-            }
-            servicing_started = perf_counter()
-            monitor.mark("checkpoint")
-            if metrics["optimizer_steps"] or controlled(config):
-                save_boundary(config, out, policy, optimizer, state, rng, identity)
-            else:
-                write_json(out / "state.json", state)
-            if controlled(config):
-                servicing_seconds = perf_counter() - servicing_started
-                state["active_seconds"] += servicing_seconds
-                row["checkpoint_servicing_seconds"] = servicing_seconds
-                row["active_seconds"] = state["active_seconds"]
-                row["active_time_overshoot_seconds"] = max(
-                    0, state["active_seconds"] - config["experiment"]["active_seconds"]
-                )
-                if state["active_seconds"] >= config["experiment"]["active_seconds"]:
-                    state["stop_reason"] = "active_time_limit"
-                    state["pending_evaluation"] = True
-                write_json(out / "state.json", state)
-            with records_path.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(row, allow_nan=False) + "\n")
-            print(
-                f"update {number}: {summary['W']}/{summary['D']}/{summary['L']}; decisions={state['decisions']}; Adam={state['optimizer_steps']}; active={state['active_seconds']:.1f}s; {metrics['stop_reason']}",
-                flush=True,
-            )
-            if number == 3:
-                write_json(
-                    out / "early-eta.json",
-                    {
-                        "decisions": state["decisions"],
-                        "active_seconds": state["active_seconds"],
-                        "estimated_total_active_seconds": config["experiment"][
-                            "decisions"
-                        ]
-                        * state["active_seconds"]
-                        / state["decisions"],
-                    },
-                )
-            if state["pending_evaluation"]:
-                monitor.mark("evaluation")
-                development(config, plan, out, state)
-                if first_accepted:
-                    state["first_accepted_evaluated"] = True
-                    write_json(out / "state.json", state)
-            # Heavy public input buffers are local; the current rollout is never reused by another update.
-            if not controlled(config):
-                del episodes
-                gc.collect()
+            _run_ppo_rollout_cycle(config, plan, out, device, training, collector, monitor, records_path)
         monitor.mark("stopped")
         evaluated_hashes = {e["policy_hash"] for e in state["evaluated"].values()}
-        if policy_hash(policy.state_dict()) not in evaluated_hashes:
+        if policy_hash(training.policy.state_dict()) not in evaluated_hashes:
             state["pending_evaluation"] = True
         if state["pending_evaluation"]:
             development(config, plan, out, state)
@@ -906,17 +994,12 @@ def confirmation(config, plan, out):
     before, after = results["baseline"], results["candidate"]
 
     def rows(result):
-        directory = Path(result["runs"]["argmax"]["cp"]["directory"])
-        values = {}
-        cases = {}
-        for p in directory.glob("*/metrics.json"):
-            metric = read_json(p)
-            case = read_json(p.parent / "case.json")
-            key = (case["parent_world"], case["case_id"], metric["side"])
-            if key in values:
-                raise ValueError("Duplicate confirmation")
-            values[key] = int(metric["winner"] == metric["side"])
-            cases[key] = case
+        values, cases, _ = collect_paired_outcomes(
+            result["runs"]["argmax"]["cp"]["directory"],
+            side_source="metrics",
+            check_duplicates=True,
+            sort=False,
+        )
         return values, cases
 
     b, bc = rows(before)
@@ -924,20 +1007,26 @@ def confirmation(config, plan, out):
     if bc != ac:
         raise ValueError("Confirmation pairing differs")
     baseline_selected = controlled(config) and before["policy_hash"] == after["policy_hash"]
-    ci = None if baseline_selected else paired_world_bootstrap(
-        b,
-        a,
-        samples=config["experiment"]["bootstrap_samples"],
-        seed=config["experiment"]["bootstrap_seed"],
-        cases=ac,
-        cases_per_world=16,
+    ci = (
+        None
+        if baseline_selected
+        else paired_world_bootstrap(
+            b,
+            a,
+            samples=config["experiment"]["bootstrap_samples"],
+            seed=config["experiment"]["bootstrap_seed"],
+            cases=ac,
+            cases_per_world=16,
+        )
     )
     result = {
         "baseline": before,
         "candidate": after,
         "comparison": ci,
         "baseline_selected": baseline_selected,
-        "selection_result": "PPO-кандидат не прошёл development-отбор" if baseline_selected else "new_candidate",
+        "selection_result": "PPO-кандидат не прошёл development-отбор"
+        if baseline_selected
+        else "new_candidate",
         "confirmed_improvement": False if ci is None else ci["CI95"][0] > 0,
         "practical_10pp": False if ci is None else ci["delta"] >= 0.1,
         "selected_before_confirmation": True,
@@ -946,49 +1035,81 @@ def confirmation(config, plan, out):
     return result
 
 
-def report(config, out):
-    state = read_json(out / "state.json")
-    rows = (
-        [json.loads(l) for l in (out / "updates.jsonl").read_text().splitlines()]
-        if (out / "updates.jsonl").exists()
-        else []
+def _report_gpu_metrics(out: Path) -> dict[str, Any] | None:
+    telemetry = out / "telemetry/resources.jsonl"
+    if not telemetry.exists():
+        return None
+    gpu: dict[str, Any] = analyze_telemetry(telemetry, active_phase="ppo")
+    write_json(out / "gpu-analysis.json", {k: v for k, v in gpu.items() if k != "active"})
+    return gpu
+
+
+def _render_report(
+    config: dict[str, Any],
+    out: Path,
+    state: dict[str, Any],
+    rows: list[dict[str, Any]],
+    final: dict[str, Any] | None,
+) -> MarkdownReport:
+    lines = MarkdownReport(
+        [
+            "# PPO с контролем принятого изменения политики"
+            if controlled(config)
+            else "# PPO после имитации CP",
+            "",
+            f"Статус: {read_json(out / 'status.json')['status']}; причина остановки: {state['stop_reason']}.",
+            f"Решения: {state['decisions']}; rollouts: {state['updates']}; Adam steps: {state['optimizer_steps']}; активное время: {state['active_seconds']:.2f} с.",
+            f"Evaluation: {state['evaluation_seconds']:.2f} с; подготовка: {state['preparation_seconds']:.2f} с; сохранение checkpoints: {state['save_seconds']:.2f} с.",
+            "",
+            "Основной режим — argmax; sampling и greedy — отдельные контрольные показатели.",
+            "",
+        ]
     )
-    final = (
-        read_json(out / "confirmation.json")
-        if (out / "confirmation.json").exists()
-        else None
+    lines.table(
+        (
+            "Update",
+            "Решения",
+            "Adam",
+            "Active, с",
+            "Train W/D/L",
+            "Win rate",
+            "Free/forced",
+            "KL free / all",
+            "Stop",
+        ),
+        ("left", "right", "right", "right", "right", "right", "right", "left", "left"),
+        (
+            (
+                r["update"],
+                r["total_decisions"],
+                r["total_Adam_steps"],
+                f"{r['active_seconds']:.1f}",
+                format_wdl(r),
+                f"{r['win_rate']:.1%}",
+                f"{r['free_decisions']}/{r['forced_decisions']}",
+                f"{r['ppo'].get('sampled_kl_free')} / {r['ppo'].get('sampled_kl')}",
+                r["ppo"]["stop_reason"],
+            )
+            for r in rows
+        ),
     )
-    lines = [
-        "# PPO с контролем принятого изменения политики" if controlled(config) else "# PPO после имитации CP",
-        "",
-        f"Статус: {read_json(out / 'status.json')['status']}; причина остановки: {state['stop_reason']}.",
-        f"Решения: {state['decisions']}; rollouts: {state['updates']}; Adam steps: {state['optimizer_steps']}; активное время: {state['active_seconds']:.2f} с.",
-        f"Evaluation: {state['evaluation_seconds']:.2f} с; подготовка: {state['preparation_seconds']:.2f} с; сохранение checkpoints: {state['save_seconds']:.2f} с.",
-        "",
-        "Основной режим — argmax; sampling и greedy — отдельные контрольные показатели.",
-        "",
-        "| Update | Решения | Adam | Active, с | Train W/D/L | Win rate | Free/forced | KL free / all | Stop |",
-        "|---|---:|---:|---:|---:|---:|---:|---|---|",
-    ]
-    for r in rows:
-        p = r["ppo"]
-        lines.append(
-            f"| {r['update']} | {r['total_decisions']} | {r['total_Adam_steps']} | {r['active_seconds']:.1f} | {r['W']}/{r['D']}/{r['L']} | {r['win_rate']:.1%} | {r['free_decisions']}/{r['forced_decisions']} | {p.get('sampled_kl_free')} / {p.get('sampled_kl')} | {p['stop_reason']} |"
-        )
-    lines += [
-        "",
-        "## Development",
-        "",
-        "| Update | Режим | Соперник | W/D/L | Win rate |",
-        "|---|---|---|---:|---:|",
-    ]
-    for number, evaluation in state["evaluated"].items():
-        for mode, enemies in evaluation["runs"].items():
-            for enemy, record in enemies.items():
-                s = record["summary"]
-                lines.append(
-                    f"| {number} | {mode} | {enemy} | {s['W']}/{s['D']}/{s['L']} | {s['win_rate']:.1%} |"
-                )
+    lines += ["", "## Development", ""]
+    lines.table(
+        ("Update", "Режим", "Соперник", "W/D/L", "Win rate"),
+        ("left", "left", "left", "right", "right"),
+        (
+            (
+                number,
+                mode,
+                enemy,
+                format_wdl(record["summary"]),
+                f"{record['summary']['win_rate']:.1%}",
+            )
+            for number, evaluation in state["evaluated"].items()
+            for mode, enemies in evaluation["runs"].items()
+            for enemy, record in enemies.items()
+        ),
+    )
     lines += ["", f"Выбранный кандидат: {state['best']}."]
     if final:
         lines += [
@@ -1006,12 +1127,8 @@ def report(config, out):
             "",
             f"Последний rollout: {r['decisions']} решений; превышение общего лимита: {r['decision_overshoot']}; превышение времени: {r['active_time_overshoot_seconds']:.3f} с.",
         ]
-    telemetry = out / "telemetry/resources.jsonl"
-    if telemetry.exists():
-        gpu = analyze_telemetry(telemetry, active_phase="ppo")
-        write_json(
-            out / "gpu-analysis.json", {k: v for k, v in gpu.items() if k != "active"}
-        )
+    gpu = _report_gpu_metrics(out)
+    if gpu is not None:
         lines += [
             "",
             "## NVML",
@@ -1024,69 +1141,72 @@ def report(config, out):
         "",
         "## Границы вывода",
         "",
-        "Дополнительная проверка повторно использует 256 validation-матчей прежнего PPO; это открытый validation, не test." if controlled(config) else "Дополнительная проверка использует новые расстановки знакомых validation-worlds. Test закрыт; 75% — цель проекта, не автоматическое подтверждение обобщения.",
+        "Дополнительная проверка повторно использует 256 validation-матчей прежнего PPO; это открытый validation, не test."
+        if controlled(config)
+        else "Дополнительная проверка использует новые расстановки знакомых validation-worlds. Test закрыт; 75% — цель проекта, не автоматическое подтверждение обобщения.",
         "Отсутствие побед в rollout явно означает отсутствие положительной терминальной награды. Награда, модель, температура и бюджет автоматически не менялись.",
     ]
     if controlled(config):
+        # Controlled diagnostics use the policy and optimizer factories above.
         from civ5rl.experiments.ppo_controlled_checks import extend_report
+
         lines += extend_report(config, out, state, rows, final)
-    (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return lines
+
+
+def _plot_learning_curves(out: Path, rows: list[dict[str, Any]]) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True)
+    axes[0].plot(
+        [r["total_decisions"] for r in rows],
+        [r["win_rate"] for r in rows],
+        label="Train P(win)",
+    )
+    axes[1].plot(
+        [r["total_decisions"] for r in rows],
+        [r["ppo"].get("sampled_kl_free") or 0 for r in rows],
+        label="Post-update sampled KL (free)",
+    )
+    for ax in axes:
+        ax.legend()
+        ax.grid(alpha=0.25)
+        ax.set_xlabel("Learner decisions")
+    fig.savefig(out / "learning-curves.png", dpi=150)
+    plt.close(fig)
+
+
+def report(config: dict[str, Any], out: Path) -> dict[str, Any]:
+    state: dict[str, Any] = read_json(out / "state.json")
+    rows = read_jsonl(out / "updates.jsonl", missing_ok=True, skip_blank=False, encoding=None)
+    final_path = out / "confirmation.json"
+    final = read_json(final_path) if final_path.exists() else None
+    _render_report(config, out, state, rows, final).write(out / "report.md")
     if rows:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        fig, axes = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True)
-        axes[0].plot(
-            [r["total_decisions"] for r in rows],
-            [r["win_rate"] for r in rows],
-            label="Train P(win)",
-        )
-        axes[1].plot(
-            [r["total_decisions"] for r in rows],
-            [r["ppo"].get("sampled_kl_free") or 0 for r in rows],
-            label="Post-update sampled KL (free)",
-        )
-        for ax in axes:
-            ax.legend()
-            ax.grid(alpha=0.25)
-            ax.set_xlabel("Learner decisions")
-        fig.savefig(out / "learning-curves.png", dpi=150)
-        plt.close(fig)
+        _plot_learning_curves(out, rows)
     return state
 
 
-def audit_replays(config, out):
-    cache = read_json(out / "evaluations.json")
-    selected = []
+def _audit_replay_selection(cache: dict[str, Any]) -> list[Path]:
+    selected: dict[Path, None] = {}
     for evaluation in cache.values():
         if evaluation["reused_parent"]:
             continue
         for enemies in evaluation["runs"].values():
             for value in enemies.values():
-                paths = sorted(Path(value["directory"]).glob("*/metrics.json"))
-                for outcome in ("W", "D", "L"):
-                    for p in paths:
-                        r = read_json(p)
-                        o = (
-                            "D"
-                            if r["winner"] is None
-                            else "W"
-                            if r["winner"] == r["side"]
-                            else "L"
-                        )
-                        if o == outcome:
-                            selected.append(p.parent)
-                            break
-    selected = list(dict.fromkeys(selected))
+                representatives = select_outcome_representatives(value["directory"], wdl_order=True)
+                selected.update(dict.fromkeys(representatives.values()))
+    return list(selected)
+
+
+def audit_replays(config: dict[str, Any], out: Path) -> None:
+    selected = _audit_replay_selection(read_json(out / "evaluations.json"))
     if controlled(config):
         # One representative of each observed outcome is sufficient here.
-        representatives = {}
-        for path in selected:
-            result = read_json(path / "metrics.json")
-            outcome = "D" if result["winner"] is None else "W" if result["winner"] == result["side"] else "L"
-            representatives.setdefault(outcome, path)
+        representatives = select_outcome_representatives(selected)
         selected = list(representatives.values())
     checks = [verify_replay(p) for p in selected]
     write_json(out / "replay-verification.json", checks)
@@ -1094,11 +1214,14 @@ def audit_replays(config, out):
         descriptions = []
         for directory, check in zip(selected, checks):
             replay = read_json(directory / "replay.json")
-            descriptions.append({
-                "directory": str(directory), "metrics": read_json(directory / "metrics.json"),
-                "commands": dict(Counter(s["action"]["kind"] for s in replay["steps"])),
-                "verification": check,
-            })
+            descriptions.append(
+                {
+                    "directory": str(directory),
+                    "metrics": read_json(directory / "metrics.json"),
+                    "commands": dict(Counter(s["action"]["kind"] for s in replay["steps"])),
+                    "verification": check,
+                }
+            )
         write_json(out / "representative-battles.json", descriptions)
     hashes = {
         p.relative_to(out).as_posix(): file_hash(p)
@@ -1112,38 +1235,30 @@ def audit_replays(config, out):
     write_json(out / "artifact-hashes.json", hashes)
 
 
+def _report_run_failure(config, out):
+    if (out / "state.json").exists():
+        with suppress(Exception):
+            report(config, out)
+
+
 def run(phase, config, out, device):
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    with RunLock(out):
-        try:
-            if phase == "prepare":
-                return prepare(config, out)
-            plan = check_identity(
-                config, out, for_execution=phase in ("train", "evaluate", "run")
-            )
-            if phase in ("train", "run"):
-                train(config, plan, out, device)
-            if phase in ("evaluate", "run"):
-                confirmation(config, plan, out)
-                write_json(
-                    out / "status.json",
-                    {
-                        "status": "complete",
-                        "stop_reason": read_json(out / "state.json")["stop_reason"],
-                    },
-                )
-            report(config, out)
-            if phase in ("evaluate", "run"):
-                audit_replays(config, out)
-        except BaseException:
-            (out / "traceback.txt").write_text(traceback.format_exc(), encoding="utf-8")
+    with experiment_run_guard(out, phase=phase, on_error_report=lambda: _report_run_failure(config, out)):
+        if phase == "prepare":
+            return prepare(config, out)
+        plan = check_identity(config, out, for_execution=phase in ("train", "evaluate", "run"))
+        if phase in ("train", "run"):
+            train(config, plan, out, device)
+        if phase in ("evaluate", "run"):
+            confirmation(config, plan, out)
             write_json(
-                out / "status.json", {"status": "technical_error", "phase": phase}
+                out / "status.json",
+                {
+                    "status": "complete",
+                    "stop_reason": read_json(out / "state.json")["stop_reason"],
+                },
             )
-            if (out / "state.json").exists():
-                try:
-                    report(config, out)
-                except Exception:  # noqa: BLE001, S110 -- best-effort report before re-raising
-                    pass
-            raise
+        report(config, out)
+        if phase in ("evaluate", "run"):
+            audit_replays(config, out)

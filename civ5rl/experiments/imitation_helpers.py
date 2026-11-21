@@ -1,5 +1,7 @@
 """Shared primitives for CP imitation experiments."""
 
+from __future__ import annotations
+
 from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
@@ -8,10 +10,11 @@ from time import perf_counter
 import numpy as np
 import torch
 
-from civ5rl.engine.runtime.shared import pool
+from civ5rl.engine.runtime.shared import pool as pool  # noqa: PLC0414 -- historical re-export
 from civ5rl.protocols.imitation import load_episode, make_case
 from civ5rl.provenance.common import file_sha256, read_json
-from civ5rl.provenance.rng import capture_rng, restore_rng as _restore_rng
+from civ5rl.provenance.rng import capture_rng
+from civ5rl.provenance.rng import restore_rng as _restore_rng
 
 
 def adam(policy, config, device):
@@ -33,7 +36,12 @@ def load_policy(config, path, device):
 
     saved = torch.load(path, weights_only=False, map_location="cpu")
     from civ5rl.core.preview import extends_parent, load_parent_model
-    variant = config["model"]["variant"] if extends_parent(config) else saved.get("variant") or config.get("model", {}).get("variant", "C")
+
+    variant = (
+        config["model"]["variant"]
+        if extends_parent(config)
+        else saved.get("variant") or config.get("model", {}).get("variant", "C")
+    )
     policy = Policy(variant)
     load_parent_model(policy, saved, config)
     policy = policy.to(device)
@@ -49,9 +57,7 @@ def load_policy(config, path, device):
         policy.enable_action_routing()
         policy.enable_maximum_routing()
     if cuda and performance["compile"]:
-        policy.enable_compile(
-            spatial_mode=performance.get("spatial_compile_mode")
-        )
+        policy.enable_compile(spatial_mode=performance.get("spatial_compile_mode"))
     for parameter in policy.value.parameters():
         parameter.requires_grad_(False)
     if cuda:
@@ -59,9 +65,7 @@ def load_policy(config, path, device):
             policy.enable_coalesced_spatial()
         policy.coalesced_accumulation = performance.get("coalesced_accumulation", False)
         if performance.get("recurrent_cuda_graphs", False):
-            policy.enable_recurrent_graphs(
-                max_shapes=performance.get("recurrent_graph_max_shapes", 64)
-            )
+            policy.enable_recurrent_graphs(max_shapes=performance.get("recurrent_graph_max_shapes", 64))
     return policy
 
 
@@ -73,16 +77,10 @@ def demonstrations(config, manifest, out, split):
         metrics = read_json(path.parent / "metrics.json")
         if case != make_case(config, manifest, split, case["case_id"]):
             raise ValueError("Untrusted demonstration case")
-        if (
-            metrics["status"] != "completed"
-            or file_sha256(path) != metrics["demonstration_sha256"]
-        ):
+        if metrics["status"] != "completed" or file_sha256(path) != metrics["demonstration_sha256"]:
             raise ValueError("Unfinished/corrupted demonstration")
         episode = load_episode(path)
-        if (
-            episode["parent_world"] not in manifest["worlds"][split]
-            or episode["split"] != split
-        ):
+        if episode["parent_world"] not in manifest["worlds"][split] or episode["split"] != split:
             raise ValueError("Demonstration world split leakage")
         episodes.append(episode)
         files[path.relative_to(out).as_posix()] = metrics["demonstration_sha256"]
@@ -139,8 +137,7 @@ def update_selection(state, epoch, ce, settings):
     else:
         result["plateau_count"] += 1
     result["plateau"] = (
-        epoch >= settings["plateau_min_epoch"]
-        and result["plateau_count"] >= settings["plateau_patience"]
+        epoch >= settings["plateau_min_epoch"] and result["plateau_count"] >= settings["plateau_patience"]
     )
     return result
 
@@ -180,10 +177,7 @@ def collect_summary(directory):
     rows = [read_json(p) for p in sorted(Path(directory).glob("*/metrics.json"))]
     if len(rows) != 64 or any(r["status"] != "completed" for r in rows):
         raise ValueError(f"Incomplete battle evaluation: {directory}")
-    outcomes = Counter(
-        "D" if r["winner"] is None else "W" if r["winner"] == r["side"] else "L"
-        for r in rows
-    )
+    outcomes = Counter("D" if r["winner"] is None else "W" if r["winner"] == r["side"] else "L" for r in rows)
     return {
         "matches": len(rows),
         "W": outcomes["W"],

@@ -5,7 +5,10 @@ observation. The first changed decision therefore processes its observation
 exactly once, while the worker reconstructs public encoder and CP history.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
+
 from civ5rl.engine.evaluation.executor import EvaluationExecutor
 from civ5rl.experiments.comparison_prefix import SourcePrefixes
 from civ5rl.provenance.common import read_json
@@ -27,9 +30,7 @@ class TurnExecutor(EvaluationExecutor):
         key = (source, branch["command"])
         if key not in self.previous:
             history = read_json(Path(source) / "history.json")
-            before = [
-                row["command"] for row in history if row["command"] < branch["command"]
-            ]
+            before = [row["command"] for row in history if row["command"] < branch["command"]]
             self.previous[key] = before[-1] if before else None
         command = self.previous[key]
         if command is not None:

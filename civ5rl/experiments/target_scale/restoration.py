@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from civ5rl.engine.runtime.control import TrainingCounters
+from civ5rl.experiments._shared.io import (
+    read_jsonl,
+    read_jsonl_lines,
+    recover_jsonl_prefix,
+)
 from civ5rl.provenance.common import read_json, write_json
 
 
@@ -22,9 +26,7 @@ class BcRestorationState:
     epoch_order: list[Any] | None = None
 
     @classmethod
-    def from_dict(
-        cls, data: dict[str, Any], *, protocol: str | None = "bc"
-    ) -> BcRestorationState:
+    def from_dict(cls, data: dict[str, Any], *, protocol: str | None = "bc") -> BcRestorationState:
         adam_steps = data.get("adam_steps")
         if adam_steps is None:
             counters = TrainingCounters.from_dict(data, protocol=protocol)
@@ -130,18 +132,11 @@ def select_bc_checkpoint(
     """Resolve candidate checkpoint path from restart input, state.json['latest'], or initial.pt."""
     out_path = Path(out)
     if restart_file is not None:
-        restart_path = (
-            out_path / restart_file
-            if not Path(restart_file).is_absolute()
-            else Path(restart_file)
-        )
+        restart_path = out_path / restart_file if not Path(restart_file).is_absolute() else Path(restart_file)
         if restart_path.exists():
             restart = read_json(restart_path)
             if restart and not restart.get("consumed", False):
-                if (
-                    "checkpoint_boundary" in restart
-                    and "latest" in restart["checkpoint_boundary"]
-                ):
+                if "checkpoint_boundary" in restart and "latest" in restart["checkpoint_boundary"]:
                     return str(restart["checkpoint_boundary"]["latest"])
                 if "latest" in restart:
                     return str(restart["latest"])
@@ -173,11 +168,7 @@ def reconcile_state_vs_steplog(
     Truncates orphaned trailing steps if interrupted before checkpoint save,
     validates step continuity and label sums.
     """
-    saved_dict = (
-        asdict(saved_state)
-        if isinstance(saved_state, BcRestorationState)
-        else saved_state
-    )
+    saved_dict = asdict(saved_state) if isinstance(saved_state, BcRestorationState) else saved_state
 
     if state_record is not None:
         for key in (
@@ -190,35 +181,18 @@ def reconcile_state_vs_steplog(
             saved_val = _extract_counter(saved_dict, key)
             state_val = _extract_counter(state_record, key)
             if saved_val != state_val:
-                raise ValueError(
-                    f"Checkpoint state and state.json disagree on {key}"
-                )
+                raise ValueError(f"Checkpoint state and state.json disagree on {key}")
 
     steps_path = Path(steplog_path)
-    all_lines = (
-        [
-            line
-            for line in steps_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        if steps_path.exists()
-        else []
-    )
+    all_lines = read_jsonl_lines(steps_path) if steps_path.exists() else []
     origin_steps = int(_extract_counter(saved_dict, "Adam_steps") or 0)
-
-    if len(all_lines) < origin_steps:
-        raise ValueError("steps.jsonl has fewer records than saved checkpoint")
-    if len(all_lines) > origin_steps:
-        all_lines = all_lines[:origin_steps]
-        steps_path.write_text(
-            ("\n".join(all_lines) + "\n") if all_lines else "",
-            encoding="utf-8",
-        )
-
-    previous_records = [json.loads(line) for line in all_lines]
-    if [r["step"] for r in previous_records] != list(
-        range(1, origin_steps + 1)
-    ):
+    previous_records = recover_jsonl_prefix(
+        steps_path,
+        all_lines,
+        origin_steps,
+        missing_error="steps.jsonl has fewer records than saved checkpoint",
+    )
+    if [r["step"] for r in previous_records] != list(range(1, origin_steps + 1)):
         raise ValueError("Non-sequential step numbers in steps.jsonl")
 
     expected_labels = int(saved_dict.get("free_labels_processed", 0))
@@ -245,11 +219,7 @@ def restore_epoch_cursor_and_batches(
             label_minibatches as label_minibatches_fn,
         )
 
-    saved_dict = (
-        asdict(saved_state)
-        if isinstance(saved_state, BcRestorationState)
-        else saved_state
-    )
+    saved_dict = asdict(saved_state) if isinstance(saved_state, BcRestorationState) else saved_state
 
     raw_order = saved_dict.get("epoch_order")
     if raw_order is None:
@@ -259,14 +229,8 @@ def restore_epoch_cursor_and_batches(
     for item in raw_order:
         if isinstance(item, Span_cls):
             order.append(item)
-        elif (
-            hasattr(item, "episode")
-            and hasattr(item, "start")
-            and hasattr(item, "stop")
-        ):
-            order.append(
-                Span_cls(int(item.episode), int(item.start), int(item.stop))
-            )
+        elif hasattr(item, "episode") and hasattr(item, "start") and hasattr(item, "stop"):
+            order.append(Span_cls(int(item.episode), int(item.start), int(item.stop)))
         else:
             order.append(Span_cls(int(item[0]), int(item[1]), int(item[2])))
 
@@ -328,16 +292,10 @@ def restore_bc_training_state(
         origin_steps = int(_extract_counter(boundary, "Adam_steps") or 0)
         saved_steps = int(_extract_counter(saved_dict, "Adam_steps") or 0)
         if not saved_dict.get("epoch_completed") or saved_steps != origin_steps:
-            raise ValueError(
-                "Input-fix restart requires its complete saved epoch boundary"
-            )
+            raise ValueError("Input-fix restart requires its complete saved epoch boundary")
 
         steps_path = out_path / "steps.jsonl"
-        previous = [
-            json.loads(line)
-            for line in steps_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ] if steps_path.exists() else []
+        previous = read_jsonl(steps_path) if steps_path.exists() else []
 
         if len(previous) != origin_steps:
             raise ValueError("Saved step log differs from checkpoint boundary")
@@ -355,8 +313,7 @@ def restore_bc_training_state(
                         "completed": True,
                         "steps": len(records),
                         "labels": data_labels,
-                        "online_CE": sum(r["ce"] * r["labels"] for r in records)
-                        / data_labels,
+                        "online_CE": sum(r["ce"] * r["labels"] for r in records) / data_labels,
                     }
                 )
         else:
@@ -396,18 +353,20 @@ def restore_bc_training_state(
             or int(state_record.get("epoch", 0)) > 0
         )
     )
-    is_resuming = resuming_more_data or resume or (
-        state_record is not None
-        and (
-            int(_extract_counter(state_record, "Adam_steps") or 0) > 0
-            or int(state_record.get("epoch", 0)) > 0
+    is_resuming = (
+        resuming_more_data
+        or resume
+        or (
+            state_record is not None
+            and (
+                int(_extract_counter(state_record, "Adam_steps") or 0) > 0
+                or int(state_record.get("epoch", 0)) > 0
+            )
         )
     )
 
     if is_resuming:
-        previous_records = reconcile_state_vs_steplog(
-            saved_dict, state_record, out_path / "steps.jsonl"
-        )
+        previous_records = reconcile_state_vs_steplog(saved_dict, state_record, out_path / "steps.jsonl")
         origin_steps = int(_extract_counter(saved_dict, "Adam_steps") or 0)
         steps = origin_steps
         labels = int(saved_dict["free_labels_processed"])
@@ -417,7 +376,7 @@ def restore_bc_training_state(
                 cache.counters[field_name] = int(saved_dict.get(field_name, 0))
 
         history = list(saved_dict.get("epochs_history", []))
-        clock_offset = float(
+        raw_clock_offset: Any = (
             state_record.get(
                 "active_seconds",
                 saved_dict.get("active_seconds_at_save_start", 0.0),
@@ -425,6 +384,7 @@ def restore_bc_training_state(
             if state_record is not None
             else saved_dict.get("active_seconds_at_save_start", 0.0)
         )
+        clock_offset = float(raw_clock_offset)
         saved_epoch = int(saved_dict["epoch"])
         evaluate_needed = False
 
@@ -438,11 +398,7 @@ def restore_bc_training_state(
         else:
             start_epoch = saved_epoch
             resume_mid_epoch = True
-            if (
-                history
-                and history[-1].get("epoch") == saved_epoch
-                and not history[-1].get("completed", True)
-            ):
+            if history and history[-1].get("epoch") == saved_epoch and not history[-1].get("completed", True):
                 history.pop()
 
         write_json(

@@ -1,13 +1,16 @@
 """One CPU-only, paired evaluation of the frozen target BC policy."""
 
+from __future__ import annotations
+
 import platform
 import random
 import sys
-import traceback
 from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 
 import numpy as np
 import torch
@@ -18,6 +21,15 @@ from civ5rl.core.context import context_from_spec
 from civ5rl.core.observation import ordered_actions
 from civ5rl.engine.runtime.control import RunLock
 from civ5rl.engine.runtime.shared import pool
+from civ5rl.experiments._shared.evaluation_runner import run_chunked_pool
+from civ5rl.experiments._shared.lifecycle import record_experiment_errors
+from civ5rl.experiments._shared.markdown import MarkdownReport, format_wdl
+from civ5rl.experiments._shared.outcomes import (
+    classify_outcome,
+    summarize_wdl,
+    verify_match_artifacts,
+)
+from civ5rl.experiments._shared.provenance_checks import verify_manifest_digest
 from civ5rl.experiments.evaluation import paired_world_bootstrap
 from civ5rl.experiments.ppo_after_imitation import play_case
 from civ5rl.experiments.ppo_artifacts import load_rollout
@@ -41,16 +53,10 @@ MODES = [
 
 
 def execution_identity():
-    names = [
-        p
-        for package in ("civ5rl", "civ5sim", "civ5map")
-        for p in (ROOT / package).rglob("*.py")
-    ]
+    names = [p for package in ("civ5rl", "civ5sim", "civ5map") for p in (ROOT / package).rglob("*.py")]
     names.append(ROOT / "tools/archive/evaluate_target_bc_sampling.py")
     suffixes = (
-        ("combat.dll", "combat_ai.dll")
-        if sys.platform == "win32"
-        else ("libcombat.so", "libcombat_ai.so")
+        ("combat.dll", "combat_ai.dll") if sys.platform == "win32" else ("libcombat.so", "libcombat_ai.so")
     )
     names += [
         ROOT / "build" / name
@@ -62,9 +68,7 @@ def execution_identity():
         )
     ]
     return {
-        "files": {
-            p.relative_to(ROOT).as_posix(): file_sha256(p) for p in sorted(names)
-        },
+        "files": {p.relative_to(ROOT).as_posix(): file_sha256(p) for p in sorted(names)},
         "python": platform.python_version(),
         "platform": platform.platform(),
         "torch": torch.__version__,
@@ -92,21 +96,15 @@ def inputs(settings):
         or settings["bootstrap_samples"] != 10000
         or settings["bootstrap_seed"] != 20261103
     ):
-        raise ValueError(
-            "This experiment is fixed to three modes, four workers and the agreed bootstrap"
-        )
+        raise ValueError("This experiment is fixed to three modes, four workers and the agreed bootstrap")
     parent = ROOT / settings["checkpoint"]
-    if (
-        settings["checkpoint_sha256"] != PARENT_SHA256
-        or file_sha256(parent) != PARENT_SHA256
-    ):
+    if settings["checkpoint_sha256"] != PARENT_SHA256 or file_sha256(parent) != PARENT_SHA256:
         raise ValueError("Expected original BC epoch 10, before critic preparation/PPO")
     manifest = ROOT / settings["manifest"]
     if file_sha256(manifest) != MANIFEST_SHA256:
         raise ValueError("Target BC manifest changed")
     plan = read_json(manifest)
-    if digest({k: v for k, v in plan.items() if k != "hash"}) != plan["hash"]:
-        raise ValueError("Invalid target manifest digest")
+    verify_manifest_digest(plan, error_msg="Invalid target manifest digest")
     cases = plan["development"]
     config = load_config(ROOT / settings["evaluator_config"])
     if len(cases) != 128 or len({c["case_hash"] for c in cases}) != 128:
@@ -121,8 +119,7 @@ def inputs(settings):
             or case["opponent"] != "cp"
             or case["max_calls_per_turn"] != config["environment"]["max_calls_per_turn"]
             or case["opponent_search"] != config["teacher_search"]
-            or digest({k: v for k, v in case.items() if k != "case_hash"})
-            != case["case_hash"]
+            or digest({k: v for k, v in case.items() if k != "case_hash"}) != case["case_hash"]
         ):
             raise ValueError("Development conditions changed")
     identity = {
@@ -138,9 +135,7 @@ def inputs(settings):
 def preflight(settings, out):
     """Real BC logits on saved public states; no new battle or model training."""
     configure(17, "cpu")
-    episode = load_rollout(
-        ROOT / "artifacts/rl/ppo-after-target-bc/rollouts/latest.pt"
-    )[0]
+    episode = load_rollout(ROOT / "artifacts/rl/ppo-after-target-bc/rollouts/latest.pt")[0]
     agent = RLAgent.from_checkpoint(ROOT / settings["checkpoint"], "cpu")
     agent.reset(context_from_spec(episode["spec"]))
     tensors, checks = [], []
@@ -153,9 +148,7 @@ def preflight(settings, out):
             new = action_probabilities(logits, 1)[0].cpu().numpy()
             np.testing.assert_array_equal(old, new)
             before, after = random.Random(20261103), random.Random(20261103)
-            assert [choose(old, before) for _ in range(64)] == [
-                choose(new, after) for _ in range(64)
-            ]
+            assert [choose(old, before) for _ in range(64)] == [choose(new, after) for _ in range(64)]
             assert before.getstate() == after.getstate()
             colder = action_probabilities(logits, 0.5)
             assert int(colder[0].argmax()) == int(logits[0].argmax())
@@ -169,9 +162,7 @@ def preflight(settings, out):
                     "argmax_and_mask_preserved": True,
                 }
             )
-            agent.encoder.remember_action(
-                episode["actions"][index][episode["chosen"][index]], observation
-            )
+            agent.encoder.remember_action(episode["actions"][index][episode["chosen"][index]], observation)
     torch.save(tensors, out / "preflight-logits.pt")
     write_json(
         out / "preflight.json",
@@ -193,7 +184,7 @@ def completed_case(directory, case, key):
         "final.json",
         "selection-metrics.json",
     )
-    if not all((directory / name).is_file() for name in names):
+    if not verify_match_artifacts(directory, names):
         return False
     metric = read_json(directory / "metrics.json")
     return (
@@ -205,116 +196,135 @@ def completed_case(directory, case, key):
     )
 
 
+@dataclass(frozen=True)
+class SamplingMatchTask:
+    config: dict[str, Any]
+    case: dict[str, Any]
+    parent: str
+    setting: dict[str, Any]
+    directory: str
+    key: str
+
+
 def match_task(task):
-    config, case, parent, setting, directory, key = task
-    directory = Path(directory)
+    if not isinstance(task, SamplingMatchTask):
+        task = SamplingMatchTask(*task)
+    directory = Path(task.directory)
     result = play_case(
-        config,
-        case,
-        parent,
-        setting["mode"],
+        task.config,
+        task.case,
+        task.parent,
+        task.setting["mode"],
         "cp",
         directory,
-        temperature=setting["temperature"],
+        temperature=task.setting["temperature"],
         collect_selection_metrics=True,
     )
     result.update(
-        evaluation_key=key, mode=setting["mode"], temperature=setting["temperature"]
+        evaluation_key=task.key,
+        mode=task.setting["mode"],
+        temperature=task.setting["temperature"],
     )
     write_json(directory / "metrics.json", result)
     return result
 
 
 def case_directory(out, setting, case):
-    return (
-        out
-        / setting["label"]
-        / f"case-{case['case_id']:03}-side-{case['learner_side']}"
-    )
+    return out / setting["label"] / f"case-{case['case_id']:03}-side-{case['learner_side']}"
 
 
 def wdl(rows):
-    counts = Counter(
-        "D" if r["winner"] is None else "W" if r["winner"] == r["side"] else "L"
-        for r in rows
-    )
+    rounds = [row["rounds"] for row in rows]
     return {
-        "matches": len(rows),
-        **{k: counts[k] for k in ("W", "D", "L")},
-        "win_rate": counts["W"] / len(rows),
-        "mean_rounds": float(np.mean([r["rounds"] for r in rows])),
-        "median_rounds": float(np.median([r["rounds"] for r in rows])),
-        "turn_limit_draw_rate": sum(
-            r["winner"] is None and r["reason"] == "turn_limit" for r in rows
-        )
+        **summarize_wdl(rows),
+        "mean_rounds": float(np.mean(rounds)),
+        "median_rounds": float(np.median(rounds)),
+        "turn_limit_draw_rate": sum(row["winner"] is None and row["reason"] == "turn_limit" for row in rows)
         / len(rows),
     }
 
 
 def paired(cases, rows):
     return {
-        (c["parent_world"], c["case_id"], c["learner_side"]): int(
-            r["winner"] == r["side"]
+        (case["parent_world"], case["case_id"], case["learner_side"]): int(
+            classify_outcome(row["winner"], row["side"]) == "W"
         )
-        for c, r in zip(cases, rows, strict=True)
+        for case, row in zip(cases, rows, strict=True)
     }
 
 
-def report(settings, cases, identity, out):
+def _load_mode_results(cases, setting, key, out):
+    rows, decisions = [], []
+    for case in cases:
+        directory = case_directory(out, setting, case)
+        if not completed_case(directory, case, key):
+            continue
+        row = read_json(directory / "metrics.json")
+        # Independently verify W/D/L against the match completion record.
+        raw = read_json(directory / "result.json")
+        if row["winner"] != raw["winner"] or row["reason"] != raw["reason"]:
+            raise ValueError("Metrics differ from saved match result")
+        rows.append(row)
+        decisions.extend(read_json(directory / "selection-metrics.json"))
+    return rows, decisions
+
+
+def _write_incomplete_report(out, setting, rows):
+    write_json(
+        out / "summary.json",
+        {
+            "status": "incomplete",
+            "mode": setting["label"],
+            "completed": len(rows),
+        },
+    )
+    (out / "report.md").write_text(
+        f"# Неполная оценка\n\n{setting['label']}: {len(rows)}/128; итоговое сравнение не готово.\n",
+        encoding="utf-8",
+    )
+
+
+def _sampling_slices(cases, rows):
+    slices = {}
+    for field in ("map_size", "army_bin", "placement", "learner_side"):
+        slices[field] = {
+            str(value): wdl([row for case, row in zip(cases, rows, strict=True) if case[field] == value])
+            for value in sorted({case[field] for case in cases}, key=str)
+        }
+    return slices
+
+
+def _sampling_behavior(decisions):
+    behavior = {"free_decisions": len(decisions)}
+    for field in (
+        "p_max",
+        "argmax_selected",
+        "normalized_entropy",
+        "legal_actions",
+    ):
+        values = [decision[field] for decision in decisions]
+        behavior[field] = (
+            {"mean": float(np.mean(values)), "median": float(np.median(values))}
+            if values
+            else {"mean": None, "median": None}
+        )
+    return behavior
+
+
+def _summarize_modes(settings, cases, identity, out):
     modes, outcomes = {}, {}
     wall_times = read_json(out / "run.json").get("mode_wall_seconds", {})
     for setting in settings["modes"]:
         key = mode_key(identity, setting)
-        rows, decisions = [], []
-        for case in cases:
-            directory = case_directory(out, setting, case)
-            if not completed_case(directory, case, key):
-                continue
-            row = read_json(directory / "metrics.json")
-            # Independently verify W/D/L against the match completion record.
-            raw = read_json(directory / "result.json")
-            if row["winner"] != raw["winner"] or row["reason"] != raw["reason"]:
-                raise ValueError("Metrics differ from saved match result")
-            rows.append(row)
-            decisions.extend(read_json(directory / "selection-metrics.json"))
+        rows, decisions = _load_mode_results(cases, setting, key, out)
         if len(rows) != 128:
-            write_json(
-                out / "summary.json",
-                {
-                    "status": "incomplete",
-                    "mode": setting["label"],
-                    "completed": len(rows),
-                },
-            )
-            (out / "report.md").write_text(
-                f"# Неполная оценка\n\n{setting['label']}: {len(rows)}/128; итоговое сравнение не готово.\n",
-                encoding="utf-8",
-            )
-            return False
-        slices = {}
-        for field in ("map_size", "army_bin", "placement", "learner_side"):
-            slices[field] = {
-                str(value): wdl(
-                    [r for c, r in zip(cases, rows, strict=True) if c[field] == value]
-                )
-                for value in sorted({c[field] for c in cases}, key=str)
-            }
-        behavior = {"free_decisions": len(decisions)}
-        for field in (
-            "p_max",
-            "argmax_selected",
-            "normalized_entropy",
-            "legal_actions",
-        ):
-            values = [r[field] for r in decisions]
-            behavior[field] = (
-                {"mean": float(np.mean(values)), "median": float(np.median(values))}
-                if values
-                else {"mean": None, "median": None}
-            )
+            _write_incomplete_report(out, setting, rows)
+            return None
+        slices = _sampling_slices(cases, rows)
+        behavior = _sampling_behavior(decisions)
         modes[setting["label"]] = {
             **wdl(rows),
-            "match_seconds_sum": sum(r["seconds"] for r in rows),
+            "match_seconds_sum": sum(row["seconds"] for row in rows),
             "wall_seconds": wall_times.get(setting["label"]),
             "behavior": behavior,
             "slices": slices,
@@ -323,7 +333,11 @@ def report(settings, cases, identity, out):
             "temperature": setting["temperature"],
         }
         outcomes[setting["label"]] = paired(cases, rows)
-    metadata = {(c["parent_world"], c["case_id"], c["learner_side"]): c for c in cases}
+    return modes, outcomes
+
+
+def _build_sampling_summary(cases, modes, outcomes):
+    metadata = {(case["parent_world"], case["case_id"], case["learner_side"]): case for case in cases}
     comparison = paired_world_bootstrap(
         outcomes["sample-t1"],
         outcomes["sample-t0.5"],
@@ -347,35 +361,67 @@ def report(settings, cases, identity, out):
         "clusters": 16,
         "cases_per_world": 8,
     }
-    write_json(out / "summary.json", result)
-    lines = [
-        "# Target BC: режим выбора действий",
-        "",
-        "CPU / 4 workers / один поток Torch; исходный BC epoch 10; ordinary stateful CP; 128 development случаев на режим.",
-        "",
-        "| Режим | W/D/L | Победы | Round mean/median | Ничьи по лимиту | Wall, с |",
-        "|---|---|---:|---|---:|---:|",
-    ]
-    for label, row in modes.items():
-        lines.append(
-            f"| {label} | {row['W']}/{row['D']}/{row['L']} | {row['win_rate']:.2%} | {row['mean_rounds']:.2f}/{row['median_rounds']:.1f} | {row['turn_limit_draw_rate']:.2%} | {row['wall_seconds']:.1f} |"
-        )
+    return result
+
+
+def _sampling_behavior_cells(label, behavior):
+    def formatted_pair(field):
+        summary = behavior[field]
+        return f"{summary['mean']:.4f}/{summary['median']:.4f}"
+
+    return (
+        label,
+        behavior["free_decisions"],
+        formatted_pair("p_max"),
+        f"{behavior['argmax_selected']['mean']:.2%}",
+        formatted_pair("normalized_entropy"),
+        formatted_pair("legal_actions"),
+    )
+
+
+def _render_sampling_report(out, result):
+    modes = result["modes"]
+    comparison = result["T05_minus_T1"]
+    lines = MarkdownReport(
+        [
+            "# Target BC: режим выбора действий",
+            "",
+            "CPU / 4 workers / один поток Torch; исходный BC epoch 10; ordinary stateful CP; 128 development случаев на режим.",
+            "",
+        ]
+    )
+    lines.table(
+        ("Режим", "W/D/L", "Победы", "Round mean/median", "Ничьи по лимиту", "Wall, с"),
+        ("---", "---", "---:", "---", "---:", "---:"),
+        (
+            (
+                label,
+                format_wdl(row),
+                f"{row['win_rate']:.2%}",
+                f"{row['mean_rounds']:.2f}/{row['median_rounds']:.1f}",
+                f"{row['turn_limit_draw_rate']:.2%}",
+                f"{row['wall_seconds']:.1f}",
+            )
+            for label, row in modes.items()
+        ),
+    )
     lines += [
         "",
         f"T=0.5 − T=1: {comparison['delta']:+.2%}; 95% CI [{comparison['CI95'][0]:+.2%}, {comparison['CI95'][1]:+.2%}]. Bootstrap 10000, seed 20261103, 16 parent-world × 8 матчей.",
         "",
-        "| Режим | Free decisions | p_max mean/median | Argmax share | Entropy/log(N) mean/median | Legal N mean/median |",
-        "|---|---:|---|---:|---|---|",
     ]
-    for label, row in modes.items():
-        b = row["behavior"]
-
-        def pair(k, b=b):
-            return f"{b[k]['mean']:.4f}/{b[k]['median']:.4f}"
-
-        lines.append(
-            f"| {label} | {b['free_decisions']} | {pair('p_max')} | {b['argmax_selected']['mean']:.2%} | {pair('normalized_entropy')} | {pair('legal_actions')} |"
-        )
+    lines.table(
+        (
+            "Режим",
+            "Free decisions",
+            "p_max mean/median",
+            "Argmax share",
+            "Entropy/log(N) mean/median",
+            "Legal N mean/median",
+        ),
+        ("---", "---:", "---", "---:", "---", "---"),
+        (_sampling_behavior_cells(label, row["behavior"]) for label, row in modes.items()),
+    )
     lines += [
         "",
         "Forced исключены из метрик уверенности. Для argmax распределение метрик — T=1. Посещённые состояния расходятся; эти метрики не являются парной оценкой качества действий.",
@@ -385,7 +431,17 @@ def report(settings, cases, identity, out):
         "",
         "Полные срезы: [summary.json](summary.json). Парные случаи и seeds: [cases.json](cases.json). Условия и fingerprint: [run.json](run.json).",
     ]
-    (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    lines.write(out / "report.md")
+
+
+def report(settings, cases, identity, out):
+    results = _summarize_modes(settings, cases, identity, out)
+    if results is None:
+        return False
+    modes, outcomes = results
+    result = _build_sampling_summary(cases, modes, outcomes)
+    write_json(out / "summary.json", result)
+    _render_sampling_report(out, result)
     return True
 
 
@@ -404,9 +460,7 @@ def run(settings, phase="run"):
         if (out / "run.json").exists():
             record = read_json(out / "run.json")
             if record["identity"] != identity or record["settings"] != settings:
-                raise ValueError(
-                    "Existing evaluation has different inputs or evaluator; use a new output"
-                )
+                raise ValueError("Existing evaluation has different inputs or evaluator; use a new output")
         else:
             record = {
                 "identity": identity,
@@ -425,7 +479,7 @@ def run(settings, phase="run"):
             write_json(out / "cases.json", cases)
         if phase == "report":
             return report(settings, cases, identity, out)
-        try:
+        with record_experiment_errors(out, phase=None):
             preflight(settings, out)
             write_json(out / "status.json", {"status": "running"})
             started = perf_counter()
@@ -434,35 +488,40 @@ def run(settings, phase="run"):
             for setting in settings["modes"]:
                 key = mode_key(identity, setting)
                 pending[setting["label"]] = [
-                    (
+                    SamplingMatchTask(
                         config,
-                        c,
+                        case,
                         str(ROOT / settings["checkpoint"]),
                         setting,
-                        str(case_directory(out, setting, c)),
+                        str(case_directory(out, setting, case)),
                         key,
                     )
-                    for c in cases
-                    if not completed_case(case_directory(out, setting, c), c, key)
+                    for case in cases
+                    if not completed_case(case_directory(out, setting, case), case, key)
                 ]
             remaining = sum(map(len, pending.values()))
             with pool(4) as executor:
                 for setting in settings["modes"]:
                     tasks = pending[setting["label"]]
                     tick = perf_counter()
-                    for first in range(0, len(tasks), 4):
-                        part = list(executor.map(match_task, tasks[first : first + 4]))
-                        new_matches += len(part)
-                        remaining -= len(part)
+                    total_tasks = len(tasks)
+                    previous = 0
+
+                    def report_progress(completed, label=setting["label"], total=total_tasks):
+                        nonlocal new_matches, remaining, previous
+                        completed_in_chunk = completed - previous
+                        previous = completed
+                        new_matches += completed_in_chunk
+                        remaining -= completed_in_chunk
                         elapsed = perf_counter() - started
                         print(
-                            f"{setting['label']}: {min(first + 4, len(tasks))}/{len(tasks)} new matches; elapsed={elapsed:.1f}s; ETA~{elapsed / new_matches * remaining:.0f}s",
+                            f"{label}: {completed}/{total} new matches; elapsed={elapsed:.1f}s; ETA~{elapsed / new_matches * remaining:.0f}s",
                             flush=True,
                         )
+
+                    run_chunked_pool(executor, match_task, tasks, 4, on_chunk=report_progress)
                     if tasks:
-                        record.setdefault("mode_wall_seconds", {})[setting["label"]] = (
-                            perf_counter() - tick
-                        )
+                        record.setdefault("mode_wall_seconds", {})[setting["label"]] = perf_counter() - tick
                     write_json(out / "run.json", record)
             if (
                 execution_identity() != identity["execution"]
@@ -473,12 +532,6 @@ def run(settings, phase="run"):
                 raise ValueError("Incomplete comparison")
             record["finished_utc"] = datetime.now(UTC).isoformat()
             write_json(out / "run.json", record)
-            write_json(
-                out / "status.json", {"status": "complete", "new_matches": new_matches}
-            )
+            write_json(out / "status.json", {"status": "complete", "new_matches": new_matches})
             print((out / "report.md").read_text(encoding="utf-8"), flush=True)
             return True
-        except BaseException:
-            (out / "traceback.txt").write_text(traceback.format_exc(), encoding="utf-8")
-            write_json(out / "status.json", {"status": "technical_error"})
-            raise

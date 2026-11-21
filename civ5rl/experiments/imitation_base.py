@@ -1,5 +1,7 @@
 """Initial CP imitation: initialization, data collection, training and evaluation."""
 
+from __future__ import annotations
+
 import json
 import random
 import tempfile
@@ -11,6 +13,7 @@ from civ5rl.experiments.imitation_helpers import adam, demonstrations, load_poli
 from civ5rl.protocols.imitation import make_case, match_task, prepare_manifest, task_for
 from civ5rl.provenance.common import file_sha256, read_json, write_json
 from civ5sim.engine import digest
+
 
 def initialize(config, out):
     import torch
@@ -50,12 +53,11 @@ def initialize(config, out):
             config,
             identity,
         )
-    initial = torch.load(
-        out / "checkpoints/initial.pt", weights_only=False, map_location="cpu"
-    )
+    initial = torch.load(out / "checkpoints/initial.pt", weights_only=False, map_location="cpu")
     if initial["variant"] != "C" or initial["state"]["epoch"] != 0:
         raise ValueError("Unexpected initial BC checkpoint")
     return manifest, identity
+
 
 def collect(config, manifest, out, workers):
     from civ5rl.engine.runtime.telemetry import ResourceMonitor
@@ -80,16 +82,13 @@ def collect(config, manifest, out, workers):
                 if case != make_case(config, manifest, split, case["case_id"]):
                     raise ValueError("Existing demonstration has wrong provenance")
                 row = read_json(path)
-                if row["status"] != "completed" or row[
-                    "demonstration_sha256"
-                ] != file_sha256(path.parent / "demonstration.json.gz"):
+                if row["status"] != "completed" or row["demonstration_sha256"] != file_sha256(
+                    path.parent / "demonstration.json.gz"
+                ):
                     raise ValueError("Existing demonstration hash/completion mismatch")
                 labels += row["labels"]
             index = max([read_json(p)["case_id"] for p in existing], default=-1) + 1
-            while (
-                labels < target
-                and perf_counter() - start < config["collection_seconds"]
-            ):
+            while labels < target and perf_counter() - start < config["collection_seconds"]:
                 jobs = [
                     task_for(config, manifest, split, i, directory / f"match-{i:06}")
                     for i in range(index, index + workers)
@@ -116,6 +115,7 @@ def collect(config, manifest, out, workers):
     write_json(out / "collection.json", result)
     return result
 
+
 def train(config, manifest, identity, out, device):
     import torch
 
@@ -130,14 +130,10 @@ def train(config, manifest, identity, out, device):
     from civ5rl.provenance.common import configure
 
     if (out / "training.json").exists():
-        raise ValueError(
-            "BC training already recorded; use a new experiment for another training run"
-        )
+        raise ValueError("BC training already recorded; use a new experiment for another training run")
     collection = read_json(out / "collection.json")
     if collection["status"] != "complete":
-        raise ValueError(
-            "Insufficient corpus: refusing automatic training on a smaller sample"
-        )
+        raise ValueError("Insufficient corpus: refusing automatic training on a smaller sample")
     configure(17, device)
     training, train_files = demonstrations(config, manifest, out, "training")
     holdout, holdout_files = demonstrations(config, manifest, out, "holdout")
@@ -212,8 +208,7 @@ def train(config, manifest, identity, out, device):
             }
             epochs.append(row)
             checkpoint.save(
-                out
-                / f"checkpoints/{'epoch' if completed else 'partial'}-{epoch:02}.pt",
+                out / f"checkpoints/{'epoch' if completed else 'partial'}-{epoch:02}.pt",
                 policy,
                 optimizer,
                 {
@@ -228,9 +223,7 @@ def train(config, manifest, identity, out, device):
             write_json(
                 out / "training.json",
                 {
-                    "status": "complete"
-                    if completed and epoch == 3
-                    else "training_budget_exhausted",
+                    "status": "complete" if completed and epoch == 3 else "training_budget_exhausted",
                     "initial_holdout": initial_holdout,
                     "epochs": epochs,
                     "final_checkpoint": f"epoch-{epoch:02}.pt"
@@ -241,6 +234,7 @@ def train(config, manifest, identity, out, device):
             if not completed:
                 break
 
+
 def evaluate(config, manifest, out, workers, device):
     final = read_json(out / "training.json")["final_checkpoint"]
     if not final:
@@ -249,9 +243,7 @@ def evaluate(config, manifest, out, workers, device):
     for case in manifest["validation_cases"]:
         for side in (0, 1):
             paired = {**case, "learner_side": side}
-            paired["case_hash"] = digest(
-                {k: v for k, v in paired.items() if k != "case_hash"}
-            )
+            paired["case_hash"] = digest({k: v for k, v in paired.items() if k != "case_hash"})
             for model, opponent in (
                 ("initial", "cp"),
                 ("initial", "greedy"),
@@ -259,26 +251,15 @@ def evaluate(config, manifest, out, workers, device):
                 ("final", "greedy"),
                 ("teacher", "greedy"),
             ):
-                path = (
-                    out
-                    / f"evaluation/{model}-{opponent}/case-{case['case_id']:03}-side-{side}"
-                )
+                path = out / f"evaluation/{model}-{opponent}/case-{case['case_id']:03}-side-{side}"
                 contender = (
                     "teacher"
                     if model == "teacher"
                     else str(
-                        (
-                            out
-                            / "checkpoints"
-                            / ("initial.pt" if model == "initial" else final)
-                        ).resolve()
+                        (out / "checkpoints" / ("initial.pt" if model == "initial" else final)).resolve()
                     )
                 )
-                jobs.append(
-                    (config, manifest, paired, str(path), contender, opponent, device)
-                )
+                jobs.append((config, manifest, paired, str(path), contender, opponent, device))
     with pool(workers) as executor:
         rows = list(executor.map(match_task, jobs))
-    write_json(
-        out / "evaluation.json", {"matches": len(rows), "closed_test_evaluated": False}
-    )
+    write_json(out / "evaluation.json", {"matches": len(rows), "closed_test_evaluated": False})

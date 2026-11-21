@@ -1,5 +1,7 @@
 """Fixed expanded CP corpus, early throughput estimate and bounded BC training."""
 
+from __future__ import annotations
+
 import json
 import random
 import shutil
@@ -69,9 +71,7 @@ def initialize(config, out):
     ):
         raise ValueError("Parent checkpoint/data hashes differ")
     base = prepare_manifest(config)
-    if base != read_json(data / "manifest.json") or base != read_json(
-        parent / "manifest.json"
-    ):
+    if base != read_json(data / "manifest.json") or base != read_json(parent / "manifest.json"):
         raise ValueError("Expanded-data world split or validation cases changed")
     inputs = read_json(data / "training-inputs.json")
     planned = {
@@ -89,30 +89,20 @@ def initialize(config, out):
         "config_sha256": digest(config),
         "first_new_case_id": 860,
         "inputs": {
-            split: {
-                (data / name).relative_to(ROOT).as_posix(): sha
-                for name, sha in files.items()
-            }
+            split: {(data / name).relative_to(ROOT).as_posix(): sha for name, sha in files.items()}
             for split, files in inputs.items()
         },
     }
-    manifest = (
-        read_json(out / "manifest.json")
-        if (out / "manifest.json").exists()
-        else planned
-    )
+    manifest = read_json(out / "manifest.json") if (out / "manifest.json").exists() else planned
     if {k: v for k, v in manifest.items() if k != "inputs"} != {
         k: v for k, v in planned.items() if k != "inputs"
     }:
         raise ValueError("Expanded-data manifest plan mismatch")
     if manifest["inputs"]["holdout"] != planned["inputs"]["holdout"] or any(
-        manifest["inputs"]["training"].get(k) != v
-        for k, v in planned["inputs"]["training"].items()
+        manifest["inputs"]["training"].get(k) != v for k, v in planned["inputs"]["training"].items()
     ):
         raise ValueError("Parent demonstrations changed in manifest")
-    current, changes = current_parent_lineage(
-        parent, config, manifest, same_corpus=False
-    )
+    current, changes = current_parent_lineage(parent, config, manifest, same_corpus=False)
     if (out / "passport.json").exists():
         identity = verify_existing_run(out, config, current)
     else:
@@ -144,7 +134,8 @@ def freeze_dataset(config, out, manifest):
         "environment-lock.txt",
         "manifest.json",
     ):
-        if (out/name).exists():shutil.copy2(out / name, directory / name)
+        if (out / name).exists():
+            shutil.copy2(out / name, directory / name)
     write_json(out / "manifest.json", manifest)
     checkpoint.passport(out, config, manifest)
 
@@ -153,9 +144,7 @@ def collect(config, out, parent, data, manifest, workers):
     from civ5rl.experiments.imitation_helpers import pool
 
     if (out / "collection.json").exists():
-        raise ValueError(
-            "New collection already recorded; do not automatically repeat it"
-        )
+        raise ValueError("New collection already recorded; do not automatically repeat it")
     old_files = read_json(data / "training-inputs.json")["training"]
     for name, sha in old_files.items():
         if file_sha256(data / name) != sha:
@@ -170,10 +159,7 @@ def collect(config, out, parent, data, manifest, workers):
         pool(workers) as executor,
     ):
         monitor.mark("CP_collection", workers=workers)
-        while (
-            labels < config["training_labels"]
-            and perf_counter() - start < config["collection_seconds"]
-        ):
+        while labels < config["training_labels"] and perf_counter() - start < config["collection_seconds"]:
             jobs = [
                 task_for(
                     config,
@@ -233,8 +219,7 @@ def load_data(manifest, split, config):
         ):
             raise ValueError("Demonstration provenance/split mismatch")
         if any(
-            set(row) != {"observation", "actions", "chosen", "supervised"}
-            for row in episode["decisions"]
+            set(row) != {"observation", "actions", "chosen", "supervised"} for row in episode["decisions"]
         ):
             raise ValueError("Non-public fields in demonstration")
         episodes.append(episode)
@@ -246,18 +231,14 @@ def fixed_subset(episodes, manifest, config, out):
     for i, episode in enumerate(episodes):
         groups["old" if episode["case_id"] < 860 else "new"].append(i)
     counts = {
-        key: sum(
-            sum(r["supervised"] for r in episodes[i]["decisions"]) for i in indices
-        )
+        key: sum(sum(r["supervised"] for r in episodes[i]["decisions"]) for i in indices)
         for key, indices in groups.items()
     }
     chosen = []
     for key, indices in groups.items():
-        random.Random(
-            int(
-                digest({"seed": 17, "namespace": "fixed_subset", "group": key})[:16], 16
-            )
-        ).shuffle(indices)
+        random.Random(int(digest({"seed": 17, "namespace": "fixed_subset", "group": key})[:16], 16)).shuffle(
+            indices
+        )
         target = round(2000 * counts[key] / sum(counts.values()))
         labels = 0
         for i in indices:
@@ -317,9 +298,7 @@ def preflight(policy, optimizer, saved, cache, batches, config, out, clock, moni
     reset()
     monitor.mark("throughput_probe")
     reference = [
-        optimizer_step(
-            policy, optimizer, cache, spans, count, backward_minibatch, clock
-        )
+        optimizer_step(policy, optimizer, cache, spans, count, backward_minibatch, clock)
         for spans, count in batches[:8]
     ]
     mean = float(np.mean([r["optimizer_seconds"] for r in reference]))
@@ -346,17 +325,13 @@ def preflight(policy, optimizer, saved, cache, batches, config, out, clock, moni
                 torch.profiler.ProfilerActivity.CUDA,
             ]
         ) as profiler:
-            optimizer_step(
-                policy, optimizer, cache, *batches[0], backward_minibatch, clock
-            )
+            optimizer_step(policy, optimizer, cache, *batches[0], backward_minibatch, clock)
         profiler.export_chrome_trace(str(out / "performance-trace.json"))
         reset()
         try:
             candidate = ResidentDemonstrations(cache, deadline=deadline)
             result["resident_input_bytes"] = candidate.required_bytes
-            parity = compare_math(
-                policy, optimizer, saved, cache, candidate, batches[0]
-            )
+            parity = compare_math(policy, optimizer, saved, cache, candidate, batches[0])
             result["candidate_math"] = parity
             reset()
             accelerated = []
@@ -393,9 +368,7 @@ def preflight(policy, optimizer, saved, cache, batches, config, out, clock, moni
             result["candidate_rejected"] = f"{type(exc).__name__}: {exc}"
         result["optimization_investigation_seconds"] = perf_counter() - start
     else:
-        result["optimization_skipped"] = (
-            "Predicted iterative training is shorter than ten minutes"
-        )
+        result["optimization_skipped"] = "Predicted iterative training is shorter than ten minutes"
     reset()
     assert_equal(policy.state_dict(), saved["model"])
     assert_equal(optimizer.state_dict(), saved["optimizer"])
@@ -418,13 +391,9 @@ def compare_math(policy, optimizer, saved, reference, candidate, batch):
         optimizer.zero_grad(set_to_none=True)
         ce = backward(policy, cache, spans, count)
         gradients = {
-            k: v.grad.detach().cpu().clone()
-            for k, v in policy.named_parameters()
-            if v.grad is not None
+            k: v.grad.detach().cpu().clone() for k, v in policy.named_parameters() if v.grad is not None
         }
-        torch.nn.utils.clip_grad_norm_(
-            policy.parameters(), 0.5, error_if_nonfinite=True
-        )
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5, error_if_nonfinite=True)
         optimizer.step()
         outputs.append(
             (
@@ -461,18 +430,14 @@ def train(config, out, parent, data, manifest, identity):
     if sum(r["supervised"] for e in dev for r in e["decisions"]) != 2485:
         raise ValueError("Holdout label count changed")
     subset = fixed_subset(episodes, manifest, config, out)
-    cache, dev_cache, fixed_cache = [
-        DemonstrationCache(e, "cuda") for e in (episodes, dev, subset)
-    ]
+    cache, dev_cache, fixed_cache = [DemonstrationCache(e, "cuda") for e in (episodes, dev, subset)]
     source = parent / config["more_data"]["parent_checkpoint"]
     saved = torch.load(source, weights_only=False, map_location="cpu")
     if saved["state"]["epoch"] != 30 or saved["state"]["Adam_steps"] != 600:
         raise ValueError("Wrong parent optimization boundary")
     if saved["config"] != read_json(
         parent / "resolved-config.json"
-    ) or not checkpoint.same_execution_identity(
-        saved["identity"], read_json(parent / "passport.json")
-    ):
+    ) or not checkpoint.same_execution_identity(saved["identity"], read_json(parent / "passport.json")):
         raise ValueError("Parent checkpoint identity differs")
     policy = load_policy(config, source, "cuda")
     optimizer = adam(policy, config, "cuda")
@@ -508,9 +473,7 @@ def train(config, out, parent, data, manifest, identity):
             baseline = {
                 "epoch": 0,
                 "holdout": teacher_metrics(policy, dev_cache, move_details=True),
-                "fixed_training": teacher_metrics(
-                    policy, fixed_cache, move_details=True
-                ),
+                "fixed_training": teacher_metrics(policy, fixed_cache, move_details=True),
             }
         baseline["wall_seconds"] = perf_counter() - start
         metrics, history = [baseline], []
@@ -544,9 +507,7 @@ def train(config, out, parent, data, manifest, identity):
                     "new_optimizer_seconds": elapsed,
                     "preparation_seconds": preparation_seconds,
                     "compile_seconds": sum(b - a for a, b in clock.intervals),
-                    "backend": read_json(out / "performance-preflight.json")[
-                        "selected"
-                    ],
+                    "backend": read_json(out / "performance-preflight.json")["selected"],
                     "GPU_utilization_review": utilization_review,
                 },
             )
@@ -583,29 +544,21 @@ def train(config, out, parent, data, manifest, identity):
                             clock,
                         )
                     monitor.mark("performance_investigation", epoch=epoch)
-                    profiler.export_chrome_trace(
-                        str(out / "late-performance-trace.json")
-                    )
+                    profiler.export_chrome_trace(str(out / "late-performance-trace.json"))
                     monitor.mark("iterative_training", epoch=epoch)
                     profile_pending = False
                 else:
-                    row = optimizer_step(
-                        policy, optimizer, chosen_cache, spans, count, backward, clock
-                    )
+                    row = optimizer_step(policy, optimizer, chosen_cache, spans, count, backward, clock)
                 steps += 1
                 elapsed += row["optimizer_seconds"]
                 if elapsed >= 600 and utilization_review is None:
-                    analysis = analyze_telemetry(
-                        out / "training-telemetry/resources.jsonl"
-                    )
+                    analysis = analyze_telemetry(out / "training-telemetry/resources.jsonl")
                     windows = analysis["windows"]
                     average = windows[-1]["core_average"] if windows else None
                     utilization_review = {
                         "optimizer_seconds": elapsed,
                         "last_60_seconds_core_average": average,
-                        "backend": read_json(out / "performance-preflight.json")[
-                            "selected"
-                        ],
+                        "backend": read_json(out / "performance-preflight.json")["selected"],
                         "continuation_reason": "Preserve validated loss/minibatch/numerics and bounded experiment; host batching, scalar synchronizations and spatial block 32 constrain the selected backend. See measured preflight comparison and trace. No artificial GPU load or extra training.",
                     }
                     profile_pending = average is not None and average < 80
@@ -673,15 +626,11 @@ def train(config, out, parent, data, manifest, identity):
                 measured = {
                     "epoch": epoch,
                     "holdout": teacher_metrics(policy, dev_cache, move_details=True),
-                    "fixed_training": teacher_metrics(
-                        policy, fixed_cache, move_details=True
-                    ),
+                    "fixed_training": teacher_metrics(policy, fixed_cache, move_details=True),
                 }
             measured["wall_seconds"] = perf_counter() - start
             metrics.append(measured)
-            state = update_selection(
-                state, epoch, measured["holdout"]["ce"], config["more_data"]
-            )
+            state = update_selection(state, epoch, measured["holdout"]["ce"], config["more_data"])
             if state["best_epoch"] == epoch:
                 shutil.copy2(path, out / "checkpoints/best.pt")
             persist()
@@ -714,8 +663,7 @@ def evaluate(config, out, parent, data, manifest, workers):
     training = read_json(out / "training.json")
     if (
         training["status"] != "complete"
-        or file_sha256(out / "checkpoints/best.pt")
-        != training["best_checkpoint_sha256"]
+        or file_sha256(out / "checkpoints/best.pt") != training["best_checkpoint_sha256"]
     ):
         raise ValueError("Final selection not frozen")
     inherited = read_json(parent / "evaluations.json")
@@ -726,9 +674,7 @@ def evaluate(config, out, parent, data, manifest, workers):
         if training["best_epoch"] == 0:
             runs[mode] = {**original, "new_matches": 0}
             continue
-        directories = {
-            enemy: out / "evaluation" / mode / enemy for enemy in ("cp", "greedy")
-        }
+        directories = {enemy: out / "evaluation" / mode / enemy for enemy in ("cp", "greedy")}
         new_matches = run_validation_cases(
             config,
             manifest["base"],
@@ -741,12 +687,8 @@ def evaluate(config, out, parent, data, manifest, workers):
             "new_matches": new_matches,
             "mode": mode,
             "checkpoint_sha256": file_sha256(out / "checkpoints/best.pt"),
-            "directories": {
-                k: v.relative_to(ROOT).as_posix() for k, v in directories.items()
-            },
-            "opponents": {
-                enemy: collect_summary(path) for enemy, path in directories.items()
-            },
+            "directories": {k: v.relative_to(ROOT).as_posix() for k, v in directories.items()},
+            "opponents": {enemy: collect_summary(path) for enemy, path in directories.items()},
         }
         write_json(
             out / "evaluations.json",
@@ -765,8 +707,11 @@ def run(phase, config, out, workers, device):
         manifest = read_json(out / "manifest.json")
         checkpoint.verify_frozen_passport(out, config=config, manifest=manifest)
         return report(
-            config, out, ROOT / config["more_data"]["parent_run"],
-            ROOT / config["more_data"]["data_run"], manifest,
+            config,
+            out,
+            ROOT / config["more_data"]["parent_run"],
+            ROOT / config["more_data"]["data_run"],
+            manifest,
         )
     parent, data, manifest, identity = initialize(config, out)
     start = perf_counter()
@@ -849,16 +794,10 @@ def report(config, out, parent, data, manifest):
             seeds.add((case["scenario"]["seed"], *case["agent_seeds"]))
             modes[case["placement"]] += 1
             sides[str(case["learner_side"])] += 1
-            outcomes[
-                "D" if m["winner"] is None else "W" if m["winner"] == m["side"] else "L"
-            ] += 1
+            outcomes["D" if m["winner"] is None else "W" if m["winner"] == m["side"] else "L"] += 1
             labels += m["labels"]
             forced += m["forced"]
-            kinds.update(
-                r["actions"][r["chosen"]]["kind"]
-                for r in episode["decisions"]
-                if r["supervised"]
-            )
+            kinds.update(r["actions"][r["chosen"]]["kind"] for r in episode["decisions"] if r["supervised"])
         coverage[group] = {
             "episodes": len(files),
             "worlds": len(worlds),
@@ -879,9 +818,7 @@ def report(config, out, parent, data, manifest):
         )
     if id_sets["old"] & id_sets["new"] or seed_sets["old"] & seed_sets["new"]:
         raise ValueError("Repeated old case IDs or RNG in new collection")
-    coverage["new"]["physical_overlap_with_old"] = len(
-        physical_sets["old"] & physical_sets["new"]
-    )
+    coverage["new"]["physical_overlap_with_old"] = len(physical_sets["old"] & physical_sets["new"])
     coverage["new"]["first_case_id"] = min(id_sets["new"]) if id_sets["new"] else None
     coverage["new"]["last_case_id"] = max(id_sets["new"]) if id_sets["new"] else None
     write_json(out / "coverage.json", coverage)
@@ -938,9 +875,7 @@ def report(config, out, parent, data, manifest):
         lines.append(
             f"| {m['epoch']} | {a['ce']:.6f} / {100 * a['accuracy']:.3f}% | {b['ce']:.6f} / {100 * b['accuracy']:.3f}% |"
         )
-    best = next(
-        m for m in training["offline_metrics"] if m["epoch"] == training["best_epoch"]
-    )
+    best = next(m for m in training["offline_metrics"] if m["epoch"] == training["best_epoch"])
     before = training["offline_metrics"][0]
     lines += [
         "",
@@ -957,9 +892,7 @@ def report(config, out, parent, data, manifest):
             (best, "fixed_training"),
         ):
             entry = metric[split]["by_kind"].get(kind)
-            parts.append(
-                f"{entry['ce']:.5f} / {100 * entry['accuracy']:.2f}%" if entry else "—"
-            )
+            parts.append(f"{entry['ce']:.5f} / {100 * entry['accuracy']:.2f}%" if entry else "—")
         lines.append("| " + kind + " | " + " | ".join(parts) + " |")
     lines += [
         "",
@@ -1011,9 +944,7 @@ def report(config, out, parent, data, manifest):
                 "candidate": a,
                 "slices": {},
             }
-            detail["slices"] = {
-                name: value["outcomes"] for name, value in slices.items()
-            }
+            detail["slices"] = {name: value["outcomes"] for name, value in slices.items()}
             comparisons[key] = detail
             lines.append(
                 f"| {mode} | {enemy} | {b['W']}/{b['D']}/{b['L']} | {a['W']}/{a['D']}/{a['L']} | {100 * a['win_rate']:.3f}% | {100 * bootstrap['delta']:+.3f} | [{100 * bootstrap['CI95'][0]:+.3f}; {100 * bootstrap['CI95'][1]:+.3f}] |"
@@ -1036,9 +967,7 @@ def report(config, out, parent, data, manifest):
                         None,
                     )
                     if selected is None:
-                        checks.append(
-                            {"group": key, "outcome": desired, "present": False}
-                        )
+                        checks.append({"group": key, "outcome": desired, "present": False})
                         continue
                     m, case, path = selected
                     replay_check = verify_replay(path)
@@ -1075,9 +1004,7 @@ def report(config, out, parent, data, manifest):
             + " | "
             + " | ".join(parts)
             + " | "
-            + " / ".join(
-                str(kinds.get(k, 0)) for k in ("move", "ranged", "melee", "skip")
-            )
+            + " / ".join(str(kinds.get(k, 0)) for k in ("move", "ranged", "melee", "skip"))
             + " |"
         )
     lines += [
@@ -1091,9 +1018,7 @@ def report(config, out, parent, data, manifest):
     telemetry_analysis = analyze_telemetry(out / "training-telemetry/resources.jsonl")
     windows = telemetry_analysis["windows"]
     for field, stats in telemetry_analysis["metrics"].items():
-        lines.append(
-            f"- {field}: mean={stats['mean']:.3f}, max={stats['max']:.3f} {stats['unit']}"
-        )
+        lines.append(f"- {field}: mean={stats['mean']:.3f}, max={stats['max']:.3f} {stats['unit']}")
     write_json(out / "gpu-active-windows.json", windows)
     lines += [
         "",
@@ -1115,9 +1040,7 @@ def report(config, out, parent, data, manifest):
             "stop_reason": training["stop_reason"],
             "best_epoch": training["best_epoch"],
             "new_Adam_steps": training["new_Adam_steps"],
-            "new_evaluation_matches": sum(
-                r["new_matches"] for r in evaluation["runs"].values()
-            ),
+            "new_evaluation_matches": sum(r["new_matches"] for r in evaluation["runs"].values()),
             "closed_test_evaluated": False,
         },
     )

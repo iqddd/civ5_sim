@@ -118,21 +118,9 @@ def select_best_c2_candidate(
     if best_c2 is None:
         raise ValueError("No valid C2 candidates")
     if bc1m_baseline is not None or ppo37_reference is not None or bc10_reference is not None:
-        bc1m_wins = (
-            int(bc1m_baseline["runs"]["argmax"]["cp"]["summary"]["W"])
-            if bc1m_baseline
-            else None
-        )
-        ppo37_wins = (
-            int(ppo37_reference["runs"]["argmax"]["cp"]["summary"]["W"])
-            if ppo37_reference
-            else None
-        )
-        bc10_wins = (
-            int(bc10_reference["runs"]["argmax"]["cp"]["summary"]["W"])
-            if bc10_reference
-            else None
-        )
+        bc1m_wins = int(bc1m_baseline["runs"]["argmax"]["cp"]["summary"]["W"]) if bc1m_baseline else None
+        ppo37_wins = int(ppo37_reference["runs"]["argmax"]["cp"]["summary"]["W"]) if ppo37_reference else None
+        bc10_wins = int(bc10_reference["runs"]["argmax"]["cp"]["summary"]["W"]) if bc10_reference else None
         return {
             "purpose": "development_512",
             "best": best_c2,
@@ -148,10 +136,14 @@ def select_best_c2_candidate(
     return best_c2
 
 
-def _refresh_selection(config: dict[str, Any], out: Path) -> dict[str, Any]:
+def _is_development_result(key: str, point: dict[str, Any]) -> bool:
+    return key.startswith("development:") and point.get("purpose") == "development"
+
+
+def refresh_selection(config: dict[str, Any], out: Path) -> dict[str, Any]:
     """Refresh selection.json from current evaluations.json."""
     evaluations = read_json(out / "evaluations.json")
-    selection = read_json(out / "selection.json")
+    selection: dict[str, Any] = read_json(out / "selection.json")
     if config["kind"] == MORE_DATA_KIND:
         bc_hash = config["parent_policy_hash"]
         ppo_hash = config["evaluation_reference_policy_hash"]
@@ -160,8 +152,7 @@ def _refresh_selection(config: dict[str, Any], out: Path) -> dict[str, Any]:
         candidates = [
             v
             for k, v in evaluations.items()
-            if k.startswith("development:")
-            and v.get("purpose") == "development"
+            if _is_development_result(k, v)
             and v.get("policy_hash") not in (bc_hash, ppo_hash)
             and int(v.get("Adam_steps", 0)) > 0
         ]
@@ -169,11 +160,7 @@ def _refresh_selection(config: dict[str, Any], out: Path) -> dict[str, Any]:
         write_json(out / "selection.json", updated)
         return updated
     for point in sorted(
-        (
-            v
-            for k, v in evaluations.items()
-            if k.startswith("development:") and v.get("purpose") == "development"
-        ),
+        (v for k, v in evaluations.items() if _is_development_result(k, v)),
         key=lambda p: int(p.get("Adam_steps", 0)),
     ):
         wins = point["runs"]["argmax"]["cp"]["summary"]["W"]
@@ -183,7 +170,7 @@ def _refresh_selection(config: dict[str, Any], out: Path) -> dict[str, Any]:
     return selection
 
 
-refresh_selection = _refresh_selection
+_refresh_selection = refresh_selection
 
 __all__ = [
     "_refresh_selection",

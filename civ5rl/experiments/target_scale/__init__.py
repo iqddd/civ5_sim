@@ -1,5 +1,7 @@
 """Target-scale BC experiment submodules."""
 
+from __future__ import annotations
+
 from civ5rl.experiments.target_scale.corpus import (
     _collect_c2,
     _entry_lookup_key,
