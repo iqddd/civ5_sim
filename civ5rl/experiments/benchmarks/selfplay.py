@@ -172,7 +172,9 @@ def profile_selfplay(args, parser, config, inputs):
     if args.device != "cuda" or not config.get("self_play", {}).get("enabled") or min(args.warmup, args.repeats) < 1:
         parser.error("selfplay-profile requires CUDA, self-play, warmup, and measured repeats")
     out = args.out.resolve()
-    if any(p == out or p.is_relative_to(out) for p in inputs) or (out.exists() and any(out.iterdir())):
+    # Remote transport may stage the runner's lock before creating any results.
+    populated = out.exists() and any(path.name != "run.lock" for path in out.iterdir())
+    if any(p == out or p.is_relative_to(out) for p in inputs) or populated:
         parser.error("selfplay-profile output must be separate and empty")
     if min(args.workers, args.envs, args.reply_size) < 1 or args.workers > args.envs:
         parser.error("Invalid selfplay-profile worker, environment or reply counts")
