@@ -1,4 +1,10 @@
 {
   "base_config": "configs/rl-ppo-c2pa-h60-selfplay.json",
-  "output": "artifacts/rl/ppo-c2pa-h60-selfplay-optimized"
+  "output": "artifacts/rl/ppo-c2pa-h60-selfplay-optimized",
+  "experiment": {
+    "time_budget_check": {
+      "target_gpu_step_seconds": 0.75,
+      "target_collection_decisions_per_second": 700
+    }
+  }
 }
