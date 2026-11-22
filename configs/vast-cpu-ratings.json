@@ -422,6 +422,24 @@
       "single_thread": 3924,
       "source": "https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i5-14500",
       "provenance": "PassMark Single Thread rating checked 2026-11-22"
+    },
+    {
+      "name": "AMD Ryzen 5 3600",
+      "single_thread": 2557,
+      "source": "https://www.cpubenchmark.net/cpu.php?id=3481",
+      "provenance": "PassMark Single Thread rating checked 2026-11-22"
+    },
+    {
+      "name": "AMD Ryzen 7 5800X",
+      "single_thread": 3449,
+      "source": "https://www.cpubenchmark.net/cpu.php?id=3869",
+      "provenance": "PassMark Single Thread rating checked 2026-11-22"
+    },
+    {
+      "name": "Intel Core i9-14900K",
+      "single_thread": 4689,
+      "source": "https://www.cpubenchmark.net/cpu.php?id=5717",
+      "provenance": "PassMark Single Thread rating checked 2026-11-22"
     }
   ]
 }
