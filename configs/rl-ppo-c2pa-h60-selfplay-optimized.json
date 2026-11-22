@@ -1,0 +1,4 @@
+{
+  "base_config": "configs/rl-ppo-c2pa-h60-selfplay.json",
+  "output": "artifacts/rl/ppo-c2pa-h60-selfplay-optimized"
+}
