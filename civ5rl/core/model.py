@@ -506,6 +506,12 @@ class _PolicyExecutor:
     def _fixed_spatial_blocks(batch, size, runner, *, return_cells):
         # Fixed BF16 GEMM geometry keeps action selection, replay and training
         # consistent. Discard padded rows before memory and loss.
+        if (
+            isinstance(runner, StaticSpatialGraph)
+            and not torch.is_grad_enabled()
+            and len(batch["cells"])
+        ):
+            return runner.forward_blocks(batch, size, return_cells=return_cells)
         maps, contexts = [], []
         for part, count in iter_spatial_blocks(batch, size):
             x, context = runner(part)

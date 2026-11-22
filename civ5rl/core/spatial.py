@@ -20,6 +20,9 @@ class StaticSpatialGraph:
         self._capture = None
 
     def __call__(self, part):
+        return self._forward_block(part, borrow_outputs=False)
+
+    def _forward_block(self, part, *, borrow_outputs):
         cells = part["cells"]
         if (
             torch.is_grad_enabled()
@@ -48,8 +51,26 @@ class StaticSpatialGraph:
             return self._runner(part)
         torch._foreach_copy_(list(inputs.values()), [part[key] for key in inputs])
         graph.replay()
-        # Callers may retain multiple blocks until concatenation.
+        if borrow_outputs:
+            return cells_out, context
         return cells_out.clone(), context.clone()
+
+    def forward_blocks(self, batch, size, *, return_cells):
+        """Copy each result before the next replay overwrites the static outputs."""
+        rows = len(batch["cells"])
+        offset, maps, contexts = 0, None, None
+        for part, count in iter_spatial_blocks(batch, size):
+            x, context = self._forward_block(part, borrow_outputs=True)
+            if contexts is None:
+                contexts = context.new_empty((rows, *context.shape[1:]))
+                if return_cells:
+                    maps = x.new_empty((rows, *x.shape[1:]))
+            stop = offset + count
+            if maps is not None:
+                maps[offset:stop].copy_(x[:count])
+            contexts[offset:stop].copy_(context[:count])
+            offset = stop
+        return maps, contexts
 
     def _capture_block(self, part, current, signature):
         inputs = {key: value.clone() for key, value in part.items()}

@@ -7,7 +7,7 @@ import torch
 
 from civ5rl.core.model import Policy
 from civ5rl.core.schema import GLOBAL_DIM, PREV_ACTION_DIM, TILE_DIM
-from civ5rl.core.spatial import StaticSpatialGraph
+from civ5rl.core.spatial import SPATIAL_KEYS, StaticSpatialGraph
 from civ5rl.core.training_graphs import RecurrentGraphs
 
 
@@ -31,6 +31,21 @@ class TrainingGraphTests(unittest.TestCase):
         for actual, expected in zip(actual_second, spatial(second)):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         for actual, expected in zip(actual_first, expected_first):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+        policy = Policy()
+        policy.spatial_batch_size = 32
+        cells = torch.arange(37, device="cuda", dtype=torch.float32).view(-1, 1, 1)
+        cells = cells.expand(-1, 256, 1).contiguous()
+        batch = dict.fromkeys(SPATIAL_KEYS, cells)
+        block_runner = StaticSpatialGraph(spatial, 32, 256)
+        expected_batch = spatial(batch)
+        previous = policy.encode_spatial(batch, spatial_runner=block_runner)
+        weight.fill_(7.0)
+        maps, context = policy.encode_spatial(batch, spatial_runner=block_runner, return_cells=False)
+        self.assertIsNone(maps)
+        torch.testing.assert_close(context, spatial(batch)[1], rtol=0, atol=0)
+        for actual, expected in zip(previous, expected_batch):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_coalesced_spatial_preserves_padded_block_gradients(self):
