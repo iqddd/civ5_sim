@@ -452,6 +452,36 @@
       "single_thread": 1927,
       "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+7B12",
       "provenance": "PassMark Single Thread rating checked 2026-11-22"
+    },
+    {
+      "name": "AMD EPYC 9754",
+      "single_thread": 2266,
+      "source": "https://www.cpubenchmark.net/cpu.php?id=5752",
+      "provenance": "PassMark Single Thread rating checked 2026-11-22"
+    },
+    {
+      "name": "AMD Ryzen 9 7950X",
+      "single_thread": 4251,
+      "source": "https://www.cpubenchmark.net/cpu.php?id=5031",
+      "provenance": "PassMark Single Thread rating checked 2026-11-22"
+    },
+    {
+      "name": "Intel Core i5-13400F",
+      "single_thread": 3628,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=Intel+Core+i5-13400F",
+      "provenance": "PassMark Single Thread rating checked 2026-11-22"
+    },
+    {
+      "name": "AMD Ryzen Threadripper PRO 9965WX",
+      "single_thread": 4530,
+      "source": "https://www.cpubenchmark.net/cpu.php?id=6804",
+      "provenance": "PassMark Single Thread rating checked 2026-11-22"
+    },
+    {
+      "name": "AMD Eng Sample: 100-000001247-12",
+      "single_thread": null,
+      "source": "https://www.cpubenchmark.net/cpu_list.php",
+      "provenance": "Exact engineering sample identifier checked 2026-11-22; no verifiable PassMark Single Thread rating"
     }
   ]
 }
