@@ -56,6 +56,7 @@ class SupportMode(IntEnum):
     HEAL_AFTER = 1
     APPROACH = 2
     RECOVERY = 3
+    FORMATION = 4
 
 
 @dataclass(frozen=True)

@@ -45,6 +45,10 @@ def load_agent(spec):
         return RandomAgent()
     if spec == "end_turn":
         return EndTurnAgent()
+    if spec == "cpv2":
+        from .cpv2_agent import CPv2Agent
+
+        return CPv2Agent()
     if spec == "cp":
         from .cp_agent import CPAgent
 
@@ -55,5 +59,5 @@ def load_agent(spec):
         return GreedyAgent()
     module, separator, name = spec.partition(":")
     if not separator or not module or not name:
-        raise ValueError("Agent must be random, end_turn, greedy, cp or module:factory")
+        raise ValueError("Agent must be random, end_turn, greedy, cp, cpv2 or module:factory")
     return getattr(importlib.import_module(module), name)()

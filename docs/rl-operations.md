@@ -58,7 +58,8 @@ python tools/view_combat.py MATCHES_OUT --port 8767
 ```
 
 На входе manifest серии `civ5rl.showcase` и пустой MATCHES_OUT. На выходе —
-матчи на сохранённых расстановках и seeds, доступные в локальной веб-панели.
+матчи на сохранённых расстановках и seeds, доступные в локальной веб-панели. Соперника можно
+выбрать через `--opponent cp` или `--opponent cpv2`.
 По умолчанию действуют правила сброса хода из расстановок. Флаг
 `--turn-reset-mode end_turn` или `--turn-reset-mode legacy` задаёт их для всей серии.
 

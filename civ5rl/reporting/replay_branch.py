@@ -12,6 +12,7 @@ from civ5rl.protocols.imitation import search_config
 from civ5rl.provenance.common import configure, file_sha256, read_json, write_json
 from civ5sim import Action, Battle, MatchConfig, run_match
 from civ5sim.cp_agent import CPAgent
+from civ5sim.cpv2_agent import CPv2Agent
 
 
 @dataclass(frozen=True)
@@ -40,7 +41,8 @@ class BranchCP:
     def __init__(self, branch: Branch, progress: BranchProgress):
         self.branch = branch
         self.progress = progress
-        self.inner = CPAgent(search_config({"teacher_search": branch.case["opponent_search"]}))
+        self.inner = (CPv2Agent() if branch.case.get("opponent") == "cpv2"
+                      else CPAgent(search_config({"teacher_search": branch.case["opponent_search"]})))
 
     def reset(self, context):
         self.inner.reset({**context, "max_rounds": self.branch.case["max_rounds"]})

@@ -30,6 +30,7 @@ def build(*, profile=False, dll_only=False):
     planner_sources = [ROOT / "native/combat_ai/planner.cpp",
                        ROOT / "native/combat_ai/cp_tactical.cpp",
                        ROOT / "native/combat_ai/support.cpp",
+                       ROOT / "native/combat_ai/formation.cpp",
                        ROOT / "native/combat_ai/tactical.cpp"]
     test_sources = [ROOT / "tests/native/combat_ai_model_test.cpp",
                     ROOT / "native/combat.cpp", *common]

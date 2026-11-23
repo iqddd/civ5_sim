@@ -18,6 +18,7 @@ from civ5sim.combat_ai import (
     SearchConfig,
     SearchReason,
     SearchRequest,
+    SupportMode,
     _Assignment,
     _Config,
     _Contacts,
@@ -58,6 +59,24 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(result.reason, SearchReason.NO_PLAN)
         self.assertEqual(result.assignments, ())
         self.assertGreater(result.stats.checked, 0)
+
+    def test_formation_uses_public_enemy_state_for_counterplay(self):
+        # A privileged planning envelope also contains invisible enemies and
+        # private enemy movement. Neither may influence formation lookahead.
+        board = replace(state(), fog=True, units=(
+            PlanningUnit(0, 1, 0, 0), PlanningUnit(1, 0, 1, 1, hp=10),
+            PlanningUnit(2, 4, 1, 254),
+        ), visibility=tuple(int(i < 3) for i in range(256)))
+        planner = self.planner()
+        def plan(s):
+            return planner.support(request(state=s, target=1), SupportMode.FORMATION)
+        first = plan(board)
+        self.assertEqual(first.reason, SearchReason.COMPLETED)
+        self.assertTrue(first.assignments)
+        for hidden in (replace(board.units[2], tile=66, hp=1), replace(board.units[2], hp=0)):
+            changed = replace(board, units=(board.units[0],
+                replace(board.units[1], moves=0, attacked=1), hidden))
+            self.assertEqual(first.assignments, plan(changed).assignments)
 
     def test_invalid_requests_do_not_poison_later_calls(self):
         p = self.planner()

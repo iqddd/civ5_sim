@@ -36,6 +36,7 @@ def main(argv=None):
     cmd.add_argument("--manifest", type=Path, required=True)
     cmd.add_argument("--checkpoint", type=Path, required=True)
     cmd.add_argument("--out", type=Path, required=True)
+    cmd.add_argument("--opponent", choices=("cp", "cpv2"), help="Override the showcase opponent")
     cmd.add_argument(
         "--turn-reset-mode",
         choices=("legacy", "end_turn"),
@@ -181,6 +182,7 @@ def main(argv=None):
         source = args.source / "replay.json" if args.source.is_dir() else args.source
         replay = json.loads(source.read_text(encoding="utf-8"))
         target = -1
+            opponent=args.opponent,
         if args.target is not None:
             x, y = args.target
             m = replay["initial"]["map"]

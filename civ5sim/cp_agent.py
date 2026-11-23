@@ -733,7 +733,7 @@ class CPAgent:
                 self._support_calls += 1
                 mode = {"heal_before": SupportMode.HEAL_BEFORE,
                         "heal_after": SupportMode.HEAL_AFTER,
-                        "approach": SupportMode.APPROACH}[task["kind"]]
+                        "approach": SupportMode.APPROACH, "formation": SupportMode.FORMATION}[task["kind"]]
                 result = planning.support(target, selected, contacts=self.memory, mode=mode)
             if task["kind"] != "combat":
                 self._event("support", target=target, task_kind=task["kind"], selected_units=list(selected),

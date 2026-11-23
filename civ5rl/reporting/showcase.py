@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections import Counter
+from dataclasses import asdict
 from pathlib import Path
 
 from civ5rl.engine.evaluation.matches import run_saved_match
@@ -16,6 +17,7 @@ from civ5rl.reporting.evaluation_audit import classify_outcome
 from civ5rl.reporting.markdown import format_wdl
 from civ5sim.combat_ai import LIBRARY_PATH, Planner
 from civ5sim.cp_agent import CPAgent
+from civ5sim.cpv2_agent import CPv2Agent
 from civ5sim.engine import digest
 
 
@@ -43,7 +45,7 @@ def play(task):
     case, teacher, folder, checkpoint = task
     folder = Path(folder)
     learner = evaluation_agent(checkpoint, "argmax")
-    cp = CPAgent(search_config({"teacher_search": teacher}))
+    cp = CPv2Agent() if case.get("opponent") == "cpv2" else CPAgent(search_config({"teacher_search": teacher}))
     agents = [None, None]
     side = case["learner_side"]
     agents[side], agents[1 - side] = learner, cp
@@ -92,7 +94,7 @@ def play(task):
     return row
 
 
-def play_cases(manifest_path, checkpoint, out, *, turn_reset_mode=None):
+def play_cases(manifest_path, checkpoint, out, *, turn_reset_mode=None, opponent=None):
     # Spawned match workers import this module without initializing Torch.
     from civ5rl.engine.evaluation.executor import (
         EvaluationExecutor,
@@ -120,6 +122,13 @@ def play_cases(manifest_path, checkpoint, out, *, turn_reset_mode=None):
             if "case_hash" in case:
                 case["case_hash"] = digest({k: v for k, v in case.items() if k != "case_hash"})
         source["turn_reset_mode"] = turn_reset_mode
+    opponent = opponent or source.get("opponent", "cp")
+    if opponent not in ("cp", "cpv2"):
+        raise ValueError(f"Unsupported showcase opponent: {opponent}")
+    for case in cases:
+        case["opponent"] = opponent
+        case["opponent_search"] = asdict(CPv2Agent().config) if opponent == "cpv2" else source["teacher_search"]
+        case["case_hash"] = digest({k: v for k, v in case.items() if k != "case_hash"})
     if out.exists() and any(out.iterdir()):
         raise ValueError("Use a new empty output directory")
     checkpoint_sha256 = file_sha256(checkpoint)
@@ -128,6 +137,7 @@ def play_cases(manifest_path, checkpoint, out, *, turn_reset_mode=None):
     write_viewer_passport(out, checkpoint, checkpoint_sha256)
     manifest = {
         **source,
+        "opponent": opponent,
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": checkpoint_sha256,
         "source_manifest": str(manifest_path),
@@ -172,7 +182,7 @@ def play_cases(manifest_path, checkpoint, out, *, turn_reset_mode=None):
         "all_replays_verified": True,
         "closed_test_used": False,
         "viewer_summary": (
-            f"{checkpoint.parent.parent.name} / {checkpoint.stem}: argmax vs CP, "
+            f"{checkpoint.parent.parent.name} / {checkpoint.stem}: argmax vs {opponent.upper() if opponent == 'cp' else 'CPv2'}, "
             f"W/D/L {format_wdl(wdl)}; "
             f"{', '.join(sorted({case['scenario'].get('turn_reset_mode', 'legacy') for case in cases}))}"
         ),

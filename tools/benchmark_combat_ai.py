@@ -169,6 +169,19 @@ def aggregate(records):
 
 
 def main():
+    if sys.argv[1:2] == ["policy"]:
+        from civ5rl.experiments.evaluation.cp_benchmark import benchmark_policy
+
+        parser = argparse.ArgumentParser(description="Blind CP versus checkpoint evaluation on saved Development-512.")
+        parser.add_argument("--manifest", required=True, type=Path)
+        parser.add_argument("--checkpoint", required=True, type=Path)
+        parser.add_argument("--out", required=True, type=Path)
+        parser.add_argument("--agent", choices=("cp", "cpv2"), default="cpv2")
+        parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
+        parser.add_argument("--workers", type=int, default=10)
+        parser.add_argument("--cpu-timing", action="store_true", help="Measure CP decision-thread CPU time")
+        benchmark_policy(parser.parse_args(sys.argv[2:]))
+        return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT / "scenarios/combat-ai-v1.json")
     parser.add_argument("--out", type=Path, required=True)

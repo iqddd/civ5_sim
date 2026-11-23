@@ -126,7 +126,7 @@ static int32_t run_plan(CaiContext* context, const CaiSearchRequest* request, in
   if (!context || !request || !result || capacity < 0 ||
       (capacity && !assignments)) return CAI_BAD_ARGUMENT;
   try {
-    if (!valid_request(*request) || mode < -1 || mode > CAI_RECOVERY) return CAI_OK;
+    if (!valid_request(*request) || mode < -1 || mode > CAI_FORMATION) return CAI_OK;
     if (request->expected_turn != request->state->turn ||
         request->side != request->state->active_side) {
       result->reason = CAI_TURN_CHANGED;
@@ -138,6 +138,7 @@ static int32_t run_plan(CaiContext* context, const CaiSearchRequest* request, in
       auto* trace = context->workspace.trace.enabled ? &context->workspace.trace : nullptr;
       auto* map_cache = &context->workspace.map_cache;
       auto plan = mode < 0 ? combat_ai::find_assignments(context->workspace, config, *request)
+                 : mode == CAI_FORMATION ? combat_ai::formation_plan(*request, *map_cache)
                  : mode == CAI_RECOVERY ? combat_ai::recovery_assignments(*request,context->workspace.diagnostics,trace,map_cache)
                  : combat_ai::support_assignments(*request, mode, trace, map_cache);
       *result = plan.result;
@@ -158,7 +159,7 @@ int32_t cai_search(CaiContext* context, const CaiSearchRequest* request,
 int32_t cai_support(CaiContext* context, const CaiSearchRequest* request, int32_t mode,
                     CaiAssignment* assignments, int32_t capacity, CaiSearchResult* result) {
   CAI_PROFILE_SCOPE(SupportCall);
-  if (mode < CAI_HEAL_BEFORE || mode > CAI_RECOVERY) {
+  if (mode < CAI_HEAL_BEFORE || mode > CAI_FORMATION) {
     if (context) context->workspace.diagnostics = {};
     if (result) *result = {CAI_INVALID_REQUEST, 0, {0,0,0,0,0}};
     return CAI_BAD_ARGUMENT;

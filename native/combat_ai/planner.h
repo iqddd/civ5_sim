@@ -74,6 +74,7 @@ struct SearchWorkspace {
   void release_unused_branches();
 };
 struct Plan { std::vector<CaiAssignment> assignments; CaiSearchResult result; };
+Plan formation_plan(const CaiSearchRequest&, MapCache&);
 Plan find_assignments(SearchWorkspace&, const CaiConfig&, const CaiSearchRequest&);
 Plan support_assignments(const CaiSearchRequest&, int32_t mode, DecisionTrace* = nullptr,
                          MapCache* = nullptr);
