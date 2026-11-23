@@ -32,11 +32,14 @@ def main(argv=None):
     for name in ("archive-evaluations", "restore-evaluations"):
         cmd = commands.add_parser(name)
         cmd.add_argument("--run", type=Path, required=True)
+        if name == "restore-evaluations":
+            cmd.add_argument("--match", help="Saved match directory relative to evaluation/")
+            cmd.add_argument("--out", type=Path, help="Directory for the exported match")
     cmd = commands.add_parser("play-cases")
+    cmd.add_argument("--opponent", choices=("cp", "cpv2"), help="Override the showcase opponent")
     cmd.add_argument("--manifest", type=Path, required=True)
     cmd.add_argument("--checkpoint", type=Path, required=True)
     cmd.add_argument("--out", type=Path, required=True)
-    cmd.add_argument("--opponent", choices=("cp", "cpv2"), help="Override the showcase opponent")
     cmd.add_argument(
         "--turn-reset-mode",
         choices=("legacy", "end_turn"),
@@ -161,11 +164,16 @@ def main(argv=None):
             restore_evaluations,
         )
 
-        result = (
-            archive_evaluations
-            if args.command == "archive-evaluations"
-            else restore_evaluations
-        )(args.run)
+        if args.command == "archive-evaluations":
+            result = archive_evaluations(args.run)
+        elif args.match is not None and args.out is not None:
+            from civ5rl.reporting.evaluation_storage import extract_evaluation_match
+
+            result = extract_evaluation_match(args.run, args.match, args.out)
+        elif args.match is not None or args.out is not None:
+            parser.error("--match and --out must be used together")
+        else:
+            result = restore_evaluations(args.run)
     elif args.command == "play-cases":
         from civ5rl.reporting.showcase import play_cases
 
@@ -174,6 +182,7 @@ def main(argv=None):
             args.checkpoint,
             args.out,
             turn_reset_mode=args.turn_reset_mode,
+            opponent=args.opponent,
         )
     elif args.command == "branch-replay":
         from civ5rl.reporting.replay_branch import branch_replay
@@ -182,7 +191,6 @@ def main(argv=None):
         source = args.source / "replay.json" if args.source.is_dir() else args.source
         replay = json.loads(source.read_text(encoding="utf-8"))
         target = -1
-            opponent=args.opponent,
         if args.target is not None:
             x, y = args.target
             m = replay["initial"]["map"]

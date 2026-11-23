@@ -50,8 +50,8 @@ def member_name(value):
     return value
 
 
-def inventory(root):
-    """Return the file hashes, byte counts and directory names of a local tree."""
+def inventory(root, *, hash_files=True):
+    """Return file sizes, optional hashes, and directory names of a local tree."""
     root = Path(root)
     files, directories = {}, []
     if not root.exists():
@@ -75,7 +75,9 @@ def inventory(root):
             if path.is_dir():
                 directories.append(rel)
             elif path.is_file():
-                files[rel] = {"size": stat.st_size, "sha256": file_sha256(path)}
+                files[rel] = {"size": stat.st_size}
+                if hash_files:
+                    files[rel]["sha256"] = file_sha256(path)
             else:
                 raise ValueError(f"Special transport input: {rel}")
     return dict(sorted(files.items())), sorted(directories)
@@ -111,7 +113,8 @@ def _root(path):
     return resolved
 
 
-def pack(source, packet, *, token, direction, force=False):
+def pack(source, packet, *, token, direction, force=False, source_locked=False):
+    """Pack a tree. A locked source must stay immutable until publication."""
     source, packet = _root(source), _root(packet)
     _separate(source, packet)
     if direction not in ("upload", "download") or not token:
@@ -157,7 +160,7 @@ def pack(source, packet, *, token, direction, force=False):
                 check=True,
             )
         # Detect mutation during copying/compression instead of publishing a mixed snapshot.
-        if inventory(source) != (files, directories):
+        if not source_locked and inventory(source) != (files, directories):
             raise RuntimeError("Transport source changed during packaging; retry after writer stops")
         manifest = {
             "schema": 1,
@@ -199,8 +202,19 @@ def pack(source, packet, *, token, direction, force=False):
     return manifest
 
 
-def extract(packet, staging, manifest):
-    """Extract and verify a packet into an empty staging directory."""
+def _extract_7z(archive, staging, selection):
+    command = [seven_zip(), "x", "-y", "-bso0", "-bsp0", "-o" + str(staging), str(archive)]
+    if selection is None:
+        subprocess.run(command, check=True)
+        return
+    with tempfile.TemporaryDirectory(prefix="archive-members-") as temporary:
+        listing = Path(temporary) / "members.txt"
+        listing.write_text("".join(name + "\n" for name in sorted(selection)), encoding="utf-8")
+        subprocess.run([*command, "-scsUTF-8", "-spd", "-i@" + str(listing)], check=True)
+
+
+def extract(packet, staging, manifest, *, selection=None):
+    """Extract and verify a packet, or exact selected members, in empty staging."""
     packet, staging = Path(packet), Path(staging)
     files = manifest["files"]
     directories = manifest["directories"]
@@ -209,7 +223,18 @@ def extract(packet, staging, manifest):
     archived = set(manifest["archived"])
     if not archived.issubset(files) or len(archived) != len(manifest["archived"]):
         raise ValueError("Invalid archived file inventory")
-    if archived:
+    picked = None if selection is None else set(selection)
+    if picked is not None:
+        if not picked or not picked.issubset(files):
+            raise ValueError("Requested members are absent from the archive")
+        files = {name: files[name] for name in picked}
+        directories = sorted({
+            parent.as_posix()
+            for name in picked for parent in PurePosixPath(name).parents
+            if parent != PurePosixPath(".")
+        })
+    compressed = archived.intersection(files)
+    if compressed:
         archive = packet / "json.7z"
         if file_sha256(archive) != manifest["archive_sha256"]:
             raise ValueError("Transport archive SHA-256 mismatch")
@@ -239,21 +264,12 @@ def extract(packet, staging, manifest):
             members.add(name)
         if members != archived:
             raise ValueError("Transport archive member inventory differs")
-        subprocess.run(
-            [
-                seven_zip(),
-                "x",
-                "-y",
-                "-bso0",
-                "-bsp0",
-                "-o" + str(staging),
-                str(archive),
-            ],
-            check=True,
-        )
-    loose, _ = inventory(packet / "files")
-    if loose != {name: facts for name, facts in files.items() if name not in archived}:
-        raise ValueError("Transport loose file SHA-256/inventory mismatch")
+        _extract_7z(archive, staging, None if picked is None else compressed)
+    loose = {name: facts for name, facts in files.items() if name not in archived}
+    if picked is None:
+        present, _ = inventory(packet / "files")
+        if present != loose:
+            raise ValueError("Transport loose file SHA-256/inventory mismatch")
     for name in loose:
         target = staging / name
         target.parent.mkdir(parents=True, exist_ok=True)

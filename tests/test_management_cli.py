@@ -246,6 +246,82 @@ class ManagementTests(unittest.TestCase):
             remote.pull(deploy, delete_instance=True, transport=transport)
             self.assertEqual(transport.deletes, 1)
 
+    def test_finished_pull_preserves_the_server_archive_and_audit(self):
+        from civ5rl.deploy.final_run import publish_final_run
+        from civ5rl.engine.runtime.archive import seven_zip
+
+        try:
+            seven_zip()
+        except RuntimeError as exc:
+            self.skipTest(str(exc))
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            deploy, transport = self.deployment(root)
+            record = deploy / "deployment.json"
+            saved = json.loads(record.read_text())
+            write(record, {**saved, "archive_transport": 1, "final_run_bundle": 1})
+            remote.launch(deploy, "run", transport=transport)
+            self.assertIn("--script-arg=--final-run-bundle", transport.last_args)
+            saved = json.loads(record.read_text())
+            job = saved["job"]
+            transfer = job["transfer"]
+            mirror = Path(transfer["local"]) / "upload"
+            server = root / "server-run"
+            write(server / "status.json", {"status": "complete"})
+            write(server / "state.json", {"decisions": 999})
+            write(server / "evaluation/set/case-a/replay.json", {"events": [1]})
+            write(server / "evaluation/set/case-b/replay.json", {"events": [2]})
+            checkpoint = server / "checkpoints/final.pt"
+            checkpoint.parent.mkdir()
+            checkpoint.write_bytes(b"model-adam-rng")
+            audit = {"status": "passed", "sections": {
+                k: {"status": "passed"} for k in ("passport", "ppo_ledger", "checkpoints_adam_rng")
+            }}
+
+            def server_audit(_run, destination):
+                write(destination / "audit.json", audit)
+                (destination / "audit.md").write_text("Saved-run audit: passed", encoding="utf-8")
+                return audit
+
+            destination = Path(saved["local_output"])
+            write(destination / "evaluation/old.json", {"stale": True})
+            result = {
+                "job_id": job["id"],
+                "execution": {"status": "exited", "exit_code": 0},
+                "lifecycle": {"phase": "finalized"},
+                "post_sync": {
+                    "status": "failed", "file_errors": [], "verified_files": 30, "unchanged_files": 0,
+                    "local_dir": str(mirror), "remote_sync_dir": transfer["remote_upload"],
+                },
+            }
+            with patch("civ5rl.reporting.operations.audit_run", side_effect=server_audit) as run_audit:
+                publish_final_run(server, mirror, transfer["token"])
+                archive = (mirror / "final/run/evaluation.storage/json.7z").read_bytes()
+                write(deploy / job["result"], result)
+                with self.assertRaises(ValueError):
+                    remote.pull(deploy, delete_instance=True, transport=transport)
+                self.assertEqual(transport.deletes, 0)
+                self.assertTrue((destination / "evaluation/old.json").is_file())
+                result["post_sync"]["status"] = "ok"
+                write(deploy / job["result"], result)
+                receipt = remote.pull(deploy, transport=transport)
+                self.assertEqual(receipt["scientific_audit"], "passed")
+                self.assertFalse((destination / "evaluation").exists())
+                self.assertFalse((mirror / "final").exists())
+                self.assertEqual((destination / "evaluation.storage/json.7z").read_bytes(), archive)
+                self.assertEqual((destination / "checkpoints/final.pt").read_bytes(), checkpoint.read_bytes())
+                remote.pull(deploy, delete_instance=True, transport=transport)
+                self.assertEqual(transport.deletes, 1)
+                run_audit.assert_called_once()
+
+            match = root / "match"
+            with contextlib.redirect_stdout(io.StringIO()):
+                ctl(["restore-evaluations", "--run", str(destination), "--match", "set/case-a", "--out", str(match)])
+            self.assertEqual({p.name for p in match.iterdir()}, {"replay.json"})
+            self.assertEqual(json.loads((match / "replay.json").read_text()), {"events": [1]})
+            self.assertFalse((destination / "evaluation").exists())
+
     def test_cli_routing_keeps_bootstrap_settings_and_explicit_delete(self):
         with (
             tempfile.TemporaryDirectory() as temp,

@@ -208,6 +208,7 @@ def package(
     deployment = {
         "schema": 2,
         "archive_transport": 1,
+        "final_run_bundle": 1,
         "input_packets": input_packets,
         "input_packet_files": input_packet_files,
         "kind": resolved_config["kind"],
@@ -562,6 +563,9 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
                                    destination=remote_destination, local_destination=str(scientific_destination), token=token)
             worker_args += ["--transfer-dir", remote_sync_dir, "--transfer-token", token,
                             "--transfer-destination", remote_destination]
+            if deployment.get("final_run_bundle") == 1 and mode in ("run", "resume"):
+                worker_args.append("--final-run-bundle")
+                job["transfer"]["final_run_bundle"] = True
             for item in deployment.get("input_packets", []):
                 worker_args += ["--input-transfer", json.dumps(dict(
                     packet=deployment["remote_root"] + "/" + item["packet"],
@@ -661,6 +665,8 @@ print(json.dumps(result,allow_nan=False))
 
 
 def pull(directory, *, delete_instance=False, transport=None):
+    from civ5rl.provenance.common import atomic_output
+
     directory = Path(directory).resolve()
     transport = transport or Transport()
     with RunLock(directory):
@@ -681,17 +687,25 @@ def pull(directory, *, delete_instance=False, transport=None):
         if result.get("job_id") != deployment["job"]["id"]:
             raise ValueError("Final transport metadata belongs to a different job")
 
-        transferred = None
-        if deployment["job"].get("transfer"):
-            # The durable job mirrors only its upload packet. Fetch the authoritative output
-            # after exit, including after hard failures, before auditing or enabling deletion.
-            transferred = deployment["job"].get("transfer_verified")
-            if transferred is None:
-                transferred = transport.download_packet(deployment, deployment["job"]["transfer"])
-                deployment["job"]["transfer_verified"] = transferred
-
         exit_code = execution.get("exit_code")
         mode = deployment["job"]["mode"]
+        transfer = deployment["job"].get("transfer")
+        transferred = deployment["job"].get("transfer_verified")
+        audit_dir = directory / "audits" / deployment["job"]["id"]
+        final_bundle = None
+        if transfer and transfer.get("final_run_bundle"):
+            final_bundle = Path(transfer["local"]) / "upload/final"
+        if transfer and transferred is None:
+            if exit_code == 0 and final_bundle is not None and final_bundle.exists():
+                from civ5rl.deploy.final_run import install_final_run
+
+                transferred = install_final_run(transfer, post_sync, audit_dir)
+            else:
+                # A paused, interrupted or legacy job leaves its ordinary output on the host.
+                transferred = transport.download_packet(deployment, transfer)
+            deployment["job"]["transfer_verified"] = transferred
+
+        final_run = transferred is not None and transferred.get("format") == "final-run-v1"
         if mode == "tune":
             destination = directory / "tuning"
             measurement = destination / deployment.get("tuning_measurement", "")
@@ -726,15 +740,17 @@ def pull(directory, *, delete_instance=False, transport=None):
             )
             audit = None
         else:
-            from civ5rl.reporting.operations import audit_run
-
             destination = Path(deployment["local_output"])
-            audit = audit_run(
-                destination, directory / "audits" / deployment["job"]["id"]
-            )
-            if audit["status"] == "passed" and _read(destination / "status.json").get("status") in ("complete", "completed", "finished", "closed"):
-                from civ5rl.reporting.evaluation_storage import archive_evaluations
-                archive_evaluations(destination)
+            if final_run:
+                audit = _read(audit_dir / "audit.json")
+            else:
+                from civ5rl.reporting.operations import audit_run
+
+                audit = audit_run(destination, audit_dir)
+                if audit["status"] == "passed" and _read(destination / "status.json").get("status") in ("complete", "completed", "finished", "closed"):
+                    from civ5rl.reporting.evaluation_storage import archive_evaluations
+
+                    archive_evaluations(destination)
             deployment["run_started"] = any(
                 (destination / name).is_file()
                 for name in ("state.json", "collection.json", "run.json")
@@ -757,7 +773,10 @@ def pull(directory, *, delete_instance=False, transport=None):
         if mode == "profile":
             receipt["profile_verified"] = profile_verified
         _receipt(deployment, "pull", **receipt)
-        _write(directory / "deployment.json", deployment)
+        with atomic_output(directory / "deployment.json") as staged:
+            _write(staged, deployment)
+        if final_run and final_bundle is not None:
+            shutil.rmtree(final_bundle, ignore_errors=True)
 
         if delete_instance:
             if deployment.get("instance_deleted"):
@@ -790,5 +809,6 @@ def pull(directory, *, delete_instance=False, transport=None):
                 "delete_instance",
                 instance_id=deployment["instance"]["instance_id"],
             )
-            _write(directory / "deployment.json", deployment)
+            with atomic_output(directory / "deployment.json") as staged:
+                _write(staged, deployment)
         return receipt

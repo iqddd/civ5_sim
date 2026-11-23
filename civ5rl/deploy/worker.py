@@ -49,6 +49,7 @@ def main(argv=None, *, root=ROOT):
     parser.add_argument("--transfer-dir")
     parser.add_argument("--transfer-token")
     parser.add_argument("--transfer-destination")
+    parser.add_argument("--final-run-bundle", action="store_true")
     parser.add_argument("--input-transfer", action="append", default=[])
     parser.add_argument("--evaluation-device", choices=("auto", "cpu", "cuda"))
     parser.add_argument("--evaluation-workers", type=int)
@@ -176,7 +177,12 @@ def main(argv=None, *, root=ROOT):
                 raise ValueError("No confirmed comparable tuning for this experiment")
             command += ["--runtime-config", args.runtime_config]
 
-    return subprocess.run(command, cwd=root, check=False).returncode
+    code = subprocess.run(command, cwd=root, check=False).returncode
+    if code == 0 and args.final_run_bundle and args.mode in ("run", "resume"):
+        from civ5rl.deploy.final_run import publish_final_run
+
+        publish_final_run(output, args.transfer_dir, args.transfer_token)
+    return code
 
 
 if __name__ == "__main__":
