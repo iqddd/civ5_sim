@@ -68,6 +68,8 @@ Development, additional validation, sampling и argmax нельзя объеди
 Таблица сохраняет результаты до последующих изменений кода; она не обещает
 воспроизведение нынешним evaluator без проверки паспортов и платформы.
 
+**Пилот C2PA против CPv2 + CP + self-play (27 ноября).** Старт от `update-0084.pt`, `end_turn`, `two_visible_compact_v1`, RTX 5080 16 ГБ. Два пилота по три rollout на тренировочных мирах. При LR новых веток 5e−5 и 1e−4 RMS вклада action attention перед R3 составил 0,00249 и 0,00392 при допуске от 0,015. Доля смен argmax составила 0,063% и 0,087% при допуске от 0,2%. Критик прошёл оба прогона: EV на контактных боях против CPv2 перед R3 составила 0,419 и 0,576. Полный прогон на 5090 не запускался. Development, Additional и закрытый test не использовались. [Первый пилот](../artifacts/rl/ppo-c2pa-h60-cpv2-pilot/derived/pilot-report.json), [повтор](../artifacts/rl/ppo-c2pa-h60-cpv2-pilot-retry/derived/pilot-report.json).
+
 ## Combat AI и отдельные исследования
 
 | Исследование | Установленное свидетельство | Где читать |

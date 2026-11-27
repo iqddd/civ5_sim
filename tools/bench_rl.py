@@ -267,7 +267,6 @@ def main():
         help="Also force and check a KL rejection",
     )
     ppo_update.add_argument("--no-resident-replay-indices", action="store_true")
-    ppo_update.add_argument("--replay-action-bucket", type=int, help="Split replay scoring rows at this legal-action count")
     parser.add_argument(
         "--steps",
         type=int,
@@ -373,14 +372,8 @@ def main():
         parser.error(
             "--baseline-result, --minibatch-tokens and --check-rollback apply to ppo-update only"
         )
-    if args.phase not in ("ppo-update", "selfplay-profile") and (
-        args.no_resident_replay_indices or args.replay_action_bucket is not None
-    ):
-        parser.error("Replay performance overrides require ppo-update or selfplay-profile")
-    if args.replay_action_bucket is not None and (
-        args.replay_action_bucket < 1 or args.no_resident_replay_indices
-    ):
-        parser.error("Replay action bucketing needs a positive width and resident replay indices")
+    if args.no_resident_replay_indices and args.phase not in ("ppo-update", "selfplay-profile"):
+        parser.error("--no-resident-replay-indices requires ppo-update or selfplay-profile")
     if args.phase == "comparison-collection":
         from civ5rl.experiments.benchmarks.comparison_collection import run_benchmark
 
@@ -440,8 +433,6 @@ def main():
     config, inputs = resolve_inputs(args, parser)
     if args.no_resident_replay_indices:
         config["performance"]["ppo_resident_replay_indices"] = False
-    if args.replay_action_bucket is not None:
-        config["performance"]["ppo_replay_action_bucket"] = args.replay_action_bucket
     if args.phase == "replay":
         replay(args, parser, config, inputs)
     elif args.phase == "ppo-update":

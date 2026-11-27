@@ -64,8 +64,7 @@ class RolloutCache(SequenceBuffer):
         self.pinned_replay_bytes = 0
         self.pinned_replay_hits = 0
         self.replay_memory_admission = None
-        self.resident_replay_indices = True
-        self.replay_action_bucket = 0
+        self.resident_replay_indices = False
 
     def _prepare_labels(self, episodes, *, gamma, gae_lambda):
         label_device = "cpu" if self.cpu_labels else self.device
@@ -290,21 +289,8 @@ class RolloutCache(SequenceBuffer):
         return self._replay_plan
 
     def _resident_replay_spec(self, spans, slots, free_count):
-        width = self.action_width(spans)
-        groups = ()
-        if 0 < self.replay_action_bucket < width:
-            counts = np.concatenate([
-                self.action_counts[int(self.offsets[episode]) + start : int(self.offsets[episode]) + stop]
-                for episode, start, stop in spans
-            ])
-            small = counts <= self.replay_action_bucket
-            if small.any():
-                groups = tuple(
-                    (torch.from_numpy(np.flatnonzero(members)).to(self.device), int(counts[members].max()))
-                    for members in (small, ~small)
-                )
         state_slots = None if slots is None else torch.tensor(slots, dtype=torch.long, device=self.device)
-        return replay.ResidentReplaySpec(spans, self.indices(spans), width, state_slots, free_count, groups)
+        return replay.ResidentReplaySpec(spans, self.indices(spans), self.action_width(spans), state_slots, free_count)
 
     def _try_device_plan(self, specs_by_group, sequences_per_batch, reserve_bytes):
         """Allocate actual replay tensors before admitting a resident plan."""

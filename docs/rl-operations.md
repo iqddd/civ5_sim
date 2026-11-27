@@ -456,10 +456,8 @@ python tools/diagnose_cp_replay.py --rollout ROLLOUT --episode EPISODE --trace-f
 и сверку восстановленного состояния. Включайте флаг в обеих ветвях при
 проверке изменений, которые затрагивают rollback.
 
-Для A/B подготовки PPO replay используйте `--no-resident-replay-indices`
-на исходном замере. `--replay-action-bucket 64` группирует строки replay
-по числу легальных действий. Сравнивайте с тем же CONFIG и rollout через
-`--baseline-result`, чтобы проверить паритет до отдельного замера времени.
+Для A/B резидентного PPO replay используйте `--no-resident-replay-indices`
+на исходном замере, затем тот же CONFIG и rollout с `--baseline-result`.
 
 Время берётся из отдельных прогретых повторов полного update. Прогоны с
 новой компиляцией исключаются из медианы. Старый эталон годится для

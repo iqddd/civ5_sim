@@ -43,7 +43,6 @@ class ReplayPart(NamedTuple):
     lengths: list[int]
     slots: torch.Tensor | None
     free_count: int
-    action_groups: tuple[tuple[torch.Tensor, int], ...] = ()
 
 
 class HostReplayPart(NamedTuple):
@@ -61,7 +60,6 @@ class ResidentReplaySpec(NamedTuple):
     width: int
     slots: torch.Tensor | None
     free_count: int
-    action_groups: tuple[tuple[torch.Tensor, int], ...]
 
 
 @dataclass
@@ -89,7 +87,7 @@ class ReplayPlan:
                     ReplayPart(
                         *cache.batch(spec.spans, indices=spec.indices, width=spec.width,
                                      min_cells=cache.spatial_cell_padding),
-                        spec.slots, spec.free_count, spec.action_groups,
+                        spec.slots, spec.free_count,
                     )
                     for spec in specs
                 ]
@@ -361,16 +359,13 @@ def measure_replay(
         hidden = (
             torch.zeros((1, group_size, policy.hidden_size), device=device) if policy.is_recurrent else None
         )
-        for batch, labels, lengths, slots, part_free, action_groups in parts:
+        for batch, labels, lengths, slots, part_free in parts:
             if policy.spatial_cuda_graphs:
                 torch.compiler.cudagraph_mark_step_begin()
             part_hidden = (
                 None if hidden is None else (hidden if slots is None else hidden.index_select(1, slots))
             )
-            if action_groups:
-                logits, value, last = forward(batch, lengths, part_hidden, action_groups=action_groups)
-            else:
-                logits, value, last = forward(batch, lengths, part_hidden)
+            logits, value, last = forward(batch, lengths, part_hidden)
             logits = policy_logits(logits, temperature)
             if hidden is not None:
                 if slots is None:
