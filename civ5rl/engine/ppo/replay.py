@@ -34,7 +34,7 @@ class _ReplayPlanCache(ReplayCache, Protocol):
     _replay_h2d_stream: torch.cuda.Stream | None
 
 
-ReplayMode = Literal["on_demand", "host", "device"]
+ReplayMode = Literal["on_demand", "resident_indices", "host", "device"]
 
 
 class ReplayPart(NamedTuple):
@@ -43,6 +43,7 @@ class ReplayPart(NamedTuple):
     lengths: list[int]
     slots: torch.Tensor | None
     free_count: int
+    action_groups: tuple[tuple[torch.Tensor, int], ...] = ()
 
 
 class HostReplayPart(NamedTuple):
@@ -52,6 +53,15 @@ class HostReplayPart(NamedTuple):
     slots: torch.Tensor | None
     free_count: int
     is_pinned: bool
+
+
+class ResidentReplaySpec(NamedTuple):
+    spans: list[Span]
+    indices: torch.Tensor
+    width: int
+    slots: torch.Tensor | None
+    free_count: int
+    action_groups: tuple[tuple[torch.Tensor, int], ...]
 
 
 @dataclass
@@ -72,6 +82,17 @@ class ReplayPlan:
             count_hits = self._count_host_hits
             self._count_host_hits = True
             yield from _stream_pinned_groups(cache, self.groups, count_hits=count_hits)
+            return
+        if self.mode == "resident_indices":
+            for group_size, specs in self.groups:
+                yield group_size, [
+                    ReplayPart(
+                        *cache.batch(spec.spans, indices=spec.indices, width=spec.width,
+                                     min_cells=cache.spatial_cell_padding),
+                        spec.slots, spec.free_count, spec.action_groups,
+                    )
+                    for spec in specs
+                ]
             return
         for group_size, specs in self.groups:
             parts = replay_parts(cache, specs)
@@ -340,17 +361,16 @@ def measure_replay(
         hidden = (
             torch.zeros((1, group_size, policy.hidden_size), device=device) if policy.is_recurrent else None
         )
-        for batch, labels, lengths, slots, part_free in parts:
+        for batch, labels, lengths, slots, part_free, action_groups in parts:
             if policy.spatial_cuda_graphs:
                 torch.compiler.cudagraph_mark_step_begin()
             part_hidden = (
                 None if hidden is None else (hidden if slots is None else hidden.index_select(1, slots))
             )
-            logits, value, last = forward(
-                batch,
-                lengths,
-                part_hidden,
-            )
+            if action_groups:
+                logits, value, last = forward(batch, lengths, part_hidden, action_groups=action_groups)
+            else:
+                logits, value, last = forward(batch, lengths, part_hidden)
             logits = policy_logits(logits, temperature)
             if hidden is not None:
                 if slots is None:

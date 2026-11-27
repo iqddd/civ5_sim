@@ -54,3 +54,8 @@ class ActionContextTests(unittest.TestCase):
             self.assertTrue(torch.equal(logits, baseline_logits))
             self.assertTrue(torch.equal(values, baseline_values))
             self.assertTrue(torch.isfinite(values).all())
+
+            groups = ((torch.tensor([1, 2]), 1), (torch.tensor([0]), 2))
+            replay_logits, replay_values = policy._score_action_groups(batch, cells, hidden, groups, compute_value=True)
+            torch.testing.assert_close(replay_logits, logits)
+            torch.testing.assert_close(replay_values, values)

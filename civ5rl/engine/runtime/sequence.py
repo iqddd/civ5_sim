@@ -341,7 +341,17 @@ class SequenceBuffer:
         runner = self._gather_runner or _gather_resident
         return runner(self.data, indices, width)
 
-    def gather_inputs(self, spans, indices=None, *, device=None, min_cells=0, include_behavior=True):
+    def action_width(self, spans):
+        return max(
+            int(
+                self.action_counts[
+                    int(self.offsets[episode]) + start : int(self.offsets[episode]) + stop
+                ].max()
+            )
+            for episode, start, stop in spans
+        )
+
+    def gather_inputs(self, spans, indices=None, *, device=None, min_cells=0, include_behavior=True, width=None):
         if self.data is None:
             return batch_inputs(
                 [
@@ -355,14 +365,8 @@ class SequenceBuffer:
             )
         if indices is None:
             indices = self.indices(spans)
-        width = max(
-            int(
-                self.action_counts[
-                    int(self.offsets[episode_index]) + start : int(self.offsets[episode_index]) + stop
-                ].max()
-            )
-            for episode_index, start, stop in spans
-        )
+        if width is None:
+            width = self.action_width(spans)
         return self._gather(indices, width, include_behavior=include_behavior)
 
     def gather_spatial_inputs(self, spans):

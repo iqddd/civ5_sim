@@ -803,7 +803,7 @@ class Policy(nn.Module):
 
     def forward_sequences(
         self, batch, lengths, hidden=None, *, memory_only=False, compute_value=True,
-        spatial_runner=None,
+        spatial_runner=None, action_groups=(),
     ):
         self._check_sequences(len(batch["cells"]), lengths, hidden)
         x, context_embedding = self.encode_spatial(
@@ -812,8 +812,26 @@ class Policy(nn.Module):
         h, last = self.sequence_memory(context_embedding, lengths, hidden, return_sequence=not memory_only)
         if memory_only:
             return last
-        logits, value = self.score_heads(batch, x, h, compute_value=compute_value)
+        if action_groups:
+            logits, value = self._score_action_groups(batch, x, h, action_groups, compute_value=compute_value)
+        else:
+            logits, value = self.score_heads(batch, x, h, compute_value=compute_value)
         return logits, value, last
+
+    def _score_action_groups(self, batch, x, h, groups, *, compute_value):
+        """Score independent replay rows at their local width and restore row order."""
+        scores = h.new_full(batch["action_mask"].shape, -torch.inf)
+        values = h.new_empty(len(h)) if compute_value else None
+        keys = ("sources", "targets", "action_features", "action_mask", "attack_preview")
+        for rows, width in groups:
+            part = {key: batch[key][:, :width].index_select(0, rows) for key in keys if key in batch}
+            logits, value = self.score_heads(
+                part, x.index_select(0, rows), h.index_select(0, rows), compute_value=compute_value,
+            )
+            scores[:, :width].index_copy_(0, rows, logits)
+            if compute_value:
+                values.index_copy_(0, rows, value)
+        return scores, values
 
     def _initialize(self):
         for module in self.modules():

@@ -380,7 +380,7 @@ python tools/ctl_rl.py overhead --run RUN --out OUT --reference-start START_UPDA
 ```
 
 `performance` читает законченные updates; без `--last` — весь RUN.
-Для записи результата задайте `--output`. `overhead` сохраняет разбор затрат
+Для записи результата задайте `--out`. `overhead` сохраняет разбор затрат
 в OUT; reference range задаёт окно сравнения скорости.
 
 | Показатель | Как читать |
@@ -455,6 +455,11 @@ python tools/diagnose_cp_replay.py --rollout ROLLOUT --episode EPISODE --trace-f
 код 1. `--check-rollback` добавляет принудительное отклонение первого шага
 и сверку восстановленного состояния. Включайте флаг в обеих ветвях при
 проверке изменений, которые затрагивают rollback.
+
+Для A/B подготовки PPO replay используйте `--no-resident-replay-indices`
+на исходном замере. `--replay-action-bucket 64` группирует строки replay
+по числу легальных действий. Сравнивайте с тем же CONFIG и rollout через
+`--baseline-result`, чтобы проверить паритет до отдельного замера времени.
 
 Время берётся из отдельных прогретых повторов полного update. Прогоны с
 новой компиляцией исключаются из медианы. Старый эталон годится для

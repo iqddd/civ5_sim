@@ -217,8 +217,9 @@ def _parity(trial, config, *, rollback=False):
     )
     if rollback:
         expected_adam = copy.deepcopy(trial.saved["optimizer"])
+        group_lrs = config["optimizer"].get("group_lrs", {})
         for group in expected_adam["param_groups"]:
-            group["lr"] = result["lr"]
+            group["lr"] = group_lrs.get(group.get("name"), result["lr"])
         values["restored"] = (
             result["rejected_optimizer_steps"] == 1
             and result["stop_reason"] == "rejected_full_kl"
@@ -313,6 +314,8 @@ def run_benchmark(args, parser, config, inputs):
             "git_commit": commit,
             "working_diff_sha256": hashlib.sha256(execution_diff).hexdigest(),
             "baseline": str(args.baseline_result.resolve()) if baseline else None,
+            "resident_replay_indices": config["performance"].get("ppo_resident_replay_indices", True),
+            "replay_action_bucket": config["performance"].get("ppo_replay_action_bucket"),
             "checks": checks,
             "differences": problems,
             "timing": timing,

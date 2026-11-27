@@ -101,6 +101,8 @@ class BatchedBackend:
                 episode.pop("encoded", None)
                 episode.pop("encoded_variant", None)
         self.cache.spatial_cell_padding = int(getattr(policy, "spatial_cell_padding", 0) or 0)
+        self.cache.resident_replay_indices = options.get("ppo_resident_replay_indices", True)
+        self.cache.replay_action_bucket = int(options.get("ppo_replay_action_bucket", 0))
         self.kl_batch = options.get("kl_sequences_per_batch", 8)
         self.diagnostics_runner = _minibatch_diagnostics
         if str(device).startswith("cuda") and options.get("ppo_optimized_inputs", False):
