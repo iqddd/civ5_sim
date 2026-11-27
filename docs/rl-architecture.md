@@ -442,9 +442,11 @@ C2PA и C2PA-pre-GELU используют тот же публичный вхо
 Расширения `action_context_v1` и `action_context_pre_gelu_v1` переносят
 веса и состояния Adam из C2P согласно настройкам опыта.
 Выходная проекция attention и проекция сводки нулевые в `initial.pt`.
-Группа Adam `action_context` включает оба новых модуля и стартует пустой.
-В смешанном профиле `u0` — исходный C2P-чекпойнт, а `current` и архивные
-снимки используют C2PA. [Профиль](../configs/rl-ppo-c2pa-h60-selfplay.json).
+Новые состояния Adam стартуют пустыми. В профиле с адаптацией критика
+`action_context` и `value_actions` имеют отдельные группы Adam.
+В смешанных профилях `u0` — исходный C2P-чекпойнт, а `current` и архивные
+снимки используют вариант из конфига.
+[C2PA](../configs/rl-ppo-c2pa-h60-selfplay.json) · [C2PA-pre-GELU](../configs/rl-ppo-c2pa-pre-gelu-h60-cpv2.json).
 
 ## Удалённая передача результатов
 

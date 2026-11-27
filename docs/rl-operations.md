@@ -380,7 +380,8 @@ python tools/ctl_rl.py overhead --run RUN --out OUT --reference-start START_UPDA
 ```
 
 `performance` читает законченные updates; без `--last` — весь RUN.
-Для записи результата задайте `--out`. `overhead` сохраняет разбор затрат
+Для записи результата перенаправьте вывод `performance --json` в файл.
+`overhead` сохраняет разбор затрат
 в OUT; reference range задаёт окно сравнения скорости.
 
 | Показатель | Как читать |

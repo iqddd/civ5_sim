@@ -70,6 +70,8 @@ Development, additional validation, sampling и argmax нельзя объеди
 
 **Пилот C2PA против CPv2 + CP + self-play (27 ноября).** Старт от `update-0084.pt`, `end_turn`, `two_visible_compact_v1`, RTX 5080 16 ГБ. Два пилота по три rollout на тренировочных мирах. При LR новых веток 5e−5 и 1e−4 RMS вклада action attention перед R3 составил 0,00249 и 0,00392 при допуске от 0,015. Доля смен argmax составила 0,063% и 0,087% при допуске от 0,2%. Критик прошёл оба прогона: EV на контактных боях против CPv2 перед R3 составила 0,419 и 0,576. Полный прогон на 5090 не запускался. Development, Additional и закрытый test не использовались. [Первый пилот](../artifacts/rl/ppo-c2pa-h60-cpv2-pilot/derived/pilot-report.json), [повтор](../artifacts/rl/ppo-c2pa-h60-cpv2-pilot-retry/derived/pilot-report.json).
 
+**C2PA-pre-GELU против CPv2 + CP + self-play.** Старт от `update-0084.pt`, `end_turn`, `two_visible_compact_v1`. В единственном пилоте на RTX 5080 после 171 принятого шага RMS вклада attention 0,01928, смены argmax 0,663%, EV перед R3 на контактах CPv2 0,527. На RTX 5090 ранний стоп `no_development_gain` после 2 131 652 решений, 59 rollout, 3 178 принятых шагов и 3 785 активных секунд. На Development-512 от 0 до 1 и 2 Mi победы над CPv2 составили **255 → 269 → 278**, над CP **393 → 400 → 393**, баланс H2H с u84 **0 → −9 → −10**. Для продолжения требовалось 280 побед над CPv2 хотя бы на одной вехе. Выбрана исходная модель, Additional и test не использовались. [Пилот](../artifacts/rl/ppo-c2pa-pre-gelu-h60-cpv2-pilot/derived/pilot-report.json) · [Полный опыт](../artifacts/rl/ppo-c2pa-pre-gelu-h60-cpv2/report.md).
+
 ## Combat AI и отдельные исследования
 
 | Исследование | Установленное свидетельство | Где читать |
