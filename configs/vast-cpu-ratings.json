@@ -512,6 +512,12 @@
       "single_thread": 4673,
       "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+9+9950X3D2",
       "provenance": "PassMark Single Thread rating checked 2026-11-27"
+    },
+    {
+      "name": "AMD Ryzen 7 8700F",
+      "single_thread": 3872,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+8700F&id=6104",
+      "provenance": "PassMark Single Thread rating on 2026-11-27"
     }
   ]
 }
