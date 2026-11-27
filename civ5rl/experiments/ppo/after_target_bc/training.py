@@ -36,6 +36,7 @@ from civ5rl.experiments.ppo.after_target_bc.boundary import (
     RolloutBoundary,
     heal_interrupted_update,
 )
+from civ5rl.experiments.ppo.after_target_bc.diagnostic import record_post_r3
 from civ5rl.experiments.ppo.after_target_bc.evaluation import development
 from civ5rl.experiments.ppo.after_target_bc.initialization import make_policy
 from civ5rl.experiments.ppo.after_target_bc.phases import (
@@ -243,6 +244,8 @@ def train(
 
         if not diagnostic:
             _recover_due_evaluation(session)
+        else:
+            record_post_r3(session)
         if pause_due(out, "update", state["updates"], at_boundary=state["phase"] == "collect"):
             write_json(out / "status.json", {"status": "paused", "checkpoint": state["latest"]})
             return
@@ -318,6 +321,8 @@ def train(
                 checked_final_evaluation = _commit_ppo_rollout(
                     session, metrics, monitor, factory, opponent_pool
                 )
+                if diagnostic:
+                    record_post_r3(session, monitor)
                 if pause_due(out, "update", state["updates"]):
                     write_json(
                         out / "status.json",

@@ -22,7 +22,7 @@ U0_CHECKPOINT = "checkpoints/reference-u0.pt"
 def u0_checkpoint(config):
     """C2PA uses its native C2P parent as the frozen match reference."""
     extension = model_extension(config)
-    return U0_CHECKPOINT if extension and extension.child == "C2PA" else "checkpoints/initial.pt"
+    return U0_CHECKPOINT if extension and extension.adds_action_context else "checkpoints/initial.pt"
 
 
 def self_play_config(config: dict[str, Any]) -> dict[str, Any] | None:

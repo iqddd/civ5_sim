@@ -555,8 +555,11 @@ python tools/run_ppo.py pilot-report --config configs/rl-ppo-c2pa-h60-cpv2-pilot
 ```
 
 Пилот ведёт сбор и PPO на тренировочных мирах и отключает Development и Additional.
-`pilot-report` проверяет допуски и выводит предложенную разовую поправку LR и эпох.
-Повтор выполняется от родителя в отдельном каталоге с теми же RNG namespaces.
+Для C2PA-pre-GELU используйте `configs/rl-ppo-c2pa-pre-gelu-h60-cpv2-pilot.json`.
+`pilot-report` проверяет attention на сохранённых позициях R3 по чекпойнту после
+PPO R3 и возвращает число принятых шагов и хеши входов в `R3_post`.
+В отчётах исторического C2PA метрики attention находятся в `R3_pre`, там же
+доступна предложенная поправка LR и эпох для отдельного повторного пилота.
 
 Для отдельного сравнительного сбора при `package` задайте
 `--tuning-source SAVED_COLLECTION`: каталог завершённого сравнительного опыта.

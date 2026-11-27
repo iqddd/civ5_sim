@@ -898,8 +898,10 @@ class Policy(nn.Module):
             mask = batch["action_mask"]
             if self.variant_spec.attack_preview:
                 first = self.action[0](action_input.float()) + self.attack_preview(batch["attack_preview"].float())
+                if self.variant_spec.action_context_pre_gelu:
+                    first = self.action_attention(first, mask)
                 actions = self.action[1](first)
-                if self.variant_spec.action_context:
+                if self.variant_spec.action_context and not self.variant_spec.action_context_pre_gelu:
                     actions = self.action_attention(actions, mask)
                 scores = self.action[2](actions)
             else:

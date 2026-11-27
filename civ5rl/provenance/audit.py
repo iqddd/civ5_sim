@@ -488,7 +488,7 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
                     raise ValueError("Initial extension Adam group must be empty")
             elif not _equal(initial["optimizer"], parent["optimizer"]):
                 raise ValueError("Initial Adam differs from parent")
-            if extension and extension.child == "C2PA" and file_sha256(directory / "checkpoints/reference-u0.pt") != file_sha256(parent_checkpoint):
+            if extension and extension.adds_action_context and file_sha256(directory / "checkpoints/reference-u0.pt") != file_sha256(parent_checkpoint):
                 raise ValueError("Frozen u0 differs from the native parent checkpoint")
     return {
         "status": "verified",

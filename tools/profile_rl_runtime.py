@@ -300,7 +300,9 @@ def main():
                 self_play = bool(config.get("self_play", {}).get("enabled"))
                 synthetic_archive = []
                 if self_play:
-                    from civ5rl.engine.collection.opponents import OpponentPool, select_opponent
+                    from civ5rl.engine.collection.opponents import (
+                        U0_CHECKPOINT, OpponentPool, select_opponent, u0_checkpoint,
+                    )
 
                     if float(config["self_play"].get("archive_share", 0.0)) > 0:
                         synthetic_archive = [
@@ -333,7 +335,7 @@ def main():
                         config, "cuda", args.out,
                         parent_checkpoint=(
                             ROOT / config["experiment"]["parent"]
-                            if config["model"]["variant"] == "C2PA" else args.checkpoint
+                            if u0_checkpoint(config) == U0_CHECKPOINT else args.checkpoint
                         ),
                     )
                     if self_play

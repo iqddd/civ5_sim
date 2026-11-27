@@ -1,8 +1,10 @@
 """Explicit, function-preserving policy extensions for branching from a checkpoint."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
+
+from civ5rl.core.variants import PolicyVariant, variant_spec
 
 
 @dataclass(frozen=True)
@@ -12,6 +14,10 @@ class ModelExtension:
     adam_group: str
     new_parameters: frozenset[str]
     zero_parameters: tuple[str, ...]
+
+    @property
+    def adds_action_context(self):
+        return variant_spec(self.child).action_context
 
 
 _EXTENSIONS = {
@@ -28,6 +34,9 @@ _EXTENSIONS = {
         ("action_attention.out_proj.weight", "action_attention.out_proj.bias", "value_actions.weight"),
     ),
 }
+_EXTENSIONS["action_context_pre_gelu_v1"] = replace(
+    _EXTENSIONS["action_context_v1"], child=PolicyVariant.CONTACTS_GRU_C2_PREVIEW_ACTIONS_PRE_GELU,
+)
 
 
 def model_extension(config):

@@ -21,7 +21,7 @@ def validate_profile(config):
         raise ValueError("Initial value handling is incompatible with the parent optimizer")
     extension = model_extension(config)
     value_mode = ("adapt_parent_first_rollout", "reset_then_preserve") if experiment.get("three_opponent_evaluation") else ("preserve_parent", "preserve")
-    if extension and extension.child == "C2PA" and (
+    if extension and extension.adds_action_context and (
         config["model"]["variant"] != extension.child or not inherited
         or not experiment.get("parent_optimizer_counters")
         or (mode, experiment.get("value_optimizer")) != value_mode
@@ -33,7 +33,7 @@ def validate_profile(config):
     ):
         raise ValueError("Invalid PPO Adam group learning rates")
     if experiment.get("three_opponent_evaluation"):
-        if not (config["model"]["variant"] == "C2PA" and config["self_play"]["enabled"]
+        if not (extension and extension.adds_action_context and config["self_play"]["enabled"]
                 and config["self_play"]["cpv2_share"] > 0 and config["self_play"]["cp_share"] > 0
                 and config["ppo"]["evaluation_purpose"] == "development_512"
                 and "evaluation_manifest" in experiment and "evaluation_manifest_sha256" in experiment):

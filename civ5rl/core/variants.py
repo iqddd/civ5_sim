@@ -11,6 +11,7 @@ class PolicyVariant(StrEnum):
     CONTACTS_GRU_C2 = "C2"
     CONTACTS_GRU_C2_PREVIEW = "C2P"
     CONTACTS_GRU_C2_PREVIEW_ACTIONS = "C2PA"
+    CONTACTS_GRU_C2_PREVIEW_ACTIONS_PRE_GELU = "C2PA-pre-GELU"
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class VariantSpec:
     bounded_time_features: bool
     attack_preview: bool = False
     action_context: bool = False
+    action_context_pre_gelu: bool = False
 
 
 VARIANT_SPECS: dict[PolicyVariant, VariantSpec] = {
@@ -69,6 +71,11 @@ VARIANT_SPECS[PolicyVariant.CONTACTS_GRU_C2_PREVIEW_ACTIONS] = replace(
     VARIANT_SPECS[PolicyVariant.CONTACTS_GRU_C2_PREVIEW],
     variant=PolicyVariant.CONTACTS_GRU_C2_PREVIEW_ACTIONS,
     action_context=True,
+)
+VARIANT_SPECS[PolicyVariant.CONTACTS_GRU_C2_PREVIEW_ACTIONS_PRE_GELU] = replace(
+    VARIANT_SPECS[PolicyVariant.CONTACTS_GRU_C2_PREVIEW_ACTIONS],
+    variant=PolicyVariant.CONTACTS_GRU_C2_PREVIEW_ACTIONS_PRE_GELU,
+    action_context_pre_gelu=True,
 )
 RECURRENT_VARIANTS = tuple(variant for variant in PolicyVariant if VARIANT_SPECS[variant].is_recurrent)
 

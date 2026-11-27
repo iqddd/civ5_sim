@@ -131,7 +131,7 @@ def load_initial_optimizer(policy: Policy, saved: dict[str, Any], config: dict[s
         if {name for g in extras for name in g["parameter_names"]} != extension.new_parameters:
             raise ValueError("Unexpected parameters in new Adam group")
         for extra in extras:
-            if extension.child == "C2PA":
+            if extension.adds_action_context:
                 extra["fused"] = config["performance"].get("fused_adam", False)
         source["param_groups"].extend(extras)
     optimizer.load_state_dict(source)

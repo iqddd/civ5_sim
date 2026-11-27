@@ -1,0 +1,13 @@
+{
+  "base_config": "configs/rl-ppo-c2pa-h60-cpv2.json",
+  "output": "artifacts/rl/ppo-c2pa-pre-gelu-h60-cpv2",
+  "model": {"variant": "C2PA-pre-GELU"},
+  "optimizer": {
+    "lr": 0.000008,
+    "group_lrs": {"action_context": 0.0001, "value_actions": 0.00002}
+  },
+  "experiment": {
+    "model_extension": "action_context_pre_gelu_v1",
+    "active_seconds": 21600
+  }
+}

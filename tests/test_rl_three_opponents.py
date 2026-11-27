@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from random import Random
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -27,6 +28,55 @@ def entry(step, v2, cp, balance, *, cp_contact=None):
 
 
 class ThreeOpponentTests(unittest.TestCase):
+    def test_pre_gelu_pilot_uses_committed_r3_and_can_recover_missing_diagnostic(self):
+        from civ5rl.experiments.ppo.after_target_bc import diagnostic
+        from civ5rl.core.model import Policy
+        from civ5rl.provenance.common import file_sha256, read_json, write_json
+        from civ5rl.provenance.jsonl import append_jsonl
+
+        with TemporaryDirectory() as directory:
+            out = Path(directory)
+            policy = Policy("C2PA-pre-GELU")
+            checkpoint = out / "checkpoints/update-0003.pt"
+            checkpoint.parent.mkdir()
+            torch.save({"variant": policy.variant}, checkpoint)
+            rollout = out / "rollouts/latest.pt"
+            rollout.parent.mkdir()
+            torch.save([{"chosen": [0]}], rollout)
+            write_json(rollout.with_suffix(".json"), {"update": 3, "sha256": file_sha256(rollout)})
+            write_json(out / "run.json", {"config": {"model": {"variant": policy.variant}, "critic": {"epochs": 4}}})
+            row = {"cpv2_contact_pre": {"explained_variance": 0.4}}
+            write_json(out / "diagnostic-rollouts.json", {"2": row, "3": row})
+            write_json(out / "critic-preparation.json", {
+                "epochs_completed": 4, "cpv2_contact_after": {"explained_variance": 0.5},
+            })
+            for index in (1, 2, 3):
+                append_jsonl(out / "updates.jsonl", {"rollout": index, "ppo": {
+                    "optimizer_steps": 57, "stop_reason": "epochs_completed", "PPO_skipped": False,
+                }})
+            session = SimpleNamespace(out=out, policy=policy, device="cpu", shuffle=Random(17), state={
+                "rollouts": 3, "phase": "collect", "latest": "checkpoints/update-0003.pt", "optimizer_steps": 171,
+            })
+            self.assertFalse(diagnostic.pilot_report(out)["passed"])
+            with patch.object(diagnostic, "_attention_metrics", side_effect=RuntimeError("interrupted")):
+                with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                    diagnostic.record_post_r3(session)
+            self.assertNotIn("3_post", read_json(out / "diagnostic-rollouts.json"))
+            self.assertTrue(policy.training)
+
+            with patch.object(diagnostic, "_attention_metrics", return_value={
+                "attention_rms": 0.02, "argmax_switch_rate": 0.003,
+                "qkv_relative_change": 0.001, "value_context_rms": 0.02,
+            }) as measure:
+                diagnostic.record_post_r3(session)
+                diagnostic.record_post_r3(session)
+                measure.assert_called_once()
+            report = diagnostic.pilot_report(out)
+            self.assertTrue(report["passed"])
+            self.assertEqual(report["R3_post"]["accepted_steps"], 171)
+            self.assertEqual(report["R3_post"]["checkpoint_sha256"], file_sha256(checkpoint))
+            self.assertNotIn("retry_overrides", report)
+
     def test_critic_capsule_restores_context_without_touching_actor(self):
         from copy import deepcopy
 

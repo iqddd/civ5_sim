@@ -311,7 +311,7 @@ def _initial_training_state(config: dict[str, Any], *, inherited: bool, extensio
     if adapts_value(config) and "origin_Adam_counters" in state:
         state["value_optimizer"] = "reset_then_preserve"
         state["origin_Adam_counters"]["value"] = 0
-        if extension and extension.child == "C2PA":
+        if extension and extension.adds_action_context:
             state["origin_Adam_counters"]["value_actions"] = 0
     if config.get("self_play", {}).get("enabled"):
         state["self_play_archive"] = []
