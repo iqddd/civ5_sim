@@ -146,6 +146,7 @@ class ControlledPPOTests(unittest.TestCase):
         # The normal run cannot reveal an incorrectly retained rejected step.
         config = deepcopy(self.config)
         config["ppo"]["valid_tokens_per_minibatch"] = 1
+        config["optimizer"]["group_lrs"] = {"action_context": 5e-5}
         episodes = [{"chosen": [0, 0, 0], "old_value": [0.0, 0.0, 0.0], "result": {"reward": 1}}]
 
         class Backend:
@@ -177,8 +178,8 @@ class ControlledPPOTests(unittest.TestCase):
 
         model = torch.nn.Linear(1, 1, bias=False)
         reference = deepcopy(model)
-        opt = torch.optim.Adam(model.parameters(), lr=1e-5, eps=1e-5)
-        ref_opt = torch.optim.Adam(reference.parameters(), lr=1e-5, eps=1e-5)
+        opt = torch.optim.Adam([{"params": model.parameters(), "name": "action_context"}], lr=1e-5, eps=1e-5)
+        ref_opt = torch.optim.Adam(reference.parameters(), lr=5e-5, eps=1e-5)
         reference.weight.sum().backward()
         torch.nn.utils.clip_grad_norm_(reference.parameters(), 0.5)
         ref_opt.step()

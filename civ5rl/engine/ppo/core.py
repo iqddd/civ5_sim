@@ -386,8 +386,9 @@ def update(
         for start in range(0, len(e["chosen"]), length)
     ]
     lr, entropy_coefficient = _scheduled_hyperparameters(config, decisions)
+    group_lrs = config["optimizer"].get("group_lrs", {})
     for group in optimizer.param_groups:
-        group["lr"] = lr
+        group["lr"] = group_lrs.get(group.get("name"), lr)
     initial_replay = backend.precheck()
     pre_kl = initial_replay["sampled_kl"]
     pre_error = initial_replay["max_logp_error"]

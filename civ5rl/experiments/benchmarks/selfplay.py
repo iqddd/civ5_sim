@@ -136,6 +136,9 @@ def _ppo(args, config, mode, episodes, policy, optimizer, model_state, adam_stat
         trial_config["ppo"]["minibatch_kl_spike_threshold"] = 1.0 if mode == "epoch" else -1.0
     decisions = sum(len(ep["chosen"]) for ep in episodes)
     expected = (decisions + config["ppo"]["valid_tokens_per_minibatch"] - 1) // config["ppo"]["valid_tokens_per_minibatch"]
+    backend = None
+    if config["experiment"].get("three_opponent_evaluation"):
+        backend = partial(core.BatchedBackend, pinned_replay=True)
 
     def reset():
         policy.load_state_dict(model_state)
@@ -143,7 +146,9 @@ def _ppo(args, config, mode, episodes, policy, optimizer, model_state, adam_stat
         optimizer.zero_grad(set_to_none=True)
 
     def run():
-        return core.update(policy, optimizer, episodes, trial_config, decisions, "cuda", random.Random(args.seed))
+        return core.update(
+            policy, optimizer, episodes, trial_config, decisions, "cuda", random.Random(args.seed), _backend=backend,
+        )
 
     for _ in range(args.warmup):
         reset()
