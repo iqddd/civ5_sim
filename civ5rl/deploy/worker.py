@@ -3,6 +3,7 @@
 # ruff: noqa: E402
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -57,6 +58,8 @@ def main(argv=None, *, root=ROOT):
     parser.add_argument("--evaluation-wait-seconds", type=float)
     parser.add_argument("--host-resume-id")
     parser.add_argument("--host-resume-reason")
+    parser.add_argument("--continue-after-dual-target", action="store_true")
+    parser.add_argument("--diagnostic-cpv2", action="store_true")
     args = parser.parse_args(argv)
 
     root = Path(root).resolve()
@@ -76,6 +79,17 @@ def main(argv=None, *, root=ROOT):
     cfg = raw.get("config", raw)
     kind = cfg["kind"]
     output = root / cfg["output"]
+    if args.continue_after_dual_target:
+        from civ5rl.provenance.common import atomic_output, file_sha256
+
+        for name, checksum in _read(output / "execution.json")["binaries"].items():
+            if name not in {"build/libcombat.so", "build/libcombat_ai.so", "build/combat_rules.json"}:
+                raise ValueError(f"Incompatible saved binary for Linux continuation: {name}")
+            source = output / "execution-binaries" / Path(name).name
+            if file_sha256(source) != checksum:
+                raise ValueError(f"Saved binary differs from execution.json: {name}")
+            with atomic_output(root / name) as temporary:
+                shutil.copyfile(source, temporary)
     has_progress = any(
         (output / name).exists() for name in ("state.json", "collection.json", "run.json")
     )
@@ -94,6 +108,12 @@ def main(argv=None, *, root=ROOT):
             "--checkpoint", cfg["experiment"]["parent"], "--rollout", args.tuning_rollout,
             "--out", args.tuning_dir, "--episode-limit", "150", "--repeats", "2",
         ]
+        if cfg["experiment"].get("three_opponent_evaluation"):
+            command[command.index("--episode-limit") + 1] = "200"
+            if args.runtime_config:
+                runtime = _read(args.runtime_config)
+                command += ["--workers", str(runtime["cpu_workers"]), "--envs", str(runtime["num_envs"]),
+                            "--reply-size", str(runtime["worker_reply_size"])]
     elif args.mode == "tune":
         if has_progress:
             raise ValueError("Cannot retune an existing scientific run")
@@ -176,6 +196,10 @@ def main(argv=None, *, root=ROOT):
             ):
                 raise ValueError("No confirmed comparable tuning for this experiment")
             command += ["--runtime-config", args.runtime_config]
+        if args.continue_after_dual_target:
+            command.append("--continue-after-dual-target")
+        if args.diagnostic_cpv2:
+            command += ["--diagnostic-cpv2", "--max-updates", "3"]
 
     code = subprocess.run(command, cwd=root, check=False).returncode
     if code == 0 and args.final_run_bundle and args.mode in ("run", "resume"):

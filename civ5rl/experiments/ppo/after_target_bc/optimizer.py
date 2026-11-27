@@ -11,6 +11,7 @@ from civ5rl.core.model import Policy
 from civ5rl.core.preview import ModelExtension, model_extension
 from civ5rl.engine.ppo.adam import (
     adapts_value,
+    group_lr,
     grouped_optimizer,
     optimizer_for,
     parameter_group,
@@ -28,7 +29,8 @@ def _validate_inherited_groups(
 ) -> None:
     expected_names = {group["name"] for group in optimizer.param_groups}
     if extension:
-        expected_names.remove(extension.adam_group)
+        expected_names = {g["name"] for g in optimizer.param_groups
+                          if not set(g["parameter_names"]) <= extension.new_parameters}
     if set(origins) != expected_names or any(
         type(counter) is not int or counter < 0 for counter in origins.values()
     ):
@@ -37,7 +39,7 @@ def _validate_inherited_groups(
         raise ValueError("Parent ledger and inherited Adam group counters differ")
     expected_groups = optimizer.state_dict()["param_groups"]
     if extension:
-        expected_groups = [g for g in expected_groups if g["name"] != extension.adam_group]
+        expected_groups = [g for g in expected_groups if g["name"] in expected_names]
     if len(source["param_groups"]) != len(expected_groups):
         raise ValueError("Parent Adam group count differs")
     for actual, expected in zip(source["param_groups"], expected_groups, strict=True):
@@ -125,12 +127,13 @@ def load_initial_optimizer(policy: Policy, saved: dict[str, Any], config: dict[s
         _validate_inherited_groups(optimizer, source, origins, saved["state"], extension=extension)
     if extension:
         source = deepcopy(source)
-        extra = optimizer.state_dict()["param_groups"][-1]
-        if extra["name"] != extension.adam_group or set(extra["parameter_names"]) != extension.new_parameters:
+        extras = optimizer.state_dict()["param_groups"][len(source["param_groups"]):]
+        if {name for g in extras for name in g["parameter_names"]} != extension.new_parameters:
             raise ValueError("Unexpected parameters in new Adam group")
-        if extension.child == "C2PA":
-            extra["fused"] = config["performance"].get("fused_adam", False)
-        source["param_groups"].append(extra)
+        for extra in extras:
+            if extension.child == "C2PA":
+                extra["fused"] = config["performance"].get("fused_adam", False)
+        source["param_groups"].extend(extras)
     optimizer.load_state_dict(source)
     assert_equal(optimizer.state_dict(), source)
     expected = int(experiment["parent_optimizer_steps"])
@@ -139,14 +142,15 @@ def load_initial_optimizer(policy: Policy, saved: dict[str, Any], config: dict[s
     _validate_adam_state_tensors(policy, optimizer, origins, expected, extension=extension)
     parent_lr = experiment.get("parent_optimizer_lr", config["optimizer"]["lr"])
     for group in optimizer.param_groups:
-        if (extension is None or group["name"] != extension.adam_group) and group["lr"] != parent_lr:
+        is_new = extension and set(group.get("parameter_names", ())) <= extension.new_parameters
+        if not is_new and group["lr"] != parent_lr:
             raise ValueError("Parent Adam lr differs from experiment")
         for name in ("eps", "weight_decay"):
             if group[name] != config["optimizer"][name]:
                 raise ValueError(f"Parent Adam {name} differs from experiment")
         if tuple(group["betas"]) != tuple(config["optimizer"]["betas"]):
             raise ValueError("Parent Adam betas differ from experiment")
-        group["lr"] = config["optimizer"]["lr"]
+        group["lr"] = group_lr(config, group.get("name", "shared_actor"))
     if adapts_value(config):
         return _reset_value_optimizer(policy, config, optimizer)
     return optimizer

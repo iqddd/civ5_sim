@@ -64,6 +64,11 @@ def critic_statistics(predictions: ArrayLike, returns: ArrayLike) -> CriticStati
     }
 
 
+def cpv2_contact_mask(episodes):
+    return np.repeat([ep["spec"]["opponent"] == "cpv2" and ep["spec"].get("placement") == "contact"
+                      for ep in episodes], [len(ep["chosen"]) for ep in episodes])
+
+
 def behavior_digest(episodes: Sequence[Episode]) -> str:
     """Hash sampled choices and their probabilities, independently of critic values."""
     result = hashlib.sha256()
@@ -76,13 +81,13 @@ def behavior_digest(episodes: Sequence[Episode]) -> str:
 
 
 @contextmanager
-def value_only_grad_mode(policy: ValuePolicy) -> Iterator[None]:
+def value_only_grad_mode(policy: ValuePolicy, parameters=None) -> Iterator[None]:
     """Temporarily enable gradients on the value head and restore all flags."""
     saved = [(parameter, parameter.requires_grad) for parameter in policy.parameters()]
     try:
         for parameter, _ in saved:
             parameter.requires_grad_(False)
-        for parameter in policy.value.parameters():
+        for parameter in policy.value.parameters() if parameters is None else parameters:
             parameter.requires_grad_(True)
         yield
     finally:
@@ -152,7 +157,7 @@ def refresh_episode_old_values(
             raise TypeError("Bulk value refresh requires a device-resident tensor")
         with torch.no_grad(), torch.autocast(torch.device(device).type, enabled=False):
             refreshed: NDArray[np.floating] = (
-                torch.cat([policy.value(part).squeeze(-1) for part in features_or_stream.split(batch_size)])
+                torch.cat([_value_predictions(policy, part) for part in features_or_stream.split(batch_size)])
                 .cpu()
                 .numpy()
             )
@@ -225,6 +230,7 @@ def recurrent_features(policy, episodes, device):
 @torch.no_grad()
 def batched_recurrent_features(policy, episodes, device):
     """Stream bounded, episode-indexed FP32 feature blocks on the target device."""
+    action_context = policy.variant_spec.action_context
     block = DEFAULT_PREFIX_BLOCK_SIZE
     group_size = 8
     for first in range(0, len(episodes), group_size):
@@ -244,9 +250,9 @@ def batched_recurrent_features(policy, episodes, device):
                 [row for _, rows in parts for row in rows],
                 device,
                 non_blocking=True,
-                spatial_only=True,
+                spatial_only=not action_context,
             )
-            _, context = policy.encode_spatial(batch, return_cells=False)
+            cells, context = policy.encode_spatial(batch, return_cells=action_context)
             features, last = policy.sequence_memory(
                 context,
                 lengths,
@@ -256,8 +262,16 @@ def batched_recurrent_features(policy, episodes, device):
                 hidden = last
             else:
                 hidden.index_copy_(1, slots, last)
+            if action_context:
+                _, features = policy.heads(batch, cells, features, return_value_features=True)
             for (i, _), values in zip(parts, features.split(lengths)):
                 yield first + i, start, values
+
+
+def _value_predictions(policy, features):
+    if features.shape[-1] != policy.hidden_size:
+        return policy.value_from_features(features)
+    return policy.value(features).squeeze(-1)
 
 
 @dataclass(frozen=True)
@@ -411,7 +425,7 @@ def _restore_critic_progress(
     capsule_path,
     policy,
     optimizer,
-    value_group,
+    value_groups,
     identity,
     behavior,
     device,
@@ -424,7 +438,10 @@ def _restore_critic_progress(
         if capsule["identity"] != identity or capsule["behavior"] != behavior:
             raise ValueError("Critic adaptation capsule belongs to another rollout/run")
         policy.value.load_state_dict(capsule["value"])
-        for parameter, item in zip(value_group["params"], capsule["adam"], strict=True):
+        if len(value_groups) == 2:
+            policy.value_actions.load_state_dict(capsule["value_actions"])
+        members = [(group, p) for group in value_groups for p in group["params"]]
+        for (value_group, parameter), item in zip(members, capsule["adam"], strict=True):
             optimizer.state.pop(parameter, None)
             if item:
                 optimizer.state[parameter] = {
@@ -458,17 +475,18 @@ def _load_or_extract_critic_features(
     tick,
 ):
     cache_path = out / "critic-features.pt"
+    width = policy.hidden_size + (2 * policy.hex_dim if getattr(policy, "value_actions", None) is not None else 0)
     if cache_path.exists():
         saved = torch.load(cache_path, map_location="cpu", weights_only=False)
         if (
             saved["behavior"] != behavior
             or saved["policy_hash"] != original_policy
-            or saved["features"].shape != (len(returns), policy.hidden_size)
+            or saved["features"].shape != (len(returns), width)
         ):
             raise ValueError("Critic feature cache differs from frozen rollout/encoder")
         features = saved["features"]
     else:
-        features = torch.empty((len(returns), policy.hidden_size), dtype=torch.float32, device=device)
+        features = torch.empty((len(returns), width), dtype=torch.float32, device=device)
         offsets = np.cumsum([0, *[len(ep["chosen"]) for ep in episodes]])
         cached = 0
         last_progress = perf_counter()
@@ -501,7 +519,7 @@ def _load_or_extract_critic_features(
 def _fit_critic_batches(
     policy,
     optimizer,
-    value_group,
+    value_groups,
     features,
     labels,
     config,
@@ -515,8 +533,10 @@ def _fit_critic_batches(
 ):
     position_count = len(labels)
     optimizer.zero_grad(set_to_none=True)
-    old_lr = value_group["lr"]
-    value_group["lr"] = settings["lr"]
+    old_lrs = [group["lr"] for group in value_groups]
+    for group in value_groups:
+        group["lr"] = settings["lr"]
+    parameters = [p for group in value_groups for p in group["params"]]
     batches = (position_count + settings["batch_size"] - 1) // settings["batch_size"]
     shuffle_epochs = bool(settings.get("shuffle", bool(config.get("self_play", {}).get("enabled"))))
     critic_namespace = config.get("experiment", {}).get("critic_namespace", "critic")
@@ -547,14 +567,14 @@ def _fit_critic_batches(
                         epoch_order = torch.tensor(permutation, device=device, dtype=torch.long)
                         cached_epoch = epoch_idx
                     indices = epoch_order[first:stop]
-                    loss = F.mse_loss(policy.value(features[indices]).squeeze(-1), labels[indices])
+                    loss = F.mse_loss(_value_predictions(policy, features[indices]), labels[indices])
                 else:
                     loss = F.mse_loss(
-                        policy.value(features[first:stop]).squeeze(-1),
+                        _value_predictions(policy, features[first:stop]),
                         labels[first:stop],
                     )
             loss.backward()
-            norm = torch.nn.utils.clip_grad_norm_(policy.value.parameters(), settings["max_gradient_norm"])
+            norm = torch.nn.utils.clip_grad_norm_(parameters, settings["max_gradient_norm"])
             finite_loss, finite_norm = torch.isfinite(torch.stack((loss.detach(), norm))).tolist()
             if not finite_loss:
                 raise FloatingPointError("Non-finite critic adaptation loss")
@@ -568,7 +588,8 @@ def _fit_critic_batches(
         if not capsule_path.exists():
             commit()
     finally:
-        value_group["lr"] = old_lr
+        for group, lr in zip(value_groups, old_lrs, strict=True):
+            group["lr"] = lr
         optimizer.zero_grad(set_to_none=True)
     return batches
 
@@ -606,6 +627,10 @@ def _critic_adaptation_result(
         raw_gae_advantages(episodes, gamma=gamma, gae_lambda=config["ppo"]["gae_lambda"])
     )
     horizon_statistics = _critic_horizon_statistics(episodes, refreshed, returns, advantages, statistics)
+    contact_stats = {}
+    if config.get("experiment", {}).get("diagnostic_training_only"):
+        contact = cpv2_contact_mask(episodes)
+        contact_stats["cpv2_contact_after"] = statistics(refreshed[contact], returns[contact]) if contact.any() else None
     return {
         "steps": progress["steps"],
         "positions_processed": progress["positions_processed"],
@@ -615,6 +640,7 @@ def _critic_adaptation_result(
         "refresh_seconds": perf_counter() - refresh_started,
         "before": before,
         "after": statistics(refreshed, returns),
+        **contact_stats,
         "raw_advantage_std": float(advantages.std()),
         "return_min": float(returns.min()),
         "return_max": float(returns.max()),
@@ -648,13 +674,14 @@ def adapt_critic(
     settings = config["critic"]
     behavior = behavior_hash(episodes)
     original_policy = policy_hash(policy.state_dict())
-    value_group = next(group for group in optimizer.param_groups if group["name"] == "value")
+    value_groups = [group for group in optimizer.param_groups if group["name"] in ("value", "value_actions")]
+    parameters = [p for group in value_groups for p in group["params"]]
     capsule_path = out / "critic-adaptation.pt"
     progress = _restore_critic_progress(
         capsule_path,
         policy,
         optimizer,
-        value_group,
+        value_groups,
         identity,
         behavior,
         device,
@@ -678,7 +705,8 @@ def adapt_critic(
         model_adam = cpu_snapshot(
             {
                 "value": policy.value.state_dict(),
-                "adam": [optimizer.state.get(parameter, {}) for parameter in value_group["params"]],
+                **({"value_actions": policy.value_actions.state_dict()} if len(value_groups) == 2 else {}),
+                "adam": [optimizer.state.get(parameter, {}) for parameter in parameters],
             }
         )
         atomic_save(
@@ -714,11 +742,11 @@ def adapt_critic(
         # Move the cache and labels once for the entire fit.
         features = features.to(device)
         labels = torch.from_numpy(returns).to(device)
-        with value_only_grad_mode(policy):
+        with value_only_grad_mode(policy, parameters):
             batches = _fit_critic_batches(
                 policy,
                 optimizer,
-                value_group,
+                value_groups,
                 features,
                 labels,
                 config,

@@ -291,6 +291,8 @@ def stage_inputs(
                          (root / saved / directory).rglob("*") if path.is_file())
     if experiment.get("parent_manifest"):
         names.append(experiment["parent_manifest"])
+    if experiment.get("evaluation_manifest"):
+        names.append(experiment["evaluation_manifest"])
     if experiment.get("parent_final_state"):
         names.append(experiment["parent_final_state"])
         names.append(str(PurePosixPath(experiment["parent_run"]) / "run.json"))

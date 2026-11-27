@@ -98,7 +98,7 @@ def _collection(args, config, parent, carrier, policy, monitor):
         spec.pop("opponent_search", None)
         if opponent == "policy":
             spec["opponent_id"] = identity
-        else:
+        elif opponent == "cp":
             spec["opponent_search"] = config["teacher_search"]
     manifest = case_manifest(specs, source="selfplay_profile", split="train", namespace="fixed")
     pool = OpponentPool(config, "cuda", args.out, parent_checkpoint=parent)
@@ -130,11 +130,12 @@ def _collection(args, config, parent, carrier, policy, monitor):
 
 def _ppo(args, config, mode, episodes, policy, optimizer, model_state, adam_state, monitor):
     trial_config = deepcopy(config)
-    trial_config["ppo"]["epochs"] = 1
-    trial_config["ppo"]["minibatch_kl_spike_threshold"] = 1.0 if mode == "epoch" else -1.0
+    production = mode == "production"
+    if not production:
+        trial_config["ppo"]["epochs"] = 1
+        trial_config["ppo"]["minibatch_kl_spike_threshold"] = 1.0 if mode == "epoch" else -1.0
     decisions = sum(len(ep["chosen"]) for ep in episodes)
     expected = (decisions + config["ppo"]["valid_tokens_per_minibatch"] - 1) // config["ppo"]["valid_tokens_per_minibatch"]
-    trace = TraceWindow(max(1, expected - 2), expected, args.out / f"ppo-{mode}.kineto.json.gz")
 
     def reset():
         policy.load_state_dict(model_state)
@@ -159,6 +160,15 @@ def _ppo(args, config, mode, episodes, policy, optimizer, model_state, adam_stat
             )},
             "full_checks": sum(row["full_kl_checked"] for row in result["optimizer_step_records"]),
         })
+    if production:
+        return {"trials": trials, "decisions": decisions}
+    if config["experiment"].get("three_opponent_evaluation"):
+        trace_steps = min(3, *(trial["attempted_optimizer_steps"] for trial in trials))
+        if trace_steps < 1:
+            raise ValueError("No PPO optimizer steps available for profiling")
+        trace = TraceWindow(1, trace_steps, args.out / f"ppo-{mode}.kineto.json.gz")
+    else:
+        trace = TraceWindow(max(1, expected - 2), expected, args.out / f"ppo-{mode}.kineto.json.gz")
     reset()
     with patch.object(core, "_optimizer_step", partial(trace.call, core._optimizer_step)):
         try:
@@ -200,7 +210,8 @@ def profile_selfplay(args, parser, config, inputs):
         print("Profiling fixed mixed collection", flush=True)
         episodes, collection = _collection(args, config, parent, carrier, policy.eval(), monitor)
         result = {"collection": collection}
-        for mode in ("epoch", "step"):
+        modes = ("production", "epoch", "step") if config["experiment"].get("three_opponent_evaluation") else ("epoch", "step")
+        for mode in modes:
             print(f"Profiling PPO with {mode} KL", flush=True)
             result["ppo_" + mode] = _ppo(args, config, mode, episodes, policy.train(), optimizer, model_state, adam_state, monitor)
     result.update(

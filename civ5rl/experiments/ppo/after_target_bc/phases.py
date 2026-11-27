@@ -32,6 +32,7 @@ from civ5rl.engine.runtime.telemetry import (
     CompilationClock,
     ResourceMonitor,
 )
+from civ5rl.experiments.imitation.helpers import isolated_rng
 from civ5rl.experiments.ppo.after_target_bc.boundary import ActiveClock, Phase, RolloutBoundary, save_boundary
 from civ5rl.experiments.ppo.after_target_bc.evaluation import development
 from civ5rl.experiments.ppo.critic import adapt_critic, prepare_critic
@@ -180,9 +181,9 @@ def _step_critic_phase(
         session.optimizer = optimizer_for(policy, config, device)
         assert not session.optimizer.state
     state["latest"] = "checkpoints/critic-ready.pt"
+    write_json(out / "critic-preparation.json", state["critic"])
     save_boundary(out, policy, session.optimizer, state, shuffle, config, identity, clock)
     RolloutBoundary.from_state(state).validate_sufficiency(out)
-    write_json(out / "critic-preparation.json", state["critic"])
     print("Critic preparation: " + json.dumps(state["critic"]), flush=True)
 
 
@@ -202,6 +203,12 @@ def _step_ppo_phase(
     )
     policy, optimizer, shuffle = session.policy, session.optimizer, session.shuffle
     if not state["stop_reason"] and not deadline_reached(deadline):
+        if config["experiment"].get("diagnostic_training_only") and state["rollouts"] in (2, 3):
+            from civ5rl.experiments.ppo.after_target_bc.diagnostic import record_pre_update
+
+            with isolated_rng(shuffle):
+                monitor.mark("diagnostic", rollout=state["rollouts"])
+                record_pre_update(policy, episodes, config, out, device, state["rollouts"])
         monitor.mark("ppo", rollout=state["rollouts"])
 
         def inspect_step(step: dict[str, Any], optimizer: torch.optim.Optimizer = optimizer) -> None:
@@ -346,7 +353,9 @@ def _commit_ppo_rollout(
         str(point) not in state["development_points"] and point <= state["decisions"]
         for point in config["experiment"]["milestones"]
     )
-    if due or (state["stop_reason"] and fingerprint() not in state["evaluated"]):
+    if not config["experiment"].get("diagnostic_training_only") and (
+        due or (state["stop_reason"] and fingerprint() not in state["evaluated"])
+    ):
         monitor.mark("evaluation")
         development(config, plan, out, state, shuffle, clock)
         monitor.record_cuda_memory(policy, "after_evaluation")

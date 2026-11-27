@@ -236,7 +236,13 @@ def train(
             clock,
         )
         del optimizer
-        _recover_due_evaluation(session)
+        diagnostic = config["experiment"].get("diagnostic_training_only", False)
+        def bounded_work_done():
+            key = "rollouts" if diagnostic else "updates"
+            return max_updates is not None and state[key] >= max_updates and state["phase"] == "collect"
+
+        if not diagnostic:
+            _recover_due_evaluation(session)
         if pause_due(out, "update", state["updates"], at_boundary=state["phase"] == "collect"):
             write_json(out / "status.json", {"status": "paused", "checkpoint": state["latest"]})
             return
@@ -277,7 +283,7 @@ def train(
             checked_final_evaluation = False
             while not state["stop_reason"]:
                 critic_started = perf_counter() if state["phase"] == "critic" else None
-                if max_updates is not None and state["updates"] >= max_updates:
+                if bounded_work_done():
                     write_json(
                         out / "status.json",
                         {"status": "paused", "reason": "max_updates"},
@@ -320,13 +326,13 @@ def train(
                     return
                 prune_checkpoints(out, state)
                 clock.progress()
-                if max_updates is not None and state["updates"] >= max_updates and not state["stop_reason"]:
+                if bounded_work_done() and not state["stop_reason"]:
                     write_json(
                         out / "status.json",
                         {"status": "paused", "reason": "max_updates"},
                     )
                     return
-            if not checked_final_evaluation and policy_hash(policy.state_dict()) not in state["evaluated"]:
+            if not diagnostic and not checked_final_evaluation and policy_hash(policy.state_dict()) not in state["evaluated"]:
                 development(config, plan, out, state, shuffle, clock)
                 monitor.record_cuda_memory(policy, "after_evaluation")
             clock.progress()

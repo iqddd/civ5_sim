@@ -13,6 +13,15 @@ from civ5rl.protocols.common import (
     case_content_hash,
     own_state_physical_hash,
 )
+from civ5rl.protocols.contact_placement import (
+    CONTACT_TWO_VISIBLE,
+    CONTACT_V1,
+    contact_mode,
+    directed_visibility_tables,
+    passable_graph,
+    sample_two_visible_compact_positions,
+    visible_enemy_counts,
+)
 from civ5rl.protocols.corpus import ScenarioFactory, map_path
 from civ5rl.protocols.ppo_validation import validate_bounded_training
 from civ5rl.protocols.turn_reset import mode as turn_reset_mode
@@ -103,6 +112,8 @@ class TargetFactory:
         self.config, self.base = config, base
         self.archive_provider = archive_provider
         self.maps = {}
+        self.directed_visibility = {}
+        self.passable_graphs = {}
         self.visibility_conflicts = {}
         self.issued = set()
         self._coverage_tracker = CoverageTracker()
@@ -115,27 +126,21 @@ class TargetFactory:
     def duplicates(self):
         return self._coverage_tracker.duplicates
 
+    def _get_directed_visibility(self, key, m, group, battle_seed):
+        if key not in self.directed_visibility:
+            self.directed_visibility[key] = directed_visibility_tables(m, group, battle_seed)
+        return self.directed_visibility[key]
+
+    def _get_passable_graph(self, key, m, group):
+        if key not in self.passable_graphs:
+            self.passable_graphs[key] = passable_graph(m, group)
+        return self.passable_graphs[key]
+
     def _get_visibility_conflicts(self, key, m, group, battle_seed):
         if key not in self.visibility_conflicts:
-            first, *remaining = group
-            unit = {"type": "warrior", "side": 0, "tile": first, "hp": 100}
-            probe = {
-                "schema": 1,
-                "kind": "civ5sim.scenario",
-                "map": m,
-                "fog": True,
-                "random_damage": True,
-                "seed": battle_seed,
-                "units": [unit],
-            }
-            with Battle(probe) as battle:
-                visibility = {first: battle.observe(0)["visibility"]}
-                for tile in remaining:
-                    unit["tile"] = tile
-                    battle.reset(probe)
-                    visibility[tile] = battle.observe(0)["visibility"]
+            sees, seen_by = self._get_directed_visibility(key, m, group, battle_seed)
             self.visibility_conflicts[key] = {
-                a: {b for b in group if a == b or visibility[a][b] or visibility[b][a]} for a in group
+                a: {a} | sees[a] | seen_by[a] for a in group
             }
         return self.visibility_conflicts[key]
 
@@ -182,21 +187,42 @@ class TargetFactory:
         )
         n = len(roster)
         rng = random.Random(streams["placement"])
+        selected_contact = contact_mode(self.config)
         if not contact:
             separated = separated_candidates(
                 m, group, n, rng,
                 lambda: self._get_visibility_conflicts(entry["path"], m, group, streams["battle"]),
             )
+        elif selected_contact == CONTACT_TWO_VISIBLE:
+            sees, seen_by = self._get_directed_visibility(entry["path"], m, group, streams["battle"])
+            neighbors = self._get_passable_graph(entry["path"], m, group)
         reasons = Counter()
         scenario = None
         for attempt in range(10000):
             radius = 2 + min(attempt // 500, 3)
             if contact:
-                positions = ScenarioFactory.sample_contact_positions(
-                    m, group, n, rng, radius=radius, reasons=reasons
-                )
-                if positions is None:
-                    continue
+                if selected_contact == CONTACT_TWO_VISIBLE:
+                    sampled = sample_two_visible_compact_positions(
+                        group,
+                        n,
+                        rng,
+                        sees,
+                        seen_by,
+                        neighbors,
+                        reasons=reasons,
+                    )
+                    if sampled is None:
+                        continue
+                    positions, contact_meta = sampled
+                    radius = contact_meta["max_hidden_distance"]
+                    placement_method = "two_visible_compact"
+                else:
+                    positions = ScenarioFactory.sample_contact_positions(
+                        m, group, n, rng, radius=radius, reasons=reasons
+                    )
+                    if positions is None:
+                        continue
+                    placement_method = "contact"
             else:
                 positions, placement_method = next(separated)
                 if positions is None:
@@ -219,9 +245,12 @@ class TargetFactory:
             selected_mode = turn_reset_mode(self.config)
             if selected_mode != "legacy":
                 scenario["turn_reset_mode"] = selected_mode
-            with Battle(scenario) as battle:
-                seen = [any(u["side"] != s for u in battle.observe(s)["units"]) for s in (0, 1)]
-            if seen != [bool(contact), bool(contact)]:
+            seen_counts = visible_enemy_counts(scenario)
+            if contact and selected_contact == CONTACT_TWO_VISIBLE:
+                visibility_ok = seen_counts == [2, 2]
+            else:
+                visibility_ok = [c > 0 for c in seen_counts] == [bool(contact), bool(contact)]
+            if not visibility_ok:
                 reasons["visibility"] += 1
                 continue
             spec = {
@@ -245,8 +274,8 @@ class TargetFactory:
                 "placement_attempts": attempt + 1,
                 "placement_radius": radius,
                 "rejections": dict(reasons),
-                "placement_algorithm": "contact_v1" if contact else SEPARATED_VERSION,
-                "placement_method": "contact" if contact else placement_method,
+                "placement_algorithm": selected_contact if contact else SEPARATED_VERSION,
+                "placement_method": placement_method,
                 "spawn_zones_revised": not contact and placement_method == "revised",
                 "source": KIND,
                 "split": split,
@@ -267,7 +296,7 @@ class TargetFactory:
                 "namespace": namespace,
                 "index": index,
                 "streams": streams,
-                "placement_algorithm": "contact_v1" if contact else SEPARATED_VERSION,
+                "placement_algorithm": selected_contact if contact else SEPARATED_VERSION,
                 "last_scenario": scenario,
             }
         )
@@ -294,10 +323,11 @@ class TargetFactory:
 
             archive = self.archive_provider() if self.archive_provider is not None else []
             opponent, opponent_id = select_opponent(index, self.config, archive)
-            if opponent == "policy":
-                spec["opponent"] = "policy"
-                spec["opponent_id"] = opponent_id
+            spec["opponent"] = opponent
+            if opponent != "cp":
                 spec.pop("opponent_search", None)
+            if opponent == "policy":
+                spec["opponent_id"] = opponent_id
         self.issued.add(digest(spec))
         h = own_state_physical_hash(spec["scenario"])
         self._coverage_tracker.record(
@@ -375,10 +405,12 @@ HOLDOUT_WORLDS = (10015, 10051, 10040, 10053, 10041, 10038, 10047)
 
 def development_512_cases(config, base, *, existing_cases=()):
     """Generate 512 validation cases (256 layouts x 2 sides), disjoint from existing sets."""
+    return paired_validation_cases(config, base, 16, 12, "cp_imitation_target_c2_development_512_v1", existing_cases)
+
+
+def paired_validation_cases(config, base, per_world, shift, namespace, existing_cases):
     factory = TargetFactory(config, base)
     used = {own_state_physical_hash(c["scenario"]) for c in existing_cases if "scenario" in c}
-    per_world = 16
-    shift = 12
     cases = []
     for wi, world in enumerate(base["worlds"]["validation"]):
         for j in range(per_world):
@@ -392,7 +424,7 @@ def development_512_cases(config, base, *, existing_cases=()):
                 category,
                 j % 2,
                 0,
-                "cp_imitation_target_c2_development_512_v1",
+                namespace,
                 split="validation",
                 crop=(j + shift) % 4,
             )
@@ -401,7 +433,7 @@ def development_512_cases(config, base, *, existing_cases=()):
                     spec,
                     index,
                     used,
-                    duplicate_error="Duplicate target validation physical layout in development_512",
+                    duplicate_error=f"Duplicate target validation physical layout in {namespace}",
                 )
             )
     return cases

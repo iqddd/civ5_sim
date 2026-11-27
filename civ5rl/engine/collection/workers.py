@@ -66,7 +66,8 @@ class BaseWorker:
         """Exercise CP once in an owned temporary episode, outside collection."""
         spec = deepcopy(spec)
         spec["learner_side"] = 1  # Initial side zero belongs to CP in this episode.
-        spec["opponent"] = "cp"
+        if spec["opponent"] != "cpv2":
+            spec["opponent"] = "cp"
         spec.pop("opponent_id", None)
         if not spec.get("opponent_search"):
             spec.pop("opponent_search", None)

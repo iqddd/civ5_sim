@@ -1,0 +1,63 @@
+{
+  "base_config": "configs/rl-ppo-c2pa-h60-selfplay.json",
+  "output": "artifacts/rl/ppo-c2pa-h60-cpv2",
+  "environment": {
+    "turn_reset_mode": "end_turn",
+    "contact_placement": "two_visible_compact_v1",
+    "max_rounds": 60
+  },
+  "optimizer": {
+    "lr": 0.000008,
+    "group_lrs": {
+      "action_context": 0.00005,
+      "value_actions": 0.00005
+    }
+  },
+  "critic": {
+    "epochs": 4,
+    "batch_size": 1024,
+    "lr": 0.0001,
+    "active_seconds": 300
+  },
+  "self_play": {
+    "cpv2_share": 0.5,
+    "cp_share": 0.1,
+    "current_share": 0.25,
+    "parent_share": 0.05,
+    "archive_share": 0.1,
+    "namespace": "ppo_c2pa_cpv2_v1_opponent"
+  },
+  "experiment": {
+    "initial_value": "adapt_parent_first_rollout",
+    "value_optimizer": "reset_then_preserve",
+    "evaluation_manifest": "artifacts/rl/cpv2/two-visible-compact/manifest.json",
+    "evaluation_manifest_sha256": "546fff6da4aa8a16a3a5cafea0a5ffa33edc520dabf0bd0823dcc63ec267a9e5",
+    "three_opponent_evaluation": true,
+    "start_episode": 157488,
+    "episode_id_source": {
+      "state": "artifacts/rl/ppo-c2pa-h60-selfplay-optimized/state.json",
+      "state_sha256": "30449563e28c5a355dd6f56c53291292b2cb07845b179900eb5dada7cb5ec7ae",
+      "run": "artifacts/rl/ppo-c2pa-h60-selfplay-optimized/run.json",
+      "run_sha256": "0bdd6a2d55ca05bf15a0894dfb6a8cc67b54bf76225aa4d101c7fe9701ea5e0b"
+    },
+    "decisions": 8388608,
+    "active_seconds": 18000,
+    "milestones": [
+      1048576,
+      2097152,
+      3145728,
+      4194304,
+      5242880,
+      6291456,
+      7340032,
+      8388608
+    ],
+    "early_gain_enabled": true,
+    "early_gain_min_wins": 25,
+    "early_gain_decisions": 2097152,
+    "training_namespace": "ppo_c2pa_cpv2_v1_training",
+    "shuffle_namespace": "ppo_c2pa_cpv2_v1_shuffle",
+    "torch_namespace": "ppo_c2pa_cpv2_v1_torch",
+    "critic_namespace": "ppo_c2pa_cpv2_v1_critic"
+  }
+}

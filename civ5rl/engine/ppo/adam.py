@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-GROUP_ORDER = ("shared_actor", "value", "attack_preview", "action_context")
+GROUP_ORDER = ("shared_actor", "value", "attack_preview", "action_context", "value_actions")
 
 
 def adapts_value(config):
@@ -15,7 +15,9 @@ def uses_grouped_adam(config):
     return adapts_value(config) or bool(config.get("experiment", {}).get("parent_optimizer_counters"))
 
 
-def parameter_group(name):
+def parameter_group(name, *, separate_value_actions=False):
+    if separate_value_actions and name.startswith("value_actions."):
+        return "value_actions"
     if name.startswith(("action_attention.", "value_actions.")):
         return "action_context"
     return (
@@ -27,12 +29,14 @@ def parameter_group(name):
     )
 
 
-def group_names(variant_spec):
+def group_names(variant_spec, *, separate_value_actions=False):
     names = ["shared_actor", "value"]
     if variant_spec.attack_preview:
         names.append("attack_preview")
     if variant_spec.action_context:
         names.append("action_context")
+        if separate_value_actions:
+            names.append("value_actions")
     return names
 
 
@@ -48,17 +52,24 @@ def optimizer_for(policy, config, device):
     )
 
 
+def group_lr(config, name):
+    settings = config["optimizer"]
+    return settings.get("group_lrs", {}).get(name, settings["lr"])
+
+
 def grouped_optimizer(policy, config, device):
     settings = config["optimizer"]
     named = list(policy.named_parameters())
     groups = []
-    for name in group_names(policy.variant_spec):
-        members = [(n, p) for n, p in named if parameter_group(n) == name]
+    separate = policy.variant_spec.action_context and adapts_value(config)
+    for name in group_names(policy.variant_spec, separate_value_actions=separate):
+        members = [(n, p) for n, p in named if parameter_group(n, separate_value_actions=separate) == name]
         groups.append(
             {
                 "params": [p for _, p in members],
                 "name": name,
                 "parameter_names": [n for n, _ in members],
+                "lr": group_lr(config, name),
             }
         )
     return torch.optim.Adam(
@@ -80,7 +91,7 @@ def expected_counters(state, extra_ppo_steps=0):
             else 0
         )
         return {
-            name: count + accepted + (critic_steps if name == "value" else 0)
+            name: count + accepted + (critic_steps if name in ("value", "value_actions") else 0)
             for name, count in state["origin_Adam_counters"].items()
         }
     return {

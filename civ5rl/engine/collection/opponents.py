@@ -31,11 +31,13 @@ def self_play_config(config: dict[str, Any]) -> dict[str, Any] | None:
     if not settings or not settings.get("enabled", True):
         return None
     cp_share = float(settings.get("cp_share", 0.5))
+    cpv2_share = float(settings.get("cpv2_share", 0.0))
     current_share = float(settings.get("current_share", 0.3))
     parent_share = float(settings.get("parent_share", 0.1))
     archive_share = float(settings.get("archive_share", 0.1))
-    total = cp_share + current_share + parent_share + archive_share
-    if any(x < 0 for x in (cp_share, current_share, parent_share, archive_share)) or abs(total - 1.0) > 1e-9:
+    shares = (cp_share, cpv2_share, current_share, parent_share, archive_share)
+    total = sum(shares)
+    if not all(0 <= x <= 1 for x in shares) or abs(total - 1.0) > 1e-9:
         raise ValueError(f"Self-play shares must be nonnegative and sum to 1.0 (got {total})")
     interval = int(settings.get("archive_interval_updates", 10))
     if interval < 1:
@@ -46,6 +48,7 @@ def self_play_config(config: dict[str, Any]) -> dict[str, Any] | None:
     return {
         "enabled": True,
         "cp_share": cp_share,
+        "cpv2_share": cpv2_share,
         "current_share": current_share,
         "parent_share": parent_share,
         "archive_share": archive_share,
@@ -80,6 +83,9 @@ def select_opponent(
     if u < settings["cp_share"]:
         return "cp", None
     u -= settings["cp_share"]
+    if u < settings["cpv2_share"]:
+        return "cpv2", None
+    u -= settings["cpv2_share"]
     if u < settings["current_share"]:
         return "policy", "current"
     u -= settings["current_share"]

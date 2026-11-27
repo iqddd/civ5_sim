@@ -42,10 +42,12 @@ def _h2h_evaluations(source, purpose):
     return [r for key, r in rows.items() if key not in baseline and r.get("purpose") == purpose]
 
 
-def _evaluation_seconds(source, purpose):
+def _evaluation_seconds(source, purpose, opponent=None):
     # Short records are cache hits, not measurements of this workload. Use only
     # this process's measurements when a recorder session is available.
     rows = [r for r in _evaluations(source, purpose) if r.get("seconds", 0) > 10]
+    if opponent:
+        rows = [r for r in rows if opponent in r.get("runs", {}).get("argmax", {})]
     latest_runtime = rows[-1].get("runtime") if rows else None
     values = [r["seconds"] for r in rows if r.get("runtime") == latest_runtime]
     return median(values[-3:]) if values else None
@@ -160,7 +162,11 @@ class TargetBCPPOAdapter(PPOAdapter):
         experiment = cfg["experiment"]
         purpose = cfg.get("ppo", {}).get("evaluation_purpose", "development")
         dual = bool(cfg.get("self_play", {}).get("enabled"))
-        seconds = _evaluation_seconds(source, purpose)
+        if experiment.get("diagnostic_training_only"):
+            return observation
+        three = experiment.get("three_opponent_evaluation", False)
+        seconds = _evaluation_seconds(source, purpose, "cp" if three else None)
+        cpv2_seconds = _evaluation_seconds(source, purpose, "cpv2") if three else None
         h2h_seconds = _h2h_evaluation_seconds(source, purpose) if dual else None
         points = state.get("development_points", {})
         stopped = bool(state.get("stop_reason"))
@@ -181,10 +187,13 @@ class TargetBCPPOAdapter(PPOAdapter):
         if observation.status == "complete":
             pending = []
         observation.stages.append(Stage(purpose, len(pending), seconds))
+        if three:
+            observation.stages.append(Stage(f"cpv2_{purpose}", len(pending), cpv2_seconds))
         if dual:
             observation.stages.append(Stage(f"h2h_{purpose}", len(pending), h2h_seconds))
         confirmation = source.read("confirmation.json")
-        if confirmation is None and observation.status != "complete":
+        continuation = state.get("dual_target_continuation")
+        if (confirmation is None or (continuation and confirmation.get("attempt") == 1)) and observation.status != "complete":
             # Two policies on Additional-256. Scale by the actual dev workload.
             evaluations = source.read("evaluations.json", {}).values()
             counts = [
@@ -195,6 +204,11 @@ class TargetBCPPOAdapter(PPOAdapter):
             matches = next((n for n in counts if n), None)
             additional = seconds * 512 / matches if seconds is not None and matches else None
             observation.stages.append(Stage("additional_256_two_policies", 1, additional, conditional=True))
+            if three:
+                observation.stages.append(Stage("additional_256_cpv2", 1, cpv2_seconds, conditional=True))
+            if continuation:
+                reserve = seconds + cpv2_seconds + h2h_seconds / 2 if None not in (seconds, cpv2_seconds, h2h_seconds) else None
+                observation.stages.append(Stage("reserve_256", 1, reserve, conditional=True))
             if dual:
                 h2h_evals = source.read("evaluations-h2h.json", {}).values()
                 h2h_counts = [

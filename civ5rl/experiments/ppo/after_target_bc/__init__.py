@@ -11,7 +11,7 @@ import torch
 from civ5rl.engine.evaluation.executor import evaluation_session, runtime_for
 from civ5rl.engine.runtime.control import RunLock, assert_not_closed
 from civ5rl.experiments._shared.lifecycle import experiment_run_guard
-from civ5rl.experiments.ppo.after_target_bc.evaluation import finish
+from civ5rl.experiments.ppo.after_target_bc.evaluation import continue_after_dual_target, finish
 from civ5rl.experiments.ppo.after_target_bc.initialization import initialize
 from civ5rl.experiments.ppo.after_target_bc.training import train
 from civ5rl.protocols.ppo_after_target_bc import validate_profile
@@ -27,11 +27,17 @@ def run(
     device: str | torch.device,
     runtime_path: Path | str | None = None,
     max_updates: int | None = None,
+    continue_dual_target: bool = False,
 ) -> None:
     out = Path(out)
     validate_profile(config)
     if max_updates is not None and (type(max_updates) is not int or max_updates < 1):
         raise ValueError("max_updates must be a positive operational limit")
+    diagnostic = config["experiment"].get("diagnostic_training_only", False)
+    if diagnostic and phase in ("train", "run", "resume") and max_updates is None:
+        raise ValueError("Training-only diagnostics require a bounded update count")
+    if continue_dual_target and phase != "resume":
+        raise ValueError("Continuation after a dual target requires resume")
     if phase == "report":
         if not (out / "run.json").is_file() or not (out / "state.json").is_file():
             raise ValueError("A prepared run with saved state is required for reporting")
@@ -45,6 +51,10 @@ def run(
         (out / "pause.request").write_text("pause requested\n", encoding="utf-8")
         return
     trains = phase in ("train", "run", "resume")
+    if phase == "resume" and (out / "evaluation.storage").is_dir() and not (out / "evaluation").exists():
+        from civ5rl.engine.evaluation.storage import restore_evaluations
+
+        restore_evaluations(out)
     with experiment_run_guard(
         out,
         phase=phase,
@@ -60,10 +70,12 @@ def run(
         if config.get("evaluation_runtime"):
             runtime_for(out, config)
         plan = read_json(out / "manifest.json")
-        for purpose in ("development", "development_512", "confirmation"):
+        for purpose in ("development", "development_512", "confirmation", "reserve_256"):
             for case in plan.get(purpose, []):
                 validate_case(case, config)
         if trains:
+            if continue_dual_target:
+                continue_after_dual_target(config, out)
             write_json(out / "status.json", {"status": "training"})
             train(
                 config,
@@ -77,6 +89,8 @@ def run(
                 report(config, out)
                 return
         if phase in ("evaluate", "run", "resume"):
+            if diagnostic:
+                return
             if not read_json(out / "state.json")["stop_reason"]:
                 raise ValueError("Training has not stopped")
             finish(config, plan, out)

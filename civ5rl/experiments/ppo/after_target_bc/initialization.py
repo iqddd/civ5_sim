@@ -58,8 +58,8 @@ def validate_episode_origin(experiment, parent_final):
         frontier = read_json(ROOT / source["state"])
         origin = record.get("config", {}).get("experiment", {})
         same_parent_run = (
-            source["state_sha256"] == experiment["parent_final_state_sha256"]
-            and source["run_sha256"] == experiment["parent_run_sha256"]
+            source["state_sha256"] == experiment.get("parent_final_state_sha256")
+            and source["run_sha256"] == experiment.get("parent_run_sha256")
         )
         if not same_parent_run and (
             origin.get("parent_sha256") != experiment["parent_sha256"]
@@ -99,7 +99,10 @@ def _verify_parent_lineage(experiment: dict[str, Any], parent: Path, *, inherite
 
 def _initial_evaluation_plan(config: dict[str, Any]) -> dict[str, Any]:
     experiment = config["experiment"]
-    plan = read_json(ROOT / experiment["parent_manifest"])
+    path = ROOT / experiment.get("evaluation_manifest", experiment["parent_manifest"])
+    if "evaluation_manifest" in experiment and file_sha256(path) != experiment["evaluation_manifest_sha256"]:
+        raise ValueError("Frozen evaluation manifest SHA-256 differs")
+    plan = read_json(path)
     verify_manifest_digest(plan, error_msg="Target manifest hash differs")
     eval_purpose = config.get("ppo", {}).get("evaluation_purpose", "development")
     if (
@@ -114,6 +117,28 @@ def _initial_evaluation_plan(config: dict[str, Any]) -> dict[str, Any]:
     ):
         raise ValueError("Evaluation case max_rounds differs from environment config")
     derived_plan: dict[str, Any] = evaluation_plan(plan, config)
+    if experiment.get("three_opponent_evaluation"):
+        from civ5rl.protocols.ppo_target_scale import paired_validation_cases
+        from civ5rl.protocols.common import own_state_physical_hash
+        from civ5sim.engine import digest
+
+        existing = []
+        seen = set()
+        for key, count in (("development", 128), ("confirmation", 256), ("development_512", 512)):
+            cases = derived_plan[key]
+            hashes = {own_state_physical_hash(c["scenario"]) for c in cases}
+            if len(cases) != count or len(hashes) != count // 2 or seen & hashes or sum(
+                c["placement"] == "contact" for c in cases
+            ) != count // 2:
+                raise ValueError(f"Unbalanced or overlapping evaluation layouts: {key}")
+            seen.update(hashes)
+            existing.extend(cases)
+        derived_plan["reserve_256"] = paired_validation_cases(
+            config, derived_plan["base"], 8, 28, "ppo_c2pa_cpv2_reserve_256_v1", existing
+        )
+        if len(derived_plan["reserve_256"]) != 256:
+            raise ValueError("Reserve-256 requires sixteen validation worlds")
+        derived_plan["hash"] = digest({k: v for k, v in derived_plan.items() if k != "hash"})
     return derived_plan
 
 
@@ -221,6 +246,14 @@ def _initial_run_record(
         "torch": torch.__version__,
         "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
     }
+    if experiment.get("three_opponent_evaluation"):
+        from civ5sim.combat_ai import LIBRARY_PATH
+
+        record["algorithmic_opponents"] = {
+            "cp_search": config["teacher_search"],
+            "cpv2_agent_sha256": file_sha256(ROOT / "civ5sim/cpv2_agent.py"),
+            "combat_ai_sha256": file_sha256(LIBRARY_PATH),
+        }
     record["run_id"] = digest(record)
     identity = {"run_id": record["run_id"]}
     if inherited:
@@ -278,6 +311,8 @@ def _initial_training_state(config: dict[str, Any], *, inherited: bool, extensio
     if adapts_value(config) and "origin_Adam_counters" in state:
         state["value_optimizer"] = "reset_then_preserve"
         state["origin_Adam_counters"]["value"] = 0
+        if extension and extension.child == "C2PA":
+            state["origin_Adam_counters"]["value_actions"] = 0
     if config.get("self_play", {}).get("enabled"):
         state["self_play_archive"] = []
         state["self_play_last_archived_optimizer_steps"] = 0

@@ -321,7 +321,10 @@ def main():
                             episode["spec"].pop("opponent_search", None)
                         else:
                             episode["spec"].pop("opponent_id", None)
-                            episode["spec"]["opponent_search"] = config["teacher_search"]
+                            if opp == "cp":
+                                episode["spec"]["opponent_search"] = config["teacher_search"]
+                            else:
+                                episode["spec"].pop("opponent_search", None)
                 result["turn_reset_mode"] = selected_mode
                 result["self_play"] = self_play
                 policy = load_collection_policy(config, args.checkpoint)

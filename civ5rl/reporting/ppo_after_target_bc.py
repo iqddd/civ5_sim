@@ -65,7 +65,44 @@ def _write_performance_reports(out: Path) -> None:
         (out / f"{name}.md").write_text(performance_markdown(performance), encoding="utf-8")
 
 
+def _report_three(out, state):
+    from civ5rl.protocols.three_opponents import results
+
+    lines = MarkdownReport(["# C2PA против CPv2, CP и u0", "",
+                            f"{state['decisions']:,} решений learner, {state['rollouts']} rollout, {state['optimizer_steps']} принятых шагов Adam.",
+                            f"Активное время {state['active_seconds']:.0f} с. Статус `{state['stop_reason'] or state['phase']}`.", ""])
+    points = state.get("three_opponent_points", {})
+    if points:
+        lines.table(("Веха", "Checkpoint", "CPv2 W/D/L", "CP W/D/L", "H2H W/D/L", "J"),
+                    ("right", "left", "right", "right", "right", "right"),
+                    ((point, row["checkpoint"], format_wdl(row["cpv2"]["runs"]["argmax"]["cpv2"]["summary"]),
+                      format_wdl(row["runs"]["argmax"]["cp"]["summary"]), format_wdl(row["h2h"]["summary"]),
+                      2 * (v2 - 384) + (cp - 384) + balance / 2)
+                     for point, row in points.items() for v2, cp, balance in (results(row),)))
+        lines += ["", f"Выбран `{state['best']['path']}`."]
+    for filename in ("confirmation-first.json", "confirmation.json"):
+        if not (out / filename).exists():
+            continue
+        record = read_json(out / filename)
+        lines += ["", f"## Подтверждение {record['attempt']}", ""]
+        if record.get("status"):
+            lines.append("Допустимый новый кандидат отсутствует.")
+            continue
+        for label in ("additional", "reserve"):
+            if label in record:
+                v2, cp, balance = results(record[label]["candidate"])
+                lines.append(f"{label.capitalize()} — CPv2 {v2}/256, CP {cp}/256, очный баланс {balance:+d}.")
+        lines.append(f"Продвижение `{record['promotion']['promoted']}`. Двойной порог `{record['promotion']['dual_target_confirmed']}`.")
+    if (out / "updates.jsonl").exists():
+        _write_performance_reports(out)
+        lines += ["", "[Профиль времени и GPU](performance.md) · [Метрики rollout](updates.jsonl)"]
+    lines.write(out / "report.md")
+
+
 def report(config: dict[str, Any], out: Path) -> None:
+    if config["experiment"].get("three_opponent_evaluation"):
+        _report_three(out, read_json(out / "state.json"))
+        return
     state = read_json(out / "state.json")
     parent_label = config["experiment"].get("parent_label", "target BC epoch 10")
     eval_purpose = config.get("ppo", {}).get("evaluation_purpose", "development")

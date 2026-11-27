@@ -541,6 +541,20 @@ python tools/ctl_rl.py progress --deployment DEPLOYMENT --watch --interval 900
 в `DEPLOYMENT/profiles/` доступны результаты и исходные сжатые Kineto-трассы.
 Профилирование не создаёт состояние обучения и не заменяет tuning для `run`.
 
+Для CPv2 используйте отдельный пилотный конфиг и носитель тренировочных случаев.
+После `package` с `--extra-input CARRIER` сначала выполните и выгрузите `tune`,
+затем запустите три rollout и выгрузите их через `pull --keep-instance`:
+
+```powershell
+python tools/run_ppo.py prepare-carrier --config configs/rl-ppo-c2pa-h60-cpv2-pilot.json --out CARRIER.pt
+python tools/remote_rl.py launch --deployment DEPLOYMENT --mode run --diagnostic-cpv2
+python tools/run_ppo.py pilot-report --config configs/rl-ppo-c2pa-h60-cpv2-pilot.json --out PILOT_RUN
+```
+
+Пилот ведёт сбор и PPO на тренировочных мирах и отключает Development и Additional.
+`pilot-report` проверяет допуски и выводит предложенную разовую поправку LR и эпох.
+Повтор выполняется от родителя в отдельном каталоге с теми же RNG namespaces.
+
 Для отдельного сравнительного сбора при `package` задайте
 `--tuning-source SAVED_COLLECTION`: каталог завершённого сравнительного опыта.
 `launch --mode tune` измерит число воркеров; после `pull --keep-instance`
@@ -557,6 +571,12 @@ python tools/remote_rl.py launch --deployment DEPLOYMENT --mode resume
 После завершения или ошибки сначала выгрузите состояние, затем выполняйте resume.
 Повтор `launch` активного job присоединяется к нему. Для переноса незавершённого запуска на другой хост сохраняйте RUN/execution.json,
 checkpoints и входные данные; checkout должен соответствовать записанному commit.
+
+Для трёхстороннего PPO `launch --mode resume --continue-after-dual-target`
+восстанавливает сохранённую границу победной остановки, если первый Additional
+дал 188–191 победу по более слабой из двух серий против ботов и H2H неотрицателен.
+После переноса на другой инстанс используйте тот же commit и сохранённые нативные
+библиотеки. Отбор новой модели использует вехи после исходной границы.
 
 После финальных оценок выгрузить, проверить и удалить привязанный инстанс:
 

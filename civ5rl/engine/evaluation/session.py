@@ -97,7 +97,7 @@ def evaluation_policy_hash(checkpoint):
     return fingerprint
 
 
-def evaluation_key(config, plan, out, path, purpose, runtime_identity):
+def evaluation_key(config, plan, out, path, purpose, runtime_identity, *, opponent="cp"):
     """Return the canonical cache key without running matches."""
     fingerprint = (
         "cp_mirror_" + digest(config["teacher_search"])[:32]
@@ -127,6 +127,7 @@ def evaluation_key(config, plan, out, path, purpose, runtime_identity):
             "evaluator": evaluator,
             "runtime": runtime_identity,
             "search": config["teacher_search"],
+            **({"opponent": opponent, "agent": file_sha256(ROOT / "civ5sim/cpv2_agent.py")} if opponent == "cpv2" else {}),
         }
     )
     return fingerprint, key

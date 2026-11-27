@@ -1,0 +1,124 @@
+"""Keep the three-opponent acceptance and continuation gates reproducible."""
+
+import unittest
+from pathlib import Path
+from random import Random
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+import torch
+
+from civ5rl.engine.collection.opponents import select_opponent
+from civ5rl.protocols import three_opponents as protocol
+
+
+def entry(step, v2, cp, balance, *, cp_contact=None):
+    cp_contact = cp // 2 if cp_contact is None else cp_contact
+    return {
+        "checkpoint": "checkpoints/initial.pt" if step == 0 else f"checkpoints/update-{step:04}.pt",
+        "policy_hash": f"policy-{step}",
+        "update": step,
+        "runs": {"argmax": {"cp": {"summary": {"W": cp}}}},
+        "slices": {"placement": {"contact": {"W": cp_contact}, "separated": {"W": cp - cp_contact}}},
+        "cpv2": {"runs": {"argmax": {"cpv2": {"summary": {"W": v2}}}},
+                  "slices": {"placement": {"contact": {"W": v2 // 2}, "separated": {"W": (v2 + 1) // 2}}}},
+        "h2h": {"summary": {"W": 230 + balance, "L": 230}},
+    }
+
+
+class ThreeOpponentTests(unittest.TestCase):
+    def test_critic_capsule_restores_context_without_touching_actor(self):
+        from copy import deepcopy
+
+        from civ5rl.config import load_config
+        from civ5rl.core.model import Policy
+        from civ5rl.engine.ppo.adam import check_counters, grouped_optimizer
+        from civ5rl.experiments.ppo import critic
+        from civ5rl.experiments.ppo.after_target_bc.boundary import ActiveClock
+        from civ5rl.provenance.common import write_json
+        from civ5rl.provenance.identity import policy_hash
+
+        config = load_config("configs/rl-ppo-c2pa-h60-cpv2.json")
+        config["critic"].update(epochs=2, batch_size=2)
+        policy = Policy("C2PA")
+        weights = deepcopy(policy.state_dict())
+        actor = policy_hash(weights)
+        features = torch.rand((4, policy.hidden_size + 2 * policy.hex_dim))
+        episodes = [dict(chosen=[0, 0], old_value=[0., 0.], result={"reward": reward}) for reward in (1, 0)]
+        state = {"active_seconds": 0., "optimizer_steps": 0, "value_optimizer": "reset_then_preserve",
+                 "origin_Adam_counters": {g: 0 for g in ("shared_actor", "value", "attack_preview", "action_context", "value_actions")}}
+        rng = Random(17)
+
+        def feature_blocks(*_args):
+            yield 0, 0, features[:2]
+            yield 1, 0, features[2:]
+
+        with TemporaryDirectory() as directory:
+            out = Path(directory)
+            write_json(out / "run.json", {"kind": config["kind"], "config": config})
+            clock = ActiveClock(state, out)
+            save = critic.atomic_save
+
+            def stop_after_capsule(value, path):
+                save(value, path)
+                if path.name == "critic-adaptation.pt":
+                    raise RuntimeError("interrupt after saving critic capsule")
+
+            def adapt(optimizer):
+                return critic.adapt_critic(policy, optimizer, episodes, config, "cpu", out, state,
+                                          rng, {}, clock, None, features_for=feature_blocks,
+                                          behavior_hash=lambda _: "fixed")
+
+            with patch.object(critic, "atomic_save", side_effect=stop_after_capsule):
+                with self.assertRaisesRegex(RuntimeError, "interrupt after saving"):
+                    adapt(grouped_optimizer(policy, config, "cpu"))
+            policy.load_state_dict(weights)
+            optimizer = grouped_optimizer(policy, config, "cpu")
+            self.assertEqual(adapt(optimizer)["steps"], 4)
+            self.assertEqual(check_counters(optimizer, state)["value_actions"], 4)
+            self.assertEqual(policy_hash(policy.state_dict()), actor)
+            self.assertGreater(torch.count_nonzero(policy.value_actions.weight).item(), 0)
+            with torch.no_grad():
+                self.assertEqual(torch.cat([policy.value_from_features(x) for x in features.split(2)]).tolist(),
+                                 [value for episode in episodes for value in episode["old_value"]])
+
+    def test_selection_and_resume_only_use_admissible_milestones(self):
+        points = {"0": entry(0, 255, 378, 0), "1": entry(1, 381, 378, 40)}
+        self.assertEqual(protocol.select(points)["milestone"], 1)
+        points["2"] = entry(2, 385, 384, 0)
+        points["3"] = entry(3, 385, 384, 0, cp_contact=170)
+        self.assertEqual(protocol.select(points)["milestone"], 2)
+        points["4"] = entry(4, 385, 384, 0)
+        self.assertEqual(protocol.select(points)["milestone"], 4)
+        self.assertEqual(protocol.select(points, continuation={"milestone": 4})["milestone"], 0)
+        points["5"] = {**entry(5, 385, 384, 0), "policy_hash": points["4"]["policy_hash"]}
+        self.assertEqual(protocol.select(points, continuation={"milestone": 4})["milestone"], 0)
+        points["6"] = entry(6, 385, 384, 0)
+        self.assertEqual(protocol.select(points, continuation={"milestone": 4})["milestone"], 6)
+
+    def test_stops_and_promotion_check_the_right_opponent(self):
+        baseline = entry(0, 255, 378, 0)
+        self.assertEqual(protocol.stop_reason({"0": baseline, "1": entry(1, 279, 390, 0), "2": entry(2, 279, 400, 10)},
+                                              [1, 2, 3], gain=25, gain_boundary=2), "no_development_gain")
+        points = {"0": baseline, "1": entry(1, 392, 392, -1), "2": entry(2, 392, 392, 0)}
+        self.assertIsNone(protocol.stop_reason(points, [1, 2, 3], gain=25, gain_boundary=2))
+        points["3"] = entry(3, 392, 392, 0)
+        self.assertEqual(protocol.stop_reason(points, [1, 2, 3], gain=25, gain_boundary=2), protocol.EARLY_GOAL)
+        self.assertTrue(protocol.allows_continuation(entry(1, 188, 193, 0)))
+        self.assertFalse(protocol.allows_continuation(entry(1, 187, 193, 0)))
+        self.assertFalse(protocol.allows_continuation(entry(1, 191, 193, -1)))
+        v2 = {"delta": 0.1, "CI95": [0.05, 0.14]}
+        cp = {"delta": 0}
+        self.assertEqual(protocol.initial_promotion(v2, cp, entry(1, 191, 192, 0)),
+                         {"promoted": True, "dual_target_confirmed": False})
+
+    def test_archive_share_returns_to_u0_until_first_snapshot(self):
+        config = {"self_play": {"cpv2_share": .5, "cp_share": .1, "current_share": .25,
+                               "parent_share": .05, "archive_share": .1}}
+        archive = [{"id": "archive:10"}]
+        without = [select_opponent(i, config, []) for i in range(256)]
+        with_archive = [select_opponent(i, config, archive) for i in range(256)]
+        self.assertEqual(set(without), {("cp", None), ("cpv2", None), ("policy", "current"), ("policy", "u0")})
+        self.assertIn(("policy", "archive:10"), with_archive)
+        self.assertEqual(without, [("policy", "u0") if key == "archive:10" else (opponent, key)
+                                   for opponent, key in with_archive])

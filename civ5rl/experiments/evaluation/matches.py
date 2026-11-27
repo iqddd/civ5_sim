@@ -16,13 +16,13 @@ from civ5sim.engine import digest
 
 
 def target_scale_evaluation_task(task):
-    config, case, path, directory = task
+    config, case, path, directory, *opponent = task
     if (
         case["split"] != "validation"
         or digest({key: value for key, value in case.items() if key != "case_hash"}) != case["case_hash"]
     ):
         raise ValueError("Invalid validation case")
-    return run_policy_match(config, case, path, "argmax", "cp", directory, include_combat_metrics=True)
+    return run_policy_match(config, case, path, "argmax", opponent[0] if opponent else "cp", directory, include_combat_metrics=True)
 
 
 def run_validation_cases(
@@ -84,14 +84,14 @@ def _compute_evaluation_slices(
     return slices
 
 
-def evaluate_target_scale(config, plan, out, path, purpose):
+def evaluate_target_scale(config, plan, out, path, purpose, *, opponent="cp"):
     from civ5rl.engine.evaluation.executor import evaluation_precision
 
     with evaluation_precision():
-        return _evaluate_target_scale(config, plan, out, path, purpose)
+        return _evaluate_target_scale(config, plan, out, path, purpose, opponent=opponent)
 
 
-def _evaluate_target_scale(config, plan, out, path, purpose):
+def _evaluate_target_scale(config, plan, out, path, purpose, *, opponent="cp"):
     # Spawned simulator workers can import this module without loading Torch.
     from civ5rl.engine.evaluation import executor as evaluation_executor
     from civ5rl.engine.evaluation.executor import evaluation_key
@@ -101,13 +101,15 @@ def _evaluate_target_scale(config, plan, out, path, purpose):
 
     runtime = evaluation_executor.runtime_for(out, config, cp_only=path == "cp")
     runtime_identity = runtime.identity()
-    fingerprint, key = evaluation_key(config, plan, out, path, purpose, runtime_identity)
+    if opponent not in ("cp", "cpv2"):
+        raise ValueError("Unknown target-scale opponent")
+    fingerprint, key = evaluation_key(config, plan, out, path, purpose, runtime_identity, opponent=opponent)
     cache = read_json(out / "evaluations.json") if (out / "evaluations.json").exists() else {}
     if key in cache:
-        return cache[key]
+        return {**cache[key], "checkpoint": path}
     cases = plan[purpose]
     started = perf_counter()
-    relative = f"evaluation/{purpose}/{fingerprint[:16]}/{key[:16]}/argmax/cp"
+    relative = f"evaluation/{purpose}/{fingerprint[:16]}/{key[:16]}/argmax/{opponent}"
     directory = out / relative
     workers = runtime.workers
     checkpoint_arg = "cp" if path == "cp" else str(out / path)
@@ -118,7 +120,7 @@ def _evaluate_target_scale(config, plan, out, path, purpose):
         if metrics_path.is_file() and "units_lost" in read_json(metrics_path):
             continue
         # Older workers could publish ordinary metrics before adding combat totals.
-        tasks.append((config, case, checkpoint_arg, str(case_dir)))
+        tasks.append((config, case, checkpoint_arg, str(case_dir), opponent))
     inference_statistics = None
     if runtime.device == "cuda" and tasks:
         executor = evaluation_executor.EvaluationExecutor(checkpoint_arg, runtime)
@@ -150,7 +152,7 @@ def _evaluate_target_scale(config, plan, out, path, purpose):
         "seconds": perf_counter() - started,
         "runtime": runtime_identity,
         "inference": inference_statistics,
-        "runs": {"argmax": {"cp": {"directory": relative, "summary": summary}}},
+        "runs": {"argmax": {opponent: {"directory": relative, "summary": summary}}},
         "slices": slices,
     }
     cache[key] = result

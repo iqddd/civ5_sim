@@ -76,6 +76,59 @@ class AttackPreviewTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_case(case, cfg)
 
+    def test_two_visible_compact_contact_enforces_exact_mutual_two_vanguards(self):
+        # Prevent silent reuse of old moshpit contact cases or asymmetric initial visibility.
+        from civ5rl.protocols.common import flat_map
+        from civ5rl.protocols.contact_placement import CONTACT_TWO_VISIBLE, visible_enemy_counts
+        from civ5rl.protocols.turn_reset import evaluation_plan, validate_case
+        from civ5sim.engine import digest
+
+        m = flat_map(12)
+        roster = ["warrior", "archer", "spearman", "horseman", "chariot_archer", "warrior", "archer"]
+        legacy_units = [
+            {"type": kind, "side": s, "tile": (2 + s) * 12 + 2 + i, "hp": 100}
+            for s in (0, 1)
+            for i, kind in enumerate(roster)
+        ]
+        base_scen = {
+            "schema": 1,
+            "kind": "civ5sim.scenario",
+            "map": m,
+            "fog": True,
+            "random_damage": True,
+            "seed": 77,
+            "turn_reset_mode": "end_turn",
+            "active_side": 0,
+            "units": legacy_units,
+        }
+        cases = []
+        for side in (0, 1):
+            c = {
+                "case_id": 0,
+                "layout_id": 0,
+                "learner_side": side,
+                "placement": "contact",
+                "placement_algorithm": "contact_v1",
+                "armies": [roster, list(roster)],
+                "streams": {"placement": 12345, "battle": 77},
+                "scenario": deepcopy(base_scen),
+                "split": "validation",
+            }
+            c["scenario_hash"] = digest(c["scenario"])
+            c["case_hash"] = digest({k: v for k, v in c.items() if k != "case_hash"})
+            cases.append(c)
+        parent = {"development_512": cases, "hash": "parent_h"}
+        cfg = {"environment": {"turn_reset_mode": "end_turn", "contact_placement": CONTACT_TWO_VISIBLE}}
+        upgraded = evaluation_plan(parent, cfg)
+        c0, c1 = upgraded["development_512"]
+        self.assertEqual(c0["scenario"], c1["scenario"])
+        self.assertNotEqual(c0["case_hash"], cases[0]["case_hash"])
+        self.assertEqual(c0["placement_algorithm"], CONTACT_TWO_VISIBLE)
+        self.assertEqual(visible_enemy_counts(c0["scenario"]), [2, 2])
+        validate_case(c0, cfg)
+        with self.assertRaises(ValueError):
+            validate_case(cases[0], cfg)
+
     def test_public_batch_matches_scalar_without_state_or_hidden_information(self):
         # A fast native path could accidentally use omniscient strengths or mutate RNG.
         left = scenario(unit(hp=24), unit(side=1, x=3, hp=15), unit(side=1, x=8),

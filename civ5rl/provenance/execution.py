@@ -28,7 +28,7 @@ def binaries():
         'build/combat_rules.json') if (ROOT/name).is_file()}
 
 
-def execution_session(directory,phase):
+def execution_session(directory,phase,*,reopening=False):
     """Bind once at execution, reject a different/dirty checkout on resume.
 
     This never checks out Git or edits checkpoints. A completed result may be
@@ -39,13 +39,15 @@ def execution_session(directory,phase):
     directory=Path(directory)
     with RunLock(directory):
         status=read_json(directory/'status.json') if (directory/'status.json').exists() else {}
-        if status.get('status') in ('complete','closed_by_user'):return
+        if status.get('status') in ('complete','closed_by_user') and not reopening:return
         commit,dirty=git_code()
         if dirty:
             raise ValueError('Commit code changes before execution; resume requires a clean checkout. '
                              f'Uncommitted code: {dirty[:8]}')
         path=directory/'execution.json'
         current=dict(git_commit=commit,binaries=binaries())
+        if reopening and not path.exists():
+            raise ValueError('Reopening requires the saved execution.json')
         if path.exists():
             saved=read_json(path)
             if saved!=current:

@@ -871,7 +871,7 @@ class Policy(nn.Module):
             )
         return x, context_embedding
 
-    def heads(self, batch, x, h, *, compute_value=True):
+    def heads(self, batch, x, h, *, compute_value=True, return_value_features=False):
         b, n, _ = x.shape
         offsets = torch.arange(b, device=x.device)[:, None] * n
         flat = x.reshape(b * n, self.hex_dim)
@@ -911,11 +911,22 @@ class Policy(nn.Module):
                 mean = detached.masked_fill(~mask[..., None], 0).sum(1) / mask.sum(1, keepdim=True).clamp_min(1)
                 maximum = detached.masked_fill(~mask[..., None], -torch.inf).amax(1)
                 maximum = maximum.masked_fill(~mask.any(1, keepdim=True), 0)
-                summary = self.value_actions(torch.cat((mean, maximum), dim=-1))
-                value = self.value[2](self.value[1](self.value[0](h.float()) + summary)).squeeze(-1)
+                context = torch.cat((mean, maximum), dim=-1)
+                value = (torch.cat((h.float(), context), dim=-1) if return_value_features
+                         else self._value_with_context(h.float(), context))
             elif compute_value:
                 value = self.value(h.float()).squeeze(-1)
         return logits, value
+
+    def value_from_features(self, features):
+        if not self.variant_spec.action_context:
+            return self.value(features).squeeze(-1)
+        hidden, context = features.split((self.hidden_size, 2 * self.hex_dim), dim=-1)
+        return self._value_with_context(hidden, context)
+
+    def _value_with_context(self, hidden, context):
+        summary = self.value_actions(context)
+        return self.value[2](self.value[1](self.value[0](hidden) + summary)).squeeze(-1)
 
     def _check_hidden(self, hidden: torch.Tensor | None, batch_size: int) -> None:
         if hidden is not None and tuple(hidden.shape) != (

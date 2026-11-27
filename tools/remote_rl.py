@@ -35,6 +35,8 @@ def main(argv=None):
             cmd.add_argument("--request-id")
         if name == "launch":
             cmd.add_argument("--host-resume-reason")
+            cmd.add_argument("--continue-after-dual-target", action="store_true")
+            cmd.add_argument("--diagnostic-cpv2", action="store_true")
             cmd.add_argument("--mode", choices=("tune", "run", "resume", "profile"), required=True)
             cmd.add_argument("--instance")
             cmd.add_argument("--evaluation-device", choices=("auto", "cpu", "cuda"))
@@ -54,6 +56,8 @@ def main(argv=None):
     elif args.command == "launch":
         result = launch(args.deployment, args.mode, instance=args.instance,
                         host_resume_reason=args.host_resume_reason,
+                        continue_dual_target=args.continue_after_dual_target,
+                        diagnostic_cpv2=args.diagnostic_cpv2,
                         evaluation_runtime={k: getattr(args, "evaluation_" + k) for k in ("device", "workers", "max_batch", "wait_seconds")
                                             if getattr(args, "evaluation_" + k) is not None})
     elif args.command == "status":

@@ -306,12 +306,13 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
         adapting = uses_grouped_adam(value.get("config", {}))
         if adapting:
             named = dict(policy.named_parameters())
-            from civ5rl.engine.ppo.adam import group_names, parameter_group
-            if [g.get("name") for g in groups] != group_names(policy.variant_spec):
+            from civ5rl.engine.ppo.adam import adapts_value, group_names, parameter_group
+            separate = policy.variant_spec.action_context and adapts_value(value.get("config", {}))
+            if [g.get("name") for g in groups] != group_names(policy.variant_spec, separate_value_actions=separate):
                 raise ValueError(f"Adam groups differ: {path}")
             lookup = {}
             for group in groups:
-                expected_names = [n for n in named if parameter_group(n) == group["name"]]
+                expected_names = [n for n in named if parameter_group(n, separate_value_actions=separate) == group["name"]]
                 if group.get("parameter_names") != expected_names:
                     raise ValueError(f"Adam parameter names differ: {path}")
                 lookup.update(zip(group["params"], [named[n] for n in expected_names], strict=True))
@@ -463,11 +464,16 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
                 raise ValueError("Parent checkpoint SHA256 differs")
             if initial["config"]["experiment"].get("initial_value") == "adapt_parent_first_rollout":
                 parent_ids = [i for g in parent["optimizer"]["param_groups"] for i in g["params"]]
-                parent_named = dict(zip(dict(policy.named_parameters()), parent_ids, strict=True))
+                named_groups = all("parameter_names" in group for group in parent["optimizer"]["param_groups"])
+                if named_groups:
+                    parent_named = {name: index for group in parent["optimizer"]["param_groups"]
+                                    for name, index in zip(group["parameter_names"], group["params"], strict=True)}
+                else:
+                    parent_named = dict(zip(dict(policy.named_parameters()), parent_ids, strict=True))
                 for group in initial["optimizer"]["param_groups"]:
                     for name, index in zip(group["parameter_names"], group["params"], strict=True):
                         item = initial["optimizer"]["state"].get(index, {})
-                        if name.startswith("value."):
+                        if name.startswith("value.") or (extension and name in extension.new_parameters):
                             if item:
                                 raise ValueError("Initial value Adam was not reset")
                         elif not _equal(item, parent["optimizer"]["state"][parent_named[name]]):
@@ -480,10 +486,10 @@ def verify_checkpoint_chain(directory, *, adam_offset=0, parent_checkpoint=None)
                 extra = groups[-1]
                 if extra.get("name") != extension.adam_group or any(i in original["state"] for i in extra["params"]):
                     raise ValueError("Initial extension Adam group must be empty")
-                if extension.child == "C2PA" and file_sha256(directory / "checkpoints/reference-u0.pt") != file_sha256(parent_checkpoint):
-                    raise ValueError("Frozen u0 differs from the native parent checkpoint")
             elif not _equal(initial["optimizer"], parent["optimizer"]):
                 raise ValueError("Initial Adam differs from parent")
+            if extension and extension.child == "C2PA" and file_sha256(directory / "checkpoints/reference-u0.pt") != file_sha256(parent_checkpoint):
+                raise ValueError("Frozen u0 differs from the native parent checkpoint")
     return {
         "status": "verified",
         "adam_offset": adam_offset,

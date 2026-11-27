@@ -17,6 +17,9 @@ def prune_checkpoints(out: str | PathLike[str], state: dict[str, Any]) -> None:
     keep = {"initial.pt", Path(state["latest"]).name, Path(state["best"]["path"]).name}
     keep.update(p.name for p in paths[-2:])
     keep.update(Path(e["checkpoint"]).name for e in state["evaluated"].values())
+    keep.update(Path(e["checkpoint"]).name for e in state.get("three_opponent_points", {}).values())
+    if state.get("dual_target_boundary"):
+        keep.add(Path(state["dual_target_boundary"]["checkpoint"]).name)
     keep.update(Path(e["path"]).name for e in state.get("self_play_archive", ()))
     journal = out / "checkpoint-retention.json"
     removed = read_json(journal) if journal.exists() else []

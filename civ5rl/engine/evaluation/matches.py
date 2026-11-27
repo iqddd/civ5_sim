@@ -58,7 +58,12 @@ def run_policy_match(
             collect_selection_metrics=collect_selection_metrics,
             cpu_seed=17,
         )
-    opponent = CPAgent(search_config(config)) if enemy == "cp" else "greedy"
+    if enemy == "cpv2":
+        from civ5sim.cpv2_agent import CPv2Agent
+
+        opponent = CPv2Agent()
+    else:
+        opponent = CPAgent(search_config(config)) if enemy == "cp" else "greedy"
     side = case["learner_side"]
     agents = [None, None]
     agents[side], agents[1 - side] = agent, opponent

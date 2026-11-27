@@ -394,7 +394,8 @@ def _attach(directory, deployment, transport):
     return result
 
 
-def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime=None, host_resume_reason=None):
+def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime=None, host_resume_reason=None,
+           continue_dual_target=False, diagnostic_cpv2=False):
     """Attach to active jobs or prepare a durable launch with explicit recovery.
 
     Retry preparation only when the same job is confirmed cancelled_before_launch
@@ -410,6 +411,15 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
             raise ValueError("The bound instance has been deleted")
         if mode not in CAPABILITIES.get(deployment["kind"], set()):
             raise ValueError(f"Unsupported {mode} for {deployment['kind']}")
+        experiment = deployment["resolved_config"].get("experiment", {})
+        if continue_dual_target or diagnostic_cpv2:
+            three = experiment.get("three_opponent_evaluation")
+            if (not three or (continue_dual_target and mode != "resume")
+                    or (diagnostic_cpv2 and mode not in ("run", "resume"))
+                    or (continue_dual_target and diagnostic_cpv2)):
+                raise ValueError("Invalid CPv2 launch mode")
+        if mode in ("run", "resume") and bool(experiment.get("pilot_only")) != diagnostic_cpv2:
+            raise ValueError("CPv2 diagnostics require the separate pilot deployment and --diagnostic-cpv2")
         if evaluation_runtime and mode in ("tune", "profile"):
             raise ValueError("Evaluation runtime options do not apply to tuning or profiling")
         if evaluation_runtime and deployment["kind"] not in {
@@ -515,6 +525,8 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
                 "--mode", "profile", "--config", deployment["config"],
                 "--tuning-rollout", deployment["tuning_rollout"], "--tuning-dir", remote_sync_dir,
             ]
+            if deployment.get("tune", {}).get("confirmed"):
+                worker_args += ["--runtime-config", deployment["remote_tuning_dir"] + "/recommended-runtime.json"]
         else:
             local_sync_dir = Path(deployment["local_output"])
             local_sync_dir.mkdir(parents=True, exist_ok=True)
@@ -535,6 +547,10 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
             if host_resume_reason:
                 worker_args += ["--host-resume-id", str(deployment["instance"]["instance_id"]),
                                 "--host-resume-reason", host_resume_reason]
+            if continue_dual_target:
+                worker_args.append("--continue-after-dual-target")
+            if diagnostic_cpv2:
+                worker_args.append("--diagnostic-cpv2")
             for key, value in (evaluation_runtime or {}).items():
                 if key not in {"device", "workers", "max_batch", "wait_seconds"}:
                     raise ValueError(f"Unknown evaluation runtime key {key!r}")

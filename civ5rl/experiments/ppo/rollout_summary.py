@@ -25,12 +25,12 @@ def summarize_rollout(episodes):
         "forced_decisions": total - free,
         "positive_reward_episodes": count["W"],
     }
-    if any(episode["spec"].get("opponent") == "policy" for episode in episodes):
+    if any(episode["spec"].get("opponent") in ("policy", "cpv2") for episode in episodes):
         buckets = {}
         for episode in episodes:
             spec = episode["spec"]
             if spec.get("opponent") != "policy":
-                bucket = "cp"
+                bucket = spec.get("opponent", "cp")
             else:
                 opponent_id = spec.get("opponent_id") or "current"
                 bucket = "archive" if opponent_id.startswith("archive:") else opponent_id

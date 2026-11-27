@@ -27,6 +27,7 @@ from civ5rl.provenance.common import write_json
 from civ5rl.provenance.host_resume import verify_revision
 from civ5rl.reporting.evaluation_audit import (
     clustered_paired_bootstrap,
+    collect_paired_outcomes,
     dual_promotion_decision,
     eval_wdl_summary,
     h2h_world_bootstrap,
@@ -282,6 +283,8 @@ SKIPPED_CONFIRMATION = (
 def _confirmation_check(directory, state, confirmation, config=None):
     if config is None:
         config = _read(directory / "run.json", {}).get("config", {})
+    if config.get("experiment", {}).get("three_opponent_evaluation"):
+        return _three_opponent_confirmation_check(directory, state, confirmation, config["experiment"])
     dual = bool(config.get("self_play", {}).get("enabled"))
     status = confirmation.get("status")
     if status == "not_run_parent_selected":
@@ -292,6 +295,96 @@ def _confirmation_check(directory, state, confirmation, config=None):
     if dual or "h2h_confirmation" in confirmation:
         return {**cp_result, **_check_h2h_confirmation(directory, state, confirmation, cp_result, dual=dual)}
     return cp_result
+
+
+def _three_opponent_confirmation_check(directory, state, confirmation, experiment):
+    from civ5rl.experiments.ppo.after_target_bc.evaluation import bot_comparison
+    from civ5rl.protocols import three_opponents as triple
+
+    points = state["three_opponent_points"]
+    manifest = _read(directory / "manifest.json")
+    native_u0 = "checkpoints/reference-u0.pt"
+    continuation = state.get("dual_target_continuation")
+    for point, fingerprint in state["development_points"].items():
+        entry = points.get(point, {})
+        if entry.get("policy_hash") != fingerprint or entry.get("decisions", 0) < int(point):
+            raise ValueError("Three-opponent milestone differs from the saved decision boundary")
+    boundary = state.get("dual_target_boundary")
+    if boundary:
+        until_stop = {point: item for point, item in points.items() if int(point) <= boundary["milestone"]}
+        if triple.stop_reason(until_stop, experiment["milestones"], gain=experiment["early_gain_min_wins"],
+                              gain_boundary=experiment["early_gain_decisions"]) != triple.EARLY_GOAL:
+            raise ValueError("Invalid early goal boundary")
+        if (until_stop[str(boundary["milestone"])]["checkpoint"] != boundary["checkpoint"]
+                or not (directory / boundary["checkpoint"]).is_file()):
+            raise ValueError("Early goal checkpoint is missing or differs")
+    elif state.get("stop_reason") == triple.EARLY_GOAL:
+        raise ValueError("Missing early goal boundary")
+
+    def check_cases(relative, purpose):
+        path = (directory / relative).resolve()
+        if not path.is_relative_to(directory.resolve()):
+            raise ValueError("Evaluation path escapes saved run")
+        _, cases, _ = collect_paired_outcomes(path, check_duplicates=True)
+        expected = {case["case_hash"] for case in manifest[purpose]}
+        if len(cases) != len(expected) or {case["case_hash"] for case in cases.values()} != expected:
+            raise ValueError(f"Evaluation cases differ from {purpose}")
+
+    def check_series(series, candidate_path, purpose):
+        candidate, baseline = series["candidate"], series["baseline"]
+        if (candidate["checkpoint"] != candidate_path or candidate["cpv2"]["checkpoint"] != candidate_path
+                or baseline["checkpoint"] != native_u0 or baseline["cpv2"]["checkpoint"] != native_u0):
+            raise ValueError("Confirmed checkpoint differs from selected checkpoint")
+        for enemy in ("cp", "cpv2"):
+            old, new = (baseline, candidate) if enemy == "cp" else (baseline[enemy], candidate[enemy])
+            for item in (old, new):
+                if item["purpose"] != purpose:
+                    raise ValueError(f"Saved {enemy} series belongs to another split")
+                check_cases(item["runs"]["argmax"][enemy]["directory"], purpose)
+            actual = bot_comparison(directory, old, new, enemy)
+            for key in ("delta", "CI95"):
+                if not np.allclose(actual[key], series[enemy][key], atol=1e-12, rtol=0):
+                    raise ValueError(f"Saved {enemy} bootstrap differs")
+        h2h = candidate["h2h"]
+        if (h2h["checkpoint"] != candidate_path or h2h["reference"] != native_u0 or h2h["purpose"] != purpose
+                or h2h["policy_hash"] != candidate["policy_hash"] or h2h["reference_policy_hash"] != baseline["policy_hash"]):
+            raise ValueError("Wrong H2H candidate, reference or split")
+        check_cases(h2h["directory"], purpose)
+        actual = h2h_world_bootstrap(directory / h2h["directory"], 256, samples=10000, seed=20261103, clusters=16)
+        for key in ("W", "D", "L", "delta", "CI95"):
+            if not np.allclose(actual[key], h2h["bootstrap"][key], atol=1e-12, rtol=0):
+                raise ValueError("Saved H2H confirmation differs")
+
+    if continuation:
+        if continuation != boundary:
+            raise ValueError("Continuation boundary differs from original stop")
+        first = _read(directory / "confirmation-first.json", {})
+        first_path = triple.select(until_stop)["path"]
+        if first.get("attempt") != 1 or not triple.allows_continuation(first["additional"]["candidate"]):
+            raise ValueError("First Additional does not allow continuation")
+        check_series(first["additional"], first_path, "confirmation")
+    selection = triple.select(points, continuation=continuation)
+    if _read(directory / "selected.json", {}) != selection or state["best"] != selection:
+        raise ValueError("Three-opponent selection differs from recomputation")
+    if confirmation["attempt"] != (2 if continuation else 1):
+        raise ValueError("Wrong confirmation attempt")
+    path = selection["path"]
+    if path == "checkpoints/initial.pt":
+        if confirmation.get("status") != "not_run_parent_selected":
+            raise ValueError("Confirmation exists without an admissible new candidate")
+        return {"status": confirmation["status"]}
+    additional = confirmation["additional"]
+    check_series(additional, path, "confirmation")
+    if continuation:
+        reserve = confirmation["reserve"]
+        check_series(reserve, path, "reserve_256")
+        confirmed = all(triple.meets(item["candidate"], triple.ADDITIONAL_TARGET) for item in (additional, reserve))
+        promotion = {"promoted": confirmed, "dual_target_confirmed": confirmed}
+    else:
+        promotion = triple.initial_promotion(additional["cpv2"], additional["cp"], additional["candidate"])
+    if confirmation["promotion"] != promotion:
+        raise ValueError("Three-opponent promotion differs from recomputation")
+    return promotion
 
 
 def _audit_section(sections, name, operation, missing=None):
@@ -482,7 +575,8 @@ def _audit_stable(directory):
     state = _read(directory / "state.json", {})
     evaluations = _read(directory / "evaluations.json", {})
     confirmation = _read(directory / "confirmation.json", {})
-    entries = list(_evaluation_entries([state.get("evaluated", {}), evaluations, confirmation]))
+    first_confirmation = _read(directory / "confirmation-first.json", {})
+    entries = list(_evaluation_entries([state.get("evaluated", {}), evaluations, confirmation, first_confirmation]))
     _audit_section(
         sections,
         "evaluation_completeness_wdl",
@@ -496,6 +590,7 @@ def _audit_stable(directory):
         partial(_confirmation_check, directory, state, confirmation, config),
         None
         if {"baseline", "candidate"} <= confirmation.keys()
+        or "additional" in confirmation
         or confirmation.get("status") in SKIPPED_CONFIRMATION
         else "No recognized paired confirmation; special historical analyses are not covered",
     )
