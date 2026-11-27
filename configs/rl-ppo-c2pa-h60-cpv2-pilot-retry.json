@@ -1,0 +1,10 @@
+{
+  "base_config": "configs/rl-ppo-c2pa-h60-cpv2-pilot.json",
+  "output": "artifacts/rl/ppo-c2pa-h60-cpv2-pilot-retry",
+  "optimizer": {
+    "group_lrs": {
+      "action_context": 0.0001,
+      "value_actions": 0.0001
+    }
+  }
+}
