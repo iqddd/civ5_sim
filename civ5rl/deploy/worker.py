@@ -181,13 +181,9 @@ def main(argv=None, *, root=ROOT):
             value = getattr(args, "evaluation_" + name)
             if value is not None:
                 command += ["--evaluation-" + name.replace("_", "-"), str(value)]
-        if kind == "rl01.rollout_comparison_collection":
+        if kind in {"rl01.ppo_after_target_bc", "rl01.rollout_comparison_collection"}:
             if not args.runtime_config:
-                raise ValueError("Collection requires a measured --runtime-config")
-            command += ["--runtime-config", args.runtime_config]
-        if kind == "rl01.ppo_after_target_bc":
-            if not args.runtime_config:
-                raise ValueError("--runtime-config is required for ppo_after_target_bc")
+                raise ValueError("A measured --runtime-config is required")
             summary_path = Path(args.runtime_config).parent / "summary.json"
             summary = _read(summary_path)
             if (

@@ -28,6 +28,8 @@ class FakeTransport:
         self.attaches = 0
         self.deletes = 0
         self.last_args = None
+        self.runtime = {"num_envs": 16}
+        self.attach_result = None
 
     def validate_attach(self, deployment):
         if deployment["job"]["id"] != "fixture-job":
@@ -37,6 +39,9 @@ class FakeTransport:
         self.last_args = args
         if "--attach" in args:
             self.attaches += 1
+            if self.attach_result is not None:
+                record = json.loads((self.directory / "deployment.json").read_text())
+                write(self.directory / record["job"]["result"], self.attach_result)
         else:
             self.starts += 1
             result = args[args.index("--result-json") + 1]
@@ -52,6 +57,9 @@ class FakeTransport:
 
     def delete(self, instance):
         self.deletes += 1
+
+    def tuning_runtime(self, deployment, transfer=None):
+        return self.runtime
 
 
 class ManagementTests(unittest.TestCase):
@@ -117,8 +125,6 @@ class ManagementTests(unittest.TestCase):
             "commit": "fixture",
             "repo": "iqddd/civ5_sim",
             "repo_name": "civ5_sim",
-            "runtime": {"num_envs": 16},
-            "tune": {"confirmed": True, "fingerprint": "fixture"},
             "tuning_rollout": "cases.pt",
             "operations": [],
             "job": None,
@@ -161,7 +167,7 @@ class ManagementTests(unittest.TestCase):
                 remote.launch(deploy, "tune", transport=transport)
             saved = json.loads((deploy / "deployment.json").read_text())
             saved["kind"] = "rl01.ppo_after_target_bc"
-            saved["tune"]["confirmed"] = False
+            transport.runtime = None
             write(deploy / "deployment.json", saved)
             with self.assertRaises(ValueError):
                 remote.launch(deploy, "run", transport=transport)
@@ -221,11 +227,6 @@ class ManagementTests(unittest.TestCase):
             remote.launch(deploy, "tune", transport=transport)
             saved = json.loads((deploy / "deployment.json").read_text())
             write(
-                deploy / "tuning/summary.json",
-                {"preliminary": False, "protected_inputs_unchanged": True},
-            )
-            write(deploy / "tuning/recommended-runtime.json", {"num_envs": 16})
-            write(
                 deploy / saved["job"]["result"],
                 {
                     "job_id": "fixture-job",
@@ -269,11 +270,29 @@ class ManagementTests(unittest.TestCase):
             receipt = remote.pull(deploy, transport=transport)
             self.assertTrue(receipt["tuning_confirmed"])
             self.assertEqual(receipt["runtime"], runtime)
-            self.assertEqual(receipt["destination"], job["transfer"]["destination"])
+            self.assertEqual(receipt["destination"], job["transfer"]["destination"] + "/measurement-0")
             self.assertFalse((deploy / "tuning/recommended-runtime.json").exists())
             transport.tuning_runtime.assert_called_once()
+            after = json.loads(record.read_text())
+            self.assertFalse(after["job"]["pulled"])
+            self.assertNotIn("tune", after)
+            self.assertNotIn("runtime", after)
             remote.launch(deploy, "run", transport=transport)
-            self.assertIn("--script-arg=/workspace/civ5-runs/fixture/tuning/recommended-runtime.json", transport.last_args)
+            self.assertIn("--script-arg=/workspace/civ5-runs/fixture/tuning/measurement-0/recommended-runtime.json",
+                          transport.last_args)
+
+    def test_run_waits_for_tuning_without_a_separate_pull(self):
+        with tempfile.TemporaryDirectory() as temp:
+            deploy, transport = self.deployment(Path(temp))
+            remote.launch(deploy, "tune", transport=transport)
+            transport.attach_result = {
+                "job_id": "fixture-job",
+                "execution": {"status": "exited", "exit_code": 0},
+                "lifecycle": {"phase": "finalized"},
+                "post_sync": {"status": "ok", "file_errors": []},
+            }
+            remote.launch(deploy, "run", transport=transport)
+            self.assertEqual((transport.starts, transport.attaches), (2, 1))
 
     def test_finished_pull_preserves_the_server_archive_and_audit(self):
         from civ5rl.deploy.final_run import publish_final_run

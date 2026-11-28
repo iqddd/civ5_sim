@@ -229,7 +229,6 @@ def package(
         "tuning_rollout": carriers[0] if len(carriers) == 1 else None,
         "tuning_source": tuning_source,
         "job": None,
-        "runtime": None,
         "operations": [],
     }
     _receipt(
@@ -315,28 +314,30 @@ class Transport:
             check=True,
         )
 
-    def tuning_runtime(self, deployment, transfer):
+    def tuning_runtime(self, deployment, transfer=None):
         from civ5rl.deploy.remote import _connection, _remote_path, _ssh_json
 
-        directory = PurePosixPath(transfer["destination"]) / deployment.get("tuning_measurement", "")
         return _ssh_json(_connection(deployment["instance"]), """
 import json, sys
 from pathlib import Path
 
 request = json.load(sys.stdin)
-marker = json.loads((Path(request['upload']) / 'applied.json').read_text(encoding='utf-8'))
-if marker.get('token') != request['token']:
-    raise ValueError('Tuning output does not belong to this job')
+if request['upload']:
+    marker = json.loads((Path(request['upload']) / 'applied.json').read_text(encoding='utf-8'))
+    if marker.get('token') != request['token']:
+        raise ValueError('Tuning output does not belong to this job')
 tuning = Path(request['directory'])
-summary = json.loads((tuning / 'summary.json').read_text(encoding='utf-8'))
+summary_path = tuning / 'summary.json'
+summary = json.loads(summary_path.read_text(encoding='utf-8')) if summary_path.is_file() else {}
 runtime = None
 if summary.get('preliminary') is False and summary.get('protected_inputs_unchanged') is True:
     runtime = json.loads((tuning / 'recommended-runtime.json').read_text(encoding='utf-8'))
     if not isinstance(runtime, dict) or not runtime:
         raise ValueError('Invalid recommended runtime')
 print(json.dumps(runtime, allow_nan=False))
-""", {"directory": _remote_path(str(directory)), "upload": _remote_path(transfer["remote_upload"]),
-      "token": transfer["token"]})
+""", {"directory": _remote_path(str(_tuning_directory(deployment))),
+      "upload": _remote_path(transfer["remote_upload"]) if transfer else None,
+      "token": transfer["token"] if transfer else None})
 
     def download_packet(self, deployment, transfer):
         from civ5rl.deploy.archive import unpack
@@ -387,6 +388,22 @@ print(json.dumps({'files':len(m['files']),'archived_files':len(m['archived']),
 def _job_result(directory, deployment):
     path = directory / deployment["job"]["result"]
     return _read(path) if path.exists() else {}
+
+
+def _tuning_directory(deployment):
+    root = deployment.get("remote_tuning_dir", deployment["remote_root"] + "/tuning")
+    return PurePosixPath(root) / deployment.get("tuning_measurement", "")
+
+
+def _verified_execution(deployment, result):
+    sync = result.get("post_sync", {})
+    execution = result.get("execution", {})
+    if (result.get("lifecycle", {}).get("phase") != "finalized" or sync.get("status") != "ok"
+            or sync.get("file_errors") or execution.get("status") not in {"exited", "interrupted"}):
+        raise ValueError("Execution/transport not finalized; instance retained")
+    if result.get("job_id") != deployment["job"]["id"]:
+        raise ValueError("Final transport metadata belongs to a different job")
+    return execution.get("exit_code")
 
 
 def _attach(directory, deployment, transport):
@@ -457,6 +474,7 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
             raise ValueError("Cannot change the instance of a bound deployment")
         deployment["instance"] = target
         verify_package(directory, deployment)
+        tuning_transfer = None
         if deployment.get("job"):
             previous = _job_result(directory, deployment)
             phase = previous.get("lifecycle", {}).get("phase")
@@ -470,6 +488,15 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
                 _receipt(deployment, "prelaunch_retry", job_id=deployment["job"].get("id"),
                          previous_status=previous.get("status"))
                 deployment["job"] = None
+            elif deployment["job"]["mode"] == "tune":
+                if phase != "finalized":
+                    previous = _attach(directory, deployment, transport)
+                    if mode == "tune":
+                        return previous
+                code = _verified_execution(deployment, previous)
+                if mode in ("run", "resume") and code != 0:
+                    raise ValueError("The tuning job failed; a successful measurement is required")
+                tuning_transfer = deployment["job"].get("transfer") if code == 0 else None
             elif phase != "finalized":
                 if evaluation_runtime and evaluation_runtime != deployment.get("evaluation_runtime", {}):
                     raise ValueError("Cannot change evaluation runtime while attaching to an active job")
@@ -478,8 +505,8 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
                 raise ValueError(
                     "Pull and verify the previous job before launching another operation"
                 )
-            elif mode == "run" and deployment.get("run_started"):
-                raise ValueError("Run already exists; use supported resume")
+        if mode == "run" and deployment.get("run_started"):
+            raise ValueError("Run already exists; use supported resume")
         if mode == "tune" and not (deployment.get("tuning_rollout") or deployment.get("tuning_source")):
             raise ValueError(
                 "Tune requires exactly one explicit case-carrier .pt via --extra-input"
@@ -493,18 +520,12 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
         )
         if mode == "resume" and not (deployment.get("run_started") or local_has_progress):
             raise ValueError("Resume requires an existing remote or local run")
-        if (
-            mode in ("run", "resume")
-            and deployment["kind"] in {"rl01.ppo_after_target_bc", "rl01.rollout_comparison_collection"}
-        ):
-            tune = deployment.get("tune", {})
-            if (
-                not tune.get("confirmed")
-                or tune.get("fingerprint") != deployment["fingerprint"]
-            ):
-                raise ValueError(
-                    "Confirmed comparable tuning of this exact package/config is required"
-                )
+        uses_tuning = deployment["kind"] in {"rl01.ppo_after_target_bc", "rl01.rollout_comparison_collection"}
+        tuned = False
+        if uses_tuning and (mode in ("run", "resume") or (mode == "profile" and deployment.get("remote_tuning_dir"))):
+            tuned = bool(transport.tuning_runtime(deployment, tuning_transfer))
+            if not tuned and mode != "profile":
+                raise ValueError("Confirmed comparable tuning of this exact package/config is required on the instance")
 
         if host_resume_reason and mode != "resume":
             raise ValueError("--host-resume-reason applies only to resume")
@@ -524,16 +545,14 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
             if deployment["kind"] == "rl01.rollout_comparison_collection":
                 remote_sync_dir = deployment["remote_project"] + "/.tmp/collection-tuning"
             deployment["remote_tuning_dir"] = remote_sync_dir
-            measurement = (f"measurement-{sequence}"
-                           if deployment["kind"] == "rl01.rollout_comparison_collection" else "")
-            deployment["tuning_measurement"] = measurement
+            deployment["tuning_measurement"] = f"measurement-{sequence}"
             worker_args = [
                 "--mode",
                 "tune",
                 "--config",
                 deployment["config"],
                 "--tuning-dir",
-                remote_sync_dir + ("/" + measurement if measurement else ""),
+                str(_tuning_directory(deployment)),
             ]
             if deployment.get("tuning_source"):
                 worker_args += ["--tuning-source", deployment["tuning_source"]]
@@ -547,8 +566,8 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
                 "--mode", "profile", "--config", deployment["config"],
                 "--tuning-rollout", deployment["tuning_rollout"], "--tuning-dir", remote_sync_dir,
             ]
-            if deployment.get("tune", {}).get("confirmed"):
-                worker_args += ["--runtime-config", deployment["remote_tuning_dir"] + "/recommended-runtime.json"]
+            if tuned:
+                worker_args += ["--runtime-config", str(_tuning_directory(deployment) / "recommended-runtime.json")]
         else:
             local_sync_dir = Path(deployment["local_output"])
             local_sync_dir.mkdir(parents=True, exist_ok=True)
@@ -559,13 +578,8 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
                 "--config",
                 deployment["config"],
             ]
-            if deployment["kind"] in {"rl01.ppo_after_target_bc", "rl01.rollout_comparison_collection"}:
-                worker_args += [
-                    "--runtime-config",
-                    deployment.get("remote_tuning_dir", deployment["remote_root"] + "/tuning") + "/" +
-                    (deployment["tuning_measurement"] + "/" if deployment.get("tuning_measurement") else "") +
-                    "recommended-runtime.json",
-                ]
+            if uses_tuning:
+                worker_args += ["--runtime-config", str(_tuning_directory(deployment) / "recommended-runtime.json")]
             if host_resume_reason:
                 worker_args += ["--host-resume-id", str(deployment["instance"]["instance_id"]),
                                 "--host-resume-reason", host_resume_reason]
@@ -716,25 +730,27 @@ def pull(directory, *, delete_instance=False, transport=None):
         if result.get("lifecycle", {}).get("phase") != "finalized":
             result = _attach(directory, deployment, transport)
         post_sync = result.get("post_sync", {})
-        execution = result.get("execution", {})
-        if (
-            post_sync.get("status") != "ok"
-            or post_sync.get("file_errors")
-            or execution.get("status") not in {"exited", "interrupted"}
-        ):
-            raise ValueError("Execution/transport not finalized; instance retained")
-        if result.get("job_id") != deployment["job"]["id"]:
-            raise ValueError("Final transport metadata belongs to a different job")
-
-        exit_code = execution.get("exit_code")
+        exit_code = _verified_execution(deployment, result)
         mode = deployment["job"]["mode"]
         transfer = deployment["job"].get("transfer")
+        if mode == "tune":
+            deleted = bool(deployment.get("instance_deleted"))
+            runtime = transport.tuning_runtime(deployment, transfer) if exit_code == 0 and not deleted else None
+            if delete_instance and not deleted:
+                if not runtime:
+                    raise ValueError("Tuning is not confirmed; instance retained")
+                _delete_instance(directory, deployment, transport)
+                deleted = True
+            return {"status": "verified", "destination": str(_tuning_directory(deployment)),
+                    "runner_exit_code": exit_code, "tuning_confirmed": bool(runtime),
+                    "runtime": runtime, "instance_deleted": deleted}
+
         transferred = deployment["job"].get("transfer_verified")
         audit_dir = directory / "audits" / deployment["job"]["id"]
         final_bundle = None
         if transfer and transfer.get("final_run_bundle"):
             final_bundle = Path(transfer["local"]) / "upload/final"
-        if mode != "tune" and transfer and transferred is None:
+        if transfer and transferred is None:
             if exit_code == 0 and final_bundle is not None and final_bundle.exists():
                 from civ5rl.deploy.final_run import install_final_run
 
@@ -745,27 +761,7 @@ def pull(directory, *, delete_instance=False, transport=None):
             deployment["job"]["transfer_verified"] = transferred
 
         final_run = transferred is not None and transferred.get("format") == "final-run-v1"
-        if mode == "tune":
-            destination = transfer["destination"] if transfer else directory / "tuning"
-            runtime = None
-            if exit_code == 0:
-                if deployment["job"]["pulled"]:
-                    runtime = deployment.get("runtime")
-                elif transfer:
-                    runtime = transport.tuning_runtime(deployment, transfer)
-                else:
-                    measurement = destination / deployment.get("tuning_measurement", "")
-                    summary = _read(measurement / "summary.json") if (measurement / "summary.json").exists() else {}
-                    if summary.get("preliminary") is False and summary.get("protected_inputs_unchanged") is True:
-                        path = measurement / "recommended-runtime.json"
-                        runtime = _read(path) if path.exists() else None
-            deployment["tune"] = {
-                "confirmed": bool(runtime),
-                "fingerprint": deployment["fingerprint"],
-            }
-            deployment["runtime"] = runtime
-            audit = None
-        elif mode == "profile":
+        if mode == "profile":
             destination = directory / "profiles" / f"profile-{deployment['job']['operation']}"
             summary = _read(destination / "summary.json") if (destination / "summary.json").exists() else {}
             profile_verified = (
@@ -806,9 +802,6 @@ def pull(directory, *, delete_instance=False, transport=None):
             receipt["copied_files"] = None  # SCP packet counts differ from scientific file counts.
         if audit is not None:
             receipt["scientific_audit"] = audit["status"]
-        if mode == "tune":
-            receipt["tuning_confirmed"] = deployment["tune"]["confirmed"]
-            receipt["runtime"] = deployment["runtime"]
         if mode == "profile":
             receipt["profile_verified"] = profile_verified
         _receipt(deployment, "pull", **receipt)
@@ -820,9 +813,7 @@ def pull(directory, *, delete_instance=False, transport=None):
         if delete_instance:
             if deployment.get("instance_deleted"):
                 return {**receipt, "instance_deleted": True}
-            if mode == "tune":
-                mandatory_ok = deployment["tune"]["confirmed"]
-            elif mode == "profile":
+            if mode == "profile":
                 mandatory_ok = profile_verified
             else:
                 mandatory_ok = (
@@ -840,14 +831,16 @@ def pull(directory, *, delete_instance=False, transport=None):
                 raise ValueError(
                     "Downloaded artifacts saved, but mandatory checks failed; instance retained"
                 )
-            transport.delete(deployment["instance"])
+            _delete_instance(directory, deployment, transport)
             receipt["instance_deleted"] = True
-            deployment["instance_deleted"] = True
-            _receipt(
-                deployment,
-                "delete_instance",
-                instance_id=deployment["instance"]["instance_id"],
-            )
-            with atomic_output(directory / "deployment.json") as staged:
-                _write(staged, deployment)
         return receipt
+
+
+def _delete_instance(directory, deployment, transport):
+    from civ5rl.provenance.common import atomic_output
+
+    transport.delete(deployment["instance"])
+    deployment["instance_deleted"] = True
+    _receipt(deployment, "delete_instance", instance_id=deployment["instance"]["instance_id"])
+    with atomic_output(directory / "deployment.json") as staged:
+        _write(staged, deployment)

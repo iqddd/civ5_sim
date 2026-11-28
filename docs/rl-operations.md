@@ -531,15 +531,15 @@ python tools/remote_rl.py rent --profile 5090 --parallel 2 --cpu-score-min 1250
 git push origin HEAD
 python tools/remote_rl.py package --config CONFIG --out DEPLOYMENT --instance INSTANCE_JSON --extra-input CARRIER
 python tools/remote_rl.py launch --deployment DEPLOYMENT --mode tune
-python tools/remote_rl.py pull --deployment DEPLOYMENT --keep-instance
 python tools/remote_rl.py launch --deployment DEPLOYMENT --mode run --evaluation-device cuda
 python tools/ctl_rl.py progress --deployment DEPLOYMENT --watch --interval 900
 ```
 
 `package` собирает входы и описание запуска в DEPLOYMENT. `launch` готовит
 окружение и запускает процесс; при поддержке протокола `tune` подбирает runtime.
-После `tune` команда `pull` подтверждает результат по серверной сводке и
-записывает выбранные параметры в `deployment.json`. Сырые пробы остаются на сервере.
+`launch --mode run` дожидается предыдущего `tune` и проверяет его результат на
+сервере. Настройки берутся из серверного `recommended-runtime.json`. `pull` после
+`tune` можно вызвать для просмотра выбранных параметров.
 
 Для отдельного профилирования смешанного PPO используйте `launch --mode profile`
 с тем же `--extra-input CARRIER` на этапе `package`. После `pull --keep-instance`
@@ -547,7 +547,7 @@ python tools/ctl_rl.py progress --deployment DEPLOYMENT --watch --interval 900
 Профилирование не создаёт состояние обучения и не заменяет tuning для `run`.
 
 Для CPv2 используйте отдельный пилотный конфиг и носитель тренировочных случаев.
-После `package` с `--extra-input CARRIER` сначала выполните и подтвердите `tune`,
+После `package` с `--extra-input CARRIER` сначала запустите `tune`,
 затем запустите три rollout и выгрузите их через `pull --keep-instance`:
 
 ```powershell
@@ -572,8 +572,8 @@ PPO R3 и возвращает число принятых шагов и хеш�
 
 Для отдельного сравнительного сбора при `package` задайте
 `--tuning-source SAVED_COLLECTION`: каталог завершённого сравнительного опыта.
-`launch --mode tune` измерит число воркеров; после `pull --keep-instance`
-команда `launch --mode run` прочитает `recommended-runtime.json` на сервере.
+`launch --mode tune` измерит число воркеров. `launch --mode run` прочитает
+`recommended-runtime.json` на сервере.
 
 ### Восстановление и завершение
 
