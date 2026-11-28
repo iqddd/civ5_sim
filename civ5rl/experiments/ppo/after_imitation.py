@@ -16,6 +16,7 @@ import torch
 from civ5rl.engine.collection.collector import Collector
 from civ5rl.engine.evaluation.matches import run_policy_match
 from civ5rl.engine.evaluation.replay import verify_replay
+from civ5rl.engine.evaluation.runtime import EVALUATOR_VERSION
 from civ5rl.engine.ppo.adam import optimizer_for
 from civ5rl.engine.ppo.core import update
 from civ5rl.engine.ppo.storage import save_rollout
@@ -177,7 +178,7 @@ def evaluate_checkpoint(config, plan, out, path, purpose="development"):
     fingerprint = policy_hash(model)
     cache_path = out / "evaluations.json"
     cache = read_json(cache_path) if cache_path.exists() else {}
-    key = purpose + ":" + fingerprint
+    key = f"{purpose}:v{EVALUATOR_VERSION}:{fingerprint}"
     if key in cache:
         return cache[key]
     started = perf_counter()
@@ -188,7 +189,7 @@ def evaluate_checkpoint(config, plan, out, path, purpose="development"):
         for mode in modes:
             runs[mode] = {}
             for enemy in enemies:
-                directory = out / f"evaluation/{purpose}/{fingerprint[:16]}/{mode}/{enemy}"
+                directory = out / f"evaluation/{purpose}/v{EVALUATOR_VERSION}/{fingerprint[:16]}/{mode}/{enemy}"
                 tasks = []
                 for case_index, case in enumerate(plan[purpose]):
                     case_directory = directory / f"case-{case['case_id']:03}-side-{case['learner_side']}"

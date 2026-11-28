@@ -55,7 +55,7 @@ REQUIRED_MODES = {
 def execution_identity():
     kernel = ROOT / "build" / ("combat.dll" if sys.platform == "win32" else "libcombat.so")
     return {
-        "version": 1,
+        "version": 2,
         "kernel": file_sha256(kernel),
         "planner": file_sha256(combat_ai.LIBRARY_PATH),
         "rules": file_sha256(ROOT / "build/combat_rules.json"),

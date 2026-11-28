@@ -1,0 +1,20 @@
+{
+  "base_config": "configs/rl-ppo-c2pa-pre-gelu-h60-cpv2.json",
+  "output": "artifacts/rl/ppo-c2pa-pre-gelu-h60-cpv2-clean-contacts",
+  "ppo": {
+    "entropy_coefficient": null,
+    "entropy_schedule": {"initial": 0.002, "final": 0.0, "linear_decay_decisions": 4194304}
+  },
+  "self_play": {
+    "cpv2_share": 0.6,
+    "cp_share": 0.1,
+    "current_share": 0.2,
+    "parent_share": 0.05,
+    "archive_share": 0.05
+  },
+  "experiment": {
+    "early_gain_rule": "adaptive_cpv2_v1",
+    "early_gain_min_wins": null,
+    "early_gain_decisions": 3145728
+  }
+}

@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 from civ5rl.core.model import Policy
+from civ5rl.engine.evaluation.runtime import EVALUATOR_VERSION
 from civ5rl.engine.imitation.core import label_minibatches, teacher_metrics
 from civ5rl.engine.imitation.pipeline import (
     run_bc_minibatch_stream,
@@ -62,7 +63,7 @@ def measure_checkpoint(config, plan, out, path, epoch, steps, policy, fixed, mic
     fingerprint = policy_hash(policy.state_dict())
     cache = read_json(out / "evaluations.json") if (out / "evaluations.json").exists() else {}
     previous = cache.get("development:" + fingerprint)
-    if previous and "fixed_training" in previous:
+    if previous and "fixed_training" in previous and previous.get("runtime", {}).get("evaluator_version") == EVALUATOR_VERSION:
         refresh_selection(config, out)
         return previous
     with isolated_rng(shuffle):

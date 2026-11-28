@@ -192,7 +192,7 @@ class RemoteTests(unittest.TestCase):
                 prepared = prepare_inputs(run_dir, [entry], workers=1)
                 self.assertFalse((run_dir / "prepared-inputs").exists())
                 self.assertTrue(
-                    (scratch_dir / "run-mirror/prepared-inputs/index.json").is_file()
+                    (scratch_dir / "run-mirror/prepared-inputs/v2/index.json").is_file()
                 )
                 ds = PreparedDemonstrations(run_dir, prepared["entries"], "cpu")
                 _, labels, lengths = ds.batch([(0, 0, 1)])

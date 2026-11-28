@@ -293,9 +293,8 @@ def prepare_episode(task):
 def _prepared_directory(root, scratch_dir=None):
     root = Path(root)
     override = scratch_dir or os.environ.get("CIV5RL_SCRATCH_DIR")
-    if override:
-        return Path(override) / root.resolve().name / "prepared-inputs"
-    return root / "prepared-inputs"
+    base = Path(override) / root.resolve().name if override else root
+    return base / "prepared-inputs" / "v2"
 
 
 def prepare_inputs(root, entries, workers=4, *, scratch_dir=None):

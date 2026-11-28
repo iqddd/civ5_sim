@@ -55,23 +55,28 @@ def development(config, plan, out, state, shuffle, clock=None):
             entry["h2h"] = h2h
         state["evaluated"][result["policy_hash"]] = entry
         wins = result["runs"]["argmax"]["cp"]["summary"]["W"]
+        experiment = config["experiment"]
         if state["baseline_wins"] is None:
             state["baseline_wins"] = wins
-            if config["experiment"].get("early_gain_min_wins") is not None:
-                gain_baseline = cpv2["runs"]["argmax"]["cpv2"]["summary"]["W"] if three else wins
-                state["early_gain_required_wins"] = gain_baseline + config["experiment"]["early_gain_min_wins"]
+            if not three and experiment.get("early_gain_min_wins") is not None:
+                state["early_gain_required_wins"] = wins + experiment["early_gain_min_wins"]
         if three:
             entry["cpv2"] = cpv2
             points = state.setdefault("three_opponent_points", {})
             if not state["decisions"]:
                 points["0"] = entry
-            for point in config["experiment"]["milestones"]:
+                state["early_gain_required_wins"] = triple.required_gain_wins(
+                    triple.results(entry)[0], experiment.get("early_gain_min_wins"),
+                    gain_rule=experiment.get("early_gain_rule"),
+                )
+            for point in experiment["milestones"]:
                 if point <= state["decisions"]:
                     points.setdefault(str(point), entry)
             state["best"] = triple.select(points, continuation=state.get("dual_target_continuation"))
-            reason = triple.stop_reason(points, config["experiment"]["milestones"],
-                                        gain=config["experiment"]["early_gain_min_wins"],
-                                        gain_boundary=config["experiment"]["early_gain_decisions"],
+            reason = triple.stop_reason(points, experiment["milestones"],
+                                        gain=experiment.get("early_gain_min_wins"),
+                                        gain_boundary=experiment["early_gain_decisions"],
+                                        gain_rule=experiment.get("early_gain_rule"),
                                         continuation=state.get("dual_target_continuation"))
             if reason:
                 state["stop_reason"] = reason

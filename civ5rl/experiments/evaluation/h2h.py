@@ -349,12 +349,13 @@ def h2h_evaluation_key(config, plan, out, candidate_path, reference_path, purpos
     import torch
 
     from civ5rl.engine.evaluation.executor import evaluation_policy_hash
+    from civ5rl.engine.evaluation.runtime import EVALUATOR_VERSION
 
     cand_hash = evaluation_policy_hash(out / candidate_path)
     ref_hash = evaluation_policy_hash(out / reference_path)
     evaluator = digest(
         {
-            "version": 1,
+            "version": EVALUATOR_VERSION,
             "kind": "h2h_argmax_fp32",
             "platform": platform.system(),
             "torch": str(torch.__version__),

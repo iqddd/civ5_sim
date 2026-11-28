@@ -172,3 +172,63 @@ class ThreeOpponentTests(unittest.TestCase):
         self.assertIn(("policy", "archive:10"), with_archive)
         self.assertEqual(without, [("policy", "u0") if key == "archive:10" else (opponent, key)
                                    for opponent, key in with_archive])
+
+    def test_adaptive_gain_threshold_and_saved_stop(self):
+        from civ5rl.provenance.common import write_json
+        from civ5rl.provenance.jsonl import append_jsonl
+        from civ5rl.reporting.operations import _three_opponent_confirmation_check
+
+        rule = protocol.ADAPTIVE_CPV2_GAIN
+        for baseline, required in ((245, 285), (255, 288), (275, 303), (300, 321), (320, 340), (390, 384)):
+            with self.subTest(baseline=baseline):
+                self.assertEqual(protocol.required_gain_wins(baseline, None, gain_rule=rule), required)
+
+        milestones = [1, 2, 3, 4]
+        points = {"0": entry(0, 255, 393, 0), "1": entry(1, 288, 393, -1), "2": entry(2, 287, 393, -1)}
+        stop = {"gain": None, "gain_boundary": 3, "gain_rule": rule}
+        self.assertIsNone(protocol.stop_reason(points, milestones, **stop))
+        points["3"] = entry(3, 287, 393, -1)
+        self.assertIsNone(protocol.stop_reason(points, milestones, **stop))
+        points["1"], points["2"] = entry(1, 287, 393, -1), entry(2, 288, 393, -1)
+        self.assertIsNone(protocol.stop_reason(points, milestones, **stop))
+        points["2"] = entry(2, 287, 393, -1)
+        self.assertEqual(protocol.stop_reason(points, milestones, **stop), protocol.NO_DEVELOPMENT_GAIN)
+
+        for point, result in points.items():
+            result["decisions"] = int(point)
+            result["cpv2"].update(purpose="development_512", checkpoint=result["checkpoint"],
+                                  policy_hash=result["policy_hash"])
+        experiment = {"milestones": milestones, "early_gain_decisions": 3, "early_gain_rule": rule}
+        state = {"three_opponent_points": points,
+                 "development_points": {key: points[key]["policy_hash"] for key in ("1", "2", "3")},
+                 "decisions": 3, "latest": points["3"]["checkpoint"], "early_gain_required_wins": 288,
+                 "stop_reason": protocol.NO_DEVELOPMENT_GAIN, "best": protocol.select(points)}
+        confirmation = {"attempt": 1, "status": "not_run_parent_selected"}
+        with TemporaryDirectory() as directory:
+            directory = Path(directory)
+            write_json(directory / "manifest.json", {})
+            write_json(directory / "selected.json", state["best"])
+            append_jsonl(directory / "updates.jsonl", {"rollout": 3, "total_decisions": 3})
+            _three_opponent_confirmation_check(directory, state, confirmation, experiment)
+            with self.assertRaisesRegex(ValueError, "threshold differs"):
+                _three_opponent_confirmation_check(directory, {**state, "early_gain_required_wins": 287},
+                                                   confirmation, experiment)
+            with self.assertRaisesRegex(ValueError, "stop differs"):
+                _three_opponent_confirmation_check(directory, {**state, "stop_reason": "decision_limit"},
+                                                   confirmation, experiment)
+            with self.assertRaisesRegex(ValueError, "last committed rollout"):
+                _three_opponent_confirmation_check(directory, {**state, "decisions": 4}, confirmation, experiment)
+
+    def test_audit_rejects_a_conflicting_cpv2_milestone_summary(self):
+        from civ5rl.provenance.common import write_json
+        from civ5rl.reporting.operations import _evaluation_check
+
+        point = entry(0, 255, 393, 0)
+        series = point["cpv2"]["runs"]["argmax"]["cpv2"]
+        summary = {"matches": 512, "W": 255, "D": 0, "L": 257}
+        series.update(directory="evaluation/cpv2", summary={**summary, "W": 254, "L": 258})
+        with TemporaryDirectory() as directory:
+            directory = Path(directory)
+            write_json(directory / "manifest.json", {"development_512": []})
+            with self.assertRaisesRegex(ValueError, "Saved summaries disagree"):
+                _evaluation_check(directory, [{**series, "summary": summary}], {"0": point})

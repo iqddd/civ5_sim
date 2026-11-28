@@ -25,6 +25,7 @@ from civ5rl.provenance.audit import (
 from civ5rl.provenance.checkpoint import verify_frozen_passport
 from civ5rl.provenance.common import write_json
 from civ5rl.provenance.host_resume import verify_revision
+from civ5rl.provenance.jsonl import read_jsonl
 from civ5rl.reporting.evaluation_audit import (
     clustered_paired_bootstrap,
     collect_paired_outcomes,
@@ -310,10 +311,38 @@ def _three_opponent_confirmation_check(directory, state, confirmation, experimen
         if entry.get("policy_hash") != fingerprint or entry.get("decisions", 0) < int(point):
             raise ValueError("Three-opponent milestone differs from the saved decision boundary")
     boundary = state.get("dual_target_boundary")
+    gain_rule = experiment.get("early_gain_rule")
+    stop_options = {
+        "gain": experiment.get("early_gain_min_wins"),
+        "gain_boundary": experiment["early_gain_decisions"],
+        "gain_rule": gain_rule,
+    }
+    if gain_rule is not None:
+        if points["0"]["checkpoint"] != "checkpoints/initial.pt" or points["0"]["decisions"] != 0:
+            raise ValueError("Early gain baseline is not the initial checkpoint")
+        required = triple.required_gain_wins(triple.results(points["0"])[0], stop_options["gain"], gain_rule=gain_rule)
+        if state.get("early_gain_required_wins") != required:
+            raise ValueError("Saved early gain threshold differs from the baseline")
+        for point in (points["0"], *(points[key] for key in state["development_points"])):
+            cpv2 = point["cpv2"]
+            if (cpv2["purpose"] != "development_512" or cpv2["checkpoint"] != point["checkpoint"]
+                    or cpv2["policy_hash"] != point["policy_hash"]):
+                raise ValueError("Early gain CPv2 series does not match its development checkpoint")
+        reason = triple.stop_reason(points, experiment["milestones"], continuation=continuation, **stop_options)
+        if (reason == triple.NO_DEVELOPMENT_GAIN) != (state.get("stop_reason") == triple.NO_DEVELOPMENT_GAIN):
+            raise ValueError("Saved early gain stop differs from the milestone results")
+        if reason == triple.NO_DEVELOPMENT_GAIN:
+            gate = points[str(stop_options["gain_boundary"])]
+            crossed = next((row for row in read_jsonl(directory / "updates.jsonl")
+                            if row["total_decisions"] >= stop_options["gain_boundary"]), None)
+            if (crossed is None or gate["decisions"] != crossed["total_decisions"]
+                    or gate["decisions"] != state["decisions"]
+                    or gate["checkpoint"] != state["latest"]
+                    or gate["checkpoint"] != f"checkpoints/update-{crossed['rollout']:04}.pt"):
+                raise ValueError("Early gain stop does not match the last committed rollout")
     if boundary:
         until_stop = {point: item for point, item in points.items() if int(point) <= boundary["milestone"]}
-        if triple.stop_reason(until_stop, experiment["milestones"], gain=experiment["early_gain_min_wins"],
-                              gain_boundary=experiment["early_gain_decisions"]) != triple.EARLY_GOAL:
+        if triple.stop_reason(until_stop, experiment["milestones"], **stop_options) != triple.EARLY_GOAL:
             raise ValueError("Invalid early goal boundary")
         if (until_stop[str(boundary["milestone"])]["checkpoint"] != boundary["checkpoint"]
                 or not (directory / boundary["checkpoint"]).is_file()):
@@ -435,20 +464,33 @@ def _passport_check(directory, config):
     }
 
 
-def _evaluation_check(directory, evaluations):
+def _evaluation_check(directory, evaluations, adaptive_points=None):
     results = []
-    for entry in {v["directory"]: v for v in evaluations}.values():
-        path = (directory / entry["directory"]).resolve()
+    summaries = {}
+    development_dirs = set()
+    if adaptive_points:
+        cpv2_entries = [point["cpv2"]["runs"]["argmax"]["cpv2"] for point in adaptive_points.values()]
+        evaluations = [*evaluations, *cpv2_entries]
+        development_dirs = {entry["directory"] for entry in cpv2_entries}
+        development = _read(directory / "manifest.json")["development_512"]
+        case_hashes = {case["case_hash"] for case in development}
+    for entry in evaluations:
+        summary = {key: entry["summary"][key] for key in ("matches", "W", "D", "L")}
+        if summaries.setdefault(entry["directory"], summary) != summary:
+            raise ValueError(f"Saved summaries disagree: {entry['directory']}")
+    for relative, summary in summaries.items():
+        path = (directory / relative).resolve()
         if not path.is_relative_to(directory.resolve()):
             raise ValueError("Evaluation path escapes saved run")
-        summary = entry["summary"]
         rows = load_eval_rows(path, summary["matches"])
+        if relative in development_dirs and {case["case_hash"] for _, case, _ in rows.values()} != case_hashes:
+            raise ValueError(f"CPv2 evaluation cases differ from Development-512: {path}")
         counts = eval_wdl_summary(rows)
         if any(counts[k] != summary[k] for k in ("W", "D", "L")):
             raise ValueError(f"W/D/L differs: {path}")
         results.append(
             {
-                "directory": entry["directory"],
+                "directory": relative,
                 **{k: counts[k] for k in ("W", "D", "L")},
             }
         )
@@ -577,11 +619,12 @@ def _audit_stable(directory):
     confirmation = _read(directory / "confirmation.json", {})
     first_confirmation = _read(directory / "confirmation-first.json", {})
     entries = list(_evaluation_entries([state.get("evaluated", {}), evaluations, confirmation, first_confirmation]))
+    adaptive_points = state.get("three_opponent_points") if config.get("experiment", {}).get("early_gain_rule") else None
     _audit_section(
         sections,
         "evaluation_completeness_wdl",
-        partial(_evaluation_check, directory, entries),
-        None if entries else "No recognized saved evaluation directory references",
+        partial(_evaluation_check, directory, entries, adaptive_points),
+        None if entries or adaptive_points else "No recognized saved evaluation directory references",
     )
     _audit_scheduling(sections, kind, supported_bc, config, state, evaluations)
     _audit_section(

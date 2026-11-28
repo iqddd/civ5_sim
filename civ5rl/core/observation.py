@@ -133,6 +133,8 @@ class ObservationEncoder:
                 if neighbor >= 0 and self.neighbors[neighbor, opposite_direction(direction)] != tile_index:
                     raise ValueError("Map neighbors are not reciprocal")
         self.contacts: dict[int, ContactRecord] = {}
+        self.seen_enemies: dict[int, int] = {}
+        self.prev_visible_enemy_tiles: dict[int, int] = {}
         self.last_visible = np.full(w * h, -1, np.int64)
         self.last_clock = 0
         self.last_turn = None
@@ -247,10 +249,23 @@ class ObservationEncoder:
                 cells[i, TILE["enemy_type"].start + kind] = 1
                 cells[i, TILE["enemy_status"]] = (u["hp"] / HP_SCALE, u["fortified"])
                 self.contacts[u["id"]] = ContactRecord(kind, i, u["hp"], clock)
-        visible_ids = {u["id"] for u in enemy}
+                self.seen_enemies[u["id"]] = kind
+        visible_tiles = {u["id"]: u["tile"] for u in enemy}
+        if observation["turn"] == self.last_turn:
+            # Only adjacent own decisions can confirm that a visible enemy was killed.
+            for uid, tile in self.prev_visible_enemy_tiles.items():
+                if uid not in visible_tiles and visibility[tile]:
+                    self.contacts.pop(uid, None)
+                    del self.seen_enemies[uid]
+        self.prev_visible_enemy_tiles = visible_tiles
         historical = {}
-        for uid, contact in self.contacts.items():
-            if uid not in visible_ids:
+        for uid, contact in list(self.contacts.items()):
+            if uid in visible_tiles:
+                continue
+            if visibility[contact.tile]:
+                # An invalidated position alone does not confirm a kill.
+                del self.contacts[uid]
+            else:
                 historical.setdefault((contact.tile, contact.type_index), []).append(contact)
         for (tile, kind), records in historical.items():
             cells[tile, TILE["contact_count"].start + kind] = len(records) / ROSTER_SCALE
@@ -272,8 +287,8 @@ class ObservationEncoder:
         ):
             for kind in types:
                 globals_[offset + UNIT_TYPES.index(kind)] += 1 / ROSTER_SCALE
-        for contact in self.contacts.values():
-            globals_[GLOBAL["contacts"].start + contact.type_index] += 1 / ROSTER_SCALE
+        for kind in self.seen_enemies.values():
+            globals_[GLOBAL["contacts"].start + kind] += 1 / ROSTER_SCALE
         if self.variant_spec.bounded_time_features:
             turn_feature = min(turn / (2 * MAX_ROUNDS_SCALE), 1.0)
             max_rounds_feature = min(max(0.0, (2 * self.max_rounds - turn) / (2 * MAX_ROUNDS_SCALE)), 1.0)

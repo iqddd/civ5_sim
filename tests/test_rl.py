@@ -3,12 +3,15 @@
 import tempfile
 import unittest
 from copy import deepcopy
+from dataclasses import fields
 from pathlib import Path
 
 import numpy as np
 import torch
 from civ5rl.common import configure, read_json, seed_for
 from civ5rl.corpus import ScenarioFactory, context_for, validate_corpus
+from civ5rl.core.schema import GLOBAL, TILE
+from civ5rl.engine.ppo.objective import encode_episode
 from civ5rl.env import DecisionEnv
 from civ5rl.evaluation import require_split
 from civ5rl.memory import _history, flat_map
@@ -93,7 +96,7 @@ class RLTests(unittest.TestCase):
                             self.assertEqual(distance(m, i, int(n)), 1)
                             self.assertEqual(e.neighbors[n, (d + 3) % 6], i)
 
-    def test_contacts_enemy_clock_hidden_death_and_reset(self):
+    def test_contacts_expire_on_visibility_and_rediscover_without_double_counting(self):
         s = scenario()
         e = ObservationEncoder(context(s))
         with Battle(s) as battle:
@@ -110,19 +113,61 @@ class RLTests(unittest.TestCase):
         obs["units"].append(enemy)
         actions = (Action("end_turn"),)
         e.encode(obs, actions)
+        obs["visibility"][12] = False
         obs["units"].pop()
-        x = e.encode(obs, actions)
-        self.assertEqual(x.cells[12, 58 + 4], 1 / 8)
-        self.assertEqual(x.cells[12, 63 + 4], 0)
         obs["turn"] = 2
         x = e.encode(obs, actions)
-        self.assertEqual(x.cells[12, 63 + 4], 1 / 32)
+        self.assertEqual(x.cells[12, TILE["contact_count"]].sum(), 1 / 8)
+        self.assertEqual(x.cells[12, TILE["contact_age"]].sum(), 1 / 32)
         self.assertIn(2, e.contacts)
+        obs["visibility"][12] = True
+        x = e.encode(obs, actions)
+        self.assertEqual(x.cells[12, TILE["contact_count"]].sum(), 0)
+        self.assertEqual(x.globals[GLOBAL["contacts"]].sum(), 1 / 8)
+        self.assertNotIn(2, e.contacts)
+        obs["visibility"][12] = False
+        x = e.encode(obs, actions)
+        self.assertEqual(x.cells[12, TILE["contact_count"]].sum(), 0)
+        self.assertEqual(x.cells[12, TILE["seen"]], 1)
+        obs["visibility"][13] = True
+        obs["units"].append({**enemy, "tile": 13})
+        x = e.encode(obs, actions)
+        self.assertEqual(e.contacts[2].tile, 13)
+        self.assertEqual(x.globals[GLOBAL["contacts"]].sum(), 1 / 8)
         fresh = ObservationEncoder(context(s))
         self.assertFalse(fresh.contacts)
-        for side in (0, 1):
-            e = ObservationEncoder(context(s, side))
-            self.assertEqual((side + side) // 2, side)
+        self.assertFalse(fresh.seen_enemies)
+
+    def test_contacts_confirm_last_action_kill_at_end_turn_and_replay_bitwise(self):
+        s = scenario()
+        s["turn_reset_mode"] = "end_turn"
+        s["units"] = [s["units"][0], {**s["units"][2], "tile": 12, "hp": 1}, s["units"][3]]
+        armies = [["warrior"], ["horseman", "archer"]]
+        spec = {"scenario": s, "armies": armies, "learner_side": 0, "max_rounds": 3}
+        variant = "C2PA-pre-GELU"
+        encoder = ObservationEncoder(context(s), variant)
+        live, observations, decisions, chosen = [], [], [], []
+        with Battle(s) as battle:
+            for action in (Action("melee", 0, 12), Action("end_turn")):
+                observation = battle.observe(0)
+                actions, observation["attack_previews"] = battle.actions_with_previews()
+                if action.kind == "end_turn":
+                    self.assertEqual(actions, (action,))
+                live.append(encoder.encode(observation, actions))
+                observations.append(observation)
+                decisions.append(actions)
+                chosen.append(actions.index(action))
+                encoder.remember_action(action, observation)
+                self.assertTrue(battle.step(action).ok)
+        self.assertEqual(observations[0]["turn"], observations[1]["turn"])
+        self.assertTrue(observations[1]["visibility"][12])
+        self.assertEqual(live[0].globals[GLOBAL["contacts"]].sum(), 1 / 8)
+        self.assertEqual(live[1].globals[GLOBAL["contacts"]].sum(), 0)
+        self.assertEqual(live[1].cells[:, TILE["contact_count"]].sum(), 0)
+        ep = {"spec": spec, "observations": observations, "actions": decisions, "chosen": chosen}
+        for original, replay in zip(live, encode_episode(ep, variant), strict=True):
+            for field in fields(original):
+                np.testing.assert_array_equal(getattr(original, field.name), getattr(replay, field.name))
 
     def test_parameter_count_padding_and_recurrent_replay(self):
         policy = Policy().eval()

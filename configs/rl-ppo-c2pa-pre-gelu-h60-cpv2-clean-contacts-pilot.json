@@ -1,0 +1,5 @@
+{
+  "base_config": "configs/rl-ppo-c2pa-pre-gelu-h60-cpv2-clean-contacts.json",
+  "output": "artifacts/rl/ppo-c2pa-pre-gelu-h60-cpv2-clean-contacts-pilot",
+  "experiment": {"pilot_only": true}
+}

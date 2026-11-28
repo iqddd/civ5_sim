@@ -52,7 +52,7 @@ class TurnStorage(Histories):
                 "prefix": super().source_identity(branch["episode"]),
                 "prefix_length": branch["prefix"],
                 "tail": file_sha256(self.source_folder(episode) / "turn-history.json"),
-                "encoding_version": 1,
+                "encoding_version": 2,
             }
         return self.sources[episode]
 

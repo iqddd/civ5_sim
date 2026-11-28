@@ -5,6 +5,7 @@ import math
 from civ5rl.config import load_config as resolve_config
 from civ5rl.core.preview import model_extension
 from civ5rl.engine.runtime.control import TrainingCounters
+from civ5rl.protocols import three_opponents
 from civ5rl.protocols.ppo_validation import validate_bounded_training
 
 KIND = "rl01.ppo_after_target_bc"
@@ -38,6 +39,9 @@ def validate_profile(config):
                 and config["ppo"]["evaluation_purpose"] == "development_512"
                 and "evaluation_manifest" in experiment and "evaluation_manifest_sha256" in experiment):
             raise ValueError("Three-opponent PPO requires C2PA, both bots and the frozen Development-512 manifest")
+        three_opponents.required_gain_wins(
+            0, experiment.get("early_gain_min_wins"), gain_rule=experiment.get("early_gain_rule"),
+        )
     if experiment.get("time_budget_check"):
         compute_time_budget_check(config)
 

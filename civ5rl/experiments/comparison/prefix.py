@@ -30,7 +30,7 @@ class SourcePrefixes:
             "checkpoint": file_sha256(checkpoint),
             "runtime": runtime.identity(),
             "torch": str(torch.__version__),
-            "prefix_encoding_version": 1,
+            "prefix_encoding_version": 2,
         }
         self.cache = OrderedDict()
         self.max_bytes = max_bytes

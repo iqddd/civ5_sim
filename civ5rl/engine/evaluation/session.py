@@ -13,6 +13,7 @@ import torch
 
 from civ5rl.core.agent import RLAgent
 from civ5rl.core.model import Policy
+from civ5rl.engine.evaluation.runtime import EVALUATOR_VERSION
 from civ5rl.engine.runtime.shared import pool
 from civ5rl.provenance.common import ROOT, file_sha256
 from civ5rl.provenance.identity import policy_hash
@@ -108,7 +109,7 @@ def evaluation_key(config, plan, out, path, purpose, runtime_identity, *, oppone
     # Version behavior explicitly; source formatting and module names are metadata.
     evaluator = digest(
         {
-            "version": 1,
+            "version": EVALUATOR_VERSION,
             "platform": platform.system(),
             "torch": str(torch.__version__),
             "planner": file_sha256(combat_ai.LIBRARY_PATH),

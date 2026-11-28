@@ -557,10 +557,17 @@ python tools/run_ppo.py pilot-report --config configs/rl-ppo-c2pa-h60-cpv2-pilot
 
 Пилот ведёт сбор и PPO на тренировочных мирах и отключает Development и Additional.
 Для C2PA-pre-GELU используйте `configs/rl-ppo-c2pa-pre-gelu-h60-cpv2-pilot.json`.
+Профиль с очищенной памятью контактов использует `configs/rl-ppo-c2pa-pre-gelu-h60-cpv2-clean-contacts-pilot.json`.
 `pilot-report` проверяет attention на сохранённых позициях R3 по чекпойнту после
 PPO R3 и возвращает число принятых шагов и хеши входов в `R3_post`.
 В отчётах исторического C2PA метрики attention находятся в `R3_pre`, там же
 доступна предложенная поправка LR и эпох для отдельного повторного пилота.
+
+В полном профиле с очищенной памятью `W0` — победы над CPv2 на новой нулевой
+оценке Development-512. Порог продолжения равен
+`min(384, max(285, W0 + 20, ceil((3 * W0 + 384) / 4)))` побед. Если ни одна
+из вех 1, 2 и 3 Mi не достигла порога, обучение останавливается после 3 Mi.
+Рассчитанный порог виден в JSON прогресса как `early_gain_required_wins`.
 
 Для отдельного сравнительного сбора при `package` задайте
 `--tuning-source SAVED_COLLECTION`: каталог завершённого сравнительного опыта.

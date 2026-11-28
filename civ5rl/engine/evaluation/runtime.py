@@ -18,6 +18,7 @@ from civ5rl.engine.runtime.hardware import cgroup_limits, effective_cpu_budget
 from civ5rl.provenance.common import read_json, write_json
 
 _options = ContextVar("evaluation_options", default={})
+EVALUATOR_VERSION = 2
 
 
 @contextmanager
@@ -126,7 +127,7 @@ class EvaluationRuntime:
         value = {
             **asdict(self),
             "precision": "float32",
-            "evaluator_version": 1,
+            "evaluator_version": EVALUATOR_VERSION,
             "compiled_spatial_heads": self.device == "cuda",
             "compile_mode": "default" if self.device == "cuda" else None,
             "attention_backend": "compact_fp32" if self.device == "cuda" else "dense_fp32",

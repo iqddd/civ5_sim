@@ -4,6 +4,8 @@ DEV_TARGET = 384
 ADDITIONAL_TARGET = 192
 EARLY_TARGET = 392
 EARLY_GOAL = "dual_target_achieved"
+NO_DEVELOPMENT_GAIN = "no_development_gain"
+ADAPTIVE_CPV2_GAIN = "adaptive_cpv2_v1"
 
 
 def results(entry):
@@ -49,12 +51,25 @@ def select(points, *, continuation=None):
             "cpv2_gain": cpv2 - baseline_v2, "cp_gain": cp - baseline_cp}
 
 
-def stop_reason(points, milestones, *, gain, gain_boundary, continuation=None):
+def required_gain_wins(baseline, gain, *, gain_rule=None):
+    if gain_rule is None:
+        if type(gain) is not int:
+            raise ValueError("Three-opponent early gain requires an integer win delta")
+        return baseline + gain
+    if gain_rule != ADAPTIVE_CPV2_GAIN:
+        raise ValueError(f"Unknown three-opponent early gain rule: {gain_rule}")
+    quarter_gap_target = (3 * baseline + DEV_TARGET + 3) // 4
+    return min(DEV_TARGET, max(285, baseline + 20, quarter_gap_target))
+
+
+def stop_reason(points, milestones, *, gain, gain_boundary, gain_rule=None, continuation=None):
     if continuation:
         return None
     early = [str(point) for point in milestones if point <= gain_boundary]
-    if early and all(point in points for point in early) and max(results(points[point])[0] for point in early) < results(points["0"])[0] + gain:
-        return "no_development_gain"
+    if early and all(point in points for point in early):
+        required = required_gain_wins(results(points["0"])[0], gain, gain_rule=gain_rule)
+        if max(results(points[point])[0] for point in early) < required:
+            return NO_DEVELOPMENT_GAIN
     for previous, current in zip((0, *milestones), milestones):
         if all(str(point) in points and meets(points[str(point)], EARLY_TARGET) for point in (previous, current)):
             return EARLY_GOAL

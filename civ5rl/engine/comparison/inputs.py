@@ -94,7 +94,7 @@ class Histories:
         self.counters = Counter()
         # Bump encoding_version when tensor semantics change, not for file moves.
         self.encoder_identity = {
-            "encoding_version": 1,
+            "encoding_version": 2,
             "torch_version": str(torch.__version__),
             "numpy_version": np.__version__,
         }

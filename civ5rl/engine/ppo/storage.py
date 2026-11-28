@@ -60,6 +60,10 @@ def unpack_rollout(
     value: dict[str, Any] | list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     if isinstance(value, list):
+        for episode in value:
+            # Legacy lists could persist derived inputs from a different encoder.
+            episode.pop("encoded", None)
+            episode.pop("encoded_variant", None)
         return value
     if value.get("format") != "rl01.rollout.v2":
         raise ValueError("Unsupported rollout format")
