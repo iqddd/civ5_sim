@@ -315,6 +315,29 @@ class Transport:
             check=True,
         )
 
+    def tuning_runtime(self, deployment, transfer):
+        from civ5rl.deploy.remote import _connection, _remote_path, _ssh_json
+
+        directory = PurePosixPath(transfer["destination"]) / deployment.get("tuning_measurement", "")
+        return _ssh_json(_connection(deployment["instance"]), """
+import json, sys
+from pathlib import Path
+
+request = json.load(sys.stdin)
+marker = json.loads((Path(request['upload']) / 'applied.json').read_text(encoding='utf-8'))
+if marker.get('token') != request['token']:
+    raise ValueError('Tuning output does not belong to this job')
+tuning = Path(request['directory'])
+summary = json.loads((tuning / 'summary.json').read_text(encoding='utf-8'))
+runtime = None
+if summary.get('preliminary') is False and summary.get('protected_inputs_unchanged') is True:
+    runtime = json.loads((tuning / 'recommended-runtime.json').read_text(encoding='utf-8'))
+    if not isinstance(runtime, dict) or not runtime:
+        raise ValueError('Invalid recommended runtime')
+print(json.dumps(runtime, allow_nan=False))
+""", {"directory": _remote_path(str(directory)), "upload": _remote_path(transfer["remote_upload"]),
+      "token": transfer["token"]})
+
     def download_packet(self, deployment, transfer):
         from civ5rl.deploy.archive import unpack
         from civ5rl.deploy.remote import _connection, _remote_path, _ssh_json
@@ -497,7 +520,6 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
 
         if mode == "tune":
             local_sync_dir = directory / "tuning"
-            local_sync_dir.mkdir(parents=True, exist_ok=True)
             remote_sync_dir = deployment["remote_root"] + "/tuning"
             if deployment["kind"] == "rl01.rollout_comparison_collection":
                 remote_sync_dir = deployment["remote_project"] + "/.tmp/collection-tuning"
@@ -569,11 +591,12 @@ def launch(directory, mode, *, instance=None, transport=None, evaluation_runtime
             remote_sync_dir = deployment["remote_root"] + f"/transport/job-{sequence}/upload"
             from civ5rl.engine.runtime.control import is_active
 
-            if is_active(scientific_destination):
+            if mode != "tune" and is_active(scientific_destination):
                 raise ValueError("Cannot transfer an actively written local training run")
             # Windows byte-range locks prevent even reading run.lock while held.
             # pack independently checks that the entire source stayed unchanged.
-            pack_transfer(scientific_destination, local_sync_dir, token=token, direction="upload")
+            source = transfer_dir / "new-tuning" if mode == "tune" else scientific_destination
+            pack_transfer(source, local_sync_dir, token=token, direction="upload")
             job["transfer"] = dict(local=str(transfer_dir), remote_upload=remote_sync_dir,
                                    remote_download=remote_sync_dir.rsplit("/", 1)[0] + "/download",
                                    destination=remote_destination, local_destination=str(scientific_destination), token=token)
@@ -711,7 +734,7 @@ def pull(directory, *, delete_instance=False, transport=None):
         final_bundle = None
         if transfer and transfer.get("final_run_bundle"):
             final_bundle = Path(transfer["local"]) / "upload/final"
-        if transfer and transferred is None:
+        if mode != "tune" and transfer and transferred is None:
             if exit_code == 0 and final_bundle is not None and final_bundle.exists():
                 from civ5rl.deploy.final_run import install_final_run
 
@@ -723,27 +746,24 @@ def pull(directory, *, delete_instance=False, transport=None):
 
         final_run = transferred is not None and transferred.get("format") == "final-run-v1"
         if mode == "tune":
-            destination = directory / "tuning"
-            measurement = destination / deployment.get("tuning_measurement", "")
-            summary = (
-                _read(measurement / "summary.json")
-                if (measurement / "summary.json").exists()
-                else {}
-            )
-            confirmed = (
-                exit_code == 0
-                and summary.get("preliminary") is False
-                and summary.get("protected_inputs_unchanged") is True
-            )
+            destination = transfer["destination"] if transfer else directory / "tuning"
+            runtime = None
+            if exit_code == 0:
+                if deployment["job"]["pulled"]:
+                    runtime = deployment.get("runtime")
+                elif transfer:
+                    runtime = transport.tuning_runtime(deployment, transfer)
+                else:
+                    measurement = destination / deployment.get("tuning_measurement", "")
+                    summary = _read(measurement / "summary.json") if (measurement / "summary.json").exists() else {}
+                    if summary.get("preliminary") is False and summary.get("protected_inputs_unchanged") is True:
+                        path = measurement / "recommended-runtime.json"
+                        runtime = _read(path) if path.exists() else None
             deployment["tune"] = {
-                "confirmed": confirmed,
+                "confirmed": bool(runtime),
                 "fingerprint": deployment["fingerprint"],
             }
-            deployment["runtime"] = (
-                _read(measurement / "recommended-runtime.json")
-                if confirmed and (measurement / "recommended-runtime.json").exists()
-                else None
-            )
+            deployment["runtime"] = runtime
             audit = None
         elif mode == "profile":
             destination = directory / "profiles" / f"profile-{deployment['job']['operation']}"
@@ -786,6 +806,9 @@ def pull(directory, *, delete_instance=False, transport=None):
             receipt["copied_files"] = None  # SCP packet counts differ from scientific file counts.
         if audit is not None:
             receipt["scientific_audit"] = audit["status"]
+        if mode == "tune":
+            receipt["tuning_confirmed"] = deployment["tune"]["confirmed"]
+            receipt["runtime"] = deployment["runtime"]
         if mode == "profile":
             receipt["profile_verified"] = profile_verified
         _receipt(deployment, "pull", **receipt)

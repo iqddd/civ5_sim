@@ -246,6 +246,35 @@ class ManagementTests(unittest.TestCase):
             remote.pull(deploy, delete_instance=True, transport=transport)
             self.assertEqual(transport.deletes, 1)
 
+    def test_tuning_confirms_remote_runtime_without_transferring_probe_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            deploy, transport = self.deployment(Path(temp))
+            record = deploy / "deployment.json"
+            saved = json.loads(record.read_text())
+            write(record, {**saved, "archive_transport": 1})
+            write(deploy / "tuning/old-probe/result.json", {"obsolete": True})
+            remote.launch(deploy, "tune", transport=transport)
+            job = json.loads(record.read_text())["job"]
+            packet = Path(job["transfer"]["local"]) / "upload/manifest.json"
+            self.assertEqual(json.loads(packet.read_text())["files"], {})
+            write(deploy / job["result"], {
+                "job_id": job["id"],
+                "execution": {"status": "exited", "exit_code": 0},
+                "lifecycle": {"phase": "finalized"},
+                "post_sync": {"status": "ok", "file_errors": []},
+            })
+            runtime = {"num_envs": 16, "cpu_workers": 8, "worker_reply_size": 1}
+            transport.tuning_runtime = Mock(return_value=runtime)
+            transport.download_packet = Mock(side_effect=AssertionError("tuning must stay on the instance"))
+            receipt = remote.pull(deploy, transport=transport)
+            self.assertTrue(receipt["tuning_confirmed"])
+            self.assertEqual(receipt["runtime"], runtime)
+            self.assertEqual(receipt["destination"], job["transfer"]["destination"])
+            self.assertFalse((deploy / "tuning/recommended-runtime.json").exists())
+            transport.tuning_runtime.assert_called_once()
+            remote.launch(deploy, "run", transport=transport)
+            self.assertIn("--script-arg=/workspace/civ5-runs/fixture/tuning/recommended-runtime.json", transport.last_args)
+
     def test_finished_pull_preserves_the_server_archive_and_audit(self):
         from civ5rl.deploy.final_run import publish_final_run
         from civ5rl.engine.runtime.archive import seven_zip
