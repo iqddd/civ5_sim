@@ -524,6 +524,12 @@
       "single_thread": 2888,
       "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+EPYC+9V74&id=6535",
       "provenance": "PassMark Single Thread rating checked 2026-11-28 (2 samples)"
+    },
+    {
+      "name": "AMD Ryzen 7 9700X",
+      "single_thread": 4642,
+      "source": "https://www.cpubenchmark.net/cpu.php?cpu=AMD+Ryzen+7+9700X&id=6205",
+      "provenance": "PassMark Single Thread rating checked 2026-11-28"
     }
   ]
 }
